@@ -87,6 +87,7 @@ static DECLARE_WAIT_QUEUE(esdm_monitor_wait);
  * enum esdm_external_es
  */
 struct esdm_es_cb *esdm_es[] = {
+	&esdm_es_aux,
 #ifdef ESDM_ES_IRQ
 	&esdm_es_irq,
 #endif
@@ -105,7 +106,6 @@ struct esdm_es_cb *esdm_es[] = {
 #ifdef ESDM_ES_HWRAND
 	&esdm_es_hwrand,
 #endif
-	&esdm_es_aux
 };
 
 /******************************** ES monitor **********************************/
