@@ -725,6 +725,7 @@ static atomic_t esdm_es_irq_init_state = ATOMIC_INIT(esdm_es_init_unused);
 static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 {
 	const struct esdm_hash_cb *hash_cb = esdm_kcapi_hash_cb;
+	void *tmp_hash_state;
 	unsigned long flags;
 	int ret;
 
@@ -743,20 +744,23 @@ static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 		return;
 	}
 
-	write_lock_irqsave(&esdm_hash_lock, flags);
-	esdm_irq_hash_state = hash_cb->hash_alloc();
-	if (IS_ERR(esdm_irq_hash_state)) {
+	tmp_hash_state = hash_cb->hash_alloc();
+	if (IS_ERR(tmp_hash_state)) {
 		pr_warn("could not allocate new ESDM pool hash (%ld)\n",
-			PTR_ERR(esdm_irq_hash_state));
+			PTR_ERR(tmp_hash_state));
 	}
 
+	write_lock_irqsave(&esdm_hash_lock, flags);
+	esdm_irq_hash_state = tmp_hash_state;
 	ret = esdm_irq_register(esdm_add_interrupt_randomness);
 	if (ret) {
-		hash_cb->hash_dealloc(esdm_irq_hash_state);
 		esdm_irq_hash_state = NULL;
+		write_unlock_irqrestore(&esdm_hash_lock, flags);
+		hash_cb->hash_dealloc(tmp_hash_state);
+	} else {
+		write_unlock_irqrestore(&esdm_hash_lock, flags);
 	}
 
-	write_unlock_irqrestore(&esdm_hash_lock, flags);
 	pr_info("ESDM IRQ ES registered\n");
 }
 
@@ -779,6 +783,7 @@ int __init esdm_es_irq_module_init(void)
 void esdm_es_irq_module_exit(void)
 {
 	const struct esdm_hash_cb *hash_cb = esdm_kcapi_hash_cb;
+	void *tmp_hash_state;
 	unsigned long flags;
 
 	if (atomic_read(&esdm_es_irq_init_state) == esdm_es_init_unused)
@@ -795,12 +800,12 @@ void esdm_es_irq_module_exit(void)
 	 * in the init function.
 	 */
 	write_lock_irqsave(&esdm_hash_lock, flags);
-
-	esdm_irq_unregister(esdm_add_interrupt_randomness);
-	hash_cb->hash_dealloc(esdm_irq_hash_state);
+	tmp_hash_state = esdm_irq_hash_state;
 	esdm_irq_hash_state = NULL;
-
+	esdm_irq_unregister(esdm_add_interrupt_randomness);
 	write_unlock_irqrestore(&esdm_hash_lock, flags);
+
+	hash_cb->hash_dealloc(tmp_hash_state);
 
 	pr_info("ESDM IRQ ES unregistered\n");
 	atomic_set(&esdm_es_irq_init_state, esdm_es_init_unused);
