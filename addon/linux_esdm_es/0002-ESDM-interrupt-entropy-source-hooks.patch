@@ -1,4 +1,4 @@
-From bf299469a0210eec7a37e3a319f5a63dd9137865 Mon Sep 17 00:00:00 2001
+From 892cad0115aefd01e1c6435225dcd34cf9719744 Mon Sep 17 00:00:00 2001
 From: Stephan Mueller <smueller@chronox.de>
 Date: Fri, 17 Jun 2022 08:38:26 +0200
 Subject: [PATCH 2/2] ESDM: interrupt entropy source hooks
@@ -19,10 +19,10 @@ a while.
 Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
  drivers/char/random.c    | 14 ++++++++++---
- drivers/misc/Makefile    |  4 +---
+ drivers/misc/Makefile    |  1 +
  drivers/misc/esdm_irq.c  | 43 ++++++++++++++++++++++++++++++++++++++++
  include/linux/esdm_irq.h | 20 +++++++++++++++++++
- 4 files changed, 75 insertions(+), 6 deletions(-)
+ 4 files changed, 75 insertions(+), 3 deletions(-)
  create mode 100644 drivers/misc/esdm_irq.c
  create mode 100644 include/linux/esdm_irq.h
 
@@ -61,21 +61,13 @@ index 253f2ddb8913..e62f3d80e7ac 100644
  		 (regs ? instruction_pointer(regs) : _RET_IP_) ^ swab(irq));
  	new_count = ++fast_pool->count;
 diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
-index bb5fad24f361..69810d82ef60 100644
+index 1cac9618a55a..69810d82ef60 100644
 --- a/drivers/misc/Makefile
 +++ b/drivers/misc/Makefile
-@@ -61,11 +61,9 @@ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
- obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
- obj-$(CONFIG_HI6421V600_IRQ)	+= hi6421v600-irq.o
- obj-$(CONFIG_OPEN_DICE)		+= open-dice.o
--<<<<<<< HEAD
- obj-$(CONFIG_GP_PCI1XXXX)	+= mchp_pci1xxxx/
- obj-$(CONFIG_VCPU_STALL_DETECTOR)	+= vcpu_stall_detector.o
+@@ -66,3 +66,4 @@ obj-$(CONFIG_VCPU_STALL_DETECTOR)	+= vcpu_stall_detector.o
  obj-$(CONFIG_TMR_MANAGER)      += xilinx_tmr_manager.o
  obj-$(CONFIG_TMR_INJECT)	+= xilinx_tmr_inject.o
--=======
  obj-y				+= esdm_sched.o
-->>>>>>> 469e15c3e501 (ESDM: scheduler entropy source hooks)
 +obj-y				+= esdm_irq.o
 diff --git a/drivers/misc/esdm_irq.c b/drivers/misc/esdm_irq.c
 new file mode 100644
