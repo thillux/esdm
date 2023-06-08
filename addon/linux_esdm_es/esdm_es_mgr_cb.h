@@ -22,7 +22,7 @@ enum esdm_internal_es {
 struct entropy_buf {
 	u8 e[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
 	u32 e_bits;
-};
+} __attribute__ ((__packed__));
 
 void esdm_reset_state(enum esdm_internal_es es);
 

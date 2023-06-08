@@ -63,12 +63,12 @@ enum esdm_external_es {
 struct entropy_es {
 	uint8_t e[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
 	uint32_t e_bits;
-};
+} __attribute__ ((__packed__));
 
 struct entropy_buf {
 	struct entropy_es entropy_es[esdm_ext_es_last];
 	time_t now;
-};
+} __attribute__ ((__packed__));
 
 /*
  * struct esdm_es_cb - callback defining an entropy source
