@@ -62,8 +62,8 @@ struct esdm_rpc_client_connection {
 };
 
 /* Sleep time for poll operations */
-static const struct timespec esdm_client_poll_ts = { .tv_sec = 1,
-						     .tv_nsec = 0 };
+static const struct timespec esdm_client_poll_ts = { .tv_sec = 0,
+						     .tv_nsec = 1 << 27 };
 
 /******************************************************************************
  * General service handlers

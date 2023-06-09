@@ -119,7 +119,7 @@
 #define ESDM_POOL_SIZE	HASH_MAX_DESCSIZE
 
 /* Sleep time for poll operations */
-static const struct timespec poll_ts = { .tv_sec = 0, .tv_nsec = 1U<<29 };
+static const struct timespec poll_ts = { .tv_sec = 0, .tv_nsec = 1U<<27 };
 
 /****************************** Helper code ***********************************/
 

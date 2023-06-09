@@ -119,7 +119,7 @@ static void esdm_es_mgr_monitor_wakeup(void)
 /* ES monitor worker loop */
 int esdm_es_mgr_monitor_initialize(void)
 {
-	struct timespec ts = { .tv_sec = 0, .tv_nsec = 1U<<29 };
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 1U<<27 };
 	uint64_t i;
 	unsigned int avail = 0;
 
@@ -431,7 +431,7 @@ void esdm_init_ops(struct entropy_buf *eb)
 		state->esdm_fully_seeded = true;
 		esdm_set_operational();
 		state->esdm_min_seeded = true;
-		logger(LOGGER_VERBOSE, LOGGER_C_ES,
+		logger(LOGGER_VERBOSE, LOGGER_C_ES,esdm_invoke
 		       "ESDM fully seeded with %u bits of entropy\n",
 			seed_bits);
 		esdm_set_entropy_thresh(requested_bits);
