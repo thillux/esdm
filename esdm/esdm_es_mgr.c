@@ -431,7 +431,7 @@ void esdm_init_ops(struct entropy_buf *eb)
 		state->esdm_fully_seeded = true;
 		esdm_set_operational();
 		state->esdm_min_seeded = true;
-		logger(LOGGER_VERBOSE, LOGGER_C_ES,esdm_invoke
+		logger(LOGGER_VERBOSE, LOGGER_C_ES,
 		       "ESDM fully seeded with %u bits of entropy\n",
 			seed_bits);
 		esdm_set_entropy_thresh(requested_bits);
