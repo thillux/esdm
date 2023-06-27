@@ -47,7 +47,7 @@ static atomic_t esdm_jent_entropy_buffer_reader = ATOMIC_INIT(0);
 static atomic_t esdm_jent_entropy_buffer_writer = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE(esdm_jent_entropy_buffer_wait);
 
-static bool esdm_jent_entropy_buffer_enable = false;
+static bool esdm_jent_entropy_buffer_enable = true;
 
 static uint32_t esdm_jent_entropylevel(uint32_t requested_bits)
 {
