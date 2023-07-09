@@ -37,6 +37,11 @@ if get_option('es_hwrand').enabled()
 	esdm_src += files('esdm_es_hwrand.c')
 endif
 
+if get_option('es_pkcs11').enabled()
+	dependencies_esdm_lib += cc.find_library('p11' )
+	esdm_src += files('esdm_es_pkcs11.c')
+endif
+
 if get_option('node').enabled()
 	esdm_src += files('esdm_node.c')
 endif

@@ -196,13 +196,32 @@ automatically detect this and ignore the hardware.
 
 # Option for: ESDM_HWRAND_ENTROPY_RATE
 option('es_hwrand_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
-       description:'''CPU-based entropy source entropy rate.
+       description:'''/dev/hwrng-based entropy source entropy rate.
 
 The option defines the amount of entropy the ESDM applies to 256
-bits of data obtained from the CPU entropy source. The ESDM
+bits of data obtained from the /dev/hwrng entropy source. The ESDM
 enforces the limit that this value must be in the range between 0 and 256.
 
-When configuring this value to 0, the CPU entropy source will provide
+When configuring this value to 0, the /dev/hwrng entropy source will provide
+256 bits of data without being credited to contain entropy.
+''')
+
+################################################################################
+# PKCS11-based Entropy Source configuration options
+################################################################################
+
+option('es_pkcs11', type: 'feature', value: 'enabled',
+       description: '''Enable support for PKCS11-based entropy source.''')
+
+# Option for: ESDM_PKCS11_ENTROPY_RATE
+option('es_pkcs11_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
+       description:'''PKCS11-based entropy source entropy rate.
+
+The option defines the amount of entropy the ESDM applies to 256
+bits of data obtained from the PKCS11 entropy source. The ESDM
+enforces the limit that this value must be in the range between 0 and 256.
+
+When configuring this value to 0, the PKCS11 entropy source will provide
 256 bits of data without being credited to contain entropy.
 ''')
 
