@@ -185,6 +185,9 @@ void esdm_config_es_pkcs11_entropy_rate_set(uint32_t ent);
 uint32_t esdm_config_es_pkcs11_entropy_rate(void);
 
 
+void esdm_config_es_pkcs11_engine_path_set(const char* setting);
+char* esdm_config_es_pkcs11_engine_path();
+
 /**
  * @brief DRNG Manager configuration: get maximum value without successful
  *	  reseed

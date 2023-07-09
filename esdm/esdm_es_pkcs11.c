@@ -66,24 +66,29 @@ static int esdm_pkcs11_initialize(void)
 	/* Allow the init function to be called multiple times */
 	esdm_pkcs11_finalize();
 
+    const char* pkcs11_engine_path = esdm_config_es_pkcs11_engine_path();
+    if(pkcs11_engine_path == NULL)
+        return 0;
+
     pkcs11ctx = malloc(sizeof(struct Pkcs11Context));
     assert(pkcs11ctx != NULL);
     
     pkcs11ctx->ctx = PKCS11_CTX_new();
     assert(pkcs11ctx->ctx != NULL);
 
-    const char* pkcs11_engine_path = "/nix/store/720xwfzk4yq4hh65lnh5p94cj3ghj29v-system-path/lib/pkcs11/opensc-pkcs11.so";
-
     int ret = PKCS11_CTX_load(pkcs11ctx->ctx, pkcs11_engine_path);
     assert(ret == 0);
 
     ret = PKCS11_enumerate_slots(pkcs11ctx->ctx, &pkcs11ctx->slots, &pkcs11ctx->nslots);
     assert(ret == 0);
+
+    logger(LOGGER_DEBUG2, LOGGER_C_ES, "%d slots available\n", pkcs11ctx->nslots);
+
     pkcs11ctx->slot = PKCS11_find_token(pkcs11ctx->ctx, pkcs11ctx->slots, pkcs11ctx->nslots);
     if(pkcs11ctx->slot == NULL) {
         logger(LOGGER_WARN, LOGGER_C_ES, "Disabling PKCS11-based entropy source as device not present\n");
         esdm_pkcs11_finalize();
-        return 0;
+        return -1;
     }
 
     logger(LOGGER_DEBUG2, LOGGER_C_ES, "Slot manufacturer......: %s\n",pkcs11ctx->slot->manufacturer);
@@ -149,7 +154,7 @@ err:
 }
 
 struct esdm_es_cb esdm_es_pkcs11 = {
-	.name			= "PKCS11RNG",
+	.name			= "PKCS11",
 	.init			= esdm_pkcs11_initialize,
 	.fini			= esdm_pkcs11_finalize,
 	.monitor_es		= NULL, //esdm_pkcs11_seed_monitor,

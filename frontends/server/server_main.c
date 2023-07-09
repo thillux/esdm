@@ -65,6 +65,8 @@ static void usage(void)
 	fprintf(stderr, "\t\t\t\tretries enabling it\n");
 	fprintf(stderr, "\t-s --force_schedes\tForce to enable Sched ES where the ESDM\n");
 	fprintf(stderr, "\t\t\t\tretries enabling it\n");
+	fprintf(stderr, "\t-P --pkcs11_engine_path\tPath to PKCS11 lib to use\n");
+	fprintf(stderr, "\t\t\t\tpath for pkcs11 lib\n");
 	exit(1);
 }
 
@@ -84,9 +86,10 @@ static void parse_opts(int argc, char *argv[])
 			{"foreground", 0, 0, 0},
 			{"force_irqes", 0, 0, 0},
 			{"force_schedes", 0, 0, 0},
+			{"pkcs11_engine_path", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "hvp:u:fis", opts, &opt_index);
+		c = getopt_long(argc, argv, "hvp:u:fisP:", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -155,6 +158,11 @@ static void parse_opts(int argc, char *argv[])
 		case 's':
 			/* force_schedes */
 			esdm_config_es_sched_retry_set(1);
+			break;
+
+		case 'P':
+			/* pkcs11 engine path */
+			esdm_config_es_pkcs11_engine_path_set(optarg);
 			break;
 
 		default:

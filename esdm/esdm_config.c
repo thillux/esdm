@@ -20,6 +20,7 @@
 
 #include "build_bug_on.h"
 #include "config.h"
+#include <stdlib.h>
 #include "esdm_config.h"
 #include "esdm_config_internal.h"
 #include "esdm_definitions.h"
@@ -45,6 +46,8 @@ struct esdm_config {
 
 	bool esdm_es_irq_retry;
 	bool esdm_es_sched_retry;
+
+	char *esdm_es_pkcs11_engine_path;
 };
 
 static struct esdm_config esdm_config = {
@@ -109,6 +112,9 @@ static struct esdm_config esdm_config = {
 
 	/* Retry to access the Sched ES during initialization */
 	.esdm_es_sched_retry = false,
+
+	/* PKCS11 engine library to use for PKCS11 ES (path in filesystem) */
+	.esdm_es_pkcs11_engine_path = NULL,
 };
 
 static uint32_t esdm_config_entropy_rate_max(uint32_t val)
@@ -176,6 +182,21 @@ DSO_PUBLIC
 void esdm_config_es_irq_retry_set(int setting)
 {
 	esdm_config.esdm_es_irq_retry = !!setting;
+}
+
+DSO_PUBLIC
+char* esdm_config_es_pkcs11_engine_path(void)
+{
+	return esdm_config.esdm_es_pkcs11_engine_path;
+}
+
+DSO_PUBLIC
+void esdm_config_es_pkcs11_engine_path_set(const char* setting)
+{
+	if(esdm_config.esdm_es_pkcs11_engine_path)
+		free(esdm_config.esdm_es_pkcs11_engine_path);
+	if(setting != NULL)
+		esdm_config.esdm_es_pkcs11_engine_path = strdup(setting);
 }
 
 DSO_PUBLIC
