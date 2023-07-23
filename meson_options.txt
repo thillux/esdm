@@ -340,6 +340,12 @@ Using CUSE, the device files are provided.
 option('linux-getrandom', type: 'feature', value: 'enabled',
        description: 'Enable the Linux getrandom system call support.')
 
+option('openssl-rand-provider', type: 'feature', value: 'disabled',
+       description: 'Enable the OpenSSL >= 3 RAND/SEED-SRC provider support.')
+
+option('botan-rng', type: 'feature', value: 'disabled',
+       description: 'Enable the Botan >= 3 RNG support.')
+
 option('esdm-server', type: 'feature', value: 'enabled',
        description: 'Enable the ESDM server')
 

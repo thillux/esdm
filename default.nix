@@ -20,6 +20,8 @@ pkgs.stdenv.mkDerivation {
     cmake
   ];
 
+  mesonBuildtype = "release";
+
   mesonFlags = [
     "-Dselinux=disabled"
     "-Db_lto=false"

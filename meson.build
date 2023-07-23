@@ -10,7 +10,7 @@
 #		 considered. Yet, consumer must be recompiled.
 # Patchlevel Version: API / ABI compatible, no functional changes, no
 #		      enhancements, bug fixes only.
-project('esdm', 'c',
+project('esdm', ['c', 'cpp'],
 	version: '0.6.0',
 	default_options: [
 		'warning_level=3',
@@ -19,6 +19,7 @@ project('esdm', 'c',
 		'b_lto=true',
 		'b_staticpic=true',
 		'b_pie=true',
+		'cpp_std=c++20',
 	])
 
 ################################################################################
@@ -34,14 +35,14 @@ add_global_arguments([ '-fstack-protector-strong',
 		       '-Wcast-align',
 		       '-Wmissing-field-initializers',
 		       '-Wshadow',
-                       '-Wmissing-prototypes',
 		       '-Wswitch-enum' ],
-		       language : 'c')
+		       language : ['c', 'cpp'])
+add_global_arguments([ '-Wmissing-prototypes' ], language : 'c')
 
 if get_option('optimization') != '0'
-	add_global_arguments([ '-D_FORTIFY_SOURCE=2' ], language: 'c')
+	add_global_arguments([ '-D_FORTIFY_SOURCE=2' ], language: ['c', 'cpp'])
 else
-	add_global_arguments([ '-DDEBUG' ], language: 'c')
+	add_global_arguments([ '-DDEBUG' ], language: ['c', 'cpp'])
 endif
 
 # Versioning information
@@ -50,21 +51,21 @@ add_global_arguments(['-DMAJVERSION=' + version_array[0],
 		      '-DMINVERSION=' + version_array[1],
 		      '-DPATCHLEVEL=' + version_array[2],
 		      '-DVERSION="' + meson.project_version() + '"'],
-		      language : 'c')
+		      language : ['c', 'cpp'])
 
 # Dead-code-stripping support
-add_global_arguments(['-ffunction-sections', '-fdata-sections'], language : 'c')
-add_project_link_arguments('-Wl,--gc-sections', language : 'c')
+add_global_arguments(['-ffunction-sections', '-fdata-sections'], language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,--gc-sections', language : ['c', 'cpp'])
 
 # Link for full RELRO
-add_project_link_arguments('-Wl,-z,relro', language : 'c')
-add_project_link_arguments('-Wl,-z,now', language : 'c')
+add_project_link_arguments('-Wl,-z,relro', language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,-z,now', language : ['c', 'cpp'])
 
 # No executable stack
-add_project_link_arguments('-Wl,-z,noexecstack', language : 'c')
+add_project_link_arguments('-Wl,-z,noexecstack', language : ['c', 'cpp'])
 
 # Only link to truly needed libraries
-add_project_link_arguments('-Wl,--as-needed', language : 'c')
+add_project_link_arguments('-Wl,--as-needed', language : ['c', 'cpp'])
 
 # Prepare distribution
 dist_script = find_program('addon/sanity_checks.sh', required: true)
@@ -102,6 +103,14 @@ if get_option('esdm-server').disabled() and get_option('linux-getrandom').enable
 	error('Linux getrandom support requires the ESDM server')
 endif
 
+if get_option('esdm-server').disabled() and get_option('ossl-rand-provider').enabled()
+	error('OpenSSL RAND provider support requires the ESDM server')
+endif
+
+if get_option('esdm-server').disabled() and get_option('botan-rng').enabled()
+	error('Botan RNG support requires the ESDM server')
+endif
+
 if get_option('drng_hash_drbg').enabled() and get_option('drng_chacha20').enabled()
 	error('Only one DRNG can be enabled')
 endif
@@ -130,6 +139,17 @@ if get_option('linux-getrandom').enabled()
 	subdirs += [ 'frontends/getrandom' ]
 endif
 
+if get_option('openssl-rand-provider').enabled()
+	openssl_dep = dependency('openssl', required: true, version : '>=3.0')
+	subdirs += [ 'frontends/openssl-provider' ]
+endif
+
+if get_option('botan-rng').enabled()
+	botan_dep = dependency('botan-3', required: true)
+	subdirs += [ 'frontends/botan-rng' ]
+	include_dirs_botan_rng = [ include_directories('frontends/botan-rng') ]
+endif
+
 foreach n : subdirs
 	subdir(n)
 endforeach
@@ -149,6 +169,16 @@ testdirs = [
 	#'tests/misc',
 	'tests/rpc_client',
 	]
+if get_option('openssl-rand-provider').enabled()
+testdirs += [
+	'tests/openssl-rand-provider',
+]
+endif
+if get_option('botan-rng').enabled()
+testdirs += [
+	'tests/botan-rng',
+]
+endif
 foreach n : testdirs
 	subdir(n)
 endforeach
