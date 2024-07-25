@@ -131,6 +131,10 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Error setting timeout on socket: %s\n",
 			    strerror(errsv));
+
+		close(rpc_conn->fd);
+		rpc_conn->fd = -1;
+		
 		return -errsv;
 	}
 
@@ -157,6 +161,9 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Connection attempt using socket %s failed\n",
 			    socketname);
+
+		close(rpc_conn->fd);
+		rpc_conn->fd = -1;
 	}
 
 	return -errsv;
