@@ -99,7 +99,7 @@ static void esdm_rpcs_stale_socket(const char *path, struct sockaddr *addr,
 	if (!S_ISSOCK(statbuf.st_mode))
 		return;
 
-	fd = socket(PF_UNIX, SOCK_SEQPACKET, 0);
+	fd = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0)
 		return;
 	set_fd_nonblocking(fd);
@@ -728,7 +728,7 @@ static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
 	}
 
 	fd = socket(protocol_family,
-		    SOCK_SEQPACKET
+		    SOCK_STREAM
 #ifndef ESDM_WORKERLOOP_TERM_ON_SIGNAL
 			    | SOCK_NONBLOCK | SOCK_CLOEXEC
 #endif
