@@ -129,7 +129,7 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 		return -EINVAL;
 
 	do {
-		ret = write(rpc_conn->child_fd, data, len);
+		ret = send(rpc_conn->child_fd, data, len, 0);
 		if (ret < 0) {
 			int errsv = errno;
 
@@ -410,8 +410,8 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 
 	/* Read the data into the thread-local storage */
 	do {
-		received = read(rpc_conn->child_fd, buf_p,
-				sizeof(buf) - total_received);
+		received = recv(rpc_conn->child_fd, buf_p,
+				sizeof(buf) - total_received, 0);
 		if (received < 0) {
 			ret = -errno;
 			goto out;

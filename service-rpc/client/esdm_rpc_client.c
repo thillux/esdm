@@ -172,7 +172,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 		return -EINVAL;
 
 	do {
-		ret = write(rpc_conn->fd, data, len);
+		ret = send(rpc_conn->fd, data, len, 0);
 		if (ret < 0) {
 			int errsv = errno;
 
@@ -396,7 +396,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 	/* Read the data into the local buffer storage */
 	do {
 		received =
-			read(rpc_conn->fd, buf_p, sizeof(buf) - total_received);
+			recv(rpc_conn->fd, buf_p, sizeof(buf) - total_received, 0);
 		if (received < 0) {
 			/* Handle a read timeout due to SO_RCVTIMEO */
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
