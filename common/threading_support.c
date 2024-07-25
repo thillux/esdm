@@ -128,7 +128,10 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 {
 	/* Wait */
 	pthread_mutex_lock(lock);
-	pthread_cond_wait(cv, lock);
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_nsec += 20000000;
+	pthread_cond_timedwait(cv, lock, &ts);
 	pthread_mutex_unlock(lock);
 }
 
@@ -165,6 +168,7 @@ static inline void thread_cleanup_full(struct thread_ctx *tctx)
 int thread_init(uint32_t groups)
 {
 	static uint32_t thread_initialized = 0;
+	pthread_condattr_t time_attr;
 	unsigned int i;
 	int ret;
 
@@ -186,6 +190,8 @@ int thread_init(uint32_t groups)
 	mutex_w_init(&threads_cleanup, 0, 1);
 
 	CKINT(pthread_attr_init(&pthread_attr));
+	CKINT(pthread_condattr_init(&time_attr));
+	CKINT(pthread_condattr_setclock(&time_attr, CLOCK_MONOTONIC));
 	memset(threads, 0, sizeof(threads));
 
 	for (i = 0; i < THREADING_REALLY_ALL_THREADS; i++) {
@@ -193,6 +199,7 @@ int thread_init(uint32_t groups)
 		mutex_w_init(&threads[i].inuse, false, 1);
 		atomic_bool_set_false(&threads[i].shutdown);
 		pthread_mutex_init(&threads[i].worker_lock, NULL);
+		pthread_cond_init(&threads[i].worker_cv, &time_attr);
 	}
 
 	threads_groups = groups;
@@ -236,11 +243,18 @@ static void *thread_worker(void *arg)
 	}
 
 	while (1) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+		"Thread %u before locking inuse\n", tctx->thread_num);
 		mutex_w_lock(&tctx->inuse);
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+		"Thread %u after locking inuse\n", tctx->thread_num);
 
 		if (atomic_bool_read(&tctx->shutdown)) {
 			/* Request for termination */
 			mutex_w_unlock(&tctx->inuse);
+
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+				    "Thread %u cleanup & terminate\n", tctx->thread_num);
 			/*
 			 * As the while loop terminates, the thread will
 			 * terminate as well - clean up our structure in case
@@ -252,6 +266,8 @@ static void *thread_worker(void *arg)
 			pthread_exit(NULL);
 			break;
 		} else if (tctx->start_routine) {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+				    "Thread %u start work\n", tctx->thread_num);
 			/* Work to do, execute */
 			tctx->ret_ancestor = tctx->start_routine(tctx->data);
 			thread_cleanup(tctx);
@@ -262,8 +278,14 @@ static void *thread_worker(void *arg)
 		} else {
 			mutex_w_unlock(&tctx->inuse);
 
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+				    "Thread %u block\n", tctx->thread_num);
+
 			/* Idle */
 			thread_block(&tctx->worker_cv, &tctx->worker_lock);
+
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
+				    "Thread %u woke up\n", tctx->thread_num);
 		}
 	}
 

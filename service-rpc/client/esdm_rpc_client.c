@@ -182,6 +182,8 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 	if (rpc_conn->fd < 0)
 		return -EINVAL;
 
+	int tries = 0;
+
 	do {
 		ret = send(rpc_conn->fd, data, len, 0);
 		if (ret < 0) {
@@ -198,6 +200,16 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 				    rpc_conn->interrupt_func(
 					    rpc_conn->interrupt_data)) {
 					return -EAGAIN;
+				}
+				tries++;
+
+				if (tries > 5) {
+					printf("retried to often\n");
+					shutdown(rpc_conn->fd, SHUT_RDWR);
+					close(rpc_conn->fd);
+					rpc_conn->fd = -1;
+
+					return -errsv;
 				}
 
 				continue;
@@ -226,6 +238,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 			return -errsv;
 		}
 
+		tries = 0;
 		written += (size_t)ret;
 
 		/* Cover short writes, e.g. due to timeouts */
@@ -411,7 +424,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 	/* Read the data into the local buffer storage */
 	do {
 		received =
-			recv(rpc_conn->fd, buf_p, sizeof(buf) - total_received, 0);
+			recv(rpc_conn->fd, buf_p, sizeof(buf) - total_received, MSG_DONTWAIT);
 		if (received < 0) {
 			/* Handle a read timeout due to SO_RCVTIMEO */
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {

@@ -87,6 +87,8 @@ static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 static pid_t server_pid = -1;
 static atomic_t server_exit = ATOMIC_INIT(0);
 
+static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn);
+
 /* Remove a potentially left-over old Unix Domain socket. */
 static void esdm_rpcs_stale_socket(const char *path, struct sockaddr *addr,
 				   unsigned addr_len)
@@ -517,6 +519,10 @@ static int esdm_rpcs_handler(void *args)
 	struct esdm_rpcs_connection *rpc_conn = args;
 	int ret;
 
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		"Run worker thread for FD %d\n",
+		rpc_conn->child_fd);
+	
 	/*
 	 * Loop reusing the existing connection. When an error is received,
 	 * the communication is considered to be severed and the child FD can
