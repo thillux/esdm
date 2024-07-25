@@ -57,6 +57,7 @@ static void esdm_fini_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 		return;
 
 	if (rpc_conn->fd >= 0) {
+		shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 		rpc_conn->fd = -1;
 	}
@@ -88,6 +89,7 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 	int errsv;
 
 	if (rpc_conn->fd >= 0) {
+		shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 		rpc_conn->fd = -1;
 	}
@@ -132,6 +134,7 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 			    "Error setting timeout on socket: %s\n",
 			    strerror(errsv));
 
+		shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 		rpc_conn->fd = -1;
 		
@@ -162,6 +165,7 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 			    "Connection attempt using socket %s failed\n",
 			    socketname);
 
+		shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 		rpc_conn->fd = -1;
 	}
@@ -214,6 +218,10 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 				LOGGER_ERR, LOGGER_C_RPC,
 				"Writting of data to file descriptor %d failed: %s\n",
 				rpc_conn->fd, strerror(errsv));
+
+			shutdown(rpc_conn->fd, SHUT_RDWR);
+			close(rpc_conn->fd);
+			rpc_conn->fd = -1;
 
 			return -errsv;
 		}
@@ -423,6 +431,11 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			ret = -errno;
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 				    "Read failed: %s\n", strerror(errno));
+
+			shutdown(rpc_conn->fd, SHUT_RDWR);
+			close(rpc_conn->fd);
+			rpc_conn->fd = -1;
+			
 			break;
 		}
 
@@ -569,6 +582,7 @@ static void esdm_client_destroy(ProtobufCService *service)
 
 	mutex_w_lock(&rpc_conn->lock);
 	if (rpc_conn->fd >= 0) {
+		shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 		rpc_conn->fd = -1;
 	}

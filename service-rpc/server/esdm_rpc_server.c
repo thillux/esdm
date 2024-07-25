@@ -503,8 +503,11 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 {
 	if (!rpc_conn)
 		return;
-	if (rpc_conn->child_fd >= 0)
+	if (rpc_conn->child_fd >= 0) {
+		shutdown(rpc_conn->child_fd, SHUT_RDWR);
 		close(rpc_conn->child_fd);
+		rpc_conn->child_fd = -1;
+	}
 	free(rpc_conn);
 }
 
