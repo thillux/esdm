@@ -1,0 +1,46 @@
+[Unit]
+Description=Entropy Source and DRNG Manager Kernel Seeder
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+# Required to wait for insmod of esdm_es.ko - comment out if not needed
+Wants=esdm-server.service
+After=esdm-server.service
+
+[Service]
+DeviceAllow=/dev/random rw
+DeviceAllow=/dev/esdm rw
+DevicePolicy=strict
+Restart=on-failure
+RestartSec=5s
+ExecStart=@PATH@/esdm-kernel-seeder
+IPAddressDeny=any
+LimitMEMLOCK=0
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+MountFlags=private
+NoNewPrivileges=yes
+PrivateMounts=no
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateUsers=no
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=-/
+ReadWritePaths=/var/run
+RemoveIPC=yes
+RestrictAddressFamilies=
+RestrictRealtime=yes
+UMask=0077
+KillMode=mixed
+
+[Install]
+WantedBy=basic.target
+Alias=esdm-kernel-seeder.service
