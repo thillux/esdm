@@ -309,9 +309,7 @@ static int esdm_jent_initialize(void)
 	}
 
 	if (esdm_ntg1_2024_compliant()) {
-		flags |= JENT_FORCE_FIPS;
-		/* TODO: adapt, when jitterentropy became NTG.1 compliant */
-		/* flags |= JENT_NTG1 */
+		flags |= JENT_NTG1;
 	}
 
 	esdm_jent_state = jent_entropy_collector_alloc(0, flags);
