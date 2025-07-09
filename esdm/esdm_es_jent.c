@@ -292,7 +292,7 @@ static void esdm_jent_finalize(void)
 static int esdm_jent_initialize(void)
 {
 	unsigned int flags = 0;
-	int ret;
+	int ret = 0;
 
 	/* Allow the init function to be called multiple times */
 	esdm_jent_finalize();
