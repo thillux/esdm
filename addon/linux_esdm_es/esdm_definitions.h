@@ -15,18 +15,18 @@
  * Specific settings for different use cases
  */
 #ifdef CONFIG_CRYPTO_FIPS
-#define ESDM_OVERSAMPLE_ES_BITS 64
-#define ESDM_SEED_BUFFER_INIT_ADD_BITS 128
+#define ESDM_SAFETY_BITS 64
+#define ESDM_SAFETY_BITS_INITIATE 128
 #else /* CONFIG_CRYPTO_FIPS */
-#define ESDM_OVERSAMPLE_ES_BITS 0
-#define ESDM_SEED_BUFFER_INIT_ADD_BITS 0
+#define ESDM_SAFETY_BITS 0
+#define ESDM_SAFETY_BITS_INITIATE 0
 #endif /* CONFIG_CRYPTO_FIPS */
 
 /* Security strength of ESDM -- this must match DRNG security strength */
 #define ESDM_DRNG_SECURITY_STRENGTH_BYTES 32
 #define ESDM_DRNG_SECURITY_STRENGTH_BITS (ESDM_DRNG_SECURITY_STRENGTH_BYTES * 8)
 #define ESDM_DRNG_INIT_SEED_SIZE_BITS                                          \
-	(ESDM_DRNG_SECURITY_STRENGTH_BITS + ESDM_SEED_BUFFER_INIT_ADD_BITS)
+	(ESDM_DRNG_SECURITY_STRENGTH_BITS + ESDM_SAFETY_BITS_INITIATE)
 #define ESDM_DRNG_INIT_SEED_SIZE_BYTES (ESDM_DRNG_INIT_SEED_SIZE_BITS >> 3)
 
 /*
@@ -85,14 +85,14 @@ static inline bool esdm_sp80090c_compliant(void)
 	return fips_enabled;
 }
 
-static inline u32 esdm_compress_osr(void)
+static inline u32 esdm_num_safety_bits(void)
 {
-	return esdm_sp80090c_compliant() ? ESDM_OVERSAMPLE_ES_BITS : 0;
+	return esdm_sp80090c_compliant() ? ESDM_SAFETY_BITS : 0;
 }
 
-static inline u32 esdm_reduce_by_osr(u32 entropy_bits)
+static inline u32 esdm_del_safety_bits(u32 entropy_bits)
 {
-	u32 osr_bits = esdm_compress_osr();
+	u32 osr_bits = esdm_num_safety_bits();
 
 	return (entropy_bits >= osr_bits) ? (entropy_bits - osr_bits) : 0;
 }

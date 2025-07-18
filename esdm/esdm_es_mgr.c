@@ -429,9 +429,9 @@ static uint32_t esdm_avail_entropy_thresh(void)
 	 */
 	if (esdm_sp80090c_compliant()) {
 		if (!esdm_state.all_online_nodes_seeded) {
-			ent_thresh += ESDM_SEED_BUFFER_INIT_ADD_BITS;
+			ent_thresh += ESDM_SAFETY_BITS_INITIATE;
 		} else {
-			ent_thresh += ESDM_OVERSAMPLE_ES_BITS;
+			ent_thresh += ESDM_SAFETY_BITS;
 		}
 	}
 
@@ -459,7 +459,7 @@ bool esdm_fully_seeded(bool was_fully_seeded_once, bool fully_seeded, uint32_t c
 		return (result >= 2);
 	}
 
-	return (collected_entropy >= esdm_get_seed_entropy_osr(fully_seeded));
+	return (collected_entropy >= esdm_get_seed_entropy_w_safety_bits(fully_seeded));
 }
 
 uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb)
@@ -557,7 +557,7 @@ void esdm_set_write_wakeup_bits(uint32_t val)
 		return;
 
 	esdm_write_wakeup_bits =
-		min_uint32(val, esdm_reduce_by_osr(esdm_get_digestsize()));
+		min_uint32(val, esdm_del_safety_bits(esdm_get_digestsize()));
 }
 
 static uint32_t esdm_init_entropy_level(bool fully_seeded)
@@ -566,7 +566,7 @@ static uint32_t esdm_init_entropy_level(bool fully_seeded)
 		       /* Approximation so that two ES should deliver 240 bits each */
 		       (2 * ESDM_AIS2031_NPTRNG_MIN_ENTROPY) :
 		       /* Apply SP800-90C oversampling if applicable */
-		       esdm_get_seed_entropy_osr(fully_seeded);
+		       esdm_get_seed_entropy_w_safety_bits(fully_seeded);
 }
 
 /**
@@ -779,7 +779,7 @@ void esdm_fill_seed_buffer(struct entropy_buf *eb, uint32_t requested_bits,
 {
 	struct esdm_state *state = &esdm_state;
 	uint32_t i, req_ent = esdm_sp80090c_compliant() ?
-				      (esdm_security_strength() + ESDM_OVERSAMPLE_ES_BITS) :
+				      (esdm_security_strength() + ESDM_SAFETY_BITS) :
 				      ESDM_MIN_SEED_ENTROPY_BITS;
 	int ret;
 

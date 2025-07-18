@@ -19,6 +19,7 @@
  * DAMAGE.
  */
 
+#include "esdm_drng_mgr.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
@@ -43,7 +44,7 @@
 /*
  * This is the auxiliary pool
  *
- * The aux pool array is aligned to 8 bytes to comfort any used 
+ * The aux pool array is aligned to 8 bytes to comfort any used
  * cipher implementations of the hash functions used to read the pool: for some
  * accelerated implementations, we need an alignment to avoid a realignment
  * which involves memcpy(). The alignment to 8 bytes should satisfy all crypto
@@ -82,9 +83,10 @@ static struct esdm_pool esdm_pools[ESDM_NUM_AUX_POOLS] = { 0 };
 static uint32_t esdm_aux_avail_entropy_pool(struct esdm_pool *pool)
 {
 	/* Cap available entropy with max entropy */
-	uint32_t avail_bits =
-		min_uint32(esdm_get_digestsize(),
-			   atomic_read_u32(&pool->aux_entropy_bits));
+	uint32_t avail_bits = min_uint32(
+		esdm_get_digestsize(),
+		atomic_read_u32(&pool->aux_entropy_bits) - esdm_num_safety_bits()
+	);
 
 	/* Do not consider oversampling rate, as caller will already do */
 	return avail_bits;
@@ -95,8 +97,9 @@ static uint32_t esdm_aux_avail_entropy(uint32_t __unused u)
 	size_t i;
 	uint32_t avail_bits = 0;
 
-	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i)
+	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
 		avail_bits += esdm_aux_avail_entropy_pool(&esdm_pools[i]);
+	}
 
 	return avail_bits;
 }
@@ -384,13 +387,17 @@ static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 	CKINT(hash_cb->hash_update(shash, inbuf, inbuflen));
 
 	/*
-	 * Cap the available entropy to the hash output size compliant to
-	 * SP800-90B section 3.1.5.1 table 1.
+	 * Cap the available entropy to the hash output size and optional safety margin
+	 * compliant to SP800-90B section 3.1.5.1 table 1.
+	 * (safety margin is not reported "outside" aux es)
 	 */
 	entropy_bits += atomic_read_u32(&pool->aux_entropy_bits);
 	esdm_pool_set_entropy_pool(
 		pool,
-		min_uint32(entropy_bits, hash_cb->hash_digestsize(shash) << 3));
+		min_uint32(
+			entropy_bits,
+			(hash_cb->hash_digestsize(shash) << 3) + esdm_num_safety_bits())
+		);
 
 out:
 	mutex_reader_unlock(&drng->hash_lock);
@@ -437,11 +444,12 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	}
 
 	/*
-	 * As of now, we don't do multi pool updates for security reasons, and
-	 * thus cap entropy to single pool capacity.
-	 */
-	if (entropy_bits > esdm_get_digestsize())
-		entropy_bits = esdm_get_digestsize();
+	* As of now, we don't do multi pool updates for security reasons, and
+	* thus cap entropy to single pool capacity
+	* (with additional safety bits before hashing).
+	*/
+	if (entropy_bits > esdm_get_digestsize() + esdm_num_safety_bits())
+		entropy_bits = esdm_get_digestsize() + esdm_num_safety_bits();
 
 	/*
 	 * Now we want to find the pool to insert the entropy in. The applied
@@ -486,7 +494,7 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 		&esdm_pools[pool_with_max_entropy_capacity], inbuf, inbuflen,
 		entropy_bits));
 
-	if (esdm_aux_avail_entropy(0) >= esdm_security_strength() + esdm_compress_osr()) {
+	if (esdm_aux_avail_entropy(0) >= esdm_security_strength() + esdm_num_safety_bits()) {
 		/*
 		* As the DRNG is newly seeded, maybe the need entropy flag can be
 		* unset?
@@ -517,7 +525,8 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	struct esdm_drng *drng = esdm_drng_init_instance();
 	const struct esdm_hash_cb *hash_cb;
 	uint32_t collected_ent_bits, returned_ent_bits,
-		unused_bits = 0, digestsize, digestsize_bits;
+		unused_bits = 0, digestsize, digestsize_bits,
+		requested_bits_osr;
 	uint8_t aux_output[ESDM_MAX_DIGESTSIZE];
 
 	if (!pool->initialized)
@@ -534,6 +543,7 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 
 	/* Ensure that no more than the size of aux_pool can be requested */
 	requested_bits = min_uint32(requested_bits, (ESDM_MAX_DIGESTSIZE << 3));
+	requested_bits_osr = requested_bits + esdm_num_safety_bits();
 
 	/* Cap entropy with entropy counter from aux pool and the used digest */
 	collected_ent_bits =
@@ -543,19 +553,20 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	/* We collected too much entropy and put the overflow back */
 	if (collected_ent_bits > requested_bits) {
 		/* Amount of bits we collected too much */
-		unused_bits = collected_ent_bits - requested_bits;
+		unused_bits = collected_ent_bits - requested_bits_osr;
 		/* Put entropy back */
 		atomic_add(&pool->aux_entropy_bits, (int)unused_bits);
 		/* Fix collected entropy */
-		collected_ent_bits = requested_bits;
+		collected_ent_bits = requested_bits_osr;
 	}
 
-	returned_ent_bits = collected_ent_bits;
+	/* Apply oversampling: discount requested oversampling rate */
+	returned_ent_bits = esdm_del_safety_bits(collected_ent_bits);
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_ES,
-		"obtained %u bits of entropy from aux pool, %u bits of entropy remaining\n",
-		returned_ent_bits, unused_bits);
+		"obtained %u bits by collecting %u bits of entropy from aux pool, %u bits of entropy remaining\n",
+		returned_ent_bits, collected_ent_bits, unused_bits);
 
 	/* Get the digest for the aux pool to be returned to the caller ... */
 	if (hash_cb->hash_final(shash, aux_output) ||
@@ -618,7 +629,7 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 		 * We found the pool that can already provide all our entropy
 		 * needs (including the discount for the OSR), take it.
 		 */
-		if (requested_bits <= max_entropy) {
+		if (requested_bits + esdm_num_safety_bits() <= max_entropy) {
 			locked_pool = true;
 			break;
 		}

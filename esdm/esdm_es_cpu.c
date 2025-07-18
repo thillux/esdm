@@ -59,7 +59,7 @@ static uint32_t esdm_get_cpu_data(uint8_t *outbuf, uint32_t requested_bits)
 
 	/* operate on full blocks */
 	BUILD_BUG_ON(ESDM_DRNG_SECURITY_STRENGTH_BYTES % sizeof(unsigned long));
-	BUILD_BUG_ON(ESDM_SEED_BUFFER_INIT_ADD_BITS % sizeof(unsigned long));
+	BUILD_BUG_ON(ESDM_SAFETY_BITS_INITIATE % sizeof(unsigned long));
 	/* ensure we have aligned buffers */
 	BUILD_BUG_ON(ESDM_KCAPI_ALIGN % sizeof(unsigned long));
 
@@ -118,7 +118,7 @@ static uint32_t esdm_get_cpu_data_compress(uint8_t *outbuf,
 	/* Calculate oversampling for SP800-90C */
 	if (esdm_sp80090c_compliant()) {
 		/* Complete amount of bits to be pulled */
-		full_bits += ESDM_OVERSAMPLE_ES_BITS * multiplier;
+		full_bits += ESDM_SAFETY_BITS * multiplier;
 		/* Full blocks that will be pulled */
 		multiplier = full_bits / requested_bits;
 		/* Partial block in bits to be pulled */

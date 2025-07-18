@@ -115,13 +115,13 @@ static u32 esdm_sched_avail_entropy(u32 __unused)
 	}
 
 	/* Consider oversampling rate */
-	ent = esdm_reduce_by_osr(
+	ent = esdm_del_safety_bits(
 		esdm_data_to_entropy(events, esdm_sched_entropy_bits));
 
 	if (fips_enabled) {
 		block_factor++;
 		/* Consider oversampling rate of next block */
-		ent = esdm_reduce_by_osr(
+		ent = esdm_del_safety_bits(
 			esdm_data_to_entropy(
 				esdm_entropy_to_data(ent, esdm_sched_entropy_bits),
 				esdm_sched_entropy_bits
@@ -177,7 +177,7 @@ static bool esdm_sched_pool_extract_block(uint8_t *block, size_t partial_len,
 	 * bytes with DRBG, if advised by partial_len */
 	requested_bits = esdm_drbg_cb->drbg_sec_strength(esdm_sched_drbg_state);
 	requested_events = esdm_entropy_to_data(
-		requested_bits + esdm_compress_osr(), esdm_sched_entropy_bits);
+		requested_bits + esdm_num_safety_bits(), esdm_sched_entropy_bits);
 
 	/*
 	 * Harvest entropy from each per-CPU event state - even though we may
@@ -221,7 +221,7 @@ static bool esdm_sched_pool_extract_block(uint8_t *block, size_t partial_len,
 	collected_ent_bits =
 		esdm_data_to_entropy(collected_events, esdm_sched_entropy_bits);
 	/* Apply oversampling: discount requested oversampling rate */
-	returned_ent_bits = esdm_reduce_by_osr(collected_ent_bits);
+	returned_ent_bits = esdm_del_safety_bits(collected_ent_bits);
 
 	pr_debug(
 		"obtained %u bits by collecting %u bits of entropy from scheduler-based noise source\n",

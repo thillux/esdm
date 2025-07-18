@@ -91,14 +91,17 @@ void esdm_drng_seed_work(void);
 void esdm_force_fully_seeded(void);
 void esdm_force_fully_seeded_all_drbgs(void);
 
-static inline uint32_t esdm_compress_osr(void)
+static inline uint32_t esdm_num_safety_bits(bool initiate)
 {
-	return esdm_sp80090c_compliant() ? ESDM_OVERSAMPLE_ES_BITS : 0;
+	if (!esdm_sp80090c_compliant())
+		return 0;
+
+	return initiate ? ESDM_SAFETY_BITS_INITIATE : ESDM_SAFETY_BITS;
 }
 
-static inline uint32_t esdm_reduce_by_osr(uint32_t entropy_bits)
+static inline uint32_t esdm_del_safety_bits(bool initiate, uint32_t entropy_bits)
 {
-	uint32_t osr_bits = esdm_compress_osr();
+	uint32_t osr_bits = esdm_num_safety_bits(initiate);
 
 	return (entropy_bits >= osr_bits) ? (entropy_bits - osr_bits) : 0;
 }
