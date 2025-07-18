@@ -448,8 +448,6 @@ static void esdm_time_process(void)
 /* Hot code path - Callback for interrupt handler */
 static void esdm_add_interrupt_randomness(int irq)
 {
-	unsigned long flags;
-
 	if (esdm_highres_timer()) {
 		esdm_time_process();
 	} else {
@@ -485,7 +483,6 @@ static void esdm_add_interrupt_randomness(int irq)
 		tmp ^= ip >> 32;
 		_esdm_irq_array_add_u32(tmp);
 	}
-	spin_unlock_irqrestore(lock, flags);
 }
 
 static void esdm_irq_es_state(unsigned char *buf, size_t buflen)

@@ -21,6 +21,7 @@
  * @drbg_generate:	Generate random numbers from the drbg with arbitrary
  *			length
  * @drbg_sec_strength:	Return DRBG security strength in bits
+ * @drbg_is_initiated:	Return DRBG was initiated? (used to track safety bits)
  */
 struct esdm_drbg_cb {
 	const char *(*drbg_name)(void);

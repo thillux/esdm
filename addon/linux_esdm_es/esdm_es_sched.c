@@ -51,12 +51,6 @@ static DEFINE_PER_CPU(atomic_t, esdm_sched_array_events) = ATOMIC_INIT(0);
 static DEFINE_PER_CPU(struct drbg_string, esdm_sched_seed_data);
 
 
-/*
- * Lock to allow other CPUs to mix the pool - as this is only done during
- * reseed which is infrequent, this lock is hardly contended.
- */
-static DEFINE_PER_CPU(spinlock_t, esdm_sched_lock);
-
 void __init esdm_sched_es_init(bool highres_timer)
 {
 	/* Set a minimum number of scheduler events that must be collected */
@@ -180,8 +174,8 @@ static bool esdm_sched_pool_extract_block(uint8_t *block, size_t partial_len,
 	 * bytes with DRBG, if advised by partial_len */
 	requested_bits = esdm_drbg_cb->drbg_sec_strength(esdm_sched_drbg_state);
 	requested_events = esdm_entropy_to_data(
-		requested_bits + esdm_num_safety_bits(esdm_drbg_cb->drbg_is_initiated(esdm_irq_drbg_state)),
-		esdm_irq_entropy_bits
+		requested_bits + esdm_num_safety_bits(esdm_drbg_cb->drbg_is_initiated(esdm_sched_drbg_state)),
+		esdm_sched_entropy_bits
 	);
 
 	/*
@@ -256,14 +250,6 @@ static bool esdm_sched_pool_extract_block(uint8_t *block, size_t partial_len,
 	} else {
 		*returned_bits = min(requested_bits, 8 * partial_len);
 		ok = true;
-	}
-
-	/* mix events by XORing with DRBG output in order to never read
-	 * the same event data twice */
-	if (!esdm_sched_mix_pool_bytes()) {
-		pr_warn("mix pool bytes failed!\n");
-		ok = false;
-		*returned_bits = 0;
 	}
 
 out:
@@ -412,8 +398,6 @@ static void esdm_sched_time_process(void)
 
 static void esdm_sched_randomness(const struct task_struct *p, int cpu)
 {
-	unsigned long flags;
-
 	if (esdm_highres_timer()) {
 		esdm_sched_time_process();
 	} else {
@@ -474,7 +458,6 @@ struct esdm_es_cb esdm_es_sched = {
 int __init esdm_es_sched_module_init(void)
 {
 	int ret;
-	int cpu;
 
 	/* switch to XDRBG, if upstream in the kernel */
 	esdm_sched_drbg_state = esdm_drbg_cb->drbg_alloc(

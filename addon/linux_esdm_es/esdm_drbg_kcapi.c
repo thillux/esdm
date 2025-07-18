@@ -181,7 +181,7 @@ static u32 esdm_drbg_sec_strength(void *drbg)
 	return drbg_sec_strength(drbg_s->core->flags) * 8;
 }
 
-static bool drbg_is_initiated(void *drbg) {
+static bool esdm_drbg_is_initiated(void *drbg) {
 	struct drbg_state *drbg_s = (struct drbg_state *)drbg;
 
 	if (!drbg_s)
