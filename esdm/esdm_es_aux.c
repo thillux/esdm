@@ -85,7 +85,7 @@ static uint32_t esdm_aux_avail_entropy_pool(struct esdm_pool *pool)
 	/* Cap available entropy with max entropy */
 	uint32_t avail_bits = min_uint32(
 		esdm_get_digestsize(),
-		atomic_read_u32(&pool->aux_entropy_bits) - esdm_num_safety_bits()
+		atomic_read_u32(&pool->aux_entropy_bits) - esdm_num_safety_bits(false)
 	);
 
 	/* Do not consider oversampling rate, as caller will already do */
@@ -396,7 +396,7 @@ static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 		pool,
 		min_uint32(
 			entropy_bits,
-			(hash_cb->hash_digestsize(shash) << 3) + esdm_num_safety_bits())
+			(hash_cb->hash_digestsize(shash) << 3) + esdm_num_safety_bits(false))
 		);
 
 out:
@@ -448,8 +448,8 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	* thus cap entropy to single pool capacity
 	* (with additional safety bits before hashing).
 	*/
-	if (entropy_bits > esdm_get_digestsize() + esdm_num_safety_bits())
-		entropy_bits = esdm_get_digestsize() + esdm_num_safety_bits();
+	if (entropy_bits > esdm_get_digestsize() + esdm_num_safety_bits(false))
+		entropy_bits = esdm_get_digestsize() + esdm_num_safety_bits(false);
 
 	/*
 	 * Now we want to find the pool to insert the entropy in. The applied
@@ -494,7 +494,7 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 		&esdm_pools[pool_with_max_entropy_capacity], inbuf, inbuflen,
 		entropy_bits));
 
-	if (esdm_aux_avail_entropy(0) >= esdm_security_strength() + esdm_num_safety_bits()) {
+	if (esdm_aux_avail_entropy(0) >= esdm_security_strength() + esdm_num_safety_bits(false)) {
 		/*
 		* As the DRNG is newly seeded, maybe the need entropy flag can be
 		* unset?
@@ -543,7 +543,7 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 
 	/* Ensure that no more than the size of aux_pool can be requested */
 	requested_bits = min_uint32(requested_bits, (ESDM_MAX_DIGESTSIZE << 3));
-	requested_bits_osr = requested_bits + esdm_num_safety_bits();
+	requested_bits_osr = requested_bits + esdm_num_safety_bits(false);
 
 	/* Cap entropy with entropy counter from aux pool and the used digest */
 	collected_ent_bits =
@@ -561,7 +561,7 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	}
 
 	/* Apply oversampling: discount requested oversampling rate */
-	returned_ent_bits = esdm_del_safety_bits(collected_ent_bits);
+	returned_ent_bits = esdm_del_safety_bits(false, collected_ent_bits);
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_ES,
@@ -629,7 +629,7 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 		 * We found the pool that can already provide all our entropy
 		 * needs (including the discount for the OSR), take it.
 		 */
-		if (requested_bits + esdm_num_safety_bits() <= max_entropy) {
+		if (requested_bits + esdm_num_safety_bits(false) <= max_entropy) {
 			locked_pool = true;
 			break;
 		}

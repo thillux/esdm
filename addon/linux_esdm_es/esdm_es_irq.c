@@ -126,14 +126,19 @@ static u32 esdm_irq_avail_entropy(u32 __unused)
 			     atomic_read_u32(per_cpu_ptr(&esdm_irq_array_irqs, cpu)));
 	}
 
-	/* Consider oversampling rate */
+	/* Consider oversampling rate, possibly DRBG not initiated */
 	ent = esdm_del_safety_bits(
+		false,
 		esdm_data_to_entropy(irq, esdm_irq_entropy_bits));
 
+	/* with fips enabled, we have to extract at least two full blocks,
+	 * remove another safety bits */
 	if (fips_enabled) {
 		block_factor++;
-		/* Consider oversampling rate of next block */
+		/* Consider oversampling rate of next block, DRBG will be
+		 * initiated */
 		ent = esdm_del_safety_bits(
+			true,
 			esdm_data_to_entropy(
 				esdm_entropy_to_data(ent, esdm_irq_entropy_bits),
 				esdm_irq_entropy_bits
@@ -213,7 +218,10 @@ static bool esdm_irq_pool_extract_block(uint8_t *block, size_t partial_len,
 	collected_ent_bits =
 		esdm_data_to_entropy(collected_irqs, esdm_irq_entropy_bits);
 	/* Apply oversampling: discount requested oversampling rate */
-	returned_ent_bits = esdm_del_safety_bits(collected_ent_bits);
+	returned_ent_bits = esdm_del_safety_bits(
+		esdm_drbg_cb->drbg_is_initiated(esdm_irq_drbg_state),
+		collected_ent_bits
+	);
 
 	pr_debug(
 		"obtained %u bits by collecting %u bits of entropy from entropy pool noise source\n",

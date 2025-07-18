@@ -90,9 +90,9 @@ static inline u32 esdm_num_safety_bits(bool initiate)
 	return esdm_sp80090c_compliant() ? ESDM_SAFETY_BITS : 0;
 }
 
-static inline u32 esdm_del_safety_bits(u32 entropy_bits)
+static inline u32 esdm_del_safety_bits(bool initiate, u32 entropy_bits)
 {
-	u32 osr_bits = esdm_num_safety_bits();
+	u32 osr_bits = esdm_num_safety_bits(initiate);
 
 	return (entropy_bits >= osr_bits) ? (entropy_bits - osr_bits) : 0;
 }

@@ -114,14 +114,17 @@ static u32 esdm_sched_avail_entropy(u32 __unused)
 					&esdm_sched_array_events, cpu)));
 	}
 
-	/* Consider oversampling rate */
+	/* Consider oversampling rate, possibly DRBG not initiated */
 	ent = esdm_del_safety_bits(
+		true,
 		esdm_data_to_entropy(events, esdm_sched_entropy_bits));
 
 	if (fips_enabled) {
 		block_factor++;
-		/* Consider oversampling rate of next block */
+		/* Consider oversampling rate of next block, DRBG will be
+		 * initiated */
 		ent = esdm_del_safety_bits(
+			false,
 			esdm_data_to_entropy(
 				esdm_entropy_to_data(ent, esdm_sched_entropy_bits),
 				esdm_sched_entropy_bits
@@ -223,8 +226,10 @@ static bool esdm_sched_pool_extract_block(uint8_t *block, size_t partial_len,
 	collected_ent_bits =
 		esdm_data_to_entropy(collected_events, esdm_sched_entropy_bits);
 	/* Apply oversampling: discount requested oversampling rate */
-	returned_ent_bits = esdm_del_safety_bits(collected_ent_bits);
-
+	returned_ent_bits = esdm_del_safety_bits(
+		esdm_drbg_cb->drbg_is_initiated(esdm_sched_drbg_state),
+		collected_ent_bits
+	);
 	pr_debug(
 		"obtained %u bits by collecting %u bits of entropy from scheduler-based noise source\n",
 		returned_ent_bits, collected_ent_bits);

@@ -557,7 +557,7 @@ void esdm_set_write_wakeup_bits(uint32_t val)
 		return;
 
 	esdm_write_wakeup_bits =
-		min_uint32(val, esdm_del_safety_bits(esdm_get_digestsize()));
+		min_uint32(val, esdm_get_digestsize());
 }
 
 static uint32_t esdm_init_entropy_level(bool fully_seeded)
