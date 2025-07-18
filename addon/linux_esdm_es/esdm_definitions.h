@@ -85,7 +85,7 @@ static inline bool esdm_sp80090c_compliant(void)
 	return fips_enabled;
 }
 
-static inline u32 esdm_num_safety_bits(void)
+static inline u32 esdm_num_safety_bits(bool initiate)
 {
 	return esdm_sp80090c_compliant() ? ESDM_SAFETY_BITS : 0;
 }

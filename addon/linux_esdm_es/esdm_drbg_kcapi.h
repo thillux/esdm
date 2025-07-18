@@ -30,6 +30,7 @@ struct esdm_drbg_cb {
 	int (*drbg_generate)(void *drbg, u8 *outbuf, u32 outbuflen,
 			     u8 *additional_data, u32 additional_data_len);
 	u32 (*drbg_sec_strength)(void *drbg);
+	bool (*drbg_is_initiated)(void *drbg);
 };
 
 /* can be called from module entry point */

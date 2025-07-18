@@ -168,7 +168,9 @@ static bool esdm_irq_pool_extract_block(uint8_t *block, size_t partial_len,
 	 * bytes with DRBG, if advised by partial_len */
 	requested_bits = esdm_drbg_cb->drbg_sec_strength(esdm_irq_drbg_state);
 	requested_irqs = esdm_entropy_to_data(
-		requested_bits + esdm_num_safety_bits(), esdm_irq_entropy_bits);
+		requested_bits + esdm_num_safety_bits(esdm_drbg_cb->drbg_is_initiated(esdm_irq_drbg_state)),
+		esdm_irq_entropy_bits
+	);
 
 	/*
 	 * Collect all per CPU events and insert them into the DRBG

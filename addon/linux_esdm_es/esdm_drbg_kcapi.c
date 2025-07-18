@@ -181,6 +181,15 @@ static u32 esdm_drbg_sec_strength(void *drbg)
 	return drbg_sec_strength(drbg_s->core->flags) * 8;
 }
 
+static bool drbg_is_initiated(void *drbg) {
+	struct drbg_state *drbg_s = (struct drbg_state *)drbg;
+
+	if (!drbg_s)
+		return false;
+
+	return drbg_s->seeded = DRBG_SEED_STATE_FULL;
+}
+
 static const struct esdm_drbg_cb esdm_drbg_cb_int = {
 	.drbg_name = esdm_drbg_name,
 	.drbg_alloc = esdm_drbg_alloc,
@@ -188,6 +197,7 @@ static const struct esdm_drbg_cb esdm_drbg_cb_int = {
 	.drbg_seed = esdm_drbg_seed_helper,
 	.drbg_generate = esdm_drbg_generate_helper,
 	.drbg_sec_strength = esdm_drbg_sec_strength,
+	.drbg_is_initiated = esdm_drbg_is_initiated,
 };
 const struct esdm_drbg_cb *esdm_drbg_cb = &esdm_drbg_cb_int;
 
