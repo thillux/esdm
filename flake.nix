@@ -25,7 +25,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
 
-        kernelDebug = false;
+        kernelDebug = true;
         kernelFips = true;
         debugEsdm = false;
         startEsdm = false;

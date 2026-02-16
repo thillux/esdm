@@ -62,7 +62,7 @@ void __init esdm_sched_es_init(bool highres_timer)
 	BUG_ON(ESDM_ES_OSR <= 0 || ESDM_ES_OSR > 25);
 
 	/* reseeding possible with current array size? */
-	BUG_ON(ESDM_ES_OSR * (256 + 64) * 2 > ESDM_DATA_NUM_VALUES);
+	BUG_ON(ESDM_ES_OSR * (256 + 64 + 1) * 2 > ESDM_DATA_NUM_VALUES);
 
 	/* Set a minimum number of scheduler events that must be collected */
 	sched_entropy = max_t(u32, ESDM_SCHED_ENTROPY_BITS, sched_entropy);
