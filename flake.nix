@@ -27,7 +27,7 @@
 
         kernelDebug = false;
         kernelFips = true;
-        debugEsdm = true;
+        debugEsdm = false;
         startEsdm = false;
         startCompat = false;
 
@@ -192,6 +192,7 @@
           # this currently defaults to the botan crypto backend
           esdm =
             (pkgs.esdm.override {
+              stdenv = pkgs.clangStdenv;
               selinux = false;
               esSched = true;
               esSchedEntropyRate = 0;
