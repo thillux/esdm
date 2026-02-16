@@ -86,7 +86,7 @@ int esdm_jent_status(char* buf, size_t buf_length) {
 	return ret;
 }
 
-static bool esdm_jent_ntg1() {
+static bool esdm_jent_ntg1(void) {
 #if JENT_VERSION >= 3070000
 	const bool jent_secure_memory = jent_secure_memory_supported();
 # ifdef ESDM_JENT_NTG1
@@ -410,6 +410,10 @@ static int esdm_jent_initialize(void)
 	case 20:
 		flags |= JENT_MAX_MEMSIZE_512MB;
 		break;
+	case 0:
+	default:
+		/* nothing to do here */
+		break;
 	}
 
 	switch (ESDM_JENT_HASH_LOOP_COUNT) {
@@ -436,6 +440,9 @@ static int esdm_jent_initialize(void)
 		break;
 	case 7:
 		flags |= JENT_HASHLOOP_128;
+		break;
+	default:
+		/* nothing to do here */
 		break;
 	}
 #endif /* JENT_VERSION >= 3070000 */

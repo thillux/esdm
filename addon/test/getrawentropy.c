@@ -103,7 +103,7 @@ out:
 	return (int)ret;
 }
 
-void usage() {
+static void usage(void) {
 	fprintf(stderr, "Usage: getrawentropy [--samples NUM] [--debugfs-file FILE] [--outfile FILE] [--help]\n");
 }
 
