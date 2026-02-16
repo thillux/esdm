@@ -45,8 +45,8 @@ struct opts {
 
 static int getrawentropy(struct opts *opts)
 {
-#define BUFFER_SIZE (RAWENTROPY_SAMPLES * sizeof(uint32_t))
-	uint32_t requested = (uint32_t)opts->samples * sizeof(uint32_t);
+#define BUFFER_SIZE (RAWENTROPY_SAMPLES * sizeof(uint64_t))
+	uint32_t requested = (uint32_t)opts->samples * sizeof(uint64_t);
 	uint8_t *buffer_p, buffer[BUFFER_SIZE];
 	ssize_t ret;
 	int in_fd = -1;
@@ -78,17 +78,17 @@ static int getrawentropy(struct opts *opts)
 			goto out;
 		}
 
-		for (i = 0; i < (uint32_t)ret / (sizeof(uint32_t)); i++) {
-			uint32_t val;
+		for (i = 0; i < (uint32_t)ret / (sizeof(uint64_t)); i++) {
+			uint64_t val;
 
-			memcpy(&val, buffer_p, sizeof(uint32_t));
+			memcpy(&val, buffer_p, sizeof(uint64_t));
 			dprintf(out_fd, "%u\n", val);
-			buffer_p += sizeof(uint32_t);
+			buffer_p += sizeof(uint64_t);
 		}
 
 		requested -= (uint32_t)ret;
 
-		fprintf(stderr, "Fetched %lu events, still %lu to do\n", (uint32_t)ret / sizeof(uint32_t), requested  / sizeof(uint32_t));
+		fprintf(stderr, "Fetched %lu events, still %lu to do\n", (uint32_t)ret / sizeof(uint64_t), requested  / sizeof(uint64_t));
 	}
 
 	ret = 0;
@@ -103,6 +103,10 @@ out:
 	return (int)ret;
 }
 
+void usage() {
+	fprintf(stderr, "Usage: getrawentropy [--samples NUM] [--debugfs-file FILE] [--outfile FILE] [--help]\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct opts opts;
@@ -115,15 +119,19 @@ int main(int argc, char *argv[])
 	while (1) {
 		int opt_index = 0;
 		static struct option options[] = {
+			{ "help", 0, 0, 'h' },
 			{ "samples", required_argument, 0, 's' },
 			{ "debugfs-file", required_argument, 0, 'f' },
 			{ "outfile", required_argument, 0, 'o' },
 			{ 0, 0, 0, 0 }
 		};
-		c = getopt_long(argc, argv, "f:s:o:", options, &opt_index);
+		c = getopt_long(argc, argv, "hf:s:o:", options, &opt_index);
 		if (c == -1)
 			break;
 		switch (c) {
+		case 'h':
+			usage();
+			return EXIT_FAILURE;
 		case 's':
 			opts.samples = strtoul(optarg, NULL, 10);
 			if (opts.samples == ULONG_MAX)
