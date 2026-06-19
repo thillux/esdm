@@ -192,10 +192,12 @@ static size_t esdm_rand_get_seed(void *ctx __unused, unsigned char **buffer,
 		esdm_invoke(esdm_rpcc_get_random_bytes_full(*buffer, buf_len));
 	}
 #endif
-	if (ret <= 0)
+	/* a partial read would report more entropy to the caller than the
+	 * buffer contains, therefore insist on the full buffer */
+	if (ret != (ssize_t)buf_len)
 		goto err;
 
-	return (size_t)ret;
+	return buf_len;
 
 err:
 	OPENSSL_secure_clear_free(*buffer, buf_len);

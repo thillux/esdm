@@ -293,7 +293,9 @@ static ssize_t esdm_openssl_drbg_generate(void *drng, uint8_t *outbuf,
 	size_t addbuflen = 0;
 
 #ifdef ESDM_OPENSSL_DRNG_HMAC
-	struct timespec ts;
+	/* zero-initialize to avoid feeding uninitialized padding bytes as
+	 * additional data */
+	struct timespec ts = { 0 };
 	ssize_t genret;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &ts)) {
