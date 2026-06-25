@@ -483,7 +483,7 @@ int main(int argc, char *argv[])
 	systemd_notify_stopping();
 
 out:
-	daemon_release();
+	/* dealloc() performs the daemon_release() teardown itself. */
 	dealloc();
 
 	if (memlock) {

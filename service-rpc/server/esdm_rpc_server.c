@@ -1220,11 +1220,20 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 	/* One thread group */
 	CKINT(thread_init(1));
 
-	/* Create thread for entropy source monitor */
-	if (thread_start(esdm_rpc_server_es_monitor, NULL,
-			 ESDM_THREAD_ES_MONITOR, NULL)) {
-		esdm_logger(LOGGER_WARN, LOGGER_C_RPC,
+	/*
+	 * Create thread for entropy source monitor. This is fatal if it fails:
+	 * the monitor thread is the only producer of the priv_init_complete
+	 * notification (via esdm_rpc_priv_init_complete()), so the
+	 * thread_wait_event() below would otherwise block forever waiting for a
+	 * completion that can never arrive (short of a SIGTERM setting
+	 * server_exit). Bail out instead of hanging startup.
+	 */
+	ret = thread_start(esdm_rpc_server_es_monitor, NULL,
+			   ESDM_THREAD_ES_MONITOR, NULL);
+	if (ret) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Starting ES monitor thread failed\n");
+		goto out;
 	}
 
 	if (atomic_read(&server_exit) != 0) {
