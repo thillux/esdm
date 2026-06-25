@@ -756,9 +756,19 @@ static uint32_t esdm_aux_max_entropy(void)
 
 static void esdm_aux_es_state(char *buf, size_t buflen)
 {
-	const struct esdm_drng *esdm_drng_init = esdm_drng_init_instance();
+	struct esdm_drng *esdm_drng_init = esdm_drng_init_instance();
+	const char *hash_name;
 
-	/* Assume the esdm_drng_init lock is taken by caller */
+	/*
+	 * hash_cb is protected by hash_lock, not by the drng lock: a runtime
+	 * hash switch replaces it under the hash_lock writer, so read it under
+	 * the reader lock. hash_name() returns a static string that stays valid
+	 * after the lock is dropped.
+	 */
+	mutex_reader_lock(&esdm_drng_init->hash_lock);
+	hash_name = esdm_drng_init->hash_cb->hash_name();
+	mutex_reader_unlock(&esdm_drng_init->hash_lock);
+
 	snprintf((char *)buf, buflen,
 		 " Hash for operating entropy pool: %s\n"
 		 " Available entropy: %u\n"
@@ -766,7 +776,7 @@ static void esdm_aux_es_state(char *buf, size_t buflen)
 		 " Pools: %u\n"
 		 " Write wakeup threshold: %u\n"
 		 " Digestsize: %u\n",
-		 esdm_drng_init->hash_cb->hash_name(),
+		 hash_name,
 		 esdm_aux_avail_entropy(0), esdm_aux_max_entropy(),
 		 ESDM_NUM_AUX_POOLS, esdm_write_wakeup_bits,
 		 esdm_get_digestsize());

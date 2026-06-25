@@ -42,15 +42,23 @@ struct esdm_drng **esdm_drng_get_instances(void)
 	 */
 	mb();
 
-	/* Lock not needed as threads receive signals */
-	//mutex_reader_lock(&esdm_node_cleanup_lock);
+	/*
+	 * No reader lock against esdm_node_fini()'s free is needed: the array is
+	 * freed only during teardown, and esdm_fini() reaches esdm_node_fini()
+	 * only after esdm_es_mgr_finalize() has done thread_wait_all(true),
+	 * which joins every pool and system thread that could dereference an
+	 * instance here. The single allocation (esdm_drngs_node_alloc) installs
+	 * the array once via CAS and is never freed/reinstalled at runtime, so
+	 * concurrent readers never race the free. (External callers must
+	 * likewise quiesce their own threads using the library before calling
+	 * esdm_fini().)
+	 */
 	return esdm_drng;
 }
 
 void esdm_drng_put_instances(void)
 {
-	/* Lock not needed as threads receive signals */
-	//mutex_reader_unlock(&esdm_node_cleanup_lock);
+	/* See esdm_drng_get_instances(): readers are quiesced before any free. */
 }
 
 static void esdm_drngs_node_dealloc(struct esdm_drng **drngs)

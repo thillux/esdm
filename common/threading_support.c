@@ -134,7 +134,7 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 	 * predicate instead of sleeping indefinitely on a missed wake-up.
 	 */
 	pthread_mutex_lock(lock);
-	clock_gettime(CLOCK_REALTIME, &ts);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
 	ts.tv_nsec += 100 * 1000 * 1000;
 	if (ts.tv_nsec >= 1000000000L) {
 		ts.tv_sec++;
@@ -186,6 +186,7 @@ static inline void thread_cleanup_full(struct thread_ctx *tctx)
 int thread_init(uint32_t groups)
 {
 	static uint32_t thread_initialized = 0;
+	pthread_condattr_t cattr;
 	unsigned int i;
 	int ret;
 
@@ -209,11 +210,24 @@ int thread_init(uint32_t groups)
 	CKINT(pthread_attr_init(&pthread_attr));
 	memset(threads, 0, sizeof(threads));
 
+	/*
+	 * Arm the condition variables used with thread_block()'s timed wait
+	 * against CLOCK_MONOTONIC. thread_block() computes the absolute deadline
+	 * from clock_gettime() + a relative offset, so a wall-clock step (NTP /
+	 * settimeofday) must not be able to stretch the bound into a long hang.
+	 */
+	CKINT(pthread_condattr_init(&cattr));
+	CKINT(pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC));
+	pthread_cond_init(&thread_schedule_cv, &cattr);
+	pthread_cond_init(&thread_wait_cv, &cattr);
+
 	for (i = 0; i < THREADING_REALLY_ALL_THREADS; i++) {
 		atomic_bool_set_false(&threads[i].thread_pending);
 		mutex_w_init(&threads[i].inuse, false, 0);
 		atomic_bool_set_false(&threads[i].shutdown);
+		pthread_cond_init(&threads[i].worker_cv, &cattr);
 	}
+	pthread_condattr_destroy(&cattr);
 
 	threads_groups = groups;
 	threads_per_threadgroup = THREADING_MAX_THREADS / threads_groups;
@@ -306,12 +320,20 @@ static int thread_create(struct thread_ctx *tctx, unsigned int slot)
 
 	tctx->thread_num = slot;
 	tctx->data = NULL;
-	atomic_bool_set_true(&tctx->thread_pending);
 
 	ret = -pthread_create(&tctx->thread_id, &pthread_attr, &thread_worker,
 			      tctx);
 	if (ret)
 		goto err;
+
+	/*
+	 * Publish thread_pending only after pthread_create has written a valid
+	 * thread_id. thread_dirty() readers (thread_wait_all / thread_cancel)
+	 * gate their pthread_join/pthread_cancel solely on this flag, so setting
+	 * it before the create let them operate on an uninitialized/stale
+	 * thread_id when a create was still in flight.
+	 */
+	atomic_bool_set_true(&tctx->thread_pending);
 
 	return 0;
 
@@ -605,10 +627,18 @@ static void thread_cancel(bool system_threads)
 
 	atomic_bool_set_true(&threads_in_cancel);
 	mutex_w_lock(&threads_cleanup);
-	/* Ensure that no new thread is spawned. */
+	/*
+	 * Ensure that no new thread is spawned.
+	 *
+	 * Do not clear threads[i].start_routine here: it is protected by the
+	 * per-slot inuse lock (which we intentionally do not take on this kill
+	 * path), and a running worker dereferences it under that lock. An
+	 * unlocked write races that dereference and can crash the worker. The
+	 * shutdown flag plus the pthread_cancel below already terminate every
+	 * worker, so the write is redundant as well as unsafe.
+	 */
 	for (i = 0; i < upper; i++) {
 		atomic_bool_set_true(&threads[i].shutdown);
-		threads[i].start_routine = NULL;
 		pthread_cond_broadcast(&threads[i].worker_cv);
 	}
 	pthread_cond_broadcast(&thread_wait_cv);

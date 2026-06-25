@@ -1086,7 +1086,8 @@ static int esdm_rpcs_unpriv_init(void *args)
 	/* Wait for the mother to drop the privileges. */
 	thread_wait_event(&esdm_rpc_thread_init_wait,
 			  (atomic_read(&esdm_rpc_init_state) ==
-			   esdm_rpcs_state_perm_dropped));
+			   esdm_rpcs_state_perm_dropped) ||
+				  (atomic_read(&server_exit) != 0));
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 		    "Unprivileged server thread for %s available\n",
 		    ESDM_RPC_UNPRIV_SOCKET);
@@ -1154,7 +1155,8 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	/* Wait for the unprivileged thread to complete initialization. */
 	thread_wait_event(&esdm_rpc_thread_init_wait,
 			  (atomic_read(&esdm_rpc_init_state) ==
-			   esdm_rpcs_state_unpriv_init));
+			   esdm_rpcs_state_unpriv_init) ||
+				  (atomic_read(&server_exit) != 0));
 
 	/* Permanently drop all privileges */
 	CKINT(drop_privileges_permanent(username ? username : "nobody",
@@ -1232,7 +1234,8 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 	/* Wait for the privileged initialization to complete. */
 	thread_wait_event(&esdm_rpc_thread_init_wait,
 			  (atomic_read(&esdm_rpc_init_state) ==
-			   esdm_rpcs_state_priv_init_complete));
+			   esdm_rpcs_state_priv_init_complete) ||
+				  (atomic_read(&server_exit) != 0));
 
 	esdm_logger(LOGGER_WARN, LOGGER_C_RPC, "RPC server started\n");
 
@@ -1247,9 +1250,21 @@ out:
  * Async-signal-safe shutdown trigger. Only sets the exit flag and wakes
  * waiting threads. Does NOT join threads, acquire mutexes, or free memory.
  */
+void esdm_rpc_server_signal_exit_safe(void)
+{
+	/*
+	 * Async-signal-safe: atomic_set is just a barrier + store. No condvar
+	 * broadcast here - pthread_cond_broadcast is not async-signal-safe and
+	 * could self-deadlock if the interrupted thread held the condvar's
+	 * internal lock. thread_wait_event()'s bounded re-poll makes blocked
+	 * waiters observe server_exit within the backstop interval.
+	 */
+	atomic_set(&server_exit, 1);
+}
+
 void esdm_rpc_server_signal_exit(void)
 {
-	atomic_set(&server_exit, 1);
+	esdm_rpc_server_signal_exit_safe();
 	thread_wake_all(&esdm_rpc_thread_init_wait);
 }
 
