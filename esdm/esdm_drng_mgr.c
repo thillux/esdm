@@ -505,7 +505,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 	 * producing data while this is ongoing.
 	 */
 	} while (forced && !atomic_bool_read(&drng->fully_seeded) &&
-		 num_es_delivered >= es_delivered_threshold);
+		 num_es_delivered >= es_delivered_threshold &&
+		 !atomic_read(&esdm_drng_mgr_terminate));
 
 	memset_secure(&seedbuf, 0, sizeof(seedbuf));
 
@@ -555,15 +556,25 @@ static void esdm_drng_seed_work_one(struct esdm_drng *drng, uint32_t node)
  *
  * @param [in] force Apply the forced seeding operation.
  */
-static void __esdm_drng_seed_work(bool force)
+/*
+ * Seed at most one DRNG that is not yet fully seeded.
+ *
+ * Returns true if the pass made forward progress, i.e. the selected DRNG
+ * reached the fully-seeded level, or all DRNGs are already fully seeded.
+ * Returns false if a DRNG that needed seeding could not be brought to the
+ * fully-seeded level (insufficient entropy for the configured policy) - the
+ * caller can use this to break out of a retry loop instead of spinning.
+ */
+static bool __esdm_drng_seed_work(bool force)
 {
 	struct esdm_drng **esdm_drng;
+	bool progress = false;
 
 	/*
 	 * If the DRNG is not yet initialized, return early.
 	 */
 	if (!esdm_get_available()) {
-		return;
+		return false;
 	}
 
 	esdm_drng = esdm_drng_get_instances();
@@ -577,10 +588,10 @@ static void __esdm_drng_seed_work(bool force)
 				continue;
 
 			if (drng && !atomic_bool_read(&drng->fully_seeded)) {
-				/* return code does not matter */
 				if (force)
 					atomic_bool_set_true(&drng->force_reseed);
 				esdm_drng_seed_work_one(drng, node);
+				progress = atomic_bool_read(&drng->fully_seeded);
 				goto out;
 			}
 		}
@@ -589,6 +600,8 @@ static void __esdm_drng_seed_work(bool force)
 			if (force)
 				atomic_bool_set_true(&esdm_drng_init.force_reseed);
 			esdm_drng_seed_work_one(&esdm_drng_init, 0);
+			progress =
+				atomic_bool_read(&esdm_drng_init.fully_seeded);
 			goto out;
 		}
 	}
@@ -597,13 +610,16 @@ static void __esdm_drng_seed_work(bool force)
 		if (force)
 			atomic_bool_set_true(&esdm_drng_pr.force_reseed);
 		esdm_drng_seed_work_one(&esdm_drng_pr, 0);
+		progress = atomic_bool_read(&esdm_drng_pr.fully_seeded);
 		goto out;
 	}
 
 	esdm_pool_all_nodes_seeded(true);
+	progress = true;
 
 out:
 	esdm_drng_put_instances();
+	return progress;
 }
 
 void esdm_drng_seed_work(void)
@@ -989,8 +1005,21 @@ void esdm_force_fully_seeded_all_drbgs(void)
 
 	esdm_pool_lock();
 	do {
-		__esdm_drng_seed_work(true);
-	} while (esdm_es_reseed_wanted());
+		/*
+		 * Each pass fully seeds at most one DRNG. If a pass cannot bring
+		 * its DRNG to the fully-seeded level, the available entropy is
+		 * insufficient for the configured policy (e.g. NTG.1 requires
+		 * two entropy sources but only one delivers). Stop instead of
+		 * spinning forever: otherwise a single, continuously refilled
+		 * source keeps esdm_es_reseed_wanted() true while we hold the
+		 * pool lock on the synchronous, pre-RPC startup path, hanging
+		 * daemon startup. The terminate check additionally lets a
+		 * shutdown break the loop.
+		 */
+		if (!__esdm_drng_seed_work(true))
+			break;
+	} while (esdm_es_reseed_wanted() &&
+		 !atomic_read(&esdm_drng_mgr_terminate));
 	esdm_pool_unlock();
 }
 
@@ -1002,8 +1031,8 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 	if (nonblock)
 		return -EAGAIN;
 	thread_wait_event(&esdm_init_wait,
-			  esdm_pool_all_nodes_seeded_get() &&
-				  !atomic_read(&esdm_drng_mgr_terminate));
+			  esdm_pool_all_nodes_seeded_get() ||
+				  atomic_read(&esdm_drng_mgr_terminate));
 	return 0;
 }
 
@@ -1015,8 +1044,8 @@ static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 	if (nonblock)
 		return -EAGAIN;
 	thread_wait_event(&esdm_init_wait,
-			  esdm_state_operational() &&
-				  !atomic_read(&esdm_drng_mgr_terminate));
+			  esdm_state_operational() ||
+				  atomic_read(&esdm_drng_mgr_terminate));
 	return 0;
 }
 

@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -39,6 +40,18 @@
 
 #define ESDM_ES_HWRAND_AVAIL "/sys/devices/virtual/misc/hw_random/rng_available"
 #define ESDM_ES_HWRAND_IF "/dev/hwrng"
+
+/*
+ * Bound the time spent waiting for /dev/hwrng to deliver data. The read runs
+ * on the synchronous, pre-RPC seeding path, so a stalled or backend-less
+ * /dev/hwrng (e.g. a virtio-rng without a host source, or a slow TPM-backed
+ * hwrng) must not be able to hang daemon startup. The fd is opened
+ * non-blocking and reads are gated by poll() with a bounded total budget; on
+ * timeout the source is treated as failed for this request and claims no
+ * entropy, exactly like a hard read error.
+ */
+#define ESDM_ES_HWRAND_POLL_SLICE_MS 500
+#define ESDM_ES_HWRAND_READ_TIMEOUT_MS 2000
 
 static int esdm_hwrand_fd = -1;
 /*
@@ -88,7 +101,8 @@ static int esdm_hwrand_init(void)
 	esdm_hwrand_finalize_locked();
 
 	esdm_hwrand_read_failed = false;
-	esdm_hwrand_fd = open(ESDM_ES_HWRAND_IF, O_RDONLY | O_CLOEXEC);
+	esdm_hwrand_fd =
+		open(ESDM_ES_HWRAND_IF, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (esdm_hwrand_fd < 0) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
@@ -145,6 +159,51 @@ static uint32_t esdm_hwrand_poolsize(void)
 }
 
 /*
+ * Read exactly @buflen bytes from the non-blocking hwrng @fd, bounded by a
+ * total wait budget. Returns the number of bytes read (== @buflen on success),
+ * or a negative errno on error, or -ETIMEDOUT if the device did not deliver
+ * the requested data within ESDM_ES_HWRAND_READ_TIMEOUT_MS.
+ */
+static ssize_t esdm_hwrand_read_bounded(int fd, uint8_t *buf, size_t buflen)
+{
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	size_t bytes_read = 0;
+	int waited_ms = 0;
+
+	while (bytes_read < buflen) {
+		ssize_t ret = read(fd, buf + bytes_read, buflen - bytes_read);
+		int pret;
+
+		if (ret > 0) {
+			bytes_read += (size_t)ret;
+			continue;
+		}
+		if (ret == 0)
+			return (ssize_t)bytes_read;
+		if (errno == EINTR)
+			continue;
+		if (errno != EAGAIN && errno != EWOULDBLOCK)
+			return -errno;
+
+		/* No data ready: wait for it, bounded by the total budget. */
+		if (waited_ms >= ESDM_ES_HWRAND_READ_TIMEOUT_MS)
+			return -ETIMEDOUT;
+
+		pfd.revents = 0;
+		pret = poll(&pfd, 1, ESDM_ES_HWRAND_POLL_SLICE_MS);
+		if (pret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		if (pret == 0)
+			waited_ms += ESDM_ES_HWRAND_POLL_SLICE_MS;
+	}
+
+	return (ssize_t)bytes_read;
+}
+
+/*
  * Read entropy from /dev/hwrng in chunks. Many hwrng backends impose an upper
  * limit on a single read (e.g. 32 bytes for a TPM 2.0); chunking ensures
  * compatibility across all backends.
@@ -170,7 +229,8 @@ static void esdm_hwrand_get_sync(struct entropy_es *eb_es,
 			hwrng_chunk_len * 8, requested_bits - done_bits);
 		uint32_t chunk_size_bytes = chunk_size_bits >> 3;
 
-		if (esdm_safe_read(esdm_hwrand_fd, buffer, hwrng_chunk_len) !=
+		if (esdm_hwrand_read_bounded(esdm_hwrand_fd, buffer,
+					     hwrng_chunk_len) !=
 		    (ssize_t)hwrng_chunk_len) {
 			esdm_hwrand_read_failed = true;
 			goto err;
