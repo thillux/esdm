@@ -201,14 +201,12 @@ static int esdm_drng_mgr_selftest(void)
 	int ret = 0;
 
 	/* Perform selftest of current crypto implementations */
-	mutex_reader_lock(&drng->hash_lock);
 	hash_cb = drng->hash_cb;
 	if (hash_cb->hash_selftest)
 		ret = hash_cb->hash_selftest();
 	else
 		esdm_logger(LOGGER_WARN, LOGGER_C_DRNG,
 			    "Hash self test missing\n");
-	mutex_reader_unlock(&drng->hash_lock);
 	CKINT_LOG(ret, "Hash self test failed: %d\n", ret);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_DRNG,
 		    "Hash self test passed successfully\n");

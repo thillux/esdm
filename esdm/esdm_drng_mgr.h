@@ -66,7 +66,6 @@ struct esdm_drng {
 	atomic_bool_t force_reseed; /* Force a reseed */
 	atomic_bool_t initiated; /* Was DRNG initiated once? (used for pr drng) */
 
-	mutex_t hash_lock; /* Lock hash_cb replacement */
 	/* Lock write operations on DRNG state, DRNG replacement of drng_cb */
 	mutex_w_t lock; /* Non-atomic DRNG operation */
 };
@@ -78,7 +77,7 @@ struct esdm_drng {
 	.request_bits_since_fully_seeded = ATOMIC_INIT(0),                     \
 	.last_seeded = { 0 }, .fully_seeded = ATOMIC_BOOL_INIT(false),        \
 	.force_reseed = ATOMIC_BOOL_INIT(true),                               \
-	.initiated = ATOMIC_BOOL_INIT(false), .hash_lock = MUTEX_UNLOCKED
+	.initiated = ATOMIC_BOOL_INIT(false)
 
 struct esdm_drng *esdm_drng_init_instance(void);
 struct esdm_drng *esdm_drng_node_instance(void);
