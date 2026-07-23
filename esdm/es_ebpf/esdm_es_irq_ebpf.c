@@ -272,6 +272,7 @@ static void esdm_irq_ebpf_es_state(char *buf, size_t buflen)
 		 " Batches dropped: %llu\n"
 		 " Entropy Rate per 256 events: %u\n"
 		 " Timestamp mechanism: %s\n"
+		 " High-resolution timestamp: %s\n"
 		 " Partial batch flush timer: %s\n"
 		 " SP800-90B health tests: %s\n"
 		 " SP800-90B health test failures: %llu\n",
@@ -282,6 +283,7 @@ static void esdm_irq_ebpf_es_state(char *buf, size_t buflen)
 		 esdm_config_es_irq_ebpf_entropy_rate(),
 		 esdm_irq_ebpf_es.tier == 2 ? "CPU cycle counter (perf)" :
 						    "monotonic clock",
+		 esdm_irq_ebpf_es.highres ? "true" : "false",
 		 esdm_irq_ebpf_es.flush_timer ? "true" : "false",
 		 esdm_irq_ebpf_es.perm_failure ?
 			 "permanent failure" :

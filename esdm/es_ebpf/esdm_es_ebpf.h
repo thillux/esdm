@@ -52,6 +52,8 @@ struct esdm_ebpf_es {
 	unsigned int nr_cpus;
 	/* Timestamp tier: 2 = CPU cycle counter, 3 = monotonic clock */
 	int tier;
+	/* Does the selected timestamp mechanism provide a high resolution? */
+	bool highres;
 	/* Is the in-program flush timer active? */
 	bool flush_timer;
 

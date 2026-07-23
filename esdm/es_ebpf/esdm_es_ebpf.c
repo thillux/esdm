@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "esdm.h"
@@ -60,6 +61,16 @@
 
 /* The entropy rate denominates entropy bits per this number of events */
 #define ESDM_EBPF_RATE_EVENTS 256
+
+/* Monotonic-clock resolution probe (timestamp tier 3) */
+#define ESDM_EBPF_CLOCK_PROBES 256
+/*
+ * Largest smallest-advance between two clock reads still accepted as a high
+ * resolution clock. A TSC-backed clock advances by a few tens of nanoseconds
+ * between back-to-back reads, a coarse source (e.g. a jiffies clock source in
+ * a VM) by microseconds or more.
+ */
+#define ESDM_EBPF_HIGHRES_MAX_NS 1000
 
 /* Domain separation strings for the two hash states, padded to same length */
 #define ESDM_EBPF_POOL_DS_STATE "STATE0"
@@ -236,6 +247,46 @@ static bool esdm_ebpf_perf_probe(struct esdm_ebpf_es *es)
 	return true;
 }
 
+/*
+ * Estimate whether the monotonic clock - the tier 3 timestamp fallback read by
+ * the eBPF program via bpf_ktime_get_ns() (CLOCK_MONOTONIC) - provides a high
+ * resolution. This mirrors the intent of the kernel add-on's
+ * esdm_init_time_source(): a coarse clock source leaves the low-order bits of
+ * the time stamp constant, so no timing entropy can be collected.
+ *
+ * clock_getres() reports the nominal 1 ns on virtually all systems regardless
+ * of the true granularity, so the resolution is estimated as the smallest
+ * non-zero advance observed between successive reads.
+ */
+static bool esdm_ebpf_clock_is_highres(void)
+{
+	uint64_t min_delta = UINT64_MAX, prev;
+	struct timespec ts;
+	unsigned int i;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return false;
+	prev = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+	for (i = 0; i < ESDM_EBPF_CLOCK_PROBES; i++) {
+		uint64_t now;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &ts))
+			return false;
+
+		now = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+		if (now > prev && now - prev < min_delta)
+			min_delta = now - prev;
+		prev = now;
+	}
+
+	/*
+	 * A coarse source jumps by microseconds or more, or does not advance
+	 * within the probe loop at all (min_delta stays at its initial value).
+	 */
+	return min_delta <= ESDM_EBPF_HIGHRES_MAX_NS;
+}
+
 int esdm_ebpf_prepare(struct esdm_ebpf_es *es, struct bpf_object *obj,
 		      struct esdm_ebpf_config *cfg, bool enable_flush_timer)
 {
@@ -252,9 +303,18 @@ int esdm_ebpf_prepare(struct esdm_ebpf_es *es, struct bpf_object *obj,
 	if (esdm_ebpf_perf_probe(es)) {
 		cfg->use_perf_counter = 1;
 		es->tier = 2;
+		/* The CPU cycle counter is inherently high resolution */
+		es->highres = true;
 	} else {
 		es->tier = 3;
+		es->highres = esdm_ebpf_clock_is_highres();
 	}
+
+	if (!es->highres)
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"%s ES: no high-resolution timestamp source detected - collected timings may carry little or no entropy\n",
+			es->name);
 
 	cfg->flush_timer_enabled = enable_flush_timer;
 	es->flush_timer = enable_flush_timer;
