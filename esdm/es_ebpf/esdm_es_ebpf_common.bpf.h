@@ -35,6 +35,11 @@ struct esdm_ebpf_percpu_state {
 	__u64 last_event_ns; /* monotonic time of last event */
 	__u32 reset_gen; /* observed reset generation */
 
+	/* GCD (timer granularity) removal state */
+	__u64 gcd_val; /* computed divisor, 0 while still learning */
+	__u64 gcd_running; /* running GCD of the collected raw time stamps */
+	__u32 gcd_count; /* number of samples folded into gcd_running */
+
 	/* Stuck test state */
 	__u64 stuck_last_time;
 	__u64 stuck_last_delta;
@@ -122,6 +127,76 @@ static __always_inline __u64 esdm_ebpf_timestamp(__u64 now_ns)
 	}
 
 	return now_ns;
+}
+
+/* Window of raw time stamps analyzed to derive the timer granularity (GCD) */
+#define ESDM_EBPF_GCD_WINDOW 100
+/* Upper bound of the accepted GCD, mirrors the ESDM kernel add-on */
+#define ESDM_EBPF_GCD_MAX 1000
+
+/*
+ * Greatest common divisor via bounded Euclid. The u64 worst case (consecutive
+ * Fibonacci numbers) converges in under 92 iterations; the fixed bound keeps
+ * the loop acceptable to the eBPF verifier.
+ */
+static __always_inline __u64 esdm_ebpf_gcd64(__u64 a, __u64 b)
+{
+	int i;
+
+	for (i = 0; i < 128 && b; i++) {
+		__u64 t = b;
+
+		b = a % b;
+		a = t;
+	}
+
+	return a;
+}
+
+static __always_inline void
+esdm_ebpf_gcd_reset(struct esdm_ebpf_percpu_state *state)
+{
+	state->gcd_val = 0;
+	state->gcd_running = 0;
+	state->gcd_count = 0;
+}
+
+/*
+ * Divide out the common granularity of the time source, mirroring the GCD
+ * handling of the ESDM kernel add-on (esdm_es_timer_common.c). Coarse clock
+ * sources - notably the monotonic clock in virtualized environments -
+ * increment in fixed steps, leaving the low-order time stamp bits constant and
+ * thus entropy-free. The GCD of the first ESDM_EBPF_GCD_WINDOW raw time stamps
+ * of each CPU estimates that step; once known, subsequent time stamps are
+ * divided by it so the folded low bits actually vary. Until the GCD is known
+ * the raw time stamp is used (as does the kernel add-on).
+ */
+static __always_inline __u64
+esdm_ebpf_gcd_process(struct esdm_ebpf_percpu_state *state, __u64 ts)
+{
+	__u64 g;
+
+	if (!esdm_ebpf_cfg.gcd_enabled)
+		return ts;
+
+	g = state->gcd_val;
+	if (g)
+		return ts / g;
+
+	/* Learning phase: fold the raw time stamp into the running GCD */
+	state->gcd_running = esdm_ebpf_gcd64(ts, state->gcd_running);
+
+	if (++state->gcd_count >= ESDM_EBPF_GCD_WINDOW) {
+		g = state->gcd_running;
+		/* Clamp as the kernel add-on does: never 0, never too coarse */
+		if (!g)
+			g = 1;
+		else if (g >= ESDM_EBPF_GCD_MAX)
+			g = ESDM_EBPF_GCD_MAX;
+		state->gcd_val = g;
+	}
+
+	return ts;
 }
 
 static __always_inline void
@@ -268,12 +343,15 @@ static __always_inline void esdm_ebpf_collect(void)
 	status = bpf_map_lookup_elem(&esdm_ebpf_status_map, &zero);
 	if (status && state->reset_gen != status->reset_gen) {
 		state->pos = 0;
+		esdm_ebpf_gcd_reset(state);
 		esdm_ebpf_health_reset(state);
 		state->reset_gen = status->reset_gen;
 	}
 
 	now_ns = bpf_ktime_get_ns();
 	ts = esdm_ebpf_timestamp(now_ns);
+	/* Strip the common timer granularity before folding / health testing */
+	ts = esdm_ebpf_gcd_process(state, ts);
 
 #ifdef ESDM_ES_EBPF_TESTING
 	/* Raw measurement mode: emit the unconditioned time stamp */

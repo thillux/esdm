@@ -19,7 +19,11 @@
 
 /* SP800-90B section 4.4.2: APT window size */
 #define ESDM_EBPF_APT_WINDOW_SIZE 512
-/* LSB of the time stamp processed by the APT */
+/*
+ * The APT is performed on the time stamp reduced modulo ESDM_EBPF_APT_LSB,
+ * i.e. on its four low-order bits (ESDM_EBPF_APT_WORD_MASK == 0xf). This
+ * matches the ESDM kernel add-on (esdm_health.c) verbatim.
+ */
 #define ESDM_EBPF_APT_LSB 16
 #define ESDM_EBPF_APT_WORD_MASK (ESDM_EBPF_APT_LSB - 1)
 
@@ -92,6 +96,7 @@ struct esdm_ebpf_config {
 	__u32 apt_cutoff; /* APT intermittent failure cutoff */
 	__u32 apt_cutoff_permanent; /* APT permanent failure cutoff */
 	__u32 use_perf_counter; /* read CPU cycle counter via perf */
+	__u32 gcd_enabled; /* divide out the timer granularity (GCD) */
 	__u32 flush_timer_enabled; /* use bpf_timer to flush partial batches */
 	__u32 raw_sampling; /* emit esdm_ebpf_rec_raw records */
 	__u64 flush_deadline_ns; /* idle flush deadline for partial batches */

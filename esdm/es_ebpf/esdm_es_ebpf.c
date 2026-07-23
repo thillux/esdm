@@ -160,6 +160,8 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 	cfg->health_enabled = es->health_enabled;
 	esdm_ebpf_health_cutoffs(es->entropy_rate(), cfg);
 	cfg->use_perf_counter = 0;
+	/* Divide out the timer granularity, as the kernel add-on does */
+	cfg->gcd_enabled = 1;
 	cfg->flush_timer_enabled = 0;
 	cfg->raw_sampling = 0;
 	cfg->flush_deadline_ns = 250UL * 1000UL * 1000UL;
@@ -309,6 +311,13 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 /* Write the status map: bump the reset generation and clear the failure */
 static void esdm_ebpf_write_status(struct esdm_ebpf_es *es)
 {
+	/*
+	 * The full element is rewritten, intentionally clearing the sticky
+	 * permanent_failure and the batches_dropped counter as part of the
+	 * reset. This can race with a concurrent update by the eBPF program on
+	 * another CPU (a permanent failure raised exactly at reset time may be
+	 * lost); it self-heals as the next failing event re-raises the failure.
+	 */
 	struct esdm_ebpf_status status = {
 		.reset_gen = es->reset_gen,
 	};
@@ -490,7 +499,12 @@ void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
 	collected_ent_bits =
 		min_uint32(digestsize_bits, esdm_ebpf_collected_entropy(es));
 
-	if (collected_ent_bits > requested_bits_osr) {
+	/*
+	 * rate is guaranteed non-zero when this branch is taken - an entropy
+	 * rate of 0 forces collected_ent_bits to 0 - but guard the division
+	 * (and the rate - 1 underflow) explicitly so the invariant is local.
+	 */
+	if (rate && collected_ent_bits > requested_bits_osr) {
 		/*
 		 * More entropy is available than requested: only debit the
 		 * events needed for the request and keep the remainder

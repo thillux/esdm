@@ -266,6 +266,7 @@ static void esdm_sched_ebpf_es_state(char *buf, size_t buflen)
 		 " Available entropy: %u\n"
 		 " Maximum entropy: %u\n"
 		 " Total events: %llu\n"
+		 " Batches dropped: %llu\n"
 		 " Entropy Rate per 256 events: %u\n"
 		 " Timestamp mechanism: %s\n"
 		 " Partial batch flush timer: %s\n"
@@ -274,6 +275,7 @@ static void esdm_sched_ebpf_es_state(char *buf, size_t buflen)
 		 esdm_sched_ebpf_es.loaded ? "true" : "false",
 		 esdm_sched_ebpf_entropylevel(0), esdm_sched_ebpf_poolsize(),
 		 (unsigned long long)esdm_sched_ebpf_es.total_events,
+		 (unsigned long long)esdm_sched_ebpf_es.batches_dropped,
 		 esdm_config_es_sched_ebpf_entropy_rate(),
 		 esdm_sched_ebpf_es.tier == 2 ? "CPU cycle counter (perf)" :
 						      "monotonic clock",
