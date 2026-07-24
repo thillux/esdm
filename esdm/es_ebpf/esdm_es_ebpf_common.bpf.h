@@ -227,6 +227,7 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	rec->events = state->pos;
 	rec->health = state->health_pending |
 		      (state->startup_done ? ESDM_EBPF_HEALTH_STARTUP_DONE : 0);
+	rec->reset_gen = state->reset_gen;
 	state->health_pending = 0;
 	__builtin_memcpy(rec->data, state->data, sizeof(rec->data));
 

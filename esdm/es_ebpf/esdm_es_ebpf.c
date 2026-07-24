@@ -664,6 +664,15 @@ static void esdm_ebpf_handle_batch(struct esdm_ebpf_es *es,
 	if (esdm_ebpf_pool_insert(es, rec->data, rec->events))
 		return;
 
+	/*
+	 * A record collected under a previous reset generation was in flight
+	 * in the ring buffer when the entropy source was reset: its data has
+	 * been inserted as uncredited stirring input above, but the reset
+	 * invalidated its entropy and health state.
+	 */
+	if (rec->reset_gen != es->reset_gen)
+		return;
+
 	es->total_events += rec->events;
 
 	esdm_logger(
@@ -712,6 +721,10 @@ static void esdm_ebpf_handle_health(struct esdm_ebpf_es *es,
 {
 	const char *test =
 		(rec->test == esdm_ebpf_health_test_rct) ? "RCT" : "APT";
+
+	/* Discard stale records from before the last reset of the source */
+	if (rec->reset_gen != es->reset_gen)
+		return;
 
 	switch (rec->event) {
 	case esdm_ebpf_health_startup_done:
@@ -792,7 +805,7 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 	es->rb = ring_buffer__new(bpf_map__fd(rb_map), esdm_ebpf_handle_record,
 				  es, NULL);
 	if (!es->rb) {
-		ret = -errno;
+		ret = errno ? -errno : -EINVAL;
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "%s ES: cannot create ring buffer consumer: %s\n",
 			    es->name, strerror(errno));

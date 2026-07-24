@@ -164,6 +164,7 @@ static int esdm_sched_ebpf_initialize(void)
 			"Attaching of eBPF scheduler entropy source program failed: %d\n",
 			ret);
 		esdm_es_sched_ebpf_bpf__destroy(skel);
+		esdm_ebpf_fini_es(&esdm_sched_ebpf_es);
 		ret = 0;
 		goto out;
 	}
@@ -171,6 +172,7 @@ static int esdm_sched_ebpf_initialize(void)
 	ret = esdm_ebpf_init_es(&esdm_sched_ebpf_es, skel->obj);
 	if (ret) {
 		esdm_es_sched_ebpf_bpf__destroy(skel);
+		esdm_ebpf_fini_es(&esdm_sched_ebpf_es);
 		goto out;
 	}
 
@@ -266,6 +268,7 @@ static void esdm_sched_ebpf_es_state(char *buf, size_t buflen)
 		 " Available entropy: %u\n"
 		 " Maximum entropy: %u\n"
 		 " Total events: %llu\n"
+		 " Current events: %llu\n"
 		 " Batches dropped: %llu\n"
 		 " Entropy Rate per 256 data bits: %u\n"
 		 " Timestamp mechanism: %s\n"
@@ -276,6 +279,7 @@ static void esdm_sched_ebpf_es_state(char *buf, size_t buflen)
 		 esdm_sched_ebpf_es.loaded ? "true" : "false",
 		 esdm_sched_ebpf_entropylevel(0), esdm_sched_ebpf_poolsize(),
 		 (unsigned long long)esdm_sched_ebpf_es.total_events,
+		 (unsigned long long)esdm_sched_ebpf_es.credited_events,
 		 (unsigned long long)esdm_sched_ebpf_es.batches_dropped,
 		 esdm_config_es_sched_ebpf_entropy_rate(),
 		 esdm_sched_ebpf_es.tier == 2 ? "CPU cycle counter (perf)" :

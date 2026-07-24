@@ -36,7 +36,9 @@
 #define _ESDM_ES_EBPF_HEALTH_BPF_H
 
 /* Emit a health event record to user space (best effort) */
-static __always_inline void esdm_ebpf_health_rec_emit(__u32 event, __u32 test)
+static __always_inline void
+esdm_ebpf_health_rec_emit(const struct esdm_ebpf_percpu_state *state,
+			  __u32 event, __u32 test)
 {
 	struct esdm_ebpf_health_rec *rec;
 
@@ -48,6 +50,7 @@ static __always_inline void esdm_ebpf_health_rec_emit(__u32 event, __u32 test)
 	rec->cpu = bpf_get_smp_processor_id();
 	rec->event = event;
 	rec->test = test;
+	rec->reset_gen = state->reset_gen;
 
 	bpf_ringbuf_submit(rec, 0);
 }
@@ -76,7 +79,8 @@ esdm_ebpf_sp80090b_startup(struct esdm_ebpf_percpu_state *state)
 	if (!state->startup_done && state->startup_blocks &&
 	    --state->startup_blocks == 0) {
 		state->startup_done = 1;
-		esdm_ebpf_health_rec_emit(esdm_ebpf_health_startup_done, 0);
+		esdm_ebpf_health_rec_emit(state, esdm_ebpf_health_startup_done,
+					  0);
 	}
 }
 
@@ -94,7 +98,8 @@ esdm_ebpf_sp80090b_failure(struct esdm_ebpf_percpu_state *state, __u32 test)
 	state->startup_blocks = ESDM_EBPF_STARTUP_BLOCKS;
 	state->startup_done = 0;
 
-	esdm_ebpf_health_rec_emit(esdm_ebpf_health_intermittent_failure, test);
+	esdm_ebpf_health_rec_emit(state, esdm_ebpf_health_intermittent_failure,
+				  test);
 }
 
 static __always_inline void
@@ -118,7 +123,8 @@ esdm_ebpf_sp80090b_permanent_failure(struct esdm_ebpf_percpu_state *state,
 	state->apt_base = 0;
 	state->apt_trigger = ESDM_EBPF_APT_WINDOW_SIZE;
 
-	esdm_ebpf_health_rec_emit(esdm_ebpf_health_permanent_failure, test);
+	esdm_ebpf_health_rec_emit(state, esdm_ebpf_health_permanent_failure,
+				  test);
 }
 
 /*

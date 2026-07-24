@@ -56,6 +56,7 @@ struct esdm_ebpf_batch_rec {
 	__u64 seq; /* per-CPU batch sequence number */
 	__u32 events; /* valid bytes in ->data */
 	__u32 health; /* ESDM_EBPF_HEALTH_* state snapshot */
+	__u32 reset_gen; /* reset generation the events were collected under */
 	__u8 data[ESDM_EBPF_BATCH_EVENTS];
 };
 
@@ -76,6 +77,7 @@ struct esdm_ebpf_health_rec {
 	__u32 cpu;
 	__u32 event; /* enum esdm_ebpf_health_event */
 	__u32 test; /* enum esdm_ebpf_health_test */
+	__u32 reset_gen; /* reset generation the event was observed under */
 };
 
 /* Raw, unconditioned event timestamp - measurement mode only */
