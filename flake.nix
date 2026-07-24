@@ -333,12 +333,12 @@
 
         packages = {
           jitterentropy = pkgs.jitterentropy.overrideAttrs (_: {
-            version = "3.7.0";
+            version = "3.7.1";
             src = pkgs.fetchFromGitHub {
               owner = "smuellerDD";
               repo = "jitterentropy-library";
-              rev = "e783cf1c450bce4d72f95c9f9c84546a6094976a";
-              hash = "sha256-sJWgPx3GbvnBBVlCML/eRtUoMXux38tpWi1ZKhz41xY=";
+              rev = "8760e08ac3268946aedfcc6fc047dbadb02986ea";
+              hash = "sha256-3N1yz+mBSYUIdtAMxKrUV56lE5q2SMfcyRmULfYwcqY=";
             };
             patches = [ ];
             cmakeFlags = [
