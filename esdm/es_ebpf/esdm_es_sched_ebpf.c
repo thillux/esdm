@@ -267,7 +267,7 @@ static void esdm_sched_ebpf_es_state(char *buf, size_t buflen)
 		 " Maximum entropy: %u\n"
 		 " Total events: %llu\n"
 		 " Batches dropped: %llu\n"
-		 " Entropy Rate per 256 events: %u\n"
+		 " Entropy Rate per 256 data bits: %u\n"
 		 " Timestamp mechanism: %s\n"
 		 " High-resolution timestamp: %s\n"
 		 " Partial batch flush timer: %s\n"

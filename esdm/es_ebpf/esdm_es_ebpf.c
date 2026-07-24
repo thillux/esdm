@@ -41,6 +41,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_crypto.h"
@@ -165,8 +166,14 @@ void esdm_ebpf_health_cutoffs(uint32_t entropy_rate,
 void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 			   struct esdm_ebpf_config *cfg)
 {
-	/* Health tests are only requested in FIPS mode */
-	es->health_enabled = !!esdm_config_fips_enabled();
+	#ifdef ESDM_AIS2031_NTG1_SEEDING_STRATEGY
+	bool ntg1_seeding = true;
+	#else
+	bool ntg1_seeding = false;
+	#endif
+
+	/* Health tests are only requested in FIPS or NTG.1 mode */
+	es->health_enabled = !!esdm_config_fips_enabled() || ntg1_seeding;
 
 	cfg->health_enabled = es->health_enabled;
 	esdm_ebpf_health_cutoffs(es->entropy_rate(), cfg);
@@ -515,8 +522,11 @@ uint32_t esdm_ebpf_avail_entropy(struct esdm_ebpf_es *es)
 	ent_bits = min_uint32(esdm_get_digestsize(),
 			      esdm_ebpf_collected_entropy(es));
 
-	/* Consider oversampling rate due to pool conditioning */
-	return esdm_reduce_by_osr(ent_bits);
+	/*
+	 * Oversampling is already considered by adding
+	 * esdm_compress_osr() in get_ent. Don't reduce here.
+	 */
+	return ent_bits;
 }
 
 uint32_t esdm_ebpf_max_entropy(struct esdm_ebpf_es *es)
@@ -524,7 +534,11 @@ uint32_t esdm_ebpf_max_entropy(struct esdm_ebpf_es *es)
 	if (!es->loaded || !es->pool_initialized)
 		return 0;
 
-	return esdm_reduce_by_osr(esdm_get_digestsize());
+	/*
+	 * Oversampling is already considered by adding
+	 * esdm_compress_osr() in get_ent. Don't reduce here.
+	 */
+	return esdm_get_digestsize();
 }
 
 void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
