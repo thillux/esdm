@@ -364,6 +364,7 @@
               esHwrandEntropyRate = 0;
               esKernel = false;
               ais2031 = false;
+	      fips140 = true;
               # remove later, for testing with NTG.1 capable jitterentropy
               inherit (self.packages.${system}) jitterentropy;
             }).overrideAttrs
@@ -412,6 +413,7 @@
               "-Des_sched_ebpf=enabled"
               "-Des_irq_ebpf=enabled"
               "-Des_ebpf_testing=enabled"
+              "-Des_sched_ebpf_entropy_rate=256"
             ];
           });
 
