@@ -251,8 +251,7 @@
                       # to run it) available inside the VM so the check can
                       # execute it instead of letting it rot.
                       environment.systemPackages = [ pkgs.python3 ];
-                      environment.etc."esdm-startup-loop.py".source =
-                        ./tests/startup/esdm_startup_loop.py;
+                      environment.etc."esdm-startup-loop.py".source = ./tests/startup/esdm_startup_loop.py;
 
                       boot.kernelParams = [
                         "kmemleak=on"
@@ -330,9 +329,7 @@
         #   nix flake check
         checks =
           lib.mapAttrs' (name: kernel: lib.nameValuePair "live_${name}" (mkCheck kernel)) kernels
-          // lib.mapAttrs' (
-            name: kernel: lib.nameValuePair "ebpf_${name}" (mkEbpfCheck kernel)
-          ) stockKernels;
+          // lib.mapAttrs' (name: kernel: lib.nameValuePair "ebpf_${name}" (mkEbpfCheck kernel)) stockKernels;
 
         packages = {
           jitterentropy = pkgs.jitterentropy.overrideAttrs (_: {
@@ -364,7 +361,7 @@
               esHwrandEntropyRate = 0;
               esKernel = false;
               ais2031 = false;
-	      fips140 = true;
+              fips140 = true;
               # remove later, for testing with NTG.1 capable jitterentropy
               inherit (self.packages.${system}) jitterentropy;
             }).overrideAttrs
@@ -380,7 +377,7 @@
                   ]
                   ++ [
                     "-Des_jent_osr=4"
-		    "-Dbotan_drng_type=chacha20"
+                    "-Dbotan_drng_type=chacha20"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
