@@ -102,7 +102,9 @@ static int esdm_ebpf_libbpf_print(enum libbpf_print_level level,
 	}
 
 	vsnprintf(buf, sizeof(buf), format, args);
-	esdm_logger(severity, LOGGER_C_ES, "libbpf: %s", buf);
+	/* libbpf prefixes log messages with libbpf itself,
+	 * so they are already distinguished. */
+	esdm_logger(severity, LOGGER_C_ES, "%s", buf);
 
 	return 0;
 }
