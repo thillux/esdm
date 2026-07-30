@@ -500,6 +500,15 @@ int main(int argc, char *argv[])
 
 	esdm_logger_set_verbosity(verbosity);
 
+	/*
+	 * Evaluate the socket activation environment while we still are the
+	 * process systemd started and no thread exists yet. Everything after
+	 * this point - daemonize(), the PID namespace prefork, the socket setup
+	 * and the shutdown cleanup - uses the latched result, so all of them
+	 * agree on whether the RPC sockets belong to systemd.
+	 */
+	systemd_listen_fds_init();
+
 	if (verbosity == 0 && !foreground)
 		daemonize();
 
