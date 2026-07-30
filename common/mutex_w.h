@@ -68,14 +68,21 @@ static inline int mutex_w_lock(mutex_w_t *mutex)
  */
 static inline int mutex_w_unlock(mutex_w_t *mutex)
 {
+	/*
+	 * Sample the flag while the lock is still held: the unlock may be what
+	 * another thread is waiting for to destroy and free the object holding
+	 * this mutex (see the connection teardown in the RPC client), so the
+	 * mutex must not be touched any more once it is released.
+	 */
+	int robust = mutex->robust;
 	int ret = pthread_mutex_unlock(&mutex->lock);
-	if (mutex->robust) {
+
+	if (robust) {
 		assert(ret == 0 || ret == EOWNERDEAD);
+		if (ret == EOWNERDEAD)
+			pthread_mutex_consistent(&mutex->lock);
 	} else {
 		assert(ret == 0);
-	}
-	if (ret == EOWNERDEAD) {
-		pthread_mutex_consistent(&mutex->lock);
 	}
 	return ret;
 }

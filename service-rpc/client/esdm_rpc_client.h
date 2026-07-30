@@ -67,6 +67,11 @@ typedef struct esdm_rpc_client_connection esdm_rpc_client_connection_t;
  * requests to be processed as CPUs are available to be allocated. To limit
  * this, set maximum number of online nodes here.
  *
+ * The limit can only be lowered - every call keeps the smaller of the current
+ * and the requested value. It must be set before the service is initialized:
+ * the connections of an already initialized service are not resized any more,
+ * as releasing them would break the callers currently using them.
+ *
  * @param [in] nodes Number of maximum online nodes
  *
  * @return 0 on success, 0 < on error
@@ -138,6 +143,10 @@ void esdm_rpcc_fini_unpriv_service(void);
  * fail with -EFAULT and their fini calls become a no-op. Use this only where
  * the connection must be gone irrespective of the remaining users, e.g. when
  * shutting down a process whose other users cannot be reached anymore.
+ *
+ * A connection handle that is checked out with esdm_rpcc_get_unpriv_service at
+ * that moment is deliberately not freed - its memory is retained so that the
+ * caller owning it can complete and release it safely.
  */
 void esdm_rpcc_force_fini_unpriv_service(void);
 
@@ -206,6 +215,10 @@ void esdm_rpcc_fini_priv_service(void);
  * fail with -EFAULT and their fini calls become a no-op. Use this only where
  * the connection must be gone irrespective of the remaining users, e.g. when
  * shutting down a process whose other users cannot be reached anymore.
+ *
+ * A connection handle that is checked out with esdm_rpcc_get_priv_service at
+ * that moment is deliberately not freed - its memory is retained so that the
+ * caller owning it can complete and release it safely.
  */
 void esdm_rpcc_force_fini_priv_service(void);
 
