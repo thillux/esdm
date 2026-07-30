@@ -713,13 +713,22 @@ static uint32_t esdm_rpcc_curr_node(void)
 	return (esdm_curr_node() % esdm_rpcc_max_nodes);
 }
 
+/*
+ * Release the connections of a service.
+ *
+ * @param force If false, this is one matching counterpart of an init call: the
+ *		connections are only torn down once as many finis as inits were
+ *		seen. If true, the connections are released regardless of how
+ *		many init calls are still outstanding.
+ */
 static void esdm_rpcc_fini_service(
-	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn, uint32_t *num)
+	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn, uint32_t *num,
+	uint32_t *init_ref, bool force)
 {
 	struct timespec abstime;
 	esdm_rpc_client_connection_t *rpc_conn_array;
 	esdm_rpc_client_connection_t *rpc_conn_p;
-	uint32_t i, num_conn = *num;
+	uint32_t i, num_conn;
 	int lock_res;
 
 	/*
@@ -727,9 +736,26 @@ static void esdm_rpcc_fini_service(
 	 * connection lock: getters read both and acquire their connection's
 	 * ref_cnt under the reader side, so after this critical section every
 	 * getter either sees NULL or already owns a ref_cnt that the timedlock
-	 * loop below waits for.
+	 * loop below waits for. The same lock guards the init reference count,
+	 * so the decision to tear down and the pointer swap are one atomic step
+	 * with respect to a concurrent init.
 	 */
 	mutex_lock(&esdm_rpcc_conn_lock);
+
+	/* Not initialized, or already released - nothing to do. */
+	if (!*init_ref) {
+		mutex_unlock(&esdm_rpcc_conn_lock);
+		return;
+	}
+
+	/* Other users are still around - keep the connections alive. */
+	if (!force && --(*init_ref)) {
+		mutex_unlock(&esdm_rpcc_conn_lock);
+		return;
+	}
+
+	*init_ref = 0;
+	num_conn = *num;
 	rpc_conn_array = atomic_exchange(rpc_conn, NULL);
 	*num = 0;
 	mutex_unlock(&esdm_rpcc_conn_lock);
@@ -769,11 +795,20 @@ static void esdm_rpcc_fini_service(
 	free(rpc_conn_array);
 }
 
+/*
+ * Set up the connections of a service.
+ *
+ * Every successful call adds one reference which esdm_rpcc_fini_service()
+ * consumes again - the connections stay alive until as many finis as inits
+ * were seen. This allows independent users within one process (e.g. an
+ * application and a preloaded library) to init and fini without one of them
+ * pulling the connections away from the other.
+ */
 static int esdm_rpcc_init_service(const ProtobufCServiceDescriptor *descriptor,
 				  const char *socketname,
 				  esdm_rpcc_interrupt_func_t interrupt_func,
 				  _Atomic(esdm_rpc_client_connection_t *) *rpc_conn,
-				  uint32_t *num_conn)
+				  uint32_t *num_conn, uint32_t *init_ref)
 {
 	esdm_rpc_client_connection_t *tmp, *tmp_p;
 	uint32_t i = 0, nodes = esdm_rpcc_get_online_nodes();
@@ -796,10 +831,12 @@ static int esdm_rpcc_init_service(const ProtobufCServiceDescriptor *descriptor,
 	if (tmp) {
 		/*
 		 * If the existing nodes are already sufficient, do not allocate
-		 * more.
+		 * more - just take a reference on them.
 		 */
-		if (*num_conn >= nodes)
+		if (*num_conn >= nodes) {
+			(*init_ref)++;
 			goto out;
+		}
 
 		/*
 		 * The caller wants more ESDM connections now - release all
@@ -857,6 +894,13 @@ static int esdm_rpcc_init_service(const ProtobufCServiceDescriptor *descriptor,
 		goto out;
 	}
 	*num_conn = nodes;
+	/*
+	 * Any references taken before the re-allocation above are kept: they
+	 * refer to the service as such and not to a particular connection
+	 * array, and their owners still expect a fini of their own to be
+	 * required.
+	 */
+	(*init_ref)++;
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_ANY,
@@ -976,6 +1020,8 @@ static void esdm_rpcc_put_service(esdm_rpc_client_connection_t *rpc_conn)
  ******************************************************************************/
 static _Atomic(esdm_rpc_client_connection_t *) unpriv_rpc_conn = NULL;
 static uint32_t unpriv_rpc_conn_num = 0;
+/* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
+static uint32_t unpriv_rpc_conn_init_ref = 0;
 
 DSO_PUBLIC
 int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
@@ -998,13 +1044,22 @@ int esdm_rpcc_init_unpriv_service(esdm_rpcc_interrupt_func_t interrupt_func)
 
 	return esdm_rpcc_init_service(&unpriv_access__descriptor,
 				      ESDM_RPC_UNPRIV_SOCKET, interrupt_func,
-				      &unpriv_rpc_conn, &unpriv_rpc_conn_num);
+				      &unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				      &unpriv_rpc_conn_init_ref);
 }
 
 DSO_PUBLIC
 void esdm_rpcc_fini_unpriv_service(void)
 {
-	esdm_rpcc_fini_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num);
+	esdm_rpcc_fini_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+			       &unpriv_rpc_conn_init_ref, false);
+}
+
+DSO_PUBLIC
+void esdm_rpcc_force_fini_unpriv_service(void)
+{
+	esdm_rpcc_fini_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+			       &unpriv_rpc_conn_init_ref, true);
 }
 
 /******************************************************************************
@@ -1012,6 +1067,8 @@ void esdm_rpcc_fini_unpriv_service(void)
  ******************************************************************************/
 static _Atomic(esdm_rpc_client_connection_t *) priv_rpc_conn = NULL;
 static uint32_t priv_rpc_conn_num = 0;
+/* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
+static uint32_t priv_rpc_conn_init_ref = 0;
 
 DSO_PUBLIC
 int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
@@ -1034,13 +1091,22 @@ int esdm_rpcc_init_priv_service(esdm_rpcc_interrupt_func_t interrupt_func)
 
 	return esdm_rpcc_init_service(&priv_access__descriptor,
 				      ESDM_RPC_PRIV_SOCKET, interrupt_func,
-				      &priv_rpc_conn, &priv_rpc_conn_num);
+				      &priv_rpc_conn, &priv_rpc_conn_num,
+				      &priv_rpc_conn_init_ref);
 }
 
 DSO_PUBLIC
 void esdm_rpcc_fini_priv_service(void)
 {
-	esdm_rpcc_fini_service(&priv_rpc_conn, &priv_rpc_conn_num);
+	esdm_rpcc_fini_service(&priv_rpc_conn, &priv_rpc_conn_num,
+			       &priv_rpc_conn_init_ref, false);
+}
+
+DSO_PUBLIC
+void esdm_rpcc_force_fini_priv_service(void)
+{
+	esdm_rpcc_fini_service(&priv_rpc_conn, &priv_rpc_conn_num,
+			       &priv_rpc_conn_init_ref, true);
 }
 
 /******************************************************************************

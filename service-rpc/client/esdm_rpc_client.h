@@ -107,17 +107,39 @@ void esdm_rpcc_put_unpriv_service(esdm_rpc_client_connection_t *rpc_conn);
 /**
  * @brief Initiate the memory for accessing the unprivileged RPC connection.
  *
+ * The call may be issued multiple times within one process, e.g. by an
+ * application and a preloaded library independently of each other. The
+ * connection is reference counted: only the first call sets it up and it is
+ * released once esdm_rpcc_fini_unpriv_service was called as often as this
+ * function returned successfully.
+ *
  * @param [in] interrupt_func Function pointer invoked to check when the
- *			      operation shall be interrupted.
+ *			      operation shall be interrupted. It is only
+ *			      registered by the call actually establishing the
+ *			      connection.
  *
  * @return 0 on success, < 0 on error
  */
 int esdm_rpcc_init_unpriv_service(esdm_rpcc_interrupt_func_t interrupt_func);
 
 /**
- * @brief Release all resources around the RPC connection.
+ * @brief Drop one reference obtained with esdm_rpcc_init_unpriv_service.
+ *
+ * All resources around the RPC connection are released once the last reference
+ * is dropped. The call is a no-op if no reference is held.
  */
 void esdm_rpcc_fini_unpriv_service(void);
+
+/**
+ * @brief Release all resources around the RPC connection unconditionally.
+ *
+ * Unlike esdm_rpcc_fini_unpriv_service, the connection is torn down even when
+ * other users still hold a reference to it - their subsequent service requests
+ * fail with -EFAULT and their fini calls become a no-op. Use this only where
+ * the connection must be gone irrespective of the remaining users, e.g. when
+ * shutting down a process whose other users cannot be reached anymore.
+ */
+void esdm_rpcc_force_fini_unpriv_service(void);
 
 /******************************************************************************
  * Privileged ESDM interface
@@ -153,17 +175,39 @@ void esdm_rpcc_put_priv_service(esdm_rpc_client_connection_t *rpc_conn);
 /**
  * @brief Initiate the memory for accessing the privileged RPC connection.
  *
+ * The call may be issued multiple times within one process, e.g. by an
+ * application and a preloaded library independently of each other. The
+ * connection is reference counted: only the first call sets it up and it is
+ * released once esdm_rpcc_fini_priv_service was called as often as this
+ * function returned successfully.
+ *
  * @param [in] interrupt_func Function pointer invoked to check when the
- *			      operation shall be interrupted.
+ *			      operation shall be interrupted. It is only
+ *			      registered by the call actually establishing the
+ *			      connection.
  *
  * @return 0 on success, < 0 on error
  */
 int esdm_rpcc_init_priv_service(esdm_rpcc_interrupt_func_t interrupt_func);
 
 /**
- * @brief Release all resources around the RPC connection.
+ * @brief Drop one reference obtained with esdm_rpcc_init_priv_service.
+ *
+ * All resources around the RPC connection are released once the last reference
+ * is dropped. The call is a no-op if no reference is held.
  */
 void esdm_rpcc_fini_priv_service(void);
+
+/**
+ * @brief Release all resources around the RPC connection unconditionally.
+ *
+ * Unlike esdm_rpcc_fini_priv_service, the connection is torn down even when
+ * other users still hold a reference to it - their subsequent service requests
+ * fail with -EFAULT and their fini calls become a no-op. Use this only where
+ * the connection must be gone irrespective of the remaining users, e.g. when
+ * shutting down a process whose other users cannot be reached anymore.
+ */
+void esdm_rpcc_force_fini_priv_service(void);
 
 /******************************************************************************
  * RPC Service Call APIs

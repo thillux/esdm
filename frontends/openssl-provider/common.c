@@ -619,7 +619,7 @@ DSO_PUBLIC int OSSL_provider_init(const OSSL_CORE_HANDLE *handle,
 	if ((cprov->libctx = OSSL_LIB_CTX_new_child(handle, in)) == NULL) {
 		ESDM_PROV_ERR(handle, ESDM_R_INIT_FAILED,
 			      "creation of the child library context failed");
-		goto err;
+		goto err_fini;
 	}
 
 	*out = esdm_dispatch_table;
@@ -627,10 +627,18 @@ DSO_PUBLIC int OSSL_provider_init(const OSSL_CORE_HANDLE *handle,
 
 	return 1;
 
+	/*
+	 * Only drop the RPC client reference if it was actually taken: the
+	 * connection is reference counted and shared with everybody else in
+	 * this process, so a fini for an init that never happened would tear it
+	 * down under another user.
+	 */
+err_fini:
+	esdm_rpcc_fini_unpriv_service();
+
 err:
 	OSSL_LIB_CTX_free(cprov->libctx);
 	OPENSSL_secure_clear_free(cprov, sizeof(struct esdm_provider_ctx));
-	esdm_rpcc_fini_unpriv_service();
 
 	return 0;
 }
