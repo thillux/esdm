@@ -80,6 +80,17 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 		unpriv_access__rpc_get_seed(&rpc_conn->service, &msg,
 					    esdm_rpcc_get_seed_cb, &buffer);
 
+		/*
+		 * The callback only runs once a response was received. When the
+		 * request failed before that - no server listening, a refused
+		 * or broken connection - buffer.ret still holds the placeholder
+		 * set above, which would report every such failure as a
+		 * timeout. Report what actually went wrong instead.
+		 */
+		ret = esdm_rpcc_last_error(rpc_conn);
+		if (ret)
+			goto out;
+
 		ret = buffer.ret;
 		if (ret >= 0)
 			esdm_test_shm_status_add_rpc_client_written(

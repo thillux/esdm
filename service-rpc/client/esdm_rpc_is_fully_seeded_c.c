@@ -62,7 +62,14 @@ int esdm_rpcc_is_fully_seeded_int(bool *fully_seeded, void *int_data)
 					   esdm_rpcc_is_fully_seeded_cb,
 					   &buffer);
 
-	ret = buffer.ret;
+	/*
+	 * The callback only runs once a response was received - without one
+	 * buffer.ret still holds the placeholder set above, which would
+	 * report every transport failure as a timeout.
+	 */
+	ret = esdm_rpcc_last_error(rpc_conn);
+	if (!ret)
+		ret = buffer.ret;
 	if (fully_seeded)
 		*fully_seeded = buffer.fully_seeded;
 

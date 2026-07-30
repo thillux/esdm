@@ -578,6 +578,8 @@ static void esdm_client_invoke(ProtobufCService *service,
 
 	mutex_w_lock(&rpc_conn->lock);
 
+	rpc_conn->last_error = 0;
+
 	do {
 		clock_gettime(CLOCK_MONOTONIC, &current_time);
 		used_before_ns =
@@ -615,6 +617,14 @@ static void esdm_client_invoke(ProtobufCService *service,
 	} while (ret == -EAGAIN);
 
 out:
+	/*
+	 * Hand the reason for a failed request to the caller: the closure is
+	 * not invoked when the RPC never reached the server, so this is the
+	 * only place the actual errno survives.
+	 */
+	if (ret < 0)
+		rpc_conn->last_error = ret;
+
 	mutex_w_unlock(&rpc_conn->lock);
 }
 

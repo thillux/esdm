@@ -23,6 +23,7 @@
 #include "esdm_rpc_client.h"
 #include "esdm_rpc_service.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include "mutex_w.h"
 #include "queue.h"
@@ -74,7 +75,49 @@ struct esdm_rpc_client_connection {
 	 * dead connections open for too long.
 	 */
 	struct timespec last_used;
+
+	/*
+	 * Outcome of the most recent esdm_client_invoke() on this connection:
+	 * 0 on success, a negative errno when the request never made it to the
+	 * server or no response came back.
+	 *
+	 * protobuf-c's invoke() returns void and only reports a result by
+	 * calling the closure, which does not happen at all when the RPC fails
+	 * at the transport level. Without this, callers can merely observe
+	 * that their closure was not run and have to report a generic error
+	 * for what may just as well be a refused connection or a broken pipe.
+	 *
+	 * A connection is owned exclusively by one caller from
+	 * esdm_rpcc_get_*_service() to esdm_rpcc_put_*_service() (see the
+	 * ref_cnt handling in esdm_rpcc_get_service()), so writing it in the
+	 * invoke and reading it right afterwards needs no further
+	 * serialization.
+	 */
+	int last_error;
 };
+
+/**
+ * @brief Reason why the last RPC on this connection produced no response
+ *
+ * The RPC wrappers pre-set their closure result to -ETIMEDOUT and only learn
+ * that something went wrong from the closure not having been invoked. This
+ * turns that into the actual reason.
+ *
+ * -EAGAIN is deliberately not reported: that is how an interruption requested
+ * through esdm_rpcc_interrupt_func_t surfaces - most notably the deadline of
+ * esdm_rpcc_get_random_bytes_full_timeout() - for which the callers' own
+ * -ETIMEDOUT placeholder is the right answer.
+ *
+ * @return negative errno describing the failure, 0 if the request reached the
+ *	   server (or was interrupted on request of the caller)
+ */
+static inline int
+esdm_rpcc_last_error(const esdm_rpc_client_connection_t *rpc_conn)
+{
+	int ret = rpc_conn->last_error;
+
+	return (ret < 0 && ret != -EAGAIN) ? ret : 0;
+}
 
 /* Sleep time for poll operations */
 static const struct timespec esdm_client_poll_ts = { .tv_sec = 1,

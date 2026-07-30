@@ -60,7 +60,14 @@ int esdm_rpcc_get_ent_lvl_int(unsigned int *entlvl, void *int_data)
 	unpriv_access__rpc_get_ent_lvl(&rpc_conn->service, &msg,
 				       esdm_rpcc_get_ent_lvl_cb, &buffer);
 
-	ret = buffer.ret;
+	/*
+	 * The callback only runs once a response was received - without one
+	 * buffer.ret still holds the placeholder set above, which would
+	 * report every transport failure as a timeout.
+	 */
+	ret = esdm_rpcc_last_error(rpc_conn);
+	if (!ret)
+		ret = buffer.ret;
 	if (entlvl)
 		*entlvl = buffer.entlvl;
 

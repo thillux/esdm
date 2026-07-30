@@ -133,7 +133,7 @@ static void esdm_rpcs_stale_socket(const char *path, struct sockaddr *addr,
 				   unsigned addr_len)
 {
 	struct stat statbuf;
-	int fd;
+	int errsv, fd;
 
 	/*
 	 * Use lstat to detect symlinks - do not follow them.
@@ -149,21 +149,29 @@ static void esdm_rpcs_stale_socket(const char *path, struct sockaddr *addr,
 	if (fd < 0)
 		return;
 	set_fd_nonblocking(fd);
-	if (connect(fd, addr, addr_len) < 0) {
-		if (errno == EINPROGRESS) {
-			close(fd);
-			return;
-		}
-	} else {
+	if (connect(fd, addr, addr_len) == 0) {
+		/* Somebody is listening - the socket is live, keep it. */
 		close(fd);
 		return;
 	}
+	errsv = errno;
+	close(fd);
+
+	/*
+	 * Only ECONNREFUSED proves that nothing is listening. Any other error
+	 * leaves the question open - most notably EAGAIN, which a listening
+	 * socket returns once its backlog is full. That is exactly what a
+	 * systemd managed socket looks like while it queues up clients for a
+	 * pending activation, and removing it would break the socket for all
+	 * of its users and every future activation.
+	 */
+	if (errsv != ECONNREFUSED)
+		return;
 
 	/*
 	 * Re-verify with lstat before unlink to narrow the TOCTOU window.
 	 * Verify inode hasn't changed since our first check.
 	 */
-	close(fd);
 	{
 		struct stat statbuf2;
 
@@ -1069,6 +1077,11 @@ static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "RPC Server: cannot bind to socket: %s\n",
 			    strerror(errsv));
+		if (errsv == EADDRINUSE && unix_socket)
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_RPC,
+				"RPC Server: another process is listening on %s - is its systemd socket unit already started?\n",
+				unix_socket);
 		close(fd);
 		return -errsv;
 	}
@@ -1139,13 +1152,71 @@ static int esdm_rpcs_start_systemd(const char *socket_name,
 
 	esdm_logger(LOGGER_WARN, LOGGER_C_SERVER,
 		    "unable to find systemd provided socket %s\n", socket_name);
-	return -1;
+	return -ENOENT;
 #else
 	(void)socket_name;
 	(void)service;
 	(void)proto;
-	return 0;
+	return -ENOENT;
 #endif
+}
+
+/*
+ * Set to true once any socket had to be bound by us despite a socket
+ * activation environment being present. In that case the sockets are ours and
+ * have to be removed at shutdown just like in a non-activated run.
+ *
+ * Note that a PID namespace supervisor forked before the sockets are set up
+ * never observes this and therefore keeps treating the sockets as
+ * systemd-owned - deliberately the conservative choice, as removing a socket
+ * systemd still listens on would break every future activation.
+ */
+static atomic_bool esdm_rpcs_self_bound_socket = false;
+
+/*
+ * Obtain the listening socket, preferring one handed over by systemd.
+ *
+ * @systemd_socket is set to true when systemd owns the socket, in which case
+ * its lifecycle and its access mode are systemd's business, not ours.
+ */
+static int esdm_rpcs_start_socket(const char *socket_name,
+				  const char *socket_path,
+				  ProtobufCService *service,
+				  struct esdm_rpcs *proto, bool *systemd_socket)
+{
+	int ret;
+
+	*systemd_socket = false;
+
+	if (systemd_listen_fds() > 0) {
+		ret = esdm_rpcs_start_systemd(socket_name, service, proto);
+		if (!ret) {
+			*systemd_socket = true;
+			return 0;
+		}
+
+		/*
+		 * A socket that was handed over but is unusable is a hard
+		 * error: systemd is listening on it, so binding it ourselves
+		 * would only fail with EADDRINUSE and hide the real cause.
+		 */
+		if (ret != -ENOENT)
+			return ret;
+
+		/*
+		 * LISTEN_FDS is set, but none of the descriptors is ours - the
+		 * environment was inherited from an unrelated socket activated
+		 * context. Bind the socket ourselves instead of refusing to
+		 * start.
+		 */
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_SERVER,
+			"No systemd socket named %s handed over - binding %s directly\n",
+			socket_name, socket_path);
+		atomic_store(&esdm_rpcs_self_bound_socket, true);
+	}
+
+	return esdm_rpcs_start(socket_path, 0, service, proto);
 }
 
 /* Terminating the RPC server. */
@@ -1163,6 +1234,7 @@ static int esdm_rpcs_unpriv_init(void *args)
 	struct esdm_rpcs unpriv_proto;
 	ProtobufCService *unpriv_service =
 		(ProtobufCService *)&unpriv_access_service;
+	bool systemd_socket;
 	int ret;
 
 	(void)args;
@@ -1174,18 +1246,19 @@ static int esdm_rpcs_unpriv_init(void *args)
 	unpriv_proto.privileged = false;
 
 	/* Create server handler for privileged interface in main thread */
-	if (systemd_listen_fds() > 0) {
-		CKINT(esdm_rpcs_start_systemd("ESDM_RPC_UNPRIV_SOCKET",
-					      unpriv_service, &unpriv_proto));
-	} else {
-		CKINT(esdm_rpcs_start(ESDM_RPC_UNPRIV_SOCKET, 0, unpriv_service,
-				      &unpriv_proto));
-	}
+	CKINT(esdm_rpcs_start_socket("ESDM_RPC_UNPRIV_SOCKET",
+				     ESDM_RPC_UNPRIV_SOCKET, unpriv_service,
+				     &unpriv_proto, &systemd_socket));
 
-	/* Make unprivileged socket available for all users */
-	if (chmod(ESDM_RPC_UNPRIV_SOCKET,
-		  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) ==
-	    -1) {
+	/*
+	 * Make unprivileged socket available for all users. A socket handed
+	 * over by systemd carries the access mode of its .socket unit
+	 * (SocketMode=); overriding that here would silently ignore the
+	 * administrator's configuration.
+	 */
+	if (!systemd_socket && chmod(ESDM_RPC_UNPRIV_SOCKET,
+				     S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
+					     S_IROTH | S_IWOTH) == -1) {
 		ret = -errno;
 
 		esdm_logger(
@@ -1235,6 +1308,7 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	struct esdm_rpcs priv_proto;
 	ProtobufCService *priv_service =
 		(ProtobufCService *)&priv_access_service;
+	bool systemd_socket;
 	int ret;
 
 	thread_set_name(rpc_priv_server, 0);
@@ -1244,16 +1318,14 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	priv_proto.privileged = true;
 
 	/* Create server handler for privileged interface in main thread */
-	if (systemd_listen_fds() > 0) {
-		CKINT(esdm_rpcs_start_systemd("ESDM_RPC_PRIV_SOCKET",
-					      priv_service, &priv_proto));
-	} else {
-		CKINT(esdm_rpcs_start(ESDM_RPC_PRIV_SOCKET, 0, priv_service,
-				      &priv_proto));
-	}
+	CKINT(esdm_rpcs_start_socket("ESDM_RPC_PRIV_SOCKET",
+				     ESDM_RPC_PRIV_SOCKET, priv_service,
+				     &priv_proto, &systemd_socket));
 
-	/* Make privileged socket available for root only */
-	if (chmod(ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR) == -1) {
+	/* Make privileged socket available for root only - see above on the
+	 * socket activation case. */
+	if (!systemd_socket &&
+	    chmod(ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR) == -1) {
 		int errsv = errno;
 
 		esdm_logger(
@@ -1427,9 +1499,18 @@ void esdm_rpc_server_cleanup(void)
 
 	/*
 	 * Sockets passed in by systemd socket activation are created and
-	 * removed by systemd - leave their lifecycle to it.
+	 * removed by systemd - leave their lifecycle to it. Removing a socket
+	 * systemd still listens on would leave the .socket unit bound to an
+	 * unlinked inode and silently break every future activation.
+	 *
+	 * systemd_listen_fds() reports the state latched by
+	 * systemd_listen_fds_init() before the server forked, so this decision
+	 * cannot disagree with the one taken when the sockets were set up -
+	 * not even in the PID namespace supervisor, which performs the cleanup
+	 * on behalf of the daemon that dropped its privileges.
 	 */
-	if (systemd_listen_fds() <= 0) {
+	if (systemd_listen_fds() <= 0 ||
+	    atomic_load(&esdm_rpcs_self_bound_socket)) {
 		esdm_rpcs_cleanup_socket(ESDM_RPC_UNPRIV_SOCKET);
 		esdm_rpcs_cleanup_socket(ESDM_RPC_PRIV_SOCKET);
 	}
