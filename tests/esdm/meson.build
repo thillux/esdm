@@ -132,6 +132,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_output_min_entropy_test = executable(
+		'esdm_output_min_entropy_test',
+		[ esdm_ipc_ns, 'esdm_output_min_entropy_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_ntg1_seeding_test = executable(
 		'esdm_ntg1_seeding_test',
 		[ esdm_ipc_ns, 'esdm_ntg1_seeding_test.c' ],
@@ -201,6 +209,10 @@ if get_option('esdm-server').enabled()
 		timeout: 300)
 
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
+
+	# Skips without ea_non_iid in PATH; its estimators take a while on 1 MiB.
+	test('ESDM output min-entropy', esdm_output_min_entropy_test,
+		timeout: 300)
 
 	test('ESDM self tests', esdm_selftest_test)
 
