@@ -337,19 +337,46 @@ static void test_open(void)
 }
 
 /*
- * A 32 bit ioctl into a 64 bit daemon. The structures do not match, so the
- * request is refused rather than misread.
+ * A 32 bit ioctl into a 64 bit daemon. Every command transfers ints or bytes
+ * only, laid out the same for both, so it is served like any other rather than
+ * refused - a 32 bit program has to be able to use /dev/random as well.
  */
-static void test_ioctl_compat(void)
+static void compat_ioctl_call(unsigned long cmd, const void *in_buf,
+			      size_t in_bufsz, size_t out_bufsz)
 {
 	struct fuse_file_info fi;
 
 	memset(&fi, 0, sizeof(fi));
 	reply_reset();
-	esdm_cuse_ioctl(-1, TEST_REQ, RNDGETENTCNT, (void *)0x1000, &fi,
-			FUSE_IOCTL_COMPAT, NULL, 0, 0);
+	esdm_cuse_ioctl(-1, TEST_REQ, cmd, (void *)0x1000, &fi,
+			FUSE_IOCTL_COMPAT, in_buf, in_bufsz, out_bufsz);
+}
+
+static void test_ioctl_compat(void)
+{
+	uint8_t raw[sizeof(struct rand_pool_info) + 4] = { 0 };
+	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
+	int bits = -1;
+
+	/* The transfers are asked for as for a 64 bit caller */
+	compat_ioctl_call(RNDGETENTCNT, NULL, 0, 0);
+	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
+
+	compat_ioctl_call(RNDADDENTROPY, NULL, 0, 0);
+	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
+
+	/* And the data transferred is checked as for one */
+	rpi->buf_size = 4;
+	rpi->entropy_count = 33;
+	compat_ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, ENOSYS);
+	CHECK_EQ(reply.err, EINVAL);
+
+	caller_is_root(true);
+	compat_ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+	caller_is_root(false);
 }
 
 /*

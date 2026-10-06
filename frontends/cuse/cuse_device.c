@@ -695,12 +695,16 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 
 	(void)fi;
 
-	backend_fd = esdm_test_fallback_fd(backend_fd);
+	/*
+	 * A 32 bit caller (FUSE_IOCTL_COMPAT) is served like any other: the
+	 * commands are encoded the same, they transfer an int, a struct
+	 * rand_pool_info made of ints only, or plain bytes, and the transfers
+	 * requested by a retry are encoded independently of the caller's word
+	 * size by the FUSE protocol.
+	 */
+	(void)flags;
 
-	if (flags & FUSE_IOCTL_COMPAT) {
-		fuse_reply_err(req, ENOSYS);
-		return;
-	}
+	backend_fd = esdm_test_fallback_fd(backend_fd);
 
 	switch (cmd) {
 	case RNDGETENTCNT:
