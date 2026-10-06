@@ -76,6 +76,11 @@ int esdm_es_mgr_irq_ioctl(unsigned int cmd, unsigned long arg)
 			esdm_requested_irq_bits = data;
 		}
 
+		/*
+		 * Events per 256 bits of entropy: the setter keeps it from
+		 * going below the default, i.e. from crediting more entropy,
+		 * and every larger value is valid - U32_MAX credits none.
+		 */
 		if (data2 > 0)
 			esdm_es_irq.set_entropy_rate(data2);
 

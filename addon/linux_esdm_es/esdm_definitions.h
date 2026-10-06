@@ -7,6 +7,8 @@
 #define _ESDM_DEFINITIONS_H
 
 #include <linux/fips.h>
+#include <linux/math64.h>
+#include <linux/minmax.h>
 #include <linux/slab.h>
 
 /*************************** General ESDM parameter ***************************/
@@ -38,17 +40,31 @@
 
 /****************************** Helper code ***********************************/
 
+/*
+ * The entropy rate is the number of events for 256 bits of entropy. It is any
+ * value from the default up to U32_MAX, which credits no entropy at all - set by
+ * the module parameter or by user space through the ESDM_*_CONF ioctl. The
+ * conversions are therefore done in 64 bits: in 32 bits, a large rate wraps the
+ * product around to an arbitrary, possibly tiny, number of events.
+ */
+
 /* Convert entropy in bits into nr. of events with the same entropy content. */
 static inline u32 esdm_entropy_to_data(u32 entropy_bits, u32 entropy_rate)
 {
-	return ((entropy_bits * entropy_rate) /
-		ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	u64 events = ((u64)entropy_bits * entropy_rate) /
+		     ESDM_DRNG_SECURITY_STRENGTH_BITS;
+
+	return (u32)min_t(u64, events, U32_MAX);
 }
 
 /* Convert number of events into entropy value. */
 static inline u32 esdm_data_to_entropy(u32 num, u32 entropy_rate)
 {
-	return ((num * ESDM_DRNG_SECURITY_STRENGTH_BITS) / entropy_rate);
+	/* At most num, as the rate is at least ESDM_DRNG_SECURITY_STRENGTH_BITS */
+	return (u32)min_t(u64,
+			  div_u64((u64)num * ESDM_DRNG_SECURITY_STRENGTH_BITS,
+				  entropy_rate),
+			  U32_MAX);
 }
 
 static inline u32 atomic_read_u32(atomic_t *v)
