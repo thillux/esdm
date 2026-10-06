@@ -30,8 +30,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -45,7 +47,7 @@
 
 static bool stub_fully_seeded;
 static int stub_seeded_ret;
-static unsigned int stub_full_calls, stub_pr_calls;
+static unsigned int stub_full_calls, stub_pr_calls, stub_init_calls;
 
 int esdm_rpcc_set_max_online_nodes(uint32_t nodes)
 {
@@ -57,12 +59,19 @@ int esdm_rpcc_set_max_online_nodes(uint32_t nodes)
 int esdm_rpcc_init_unpriv_service(esdm_rpcc_interrupt_func_t interrupt_func)
 {
 	(void)interrupt_func;
+	stub_init_calls++;
 
 	return 0;
 }
 
 void esdm_rpcc_fini_unpriv_service(void)
 {
+	/*
+	 * Reached from the library's destructor only, i.e. after main()
+	 * returned, so the verdict is the exit code: 42 for a fini that pairs
+	 * with an init, 3 for one that drops a reference it never took.
+	 */
+	_exit(stub_init_calls ? 42 : 3);
 }
 
 int esdm_rpcc_is_fully_seeded(bool *fully_seeded)
@@ -175,14 +184,61 @@ static void test_nonblock_no_esdm(void)
 	stub_seeded_ret = 0;
 }
 
+/*
+ * The RPC client is reference counted and shared with everybody else in the
+ * process, so the library may only drop the reference it took itself. Each case
+ * runs in a child, the destructor being what is under test.
+ */
+static int run_child(bool use_library)
+{
+	pid_t pid = fork();
+	int status;
+
+	if (pid < 0)
+		return -1;
+
+	if (!pid) {
+		if (use_library) {
+			uint8_t buf[16];
+
+			if (getrandom(buf, sizeof(buf), 0) != sizeof(buf))
+				exit(1);
+		}
+		exit(0);
+	}
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+		return -1;
+
+	return WEXITSTATUS(status);
+}
+
+static void test_fini_pairs_init(void)
+{
+	/* Never used, so there is no reference to drop */
+	CHECK_EQ(run_child(false), 0);
+
+	/* Used, so the reference taken is dropped again */
+	CHECK_EQ(run_child(true), 42);
+}
+
 int main(int argc, char *argv[])
 {
+	int ret;
+
 	(void)argc;
 	(void)argv;
+
+	/* Before anything initializes the library in this process */
+	test_fini_pairs_init();
 
 	test_nonblock_unseeded();
 	test_nonblock_seeded();
 	test_nonblock_no_esdm();
 
-	return common_test_result("getrandom_shim");
+	ret = common_test_result("getrandom_shim");
+
+	/* Leave without the destructor, which reports through the exit code */
+	fflush(stdout);
+	_exit(ret);
 }

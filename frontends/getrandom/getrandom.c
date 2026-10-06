@@ -51,6 +51,8 @@
 #define GRND_FULLY_SEEDED 0x0020
 
 static atomic_bool is_initialized = false;
+/* Whether this library holds a reference on the RPC client */
+static atomic_bool rpc_initialized = false;
 static DEFINE_MUTEX_UNLOCKED(getrandom_mutex);
 
 static void esdm_getrandom_lib_init(void)
@@ -66,8 +68,12 @@ static void esdm_getrandom_lib_init(void)
 	esdm_rpcc_set_max_online_nodes(ESDM_GETRANDOM_NUM_NODES);
 #endif
 
-	/* Return code irrelevant due to fallback in functions below */
-	esdm_rpcc_init_unpriv_service(NULL);
+	/*
+	 * A failure is not fatal due to the fallback in the functions below,
+	 * but it means there is no reference to drop at exit.
+	 */
+	if (esdm_rpcc_init_unpriv_service(NULL) == 0)
+		atomic_store(&rpc_initialized, true);
 
 	atomic_store(&is_initialized, true);
 
@@ -78,7 +84,13 @@ out:
 ESDM_DEFINE_DESTRUCTOR(esdm_getrandom_lib_exit);
 static void esdm_getrandom_lib_exit(void)
 {
-	esdm_rpcc_fini_unpriv_service();
+	/*
+	 * The RPC client is reference counted and shared with everybody else
+	 * in this process. A fini for an init that never happened - the library
+	 * was loaded but never called - would drop somebody else's reference.
+	 */
+	if (atomic_load(&rpc_initialized))
+		esdm_rpcc_fini_unpriv_service();
 }
 
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags);
