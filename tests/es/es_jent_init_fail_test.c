@@ -34,7 +34,8 @@
 
 #include "esdm.h"
 #include "esdm_config.h"
-#include "test_pertubation.h"
+#include "esdm_definitions.h"
+#include "esdm_es_mgr.h"
 
 int jent_entropy_init_ex(unsigned int osr, unsigned int flags);
 
@@ -60,9 +61,16 @@ int main(void)
 		return 1;
 	}
 
-	if (esdm_config_es_jent_entropy_rate()) {
+	/*
+	 * The configured rate stays, for a later reinitialization that
+	 * succeeds; an uninitialized Jitter RNG is what is credited with
+	 * nothing.
+	 */
+	if (esdm_es[esdm_ext_es_jitter]->curr_entropy(
+		    ESDM_DRNG_INIT_SEED_SIZE_BITS)) {
 		printf("ES Jitter RNG - fail: still credited with %u bits after its self test failed\n",
-		       esdm_config_es_jent_entropy_rate());
+		       esdm_es[esdm_ext_es_jitter]->curr_entropy(
+			       ESDM_DRNG_INIT_SEED_SIZE_BITS));
 		ret = 1;
 	} else {
 		printf("ES Jitter RNG - pass: disabled after its self test failed\n");
