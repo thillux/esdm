@@ -473,8 +473,13 @@ static int esdm_jent_initialize(void)
 out:
 	mutex_w_unlock(&esdm_jent_lock);
 
+	/*
+	 * The configured entropy rate is left alone: an uninitialized Jitter
+	 * RNG is credited with nothing anyway (esdm_jent_entropylevel()), and
+	 * a later reinitialization that succeeds is credited with the rate
+	 * that is configured rather than with zero.
+	 */
 	if (ret) {
-		esdm_config_es_jent_entropy_rate_set(0);
 		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 			    "Jitter RNG unusable on current system\n");
 	}
