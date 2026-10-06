@@ -168,10 +168,15 @@ static int open_as(uid_t uid, const char *path, int flags)
 	struct fuse_file_info fi;
 
 	memset(&fi, 0, sizeof(fi));
+	int ret;
+
 	fi.flags = flags;
 	test_ctx_uid = uid;
 
-	return esdm_proc_open(path, &fi);
+	ret = esdm_proc_open(path, &fi);
+	esdm_proc_release(path, &fi);
+
+	return ret;
 }
 
 static void test_open_permissions(void)
@@ -277,6 +282,77 @@ static void test_read(void)
 		 -EINVAL);
 	CHECK_EQ(esdm_proc_read("/", buf, sizeof(buf), 0, NULL), -ENOENT);
 	CHECK_EQ(esdm_proc_read(NULL, buf, sizeof(buf), 0, NULL), -ENOENT);
+}
+
+/*
+ * "uuid" reports a fixed size, so getattr does not fill it; its content is
+ * generated when the file is opened, into a buffer of that open file's own.
+ * Without that a read delivered nothing at all. Two opens see different content,
+ * and a read in pieces sees one and the same.
+ */
+static unsigned int test_uuid_gen;
+
+static int test_uuid_fill(struct esdm_proc_file *file)
+{
+	file->vallen = (size_t)snprintf(file->valdata, sizeof(file->valdata),
+					"uuid-%u\n", ++test_uuid_gen);
+	return 0;
+}
+
+static int test_uuid_fill_fail(struct esdm_proc_file *file)
+{
+	(void)file;
+	return -EFAULT;
+}
+
+static void test_read_uuid(void)
+{
+	struct esdm_proc_file *file = file_by_name("uuid");
+	int (*fill)(struct esdm_proc_file *);
+	struct fuse_file_info fi1, fi2;
+	char buf[64];
+
+	if (!file)
+		return;
+
+	fill = file->fill_data;
+	file->fill_data = test_uuid_fill;
+	test_ctx_uid = 1000;
+
+	memset(&fi1, 0, sizeof(fi1));
+	memset(&fi2, 0, sizeof(fi2));
+	fi1.flags = O_RDONLY;
+	fi2.flags = O_RDONLY;
+	CHECK_EQ(esdm_proc_open("/uuid", &fi1), 0);
+	CHECK_EQ(esdm_proc_open("/uuid", &fi2), 0);
+	CHECK(fi1.direct_io, "uuid content may be cached across opens");
+
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(esdm_proc_read("/uuid", buf, sizeof(buf), 0, &fi1), 7);
+	CHECK_STR_EQ(buf, "uuid-1\n");
+
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(esdm_proc_read("/uuid", buf, 3, 0, &fi2), 3);
+	CHECK_MEM_EQ(buf, "uui", 3);
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(esdm_proc_read("/uuid", buf, sizeof(buf), 3, &fi2), 4);
+	CHECK_MEM_EQ(buf, "d-2\n", 4);
+
+	/* One generation per open, none per read */
+	CHECK_EQ(test_uuid_gen, 2);
+
+	esdm_proc_release("/uuid", &fi1);
+	esdm_proc_release("/uuid", &fi2);
+	CHECK_EQ(fi1.fh, 0);
+
+	/* A failing generation fails the open and leaves nothing behind */
+	file->fill_data = test_uuid_fill_fail;
+	memset(&fi1, 0, sizeof(fi1));
+	fi1.flags = O_RDONLY;
+	CHECK_EQ(esdm_proc_open("/uuid", &fi1), -EFAULT);
+	CHECK_EQ(fi1.fh, 0);
+
+	file->fill_data = fill;
 }
 
 /*
@@ -502,6 +578,7 @@ int main(int argc, char *argv[])
 	test_readdir();
 	test_open_permissions();
 	test_read();
+	test_read_uuid();
 	test_write_dispatch();
 	test_write_values_rejected();
 	test_fill_data_without_server();

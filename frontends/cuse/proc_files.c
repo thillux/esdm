@@ -26,6 +26,7 @@
 #include <fuse3/fuse_lowlevel.h>
 #include <libgen.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -533,6 +534,54 @@ out:
 	return ret;
 }
 
+/*
+ * Files reporting a fixed size from getattr (see getattr_size) are not filled
+ * there, so their content is generated here: once per open, into a buffer of
+ * that open file's own. Every open of "uuid" thus yields a fresh UUID, and
+ * reads at any offset of one open file see the same one.
+ */
+static int esdm_proc_open_snapshot(struct esdm_proc_file *file,
+				   struct fuse_file_info *fi)
+{
+	struct esdm_proc_file *snap;
+	int ret;
+
+	if (!file->getattr_size || !file->fill_data)
+		return 0;
+
+	snap = calloc(1, sizeof(*snap));
+	if (!snap)
+		return -ENOMEM;
+	snap->filename = file->filename;
+
+	/* See esdm_proc_getattr() for why fill_data runs under the read lock */
+	mutex_reader_lock(&esdm_proc_priv);
+	ret = file->fill_data(snap);
+	mutex_reader_unlock(&esdm_proc_priv);
+	if (ret < 0) {
+		free(snap);
+		return ret;
+	}
+
+	fi->fh = (uint64_t)(uintptr_t)snap;
+	/* The content changes with every open, the page cache must not keep it */
+	fi->direct_io = 1;
+
+	return 0;
+}
+
+static int esdm_proc_release(const char *path, struct fuse_file_info *fi)
+{
+	(void)path;
+
+	if (fi && fi->fh) {
+		free((void *)(uintptr_t)fi->fh);
+		fi->fh = 0;
+	}
+
+	return 0;
+}
+
 static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 {
 	size_t pathlen;
@@ -552,8 +601,10 @@ static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 		if (pathlen == file->filename_len &&
 		    !strncmp(path + 1, file->filename, file->filename_len)) {
 			/* Read-access is always granted */
-			if ((fi->flags & O_ACCMODE) == O_RDONLY)
+			if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+				ret = esdm_proc_open_snapshot(file, fi);
 				goto out;
+			}
 
 			/*
 			 * Write access is only granted for root and then only
@@ -583,8 +634,6 @@ static int esdm_proc_read(const char *path, char *buf, size_t size,
 	unsigned int i;
 	int ret = 0;
 
-	(void)fi;
-
 	CKNULL(path, -ENOENT);
 	pathlen = strlen(path);
 	if (pathlen <= 1)
@@ -599,6 +648,11 @@ static int esdm_proc_read(const char *path, char *buf, size_t size,
 		/* pathlen is one longer than file name due to / */
 		if (pathlen == file->filename_len &&
 		    !strncmp(path + 1, file->filename, file->filename_len)) {
+			/* Content generated at open time, see open_snapshot */
+			if (fi && fi->fh)
+				file = (struct esdm_proc_file *)(uintptr_t)
+					       fi->fh;
+
 			if ((size_t)offset < file->vallen) {
 				if ((size_t)offset + size > file->vallen) {
 					size = file->vallen - (size_t)offset;
@@ -665,6 +719,7 @@ static const struct fuse_operations esdm_proc_oper = {
 	.open = esdm_proc_open,
 	.read = esdm_proc_read,
 	.write = esdm_proc_write,
+	.release = esdm_proc_release,
 };
 
 static struct esdm_proc_options {
