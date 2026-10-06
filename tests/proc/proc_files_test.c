@@ -246,43 +246,139 @@ static struct esdm_proc_file *file_by_name(const char *name)
 }
 
 /*
- * Reading serves whatever the last fill_data() left behind, which is what makes
- * a partial read - the second `cat` of a file larger than the buffer - come
- * back with the rest rather than with the beginning again.
+ * Reading serves what the open generated, which is what makes a partial read -
+ * the second `cat` of a file larger than the buffer - come back with the rest
+ * rather than with the beginning again.
  */
+static unsigned int test_poolsize_gen;
+
+static int test_poolsize_fill(struct esdm_proc_file *file)
+{
+	test_poolsize_gen++;
+	snprintf(file->valdata, sizeof(file->valdata), "1024\n");
+	file->vallen = strlen(file->valdata);
+
+	return 0;
+}
+
 static void test_read(void)
 {
 	struct esdm_proc_file *file = file_by_name("poolsize");
+	int (*fill)(struct esdm_proc_file *);
+	struct fuse_file_info fi;
 	char buf[64];
 
 	if (!file)
 		return;
 
-	snprintf(file->valdata, sizeof(file->valdata), "1024\n");
-	file->vallen = strlen(file->valdata);
+	fill = file->fill_data;
+	file->fill_data = test_poolsize_fill;
+	test_ctx_uid = 1000;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = O_RDONLY;
+	CHECK_EQ(esdm_proc_open("/poolsize", &fi), 0);
+	CHECK(fi.direct_io, "poolsize content may be cached across opens");
 
 	memset(buf, 0, sizeof(buf));
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 0, NULL), 5);
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 0, &fi), 5);
 	CHECK_STR_EQ(buf, "1024\n");
 
 	/* A short read is not padded, and the rest picks up where it left off */
 	memset(buf, 0, sizeof(buf));
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, 2, 0, NULL), 2);
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, 2, 0, &fi), 2);
 	CHECK_MEM_EQ(buf, "10", 2);
 
 	memset(buf, 0, sizeof(buf));
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 2, NULL), 3);
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 2, &fi), 3);
 	CHECK_MEM_EQ(buf, "24\n", 3);
 
 	/* At and past the end there is nothing left to deliver */
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 5, NULL), 0);
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 4096, NULL), 0);
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 5, &fi), 0);
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 4096, &fi), 0);
 
 	/* A negative offset is a caller error, an absent path is not a file */
-	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), -1, NULL),
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), -1, &fi),
 		 -EINVAL);
-	CHECK_EQ(esdm_proc_read("/", buf, sizeof(buf), 0, NULL), -ENOENT);
-	CHECK_EQ(esdm_proc_read(NULL, buf, sizeof(buf), 0, NULL), -ENOENT);
+	CHECK_EQ(esdm_proc_read("/", buf, sizeof(buf), 0, &fi), -ENOENT);
+	CHECK_EQ(esdm_proc_read(NULL, buf, sizeof(buf), 0, &fi), -ENOENT);
+
+	/* Generated once, by the open, not by the reads */
+	CHECK_EQ(test_poolsize_gen, 1);
+
+	esdm_proc_release("/poolsize", &fi);
+	CHECK_EQ(fi.fh, 0);
+
+	file->fill_data = fill;
+}
+
+/*
+ * Requests are served concurrently, so none of them may write content into
+ * the file table they all share: a getattr filling it while a read copies out
+ * of it is a data race, and a torn read. Each open and each getattr generates
+ * into a buffer of its own, and what the table holds is never touched.
+ */
+static void test_no_shared_content(void)
+{
+	struct esdm_proc_file *file = file_by_name("poolsize");
+	int (*fill)(struct esdm_proc_file *);
+	struct fuse_file_info fi;
+	struct stat sb;
+	char buf[64];
+
+	if (!file)
+		return;
+
+	fill = file->fill_data;
+	file->fill_data = test_poolsize_fill;
+	test_ctx_uid = 1000;
+
+	snprintf(file->valdata, sizeof(file->valdata), "shared");
+	file->vallen = strlen(file->valdata);
+
+	/* getattr reports the size of what it generated ... */
+	memset(&sb, 0, sizeof(sb));
+	CHECK_EQ(esdm_proc_getattr("/poolsize", &sb, NULL), 0);
+	CHECK_EQ(sb.st_size, 5);
+
+	/* ... an open serves what it generated ... */
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = O_RDONLY;
+	CHECK_EQ(esdm_proc_open("/poolsize", &fi), 0);
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 0, &fi), 5);
+	CHECK_STR_EQ(buf, "1024\n");
+	esdm_proc_release("/poolsize", &fi);
+
+	/* ... and neither went through the table */
+	CHECK_STR_EQ(file->valdata, "shared");
+	CHECK_EQ(file->vallen, 6);
+
+	/* A read without an open of its own has no content to serve */
+	CHECK_EQ(esdm_proc_read("/poolsize", buf, sizeof(buf), 0, NULL), 0);
+
+	/* A writable file opened for reading and writing gets one as well */
+	file = file_by_name("write_wakeup_threshold");
+	if (file) {
+		int (*fill2)(struct esdm_proc_file *) = file->fill_data;
+
+		file->fill_data = test_poolsize_fill;
+		test_ctx_uid = 0;
+		memset(&fi, 0, sizeof(fi));
+		fi.flags = O_RDWR;
+		CHECK_EQ(esdm_proc_open("/write_wakeup_threshold", &fi), 0);
+		memset(buf, 0, sizeof(buf));
+		CHECK_EQ(esdm_proc_read("/write_wakeup_threshold", buf,
+					sizeof(buf), 0, &fi),
+			 5);
+		esdm_proc_release("/write_wakeup_threshold", &fi);
+		file->fill_data = fill2;
+	}
+
+	file = file_by_name("poolsize");
+	file->valdata[0] = '\0';
+	file->vallen = 0;
+	file->fill_data = fill;
 }
 
 /*
@@ -634,6 +730,7 @@ int main(int argc, char *argv[])
 	test_readdir();
 	test_open_permissions();
 	test_read();
+	test_no_shared_content();
 	test_read_uuid();
 	test_write_dispatch();
 	test_write_values_rejected();

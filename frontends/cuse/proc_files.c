@@ -498,16 +498,32 @@ static int esdm_proc_getattr(const char *path, struct stat *stbuf,
 
 				if (file->fill_data) {
 					/*
+					 * Filled into a buffer of this request's
+					 * own: concurrent requests must not
+					 * rewrite each other's content.
+					 */
+					struct esdm_proc_file *snap =
+						calloc(1, sizeof(*snap));
+
+					if (!snap) {
+						ret = -ENOMEM;
+						goto out;
+					}
+
+					/*
 					 * fill_data issues unprivileged RPCs; take
 					 * the read lock so it never overlaps a
 					 * privileged (write-locked) raise/drop
 					 * window in another thread.
 					 */
 					mutex_reader_lock(&esdm_proc_priv);
-					ret = file->fill_data(file);
+					ret = file->fill_data(snap);
 					mutex_reader_unlock(&esdm_proc_priv);
-					if (ret < 0)
-						goto out;
+					if (ret >= 0)
+						stbuf->st_size =
+							(off_t)snap->vallen;
+					free(snap);
+					goto out;
 				}
 
 				stbuf->st_size = (off_t)file->vallen;
@@ -557,10 +573,11 @@ out:
 }
 
 /*
- * Files reporting a fixed size from getattr (see getattr_size) are not filled
- * there, so their content is generated here: once per open, into a buffer of
- * that open file's own. Every open of "uuid" thus yields a fresh UUID, and
- * reads at any offset of one open file see the same one.
+ * The content of a file is generated when it is opened, into a buffer of that
+ * open file's own. Requests run concurrently, so a buffer shared by all of them
+ * would be rewritten by one while another copies out of it. Every open of
+ * "uuid" thus yields a fresh UUID, and reads at any offset of one open file see
+ * the same content.
  */
 static int esdm_proc_open_snapshot(struct esdm_proc_file *file,
 				   struct fuse_file_info *fi)
@@ -568,7 +585,7 @@ static int esdm_proc_open_snapshot(struct esdm_proc_file *file,
 	struct esdm_proc_file *snap;
 	int ret;
 
-	if (!file->getattr_size || !file->fill_data)
+	if (!file->fill_data)
 		return 0;
 
 	snap = calloc(1, sizeof(*snap));
@@ -586,7 +603,10 @@ static int esdm_proc_open_snapshot(struct esdm_proc_file *file,
 	}
 
 	fi->fh = (uint64_t)(uintptr_t)snap;
-	/* The content changes with every open, the page cache must not keep it */
+	/*
+	 * The content changes with every open, the page cache must not keep
+	 * it - nor cut it to a size getattr reported at another time.
+	 */
 	fi->direct_io = 1;
 
 	return 0;
@@ -635,8 +655,11 @@ static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 			if ((((fi->flags & O_ACCMODE) == O_WRONLY) ||
 			     ((fi->flags & O_ACCMODE) == O_RDWR)) &&
 			    (file->perm & S_IWUSR) &&
-			    (fuse_get_context()->uid == 0))
+			    (fuse_get_context()->uid == 0)) {
+				if ((fi->flags & O_ACCMODE) == O_RDWR)
+					ret = esdm_proc_open_snapshot(file, fi);
 				goto out;
+			}
 
 			/* All other access requests are denied. */
 			return -EACCES;
@@ -670,10 +693,16 @@ static int esdm_proc_read(const char *path, char *buf, size_t size,
 		/* pathlen is one longer than file name due to / */
 		if (pathlen == file->filename_len &&
 		    !strncmp(path + 1, file->filename, file->filename_len)) {
-			/* Content generated at open time, see open_snapshot */
+			/*
+			 * Content generated at open time, see open_snapshot.
+			 * Only boot_id is served from the table itself, which
+			 * is written once before the file system is mounted.
+			 */
 			if (fi && fi->fh)
 				file = (struct esdm_proc_file *)(uintptr_t)
 					       fi->fh;
+			else if (file->fill_data)
+				return 0;
 
 			if ((size_t)offset < file->vallen) {
 				if ((size_t)offset + size > file->vallen) {
