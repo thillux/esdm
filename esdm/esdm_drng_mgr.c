@@ -822,9 +822,13 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 			"regular");
 
 		/*
-		 * Set the seeding state of the ESDM
+		 * Set the seeding state of the ESDM - which is the state of
+		 * the initial DRNG, the fallback for every request: the
+		 * seeding of any other DRNG must not make the ESDM operational
+		 * while the initial one is not seeded.
 		 */
-		esdm_init_ops(&collected_seedbuf);
+		if (drng == &esdm_drng_init)
+			esdm_init_ops(&collected_seedbuf);
 
 		/*
 	 * Emergency reseeding: If we reached the min seed threshold now

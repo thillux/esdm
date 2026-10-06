@@ -227,6 +227,18 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM PR DRNG RBG3(RS) oversampling', esdm_pr_full_entropy_test)
 
+	esdm_operational_init_drng_test = executable(
+		'esdm_operational_init_drng_test',
+		[ esdm_ipc_ns, 'esdm_operational_init_drng_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM operational state follows the initial DRNG',
+		esdm_operational_init_drng_test,
+		timeout: 60)
+
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
 	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test)
