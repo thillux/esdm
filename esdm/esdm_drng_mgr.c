@@ -737,6 +737,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 		(drng == &esdm_drng_pr && !atomic_load(&drng->initiated)) ||
 		(drng != &esdm_drng_pr && !atomic_load(&drng->fully_seeded));
 	bool forced = atomic_load(&drng->force_reseed) | do_full_init;
+	/* The PR DRNG past its initial seeding aims for RBG3(RS) */
+	bool full_entropy = !do_full_init && drng == &esdm_drng_pr;
 
 	for_each_esdm_es (i)
 		collected_seedbuf.entropy_es[i].e_bits = 0;
@@ -769,8 +771,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 				drng_type);
 		}
 
-		requested_bits = esdm_get_seed_entropy_osr(
-			do_full_init, !do_full_init && drng == &esdm_drng_pr);
+		requested_bits =
+			esdm_get_seed_entropy_osr(do_full_init, full_entropy);
 
 		/*
 		 * Get the entropy and the additional data in one pass over the
@@ -805,12 +807,18 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 		 * can take place in this loop, it is still an atomic seeding
 		 * process from the DRBG perspective as the DRBG is locked
 		 * during that time and cannot produce output.
+		 *
+		 * The RBG3(RS) seed only counts with the oversampling it was
+		 * requested with: s + 64 bits of entropy for s bits of full
+		 * entropy output.
 		 */
 		seeded |= esdm_drng_inject(
 			drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
 			(uint8_t *)&addtl, sizeof(addtl),
 			esdm_fully_seeded(do_full_init, collected_entropy,
-					  &collected_seedbuf),
+					  &collected_seedbuf) &&
+				(!full_entropy ||
+				 collected_entropy >= requested_bits),
 			"regular");
 
 		/*
@@ -1772,6 +1780,14 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				esdm_pool_unlock();
 
 				/*
+				 * Cap output to the freshly collected entropy,
+				 * less the 64 bits RBG3(RS) keeps back for full
+				 * entropy output, see SP800-90C sec. 6.5.1.2.
+				 */
+				collected_ent_bits -= min_uint32(
+					collected_ent_bits, esdm_compress_osr());
+
+				/*
 				 * If less than a full byte of fresh entropy was
 				 * received, stop now: otherwise todo would be
 				 * capped to 0, drng_generate(0) fails, and the
@@ -1783,7 +1799,6 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 					goto out;
 				}
 
-				/* Cap output to the freshly collected entropy. */
 				todo = min_uint32(todo,
 						  collected_ent_bits >> 3);
 			}
