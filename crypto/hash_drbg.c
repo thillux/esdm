@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 
 #include "bitshift_be.h"
 #include "esdm_hash_drbg_sha512.h"
@@ -329,6 +330,20 @@ int esdm_drbg_hash_alloc(struct esdm_drbg_state **drbg)
 
 	if (ret)
 		return -ret;
+
+	/*
+	 * Prevent paging out of the DRBG state to swap space, as done for the
+	 * ChaCha20 DRNG. Without the privilege or the budget to lock memory,
+	 * carry on unlocked.
+	 */
+	ret = mlock(tmp, ESDM_DRBG_HASH_CTX_SIZE(ESDM_DRBG_HASH_CORE));
+	if (ret && errno != EPERM && errno != EAGAIN) {
+		int errsv = errno;
+
+		free(tmp);
+		return -errsv;
+	}
+
 	memset_secure(tmp, 0, ESDM_DRBG_HASH_CTX_SIZE(ESDM_DRBG_HASH_CORE));
 
 	ESDM_DRBG_HASH_SET_CTX(tmp);
@@ -336,4 +351,16 @@ int esdm_drbg_hash_alloc(struct esdm_drbg_state **drbg)
 	*drbg = (struct esdm_drbg_state *)tmp;
 
 	return 0;
+}
+
+DSO_PUBLIC
+void esdm_drbg_hash_zero_free(struct esdm_drbg_state *drbg)
+{
+	if (!drbg)
+		return;
+
+	esdm_drbg_zero(drbg);
+	/* Release the lock taken in esdm_drbg_hash_alloc() before freeing. */
+	munlock(drbg, ESDM_DRBG_HASH_CTX_SIZE(ESDM_DRBG_HASH_CORE));
+	free(drbg);
 }

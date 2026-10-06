@@ -283,7 +283,7 @@ static int hash_drbg_tester(void)
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
 
 out:
-	esdm_drbg_zero_free(drbg);
+	esdm_drbg_hash_zero_free(drbg);
 	return ret;
 }
 

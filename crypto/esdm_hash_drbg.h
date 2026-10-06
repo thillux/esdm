@@ -104,6 +104,14 @@ void esdm_drbg_hash_zero(struct esdm_drbg_state *drbg);
  */
 int esdm_drbg_hash_alloc(struct esdm_drbg_state **drbg);
 
+/**
+ * @brief Zeroize and free a Hash DRBG context allocated with
+ *	  esdm_drbg_hash_alloc
+ *
+ * @param [in] drbg Hash DRBG context, may be NULL
+ */
+void esdm_drbg_hash_zero_free(struct esdm_drbg_state *drbg);
+
 #ifdef __cplusplus
 }
 #endif
