@@ -33,6 +33,7 @@
 #include "esdm_logger.h"
 #include "es_rates.h"
 #include "ret_checkers.h"
+#include "wait_seeded.h"
 
 #ifdef ESDM_TESTMODE
 static int esdm_drng_mgr_max_wo_reseed_test(bool success)
@@ -50,10 +51,7 @@ static int esdm_drng_mgr_max_wo_reseed_test(bool success)
 
 	esdm_get_random_bytes(buf, sizeof(buf));
 
-	/* Wait for fully seeded */
-	sleep(1);
-
-	if (!esdm_state_fully_seeded()) {
+	if (test_wait_fully_seeded()) {
 		printf("ESDM is not fully seeded!\n");
 		goto err;
 	}

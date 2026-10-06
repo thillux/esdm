@@ -33,6 +33,7 @@
 #include "esdm_logger.h"
 #include "ret_checkers.h"
 #include "test_pertubation.h"
+#include "wait_seeded.h"
 
 #ifdef ESDM_TESTMODE
 static int esdm_drng_seed_entropy_test(void)
@@ -44,10 +45,7 @@ static int esdm_drng_seed_entropy_test(void)
 	int ret = 0;
 
 	esdm_get_random_bytes(buf, sizeof(buf));
-	/* Give DRNG seed thread some time to seed */
-	sleep(1);
-
-	if (!esdm_state_fully_seeded()) {
+	if (test_wait_fully_seeded()) {
 		printf("ESDM is not fully seeded!\n");
 		goto err;
 	}
