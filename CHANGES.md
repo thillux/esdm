@@ -133,6 +133,52 @@ addon/es_ebpf_testing
 
 * fix: esdm.spec: package the EGD client library and the EGD OpenSSL providers
 
+* fix: DRNG manager: index the per-node DRNGs by the allocated array, so raising the node limit after the allocation no longer reads or frees past its end
+
+* fix: a prediction resistance request no longer drops all DRNGs out of the seeded state; esdm_get_seed() could return nothing afterwards
+
+* fix: SP800-90C: the prediction resistance DRNG counts as fully seeded only with the additional 64 bits of RBG3(RS) and withholds them from its output
+
+* fix: only the seeding of the initial DRNG makes the ESDM operational, not that of any node DRNG
+
+* fix: with a reseed interval of zero the initial DRNG was seeded twice per request
+
+* fix: the auxiliary pool reports the digest size of its conditioning hash instead of the maximum
+
+* fix: a failed Jitter RNG initialization no longer zeroes its configured entropy rate, so a later successful reinitialization is credited again
+
+* fix: esdm_init() tears down what it set up when it fails; the timing entropy source rate setters are serialized; the start-up rate check counts every entropy source
+
+* fix: RPC server: all server threads run in the isolating mount, cgroup and network namespaces, not only the main thread (a PKCS#11 module reaching a network HSM over TCP needs the network namespace switched off)
+
+* fix: RPC server: the self test is refused to unprivileged clients; a response that cannot be packed is answered with a failure; a connection whose answer cannot be written is dropped instead of stalling the worker per request; a worker thread that cannot be started is noticed
+
+* fix: RPC client: a past poll timeout no longer suppresses the reconnect after a broken connection
+
+* fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK returns EAGAIN while the ESDM is not seeded, and the library drops only the RPC client reference it took
+
+* fix: CUSE: a non-blocking read that would block returns EAGAIN; the privileged ioctls require CAP_SYS_ADMIN instead of UID 0, as the kernel does; a negative RNDADDTOENTCNT is refused; 32 bit callers are served; the status ioctl serves a complete report only; a failed privilege drop ends the daemon instead of leaving it running as root
+
+* fix: esdm-proc: every file's content is generated per open, so concurrent readers no longer share one buffer
+
+* fix: esdm-kernel-seeder: refuse an interval outside 1 to INT32_MAX seconds
+
+* fix: Linux kernel addon: convert entropy rates in 64 bit arithmetic
+
+* fix: leancrypto backend: additional input beyond the 84 bytes the XDRBG accepts is condensed with SHA3-512 - leancrypto >= 1.9 refused the seed, so no DRNG was ever seeded; the hash init result is checked where leancrypto returns one
+
+* fix: the DRBG sanity health check seeds the DRBG first, so its limit checks are reached; the Hash DRBG state is locked into memory; SHA-2 wipes its message schedule with memset_secure
+
+* fix: logger: the log file is no longer closed at exit under a thread still writing to it; threading: the thread and parent of a worker slot are read atomically when signaling
+
+* fix: esdm_safe_read()/esdm_safe_write() return the bytes transferred before a later error
+
+* fix: esdm.spec requires the protobuf-c runtime instead of protobuf
+
+* flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; support Linux 7.2 and 7.3 in the kernel addon
+
+* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 
