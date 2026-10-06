@@ -51,28 +51,6 @@ void env_fini(void)
 	nanosleep(&ts, NULL);
 }
 
-static int env_check_file(const char *path)
-{
-	struct stat sb;
-
-	if (!path) {
-		printf("No file provided\n");
-		return ENOENT;
-	}
-
-	if (stat(path, &sb) == 1) {
-		printf("File not found\n");
-		return errno;
-	}
-
-	if (!S_ISREG(sb.st_mode)) {
-		printf("File not regular file\n");
-		return EPERM;
-	}
-
-	return 0;
-}
-
 int env_init(void)
 {
 	const char *server = getenv("ESDM_SERVER");
@@ -97,7 +75,7 @@ int env_init(void)
 		return -ret;
 	}
 
-	CKINT(env_check_file(server));
+	CKINT(test_env_check_file(server));
 	CKINT(esdm_test_shm_status_init());
 
 	/* Built before the fork - see test_env_daemon_envp() */
