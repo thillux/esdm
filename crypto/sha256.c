@@ -93,9 +93,6 @@ static inline void sha256_transform(struct esdm_hash_state *ctx,
 		} else {
 			W[i] = s1(W[i - 2]) + W[i - 7] + s0(W[i - 15]) +
 			       W[i - 16];
-
-			/* Zeroization */
-			W[i - 16] = 0;
 		}
 		T1 = h + S1(e) + CH(e, f, g) + sha256_K[i] + W[i];
 		T2 = S0(a) + MAJ(a, b, c);
@@ -118,9 +115,11 @@ static inline void sha256_transform(struct esdm_hash_state *ctx,
 	ctx->H[6] += g;
 	ctx->H[7] += h;
 
-	/* Zeroize intermediate values - register are not zeroized */
-	for (i = 48; i < 64; i++)
-		W[i] = 0;
+	/*
+	 * Zeroize intermediate values - register are not zeroized. W is not
+	 * read again, so plain stores would be dropped as dead.
+	 */
+	memset_secure(W, 0, sizeof(W));
 }
 
 static void sha256_update(struct esdm_hash_state *ctx, const uint8_t *in,
