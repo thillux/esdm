@@ -57,6 +57,7 @@
 #include "esdm_rpc_server.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
+#include "linux_support.h"
 #include "math_helper.h"
 #include "esdm_logger.h"
 #include "memset_secure.h"
@@ -1525,6 +1526,22 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 	int ret = 0;
 
 	pthread_setname_np(pthread_self(), "ESDM master");
+
+	/*
+	 * Leave the mount, cgroup and network namespaces before the first
+	 * thread is created. unshare() only moves the calling thread, and a
+	 * thread inherits the namespaces of the thread creating it. Doing this
+	 * later - e.g. as part of the privilege drop - leaves every thread
+	 * created up to then, including the one spawning the unprivileged RPC
+	 * workers, in the namespaces of the host.
+	 *
+	 * Nothing set up below needs the namespaces left here: the RPC and EGD
+	 * sockets are bound to file system paths, which the copied mount table
+	 * resolves to the same inodes as the host does, and a path bound
+	 * AF_UNIX socket is reachable across network namespaces. Sockets passed
+	 * in by systemd are file descriptors already and unaffected.
+	 */
+	CKINT(linux_isolate_namespace());
 
 	/* Main ESDM Init DRNG state, ES', ... */
 	CKINT(esdm_init());
