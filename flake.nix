@@ -1491,11 +1491,14 @@
                   # nixpkgs still knows the combined 'ais2031' option, which
                   # this tree split into 'ais2031_ntg1' and 'ais2031_drg4';
                   # drop the flag it passes and set the successors below.
+                  # Its es_jent_osr default is replaced below as well, so
+                  # that only one value reaches meson.
                   (builtins.filter (
                     x:
                     (!lib.hasInfix "max_threads" x)
                     && (!lib.hasInfix "term-on-signal" x)
                     && (!lib.hasInfix "ais2031" x)
+                    && (!lib.hasInfix "es_jent_osr" x)
                   ) prev.mesonFlags)
                   ++ lib.optionals debugEsdm [
                     "-Db_sanitize=address,undefined"
