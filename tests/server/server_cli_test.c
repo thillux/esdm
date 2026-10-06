@@ -86,8 +86,15 @@ static void test_version(void)
 
 	/* Asking what this is has an answer, so it is not a failure */
 	CHECK_EQ(rc, 0);
-	CHECK(strstr(r.err, "ESDM") != NULL,
-	      "the version does not name the ESDM (output: %.200s)", r.err);
+	/*
+	 * esdm-server(8) promises the version of the ESDM library the daemon
+	 * was built against, and that is what esdm_version() reports. Only a
+	 * test mode build prefixes it with a banner naming the ESDM, so the
+	 * name of the project is not something to look for here.
+	 */
+	CHECK(strstr(r.err, "library version") != NULL,
+	      "the version is not the library version (output: %.200s)",
+	      r.err);
 	CHECK(strstr(r.err, VERSION) != NULL,
 	      "the version does not report " VERSION " (output: %.200s)",
 	      r.err);
