@@ -1246,8 +1246,11 @@
                   # runs the FIPS integrity self test - against reference
                   # values for the build tree, as fipsHmac provides them for
                   # an installation.
-                  find "$work/build" -type f \( -perm -u+x -o -name '*.so' \
-                    -o -name '*.so.*' \) ! -name '*.hmac' -exec ${fipsHmac} {} +
+                  find "$work/build" ! -name '*.hmac' \( \
+                    \( -type f -perm -u+x \) -o \
+                    \( \( -type f -o -type l \) \
+                       \( -name '*.so' -o -name '*.so.*' \) \) \
+                    \) -exec ${fipsHmac} {} +
 
                   # Every ESDM this suite starts loads the SoftHSM module the
                   # PKCS#11 source was built against, and SoftHSM logs three
