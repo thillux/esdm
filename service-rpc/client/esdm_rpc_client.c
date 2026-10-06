@@ -441,6 +441,15 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			break;
 		}
 
+		/*
+		 * The server closed the connection, e.g. reaping it as idle
+		 * just as this request went out. No answer can come any more.
+		 */
+		if (received == 0) {
+			ret = -ECONNRESET;
+			break;
+		}
+
 		if (received < (ssize_t)sizeof(*header))
 			continue;
 
@@ -653,6 +662,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC * 1000 / 2;
 	struct timespec current_time;
 	int64_t used_before_ns;
+	bool reconnected = false;
 	int ret;
 
 	/*
@@ -696,6 +706,16 @@ static void esdm_client_invoke(ProtobufCService *service,
 		/* Receive data */
 		ret = esdm_rpc_client_read_handler(rpc_conn, method->output,
 						   closure, closure_data);
+
+		/*
+		 * The server closed the connection without answering. Ask once
+		 * more on a fresh one - only once, so a server that keeps
+		 * closing on us cannot hold the caller here.
+		 */
+		if (ret == -ECONNRESET && !reconnected) {
+			reconnected = true;
+			ret = -EAGAIN;
+		}
 		/* EAGAIN is ok here, since sockets are non-blocking now */
 		if (ret < 0 && ret != -EAGAIN) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,

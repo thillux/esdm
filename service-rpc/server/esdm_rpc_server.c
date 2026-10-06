@@ -840,6 +840,13 @@ static int esdm_rpcs_handler(void *args)
 				}
 				rpc_conn->child_fd = accepted_fd;
 				rpc_conn->proto = thread->proto;
+				/*
+				 * Idle since now, not since the epoch - or the
+				 * idle reaper could close the connection before
+				 * its first request is read.
+				 */
+				clock_gettime(CLOCK_MONOTONIC,
+					      &rpc_conn->last_used);
 				struct epoll_event ev = {
 					.events = EPOLLIN | EPOLLRDHUP,
 					.data.ptr = rpc_conn
