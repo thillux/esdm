@@ -69,6 +69,25 @@ struct esdm_proc_file {
  * Helper
  ******************************************************************************/
 static const char *esdm_proc_unprivileged_user = "nobody";
+
+/*
+ * Still being root after a privilege drop would serve every request with root
+ * privileges. That is not recoverable, so stop serving requests - the session
+ * loop then returns and unmounts the file system.
+ */
+static void esdm_proc_drop_failed(void)
+{
+	struct fuse *fuse = fuse_get_context()->fuse;
+
+	if (geteuid() != 0)
+		return;
+
+	esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+		    "Cannot drop privileges, terminating\n");
+	if (fuse)
+		fuse_exit(fuse);
+}
+
 static void esdm_proc_drop_privileges(void)
 {
 	static bool dropped = false;
@@ -78,6 +97,8 @@ static void esdm_proc_drop_privileges(void)
 
 	if (drop_privileges_transient(esdm_proc_unprivileged_user) == 0)
 		dropped = true;
+	else
+		esdm_proc_drop_failed();
 }
 
 /*
@@ -120,7 +141,8 @@ static void esdm_proc_raise_privilege(void)
 
 static void esdm_proc_drop_privilege(void)
 {
-	drop_privileges_transient(esdm_proc_unprivileged_user);
+	if (drop_privileges_transient(esdm_proc_unprivileged_user))
+		esdm_proc_drop_failed();
 	mutex_unlock(&esdm_proc_priv);
 }
 

@@ -386,16 +386,35 @@ static bool esdm_cuse_fips_enabled(void)
 #endif
 
 static const char *esdm_cuse_unprivileged_user = "nobody";
-static void esdm_cuse_drop_privileges(void)
+static int esdm_cuse_drop_privileges(void)
 {
 	static bool dropped = false;
+	int ret;
 
 	if (dropped)
-		return;
+		return 0;
 
-	if (linux_isolate_namespace() == 0 &&
-	    drop_privileges_transient(esdm_cuse_unprivileged_user) == 0)
-		dropped = true;
+	/*
+	 * The namespaces are hardening on top of the privilege drop, a failure
+	 * to enter them is logged by the helper. It must not keep the daemon
+	 * from dropping its privileges.
+	 */
+	linux_isolate_namespace();
+
+	/* Without root, there is nothing to drop */
+	if (geteuid() != 0)
+		return 0;
+
+	ret = drop_privileges_transient(esdm_cuse_unprivileged_user);
+	if (ret) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+			    "Cannot drop privileges: %s\n", strerror(-ret));
+		return ret;
+	}
+
+	dropped = true;
+
+	return 0;
 }
 
 static bool esdm_cuse_client_privileged(fuse_req_t req)
@@ -445,7 +464,20 @@ static void esdm_cuse_raise_privilege_transient(fuse_req_t req)
 
 static void esdm_cuse_drop_privilege_transient(void)
 {
-	drop_privileges_transient(esdm_cuse_unprivileged_user);
+	/*
+	 * Still being root after the drop would run every request that follows
+	 * with the privileges of this one. That is not recoverable, so stop
+	 * serving requests.
+	 */
+	if (drop_privileges_transient(esdm_cuse_unprivileged_user) &&
+	    geteuid() == 0) {
+		struct fuse_session *se = esdm_cuse_session;
+
+		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+			    "Cannot drop privileges after a privileged request, terminating\n");
+		if (se)
+			fuse_session_exit(se);
+	}
 	mutex_unlock(&esdm_cuse_priv);
 }
 
@@ -1179,7 +1211,7 @@ void esdm_cuse_init_done(void *userdata)
 	CKINT(esdm_cuse_shm_status_create_sem());
 	CKINT(esdm_cuse_shm_status_create_shm());
 
-	esdm_cuse_drop_privileges();
+	CKINT(esdm_cuse_drop_privileges());
 
 	CKINT_LOG(thread_start(esdm_cuse_poll_checker, NULL,
 			       ESDM_THREAD_CUSE_POLL_GROUP, NULL),
