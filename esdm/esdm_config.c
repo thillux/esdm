@@ -30,6 +30,7 @@
 #include "fips.h"
 #include "helper.h"
 #include "esdm_logger.h"
+#include "mutex_w.h"
 #include "visibility.h"
 
 /*
@@ -170,12 +171,18 @@ static uint32_t esdm_config_entropy_rate_max(uint32_t val)
  * these timing entropy sources may be credited with a non-zero entropy
  * rate. Setting a non-zero rate for one of them therefore zeroes the rates
  * of all others.
+ *
+ * The setters are serialized: two of them racing could otherwise both clear
+ * the others before either stores its own rate, leaving both non-zero.
  */
+static DEFINE_MUTEX_W_UNLOCKED(esdm_config_timing_es_lock);
+
 static void esdm_config_timing_es_rate_set(_Atomic uint32_t *rate_bits,
 					   uint32_t ent)
 {
 	uint32_t val = esdm_config_entropy_rate_max(ent);
 
+	mutex_w_lock(&esdm_config_timing_es_lock);
 	if (val > 0) {
 		esdm_config.esdm_es_irq_entropy_rate_bits = 0;
 		esdm_config.esdm_es_sched_entropy_rate_bits = 0;
@@ -184,6 +191,8 @@ static void esdm_config_timing_es_rate_set(_Atomic uint32_t *rate_bits,
 	}
 
 	*rate_bits = val;
+	mutex_w_unlock(&esdm_config_timing_es_lock);
+
 	esdm_es_add_entropy();
 }
 
