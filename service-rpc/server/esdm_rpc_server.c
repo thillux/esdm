@@ -1704,10 +1704,11 @@ void esdm_rpc_server_cleanup(void)
 	}
 
 	/*
-	 * The EGD socket is always created by the server itself - there is no
-	 * socket activation for it - so it is not subject to the systemd check
-	 * above. The --keep_ipc request is still honored: it is evaluated for
-	 * all IPC objects at the top of this function.
+	 * The EGD sockets may be socket activated as well, but whether one
+	 * belongs to systemd is decided per listener - esdm_egd_server_cleanup()
+	 * applies the systemd check itself rather than the one above. The
+	 * --keep_ipc request is honored for them too: it is evaluated for all
+	 * IPC objects at the top of this function.
 	 */
 	esdm_egd_server_cleanup();
 
