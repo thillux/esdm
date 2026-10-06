@@ -1106,9 +1106,33 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		threads[t].eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 		if (threads[t].eventfd < 0) {
 			ret = -errno;
-			goto out;
+		} else {
+			ret = thread_start(esdm_rpcs_handler, &threads[t], 0,
+					   NULL);
+			if (ret) {
+				close(threads[t].eventfd);
+				threads[t].eventfd = -1;
+			}
 		}
-		thread_start(esdm_rpcs_handler, &threads[t], 0, NULL);
+
+		/*
+		 * The workers started so far already use their slots of
+		 * threads[] and all serve the same listening socket. Carry on
+		 * with them, and give up only if there is none at all.
+		 */
+		if (ret) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_RPC,
+				"Starting %sprivileged RPC worker thread %u failed: %s\n",
+				proto->privileged ? "" : "un", t,
+				strerror(-ret));
+			if (!t)
+				goto out;
+			num_threads = t;
+			ret = 0;
+			break;
+		}
+
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
 			    "Started %sprivileged RPC worker thread %u\n",
 			    proto->privileged ? "" : "un", t);
