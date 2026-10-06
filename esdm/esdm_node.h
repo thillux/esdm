@@ -32,8 +32,14 @@ void esdm_drngs_node_alloc(void);
 void esdm_node_fini(void);
 uint32_t esdm_drng_node_count_get(void);
 
+/*
+ * Iterate over the entries of the published per-node DRNG array. Bound by the
+ * size the array was allocated with, not by esdm_config_online_nodes(): the
+ * latter is recomputed live and grows if esdm_config_max_nodes_set() is raised
+ * after the allocation.
+ */
 #define for_each_online_node(cpu)                                              \
-	for (cpu = 0; cpu < esdm_config_online_nodes(); cpu++)
+	for (cpu = 0; cpu < esdm_drng_node_count_get(); cpu++)
 
 #else /* ESDM_NODE */
 static inline struct esdm_drng **esdm_drng_get_instances(void)

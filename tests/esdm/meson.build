@@ -173,6 +173,19 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	# The per-node DRNG array only exists with the node support
+	if get_option('node').enabled()
+		esdm_node_bound_test = executable(
+			'esdm_node_bound_test',
+			[ esdm_ipc_ns, 'esdm_node_bound_test.c' ],
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+			dependencies: dependencies_server,
+		)
+
+		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
+	endif
+
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
 	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test)

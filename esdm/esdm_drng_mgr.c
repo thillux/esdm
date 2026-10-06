@@ -158,7 +158,8 @@ struct esdm_drng *esdm_drng_node_instance(void)
 	struct esdm_drng **esdm_drng = esdm_drng_get_instances();
 	uint32_t node = esdm_config_curr_node();
 
-	if (esdm_drng && esdm_drng[node])
+	/* Bound by the published array size - see esdm_drng_get_sleep() */
+	if (esdm_drng && node < esdm_drng_node_count_get() && esdm_drng[node])
 		return esdm_drng[node];
 
 	return esdm_drng_init_instance();
