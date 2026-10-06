@@ -102,7 +102,8 @@ void esdm_rpc_server_signal_exit_safe(void);
  * @param [in] privileged Is this the privileged interface?
  * @param [in] data Bytes as they would have arrived from the client
  * @param [in] len Number of those bytes, capped at what a read can deliver
- * @param [in] out_fd Descriptor the response is written to
+ * @param [in] out_fd Descriptor the response is written to - through a
+ * 	duplicate, so it stays open even where the server drops the connection
  * @return 0 on success, < 0 on error - the request was rejected, which for a
  * 	malformed request is the expected outcome
  */

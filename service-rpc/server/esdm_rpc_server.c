@@ -193,65 +193,70 @@ void esdm_server_remove_stale_socket(const char *path, int socktype)
 	unlink(path);
 }
 
-/* Write data into an RPC connection. */
+/*
+ * Write data into an RPC connection.
+ *
+ * A write that cannot be completed closes the connection: the client would
+ * otherwise wait for an answer that never comes. This includes a send buffer
+ * that stays full - which with one request in flight at a time, as the clients
+ * do it, only happens to a client that sends requests without reading the
+ * answers. Waiting for such a client on every request would stall all other
+ * connections served by the same worker thread.
+ */
 static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 				const uint8_t *data, size_t len)
 {
 	const int TIMEOUT_MS = 5;
 	unsigned int retries = 0;
 	ssize_t ret;
+	int errsv;
 
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
 
-	do {
-		retries++;
+	for (;;) {
 		ret = write(rpc_conn->child_fd, data, len);
+		if (ret >= 0)
+			break;
+
+		errsv = errno;
+
 		/* we use non-blocking sockets */
-		if (ret < 0 && errno == EAGAIN) {
+		if (errsv == EAGAIN && retries++ < ESDM_MAX_RX_TX_RETRIES) {
 			/* Wait a short moment for writeability, but not forever */
 			struct pollfd pfd = { .fd = rpc_conn->child_fd,
 					      .events = POLLOUT };
 			int poll_ret = poll(&pfd, 1, TIMEOUT_MS);
 
 			/* early check for writeable */
-			if (poll_ret > 0 && pfd.revents & POLLOUT) {
+			if (poll_ret > 0 && pfd.revents & POLLOUT)
 				continue;
-			}
 
 			/* signal? */
-			if (poll_ret < 0 && errno == EINTR) {
+			if (poll_ret < 0 && errno == EINTR)
 				continue;
+
+			if (poll_ret > 0) {
+				/* connection lost - POLLERR or POLLHUP */
+				errsv = EPIPE;
+			} else if (poll_ret == 0) {
+				/* the client does not read its answers */
+				errsv = ETIMEDOUT;
+			} else {
+				errsv = errno;
 			}
-
-			/* connection lost? */
-			if (poll_ret > 0 && pfd.revents & (POLLERR | POLLHUP)) {
-				ret = -EPIPE;
-				break;
-			}
-
-			/* timeout or error: fall through */
-			if (poll_ret <= 0) {
-				ret = (poll_ret == 0) ? -ETIMEDOUT : -errno;
-			}
-		};
-
-		if (ret < 0) {
-			int errsv = errno;
-
-			esdm_logger(
-				LOGGER_VERBOSE, LOGGER_C_RPC,
-				"Writing of data to file descriptor %d failed: %s\n",
-				rpc_conn->child_fd, strerror(errsv));
-
-			if (errsv == EPIPE) {
-				close(rpc_conn->child_fd);
-				rpc_conn->child_fd = -1;
-			}
-
-			return -errsv;
 		}
-	} while (ret < 0 && retries <= ESDM_MAX_RX_TX_RETRIES);
+
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Writing of data to file descriptor %d failed: %s\n",
+			rpc_conn->child_fd, strerror(errsv));
+
+		close(rpc_conn->child_fd);
+		rpc_conn->child_fd = -1;
+
+		return -errsv;
+	}
 
 	/*
 	 * SOCK_SEQPACKET guarantees atomic messages - a short write is a
@@ -597,6 +602,7 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 {
 	struct esdm_rpcs proto;
 	struct esdm_rpcs_connection rpc_conn;
+	int ret;
 
 	if (!service || (len && !data))
 		return -EINVAL;
@@ -612,11 +618,24 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 
 	memset(&rpc_conn, 0, sizeof(rpc_conn));
 	rpc_conn.proto = &proto;
-	rpc_conn.child_fd = out_fd;
+
+	/*
+	 * A failed write closes the connection's descriptor. Hand over a
+	 * duplicate, so that the caller's one stays usable for the next
+	 * request whatever becomes of this one.
+	 */
+	rpc_conn.child_fd = fcntl(out_fd, F_DUPFD_CLOEXEC, 0);
+	if (rpc_conn.child_fd < 0)
+		return -errno;
 
 	memcpy(esdm_rpcs_reqbuf, data, len);
 
-	return esdm_rpcs_process(&rpc_conn, (ssize_t)len);
+	ret = esdm_rpcs_process(&rpc_conn, (ssize_t)len);
+
+	if (rpc_conn.child_fd >= 0)
+		close(rpc_conn.child_fd);
+
+	return ret;
 }
 #endif /* ESDM_FUZZING */
 

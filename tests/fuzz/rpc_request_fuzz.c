@@ -100,8 +100,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 	/*
 	 * Non-blocking like an accepted connection, so a response that does
-	 * not fit into the socket buffer is dropped with a timeout instead of
-	 * stopping the fuzzer.
+	 * not fit into the socket buffer is dropped with the connection after
+	 * a timeout instead of stopping the fuzzer.
 	 */
 	if (set_fd_nonblocking(fuzz_response_fd) ||
 	    set_fd_nonblocking(fuzz_response_peer_fd)) {
