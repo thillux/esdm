@@ -37,7 +37,7 @@ processing is designed to maintain this strength.
 Summary:        Entropy Source and DRNG Manager
 Requires:       libjitterentropy
 Requires:       libleancrypto1
-Requires:       libprotobuf
+Requires:       libprotobuf-c1
 Requires:       systemd
 
 %description %{name}
