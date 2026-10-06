@@ -725,7 +725,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			struct iovec iov = { arg, sizeof(ent_count_bits) };
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
 		} else {
-			ent_count_bits = *(uint32_t *)in_buf;
+			int ent_count;
+
+			memcpy(&ent_count, in_buf, sizeof(ent_count));
 
 			/*
 			 * This operation requires privileges. Thus, raise the
@@ -735,6 +737,18 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 				fuse_reply_err(req, EPERM);
 				return;
 			}
+
+			/*
+			 * The kernel takes an int and refuses a negative
+			 * count. As unsigned value, it would claim the
+			 * largest entropy count possible instead.
+			 */
+			if (ent_count < 0) {
+				fuse_reply_err(req, EINVAL);
+				return;
+			}
+			ent_count_bits = (uint32_t)ent_count;
+
 			esdm_cuse_raise_privilege_transient(req);
 			esdm_invoke(esdm_rpcc_rnd_add_to_ent_cnt_int(
 				ent_count_bits, req));

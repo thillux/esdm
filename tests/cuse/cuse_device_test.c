@@ -422,6 +422,33 @@ static void test_ioctl_addentropy_rejected(void)
 }
 
 /*
+ * RNDADDTOENTCNT takes an int, and the kernel refuses a negative one. Read as
+ * unsigned, -1 would claim the largest entropy count there is.
+ */
+static void test_ioctl_addtoentcnt_negative(void)
+{
+	int bits = -1;
+
+	caller_is_root(true);
+
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, 0);
+
+	bits = INT32_MIN;
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+
+	/* The privilege check comes first, as in the kernel */
+	caller_is_root(false);
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+}
+
+/*
  * The commands that change the ESDM's state are for root. This is the check
  * that stands between any user of /dev/random and the entropy accounting, so
  * each command is asked for as an ordinary user and has to be refused.
@@ -942,6 +969,7 @@ int main(int argc, char *argv[])
 	test_ioctl_compat();
 	test_ioctl_retries();
 	test_ioctl_addentropy_rejected();
+	test_ioctl_addtoentcnt_negative();
 	test_ioctl_privileged_refused();
 	test_ioctl_privilege_is_capability();
 	test_ioctl_status_and_unknown();
