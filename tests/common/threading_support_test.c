@@ -372,6 +372,54 @@ static void test_send_signal(void)
 	CHECK_EQ(sigaction(SIGHUP, &old, NULL), 0);
 }
 
+static atomic_bool signaler_stop;
+
+static void *signaler(void *data)
+{
+	(void)data;
+
+	while (!atomic_load(&signaler_stop))
+		thread_send_signal(1, SIGHUP);
+
+	return NULL;
+}
+
+/*
+ * thread_send_signal() reads the slots without their lock while
+ * thread_schedule() fills them in for a new job - keep both going at once so
+ * a data race between them shows up under ThreadSanitizer.
+ */
+static void test_send_signal_race(void)
+{
+	struct sigaction sa, old;
+	pthread_t thread;
+	unsigned int i;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = sighup_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	CHECK_EQ(sigaction(SIGHUP, &sa, &old), 0);
+
+	atomic_store(&signaler_stop, false);
+	if (pthread_create(&thread, NULL, signaler, NULL)) {
+		CHECK(0, "cannot start the signaling thread");
+		sigaction(SIGHUP, &old, NULL);
+		return;
+	}
+
+	for (i = 0; i < 200; i++) {
+		CHECK_EQ(thread_start(job_count, NULL, 1, NULL), 0);
+		CHECK_EQ(thread_wait(false), 0);
+	}
+
+	atomic_store(&signaler_stop, true);
+	pthread_join(thread, NULL);
+
+	CHECK_EQ(thread_wait_all(true), 0);
+	CHECK_EQ(sigaction(SIGHUP, &old, NULL), 0);
+}
+
 struct fork_join_arg {
 	unsigned int index;
 	unsigned int runs;
@@ -504,6 +552,7 @@ int main(int argc, char *argv[])
 	test_special_groups();
 	test_group_isolation();
 	test_send_signal();
+	test_send_signal_race();
 	test_fork_join();
 	test_thread_names();
 

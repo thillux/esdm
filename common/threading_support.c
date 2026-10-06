@@ -55,8 +55,12 @@
  * Structure for one thread
  */
 struct thread_ctx {
-	pthread_t thread_id; /* Thread ID from pthread_create */
-	pthread_t parent; /* Parent thread ID */
+	/*
+	 * Thread ID from pthread_create and parent thread ID - atomic as
+	 * thread_send_signal() reads them without holding inuse.
+	 */
+	_Atomic(pthread_t) thread_id;
+	_Atomic(pthread_t) parent;
 	unsigned int thread_num; /* Current slot number */
 	int ret_ancestor; /* Return code of ancestor code */
 
@@ -398,15 +402,16 @@ static void *thread_worker(void *arg)
 /* Spawn a thread */
 static int thread_create(struct thread_ctx *tctx, unsigned int slot)
 {
+	pthread_t thread_id;
 	int ret;
 
 	tctx->thread_num = slot;
 	tctx->data = NULL;
 
-	ret = -pthread_create(&tctx->thread_id, &pthread_attr, &thread_worker,
-			      tctx);
+	ret = -pthread_create(&thread_id, &pthread_attr, &thread_worker, tctx);
 	if (ret)
 		goto err;
+	atomic_store(&tctx->thread_id, thread_id);
 
 	/*
 	 * Publish thread_pending only after pthread_create has written a valid
@@ -454,12 +459,15 @@ void thread_send_signal(uint32_t thread_group, int signal)
 		 * atomically; it stays true until thread_wait_all() joins the
 		 * thread, so gating on it avoids pthread_kill()ing a stale
 		 * thread_id whose thread was already joined (and whose id may
-		 * since have been recycled). A mutex cannot be taken here as
-		 * this may run from a signal-handling context.
+		 * since have been recycled). The inuse lock cannot be taken
+		 * here: a working thread holds it for as long as its job runs,
+		 * which is exactly when it is to be signaled. thread_id and
+		 * parent are atomic for this unlocked access.
 		 */
 		if (thread_dirty(i) && atomic_load(&threads[i].start_routine) &&
-		    !pthread_equal(threads[i].parent, self))
-			pthread_kill(threads[i].thread_id, signal);
+		    !pthread_equal(atomic_load(&threads[i].parent), self))
+			pthread_kill(atomic_load(&threads[i].thread_id),
+				     signal);
 	}
 }
 
@@ -514,7 +522,8 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 			 * mother thread - kick the worker.
 			 */
 			if (threads[j].scheduled &&
-			    !pthread_equal(threads[j].parent, self)) {
+			    !pthread_equal(atomic_load(&threads[j].parent),
+					   self)) {
 				mutex_w_unlock(&threads[j].inuse);
 				pthread_cond_broadcast(&threads[j].worker_cv);
 				continue;
@@ -556,8 +565,12 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 				    "Thread %u for thread group %u assigned\n",
 				    j, thread_group);
 			threads[j].data = tdata;
+			/*
+			 * The parent goes first, so a thread_send_signal()
+			 * seeing the job also sees whose job it is.
+			 */
+			atomic_store(&threads[j].parent, self);
 			atomic_store(&threads[j].start_routine, start_routine);
-			threads[j].parent = pthread_self();
 			threads[j].scheduled = true;
 			pthread_cond_broadcast(&threads[j].worker_cv);
 			mutex_w_unlock(&threads[j].inuse);
@@ -595,7 +608,8 @@ int thread_wait(bool ignore_shutdown)
 				continue;
 
 			/* Thread is not one of our children, skip */
-			if (!pthread_equal(threads[i].parent, self))
+			if (!pthread_equal(atomic_load(&threads[i].parent),
+					   self))
 				continue;
 
 			/* If the thread executes a job, skip but wait. */
@@ -720,7 +734,7 @@ int thread_wait_all(bool system_threads)
 			goto out;
 		}
 		if (join_me[i]) {
-			pthread_join(threads[i].thread_id, NULL);
+			pthread_join(atomic_load(&threads[i].thread_id), NULL);
 			ret |= threads[i].ret_ancestor;
 			thread_cleanup_full(&threads[i]);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
@@ -766,8 +780,8 @@ static void thread_cancel(bool system_threads)
 	/* Kill all worker threads. */
 	for (i = 0; i < upper; i++) {
 		if (thread_dirty(i)) {
-			pthread_cancel(threads[i].thread_id);
-			pthread_join(threads[i].thread_id, NULL);
+			pthread_cancel(atomic_load(&threads[i].thread_id));
+			pthread_join(atomic_load(&threads[i].thread_id), NULL);
 			thread_cleanup_full(&threads[i]);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
 				    "Thread %u killed\n", i);
