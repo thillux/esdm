@@ -1624,6 +1624,8 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 	ssize_t processed = 0;
 	size_t iterations = 0;
 	bool pr = (drng == &esdm_drng_pr) ? true : false;
+	/* The DRNG was reseeded for the first block below already */
+	bool reseeded = false;
 
 	if (!outbuf || !outbuflen)
 		return 0;
@@ -1665,6 +1667,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			/* double check, as we did not lock the DRNG in the first check*/
 			if (esdm_drng_must_reseed(drng, false)) {
 				esdm_drng_seed_nolock(drng);
+				reseeded = true;
 			}
 			mutex_w_unlock(&drng->lock);
 
@@ -1689,8 +1692,13 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			min_uint32((uint32_t)outbuflen, ESDM_DRNG_MAX_REQSIZE);
 		ssize_t ret;
 
-		/* In normal operation, check whether to reseed */
-		if (!pr && esdm_drng_must_reseed(drng, true)) {
+		/*
+		 * In normal operation, check whether to reseed - unless that
+		 * happened just above: with a reseed interval of zero seconds
+		 * the check says yes every time, and the first block would
+		 * otherwise be generated after two seedings in a row.
+		 */
+		if (!pr && !reseeded && esdm_drng_must_reseed(drng, true)) {
 			if (esdm_drng_reseed_async_capable(drng) &&
 			    esdm_drng_reseed_async(drng)) {
 				/*
@@ -1824,6 +1832,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				   INT_MAX);
 		processed += ret;
 		outbuflen -= (size_t)ret;
+		reseeded = false;
 
 		if (pr) {
 			/*

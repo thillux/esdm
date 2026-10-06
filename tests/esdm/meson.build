@@ -207,6 +207,16 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM aux pool digest size', esdm_aux_digestsize_test)
 
+	esdm_reseed_per_request_test = executable(
+		'esdm_reseed_per_request_test',
+		[ esdm_ipc_ns, 'esdm_reseed_per_request_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM reseed per request', esdm_reseed_per_request_test)
+
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
 	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test)
