@@ -75,8 +75,15 @@ int main(int argc, char *argv[])
 	unsigned int ctr = 0;
 	int ret, errsv = 0;
 
-	/* Open the fallback of the kernel device before overlaying it */
+	/*
+	 * Open the fallback of the kernel device before overlaying it. ENXIO
+	 * means a stale overlay of a previous instance is in the way, which
+	 * the umount removes. Only retry on that error from this very attempt:
+	 * a successful open must end the loop, it would leak the descriptor
+	 * otherwise.
+	 */
 	do {
+		errsv = 0;
 		urandom_fd = open("/dev/urandom", O_RDWR | O_CLOEXEC);
 		if (urandom_fd < 0)
 			errsv = errno;
@@ -85,7 +92,6 @@ int main(int argc, char *argv[])
 	} while (errsv == ENXIO && ctr < 3);
 
 	if (urandom_fd == -1) {
-		errsv = errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
 			    "Cannot open /dev/urandom: %s\n", strerror(errsv));
 		return errsv;
