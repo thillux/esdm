@@ -134,7 +134,7 @@
                 lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
               ++ lib.optionals kernelDebug (lpself.callPackage ./addon/linux_esdm_es/debug.nix { })
-              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { };
+              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { inherit (lpsuper) kernel; };
           };
           esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
         };
@@ -1933,13 +1933,17 @@
 
         }
         # One out-of-tree esdm_es module build per defined kernel, e.g.
-        # esdm_es_6_6 / esdm_es_latest.
+        # esdm_es_6_6 / esdm_es_latest. These carry the debugfs testing
+        # interfaces, so they stay compiled on every kernel; the module the
+        # checks and live systems load comes from the kernel package set and
+        # leaves them out.
         // lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "esdm_es_${name}" (
             pkgs.callPackage ./addon/linux_esdm_es {
               inherit (pkgs) lib;
               inherit (kernel) kernel;
+              enableTesting = true;
             }
           )
         ) kernels
