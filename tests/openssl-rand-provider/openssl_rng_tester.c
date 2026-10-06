@@ -30,6 +30,9 @@
 
 #include "env.h"
 
+/* The GNU test protocol's hard error, never inverted by should_fail */
+#define TEST_SETUP_ERROR 99
+
 static bool test_random(void)
 {
 	unsigned char bytes[300];
@@ -103,66 +106,68 @@ static bool test_instantiate(bool prediction_resistance)
 	return true;
 }
 
-static bool performTest(char *test, char *type)
+/*
+ * Returns EXIT_SUCCESS, EXIT_FAILURE if the test itself failed, or
+ * TEST_SETUP_ERROR if it could not be run at all - a provider that does not
+ * load must not count as the refusal one of the tests expects.
+ */
+static int performTest(char *test, char *type)
 {
 	OSSL_PROVIDER *prov_esdm = NULL;
 	OSSL_PROVIDER *prov_default = NULL;
-	bool result = false;
+	const char *prov_name;
+	int ret = TEST_SETUP_ERROR;
 
 	if (strncmp(type, "rng", strlen("rng")) == 0) {
-		prov_esdm = OSSL_PROVIDER_load(NULL, "libesdm-rng-provider");
-		if (prov_esdm == NULL)
-			return false;
-		prov_default = OSSL_PROVIDER_load(NULL, "default");
-		if (prov_default == NULL)
-			goto out;
+		prov_name = "libesdm-rng-provider";
+	} else if (strncmp(type, "seed-src", strlen("seed-src")) == 0) {
+		prov_name = "libesdm-seed-src-provider";
+	} else if (strncmp(type, "egd", strlen("egd")) == 0) {
+		/*
+		 * The EGD provider reaches the ESDM over the EGD protocol
+		 * instead of the RPC interface, so it is the one variant that
+		 * works without the RPC client library at all - env_init() has
+		 * the server serve EGD and points the client at that socket.
+		 */
+		prov_name = "libesdm-egd-provider";
+	} else {
+		fprintf(stderr, "Unknown provider type %s\n", type);
+		return TEST_SETUP_ERROR;
 	}
 
-	if (strncmp(type, "seed-src", strlen("seed-src")) == 0) {
-		prov_esdm =
-			OSSL_PROVIDER_load(NULL, "libesdm-seed-src-provider");
-		if (prov_esdm == NULL)
-			return false;
-		prov_default = OSSL_PROVIDER_load(NULL, "default");
-		if (prov_default == NULL)
-			goto out;
+	prov_esdm = OSSL_PROVIDER_load(NULL, prov_name);
+	if (prov_esdm == NULL) {
+		fprintf(stderr, "Cannot load %s\n", prov_name);
+		return TEST_SETUP_ERROR;
+	}
+	prov_default = OSSL_PROVIDER_load(NULL, "default");
+	if (prov_default == NULL) {
+		fprintf(stderr, "Cannot load the default provider\n");
+		goto out;
 	}
 
-	/*
-	 * The EGD provider reaches the ESDM over the EGD protocol instead of
-	 * the RPC interface, so it is the one variant that works without the
-	 * RPC client library at all - env_init() has the server serve EGD and
-	 * points the client at that socket.
-	 */
-	if (strncmp(type, "egd", strlen("egd")) == 0) {
-		prov_esdm = OSSL_PROVIDER_load(NULL, "libesdm-egd-provider");
-		if (prov_esdm == NULL)
-			return false;
-		prov_default = OSSL_PROVIDER_load(NULL, "default");
-		if (prov_default == NULL)
-			goto out;
+	if (strncmp(test, "random", strlen("random")) == 0) {
+		ret = test_random() ? EXIT_SUCCESS : EXIT_FAILURE;
+	} else if (strncmp(test, "instantiate_pr", strlen("instantiate_pr")) ==
+		   0) {
+		ret = test_instantiate(true) ? EXIT_SUCCESS : EXIT_FAILURE;
+	} else if (strncmp(test, "instantiate_full",
+			   strlen("instantiate_full")) == 0) {
+		ret = test_instantiate(false) ? EXIT_SUCCESS : EXIT_FAILURE;
+	} else {
+		fprintf(stderr, "Unknown test %s\n", test);
 	}
-
-	if (strncmp(test, "random", strlen("random")) == 0)
-		result = test_random();
-	else if (strncmp(test, "instantiate_pr", strlen("instantiate_pr")) == 0)
-		result = test_instantiate(true);
-	else if (strncmp(test, "instantiate_full",
-			 strlen("instantiate_full")) == 0)
-		result = test_instantiate(false);
 
 out:
 	if (prov_default)
 		OSSL_PROVIDER_unload(prov_default);
-	if (prov_esdm)
-		OSSL_PROVIDER_unload(prov_esdm);
-	return result;
+	OSSL_PROVIDER_unload(prov_esdm);
+	return ret;
 }
 
 int main(int argc, char **argv)
 {
 	char *provider_search_path;
-	bool success;
 	char *test;
 	char *type;
 	int ret;
@@ -172,18 +177,24 @@ int main(int argc, char **argv)
 	test = argv[2];
 	type = argv[3];
 
+	/*
+	 * A setup failure is reported as a hard error (99) rather than a plain
+	 * failure: meson inverts a failure for a should_fail test, but takes
+	 * 99 - like the skip code 77 - at face value. The test expecting the
+	 * provider to refuse would otherwise pass without a server.
+	 */
 	ret = env_init();
 	if (ret)
-		return ret;
+		return ret == 77 ? 77 : TEST_SETUP_ERROR;
 
 	ret = OSSL_PROVIDER_set_default_search_path(NULL, provider_search_path);
 	if (ret != 1) {
 		env_fini();
-		return EXIT_FAILURE;
+		return TEST_SETUP_ERROR;
 	}
 
-	success = performTest(test, type);
+	ret = performTest(test, type);
 
 	env_fini();
-	return success ? EXIT_SUCCESS : EXIT_FAILURE;
+	return ret;
 }

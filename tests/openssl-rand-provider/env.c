@@ -105,12 +105,21 @@ int env_init(void)
 		return EFAULT;
 	}
 	server_pid = pid;
-	/* The server is up once it has bound its unprivileged RPC socket */
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
-	/* and serving EGD once that socket is there as well */
-	test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+
+	/*
+	 * The server is up once it has bound its unprivileged RPC socket and
+	 * serving EGD once that socket is there as well. Unlike the other test
+	 * environments, a server that never comes up is an error here rather
+	 * than left to the test: one of the tests is expected to fail, and
+	 * must not pass merely because there was nothing to talk to.
+	 */
+	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
+				TEST_WAIT_TIMEOUT_MS) ||
+	    !test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
+				TEST_WAIT_TIMEOUT_MS)) {
+		env_fini();
+		ret = ETIMEDOUT;
+	}
 
 out:
 	return ret;
