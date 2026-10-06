@@ -1545,11 +1545,8 @@ bool esdm_drng_mgr_reseed_worker_start(void)
 	if (thread_start(esdm_drng_reseed_worker, NULL, ESDM_THREAD_DRNG_RESEED,
 			 NULL)) {
 		/*
-		 * No worker slot free. Nothing reseeds the DRNGs on their
-		 * interval then: a DRNG that reaches its maximum without a
-		 * reseed is dropped out of the fully seeded state by the
-		 * generate path and picked up by the ES monitor through
-		 * __esdm_drng_seed_work().
+		 * No worker slot free. The generate path then reseeds each
+		 * DRNG itself when a request runs into its reseed condition.
 		 */
 		atomic_store(&esdm_drng_reseed_worker_active, false);
 		esdm_logger(
@@ -1574,8 +1571,11 @@ static void esdm_drng_reseed_notify(void)
  * generating from the DRNG until the reseed lands, or until the DRNG runs into
  * the configured maximum without a full reseed - which the generate path
  * enforces on its own and which no deferral relaxes.
+ *
+ * Returns false if there is no worker to hand the reseed to: the caller then
+ * has to reseed the DRNG itself, or nothing ever would.
  */
-static void esdm_drng_reseed_async(struct esdm_drng *drng)
+static bool esdm_drng_reseed_async(struct esdm_drng *drng)
 {
 	/*
 	 * The reseed condition holds on every loop iteration until the worker
@@ -1583,7 +1583,7 @@ static void esdm_drng_reseed_async(struct esdm_drng *drng)
 	 * worker.
 	 */
 	if (atomic_exchange(&drng->reseed_pending, true))
-		return;
+		return true;
 
 	/*
 	 * Nobody to service the request - do not leave it queued, or the DRNG
@@ -1591,10 +1591,12 @@ static void esdm_drng_reseed_async(struct esdm_drng *drng)
 	 */
 	if (!esdm_drng_mgr_reseed_worker_running()) {
 		atomic_store(&drng->reseed_pending, false);
-		return;
+		return false;
 	}
 
 	esdm_drng_reseed_notify();
+
+	return true;
 }
 
 /**
@@ -1686,19 +1688,22 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 
 		/* In normal operation, check whether to reseed */
 		if (!pr && esdm_drng_must_reseed(drng, true)) {
-			if (esdm_drng_reseed_async_capable(drng)) {
+			if (esdm_drng_reseed_async_capable(drng) &&
+			    esdm_drng_reseed_async(drng)) {
 				/*
 				 * Hand the entropy collection to the worker and
 				 * keep generating. Under SP800-90C / AIS 20/31
-				 * DRG.4 the reseed threshold sits at half the
-				 * maximum number of bits allowed without a full
-				 * reseed, so there is a whole threshold's worth
-				 * of output left to cover the collection - and
+				 * DRG.4 the reseed threshold sits at three
+				 * quarters of the maximum number of bits allowed
+				 * without a full reseed, so a quarter of it is
+				 * left to cover the collection - and
 				 * where it does not, the DRNG leaves the fully
 				 * seeded state below and the caller moves to
 				 * another node instead of waiting here.
+				 *
+				 * Without a worker the DRNG is reseeded right
+				 * here, like one that cannot defer.
 				 */
-				esdm_drng_reseed_async(drng);
 			} else if (!esdm_pool_trylock()) {
 				/*
 				 * Entropy pool cannot be locked, try to reseed

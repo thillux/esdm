@@ -93,6 +93,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_drng_mgr_no_worker_reseed_test = executable(
+		'esdm_drng_mgr_no_worker_reseed_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_no_worker_reseed_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_drng_mgr_throughput_test = executable(
 		'esdm_drng_mgr_throughput_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_throughput_test.c' ],
@@ -173,6 +181,9 @@ if get_option('esdm-server').enabled()
 		args : [ '1' ])
 	test('ESDM DRNG manager max w/o reseed - 2 DRNG', esdm_drng_mgr_max_wo_reseed_test,
 		args : [ '2' ])
+
+	test('ESDM DRNG manager node reseed without worker',
+		esdm_drng_mgr_no_worker_reseed_test)
 
 	test('ESDM DRNG manager max w/o reseed bits - 1 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
 		args : [ '1' ])
