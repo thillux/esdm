@@ -214,7 +214,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 	static const int CLIENT_TX_TIMEOUT_MS =
 		(1 << ESDM_CLIENT_RX_TX_TIMEOUT_EXPONENT) / 1000000;
 	unsigned int retries = 0;
-	int pret = -1;
+	int pret;
 	ssize_t ret;
 
 	if (rpc_conn->fd < 0)
@@ -228,6 +228,11 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 		}
 
 		retries++;
+		/*
+		 * Only a poll timeout of this very attempt counts - a stale
+		 * one would divert a later EPIPE from the reconnect below.
+		 */
+		pret = -1;
 		ret = write(rpc_conn->fd, data, len);
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			struct pollfd pfd = { .fd = rpc_conn->fd,
