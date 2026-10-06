@@ -475,6 +475,27 @@ static int esdm_cuse_interrupt(void *data)
 	return !!fuse_req_interrupted(req);
 }
 
+/*
+ * Whether a read of seeded randomness would block. The status segment answers
+ * that without a round trip and is what poll() reports as well; without it, the
+ * ESDM is asked. If neither can tell, the read goes ahead and ends up at the
+ * fallback.
+ */
+static bool esdm_cuse_read_would_block(fuse_req_t req)
+{
+	bool fully_seeded = false;
+	int ret;
+
+	if (esdm_cuse_shm_status_avail())
+		return !atomic_load(&esdm_cuse_shm_status->operational);
+
+	esdm_cuse_unpriv_call_start();
+	esdm_invoke(esdm_rpcc_is_fully_seeded_int(&fully_seeded, req));
+	esdm_cuse_unpriv_call_end();
+
+	return !ret && !fully_seeded;
+}
+
 void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			     struct fuse_file_info *fi, get_func_t get,
 			     int fallback_fd)
@@ -499,6 +520,17 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 
 	if (fi->flags & O_SYNC)
 		get = esdm_rpcc_get_random_bytes_pr_int;
+
+	/*
+	 * Everything but the plain urandom read blocks until the ESDM is
+	 * seeded, which a reader asking for O_NONBLOCK is told with EAGAIN
+	 * instead, as the kernel's /dev/random does.
+	 */
+	if ((fi->flags & O_NONBLOCK) && get != esdm_rpcc_get_random_bytes_int &&
+	    esdm_cuse_read_would_block(req)) {
+		ret = -EAGAIN;
+		goto out;
+	}
 
 	/*
 	 * fuse automatically chunks requests, e.g. for a 1MB read

@@ -719,6 +719,58 @@ static void test_privileged_ioctls(void)
 }
 
 /*
+ * A non-blocking read of /dev/random while the ESDM is not seeded yet. The
+ * kernel answers it with EAGAIN, and so does this device - the request would
+ * otherwise wait for the seeding like a blocking one. Called with the status
+ * segment attached, which is where the seeding state comes from.
+ */
+static void read_call(int flags, get_func_t get, int fd)
+{
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = flags;
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi, get, fd);
+}
+
+static void test_read_nonblock(void)
+{
+	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/urandom: %s", strerror(errno));
+		return;
+	}
+
+	atomic_store(&esdm_cuse_shm_status->operational, false);
+
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+
+	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+
+	/* /dev/urandom never blocks */
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/* A blocking reader is served - here from the fallback */
+	read_call(0, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/* And once the ESDM is seeded, a non-blocking one as well */
+	atomic_store(&esdm_cuse_shm_status->operational, true);
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	atomic_store(&esdm_cuse_shm_status->operational, false);
+
+	close(fd);
+}
+
+/*
  * The status segment and the semaphore that go with it.
  *
  * Both are machine-global names, so this test creates them in an IPC namespace
@@ -772,6 +824,8 @@ static void test_shm_status(void)
 	esdm_cuse_get_pollmask(&mask);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
 	atomic_store(&esdm_cuse_shm_status->suspend_trigger, false);
+
+	test_read_nonblock();
 
 	/* The status ioctl answers out of the same segment */
 	esdm_cuse_shm_status->infolen = 5;
