@@ -326,11 +326,18 @@ static void *thread_worker(void *arg)
 	int (*routine)(void *);
 
 	/*
-	 * pthread_setcanceltype() only affects the calling thread, so it must
-	 * be invoked here in the worker and not in thread_create() (where it
-	 * would mark the creator async-cancelable instead).
+	 * Deferred cancellation, which is the default, stated here as the
+	 * choice it is: a worker runs arbitrary jobs - DRNG reseeds under their
+	 * locks, malloc(), the logger's stdio - none of which is safe to be
+	 * cancelled at an arbitrary instruction, which is all
+	 * PTHREAD_CANCEL_ASYNCHRONOUS would allow. Deferred cancellation is
+	 * honoured at the cancellation points the workers block in anyway:
+	 * the condition wait while idle, and the waits of the jobs themselves.
+	 *
+	 * pthread_setcanceltype() only affects the calling thread, so it is
+	 * invoked here in the worker and not in thread_create().
 	 */
-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 
 	if (!thread_is_special(tctx)) {
 		sigset_t block, old;
