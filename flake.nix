@@ -161,8 +161,11 @@
                     major = lib.toInt (builtins.elemAt m 0);
                     minor = lib.toInt (builtins.elemAt m 1);
                     supported = major > minKernel.major || (major == minKernel.major && minor >= minKernel.minor);
+                    # nixpkgs keeps end-of-life series (e.g. 6_13, 7_1) as
+                    # aliases that throw "was removed"; skip those.
+                    available = (builtins.tryEval pkgs.${name}.kernel.version).success;
                   in
-                  lib.optional supported {
+                  lib.optional (supported && available) {
                     name = "${toString major}_${toString minor}";
                     value = pkgs.${name};
                   }
