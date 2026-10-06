@@ -40,6 +40,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/capability.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -490,6 +491,61 @@ static void test_pre_init(void)
 }
 
 /*
+ * The CUSE devices grant the privileged random ioctls on CAP_SYS_ADMIN, as the
+ * kernel does, looked up from /proc/<pid>/status of the caller. The helper is
+ * shared with this frontend and tested here, where privileges.c is linked.
+ */
+static void test_caller_cap_sys_admin(void)
+{
+	static const char with_cap[] =
+		"Name:\tx\nUid:\t1000\t1000\t1000\t1000\n"
+		"CapInh:\t0000000000000000\nCapPrm:\t0000000000200000\n"
+		"CapEff:\t0000000000200000\n";
+	static const char root_without_cap[] =
+		"Name:\tx\nUid:\t0\t0\t0\t0\n"
+		"CapInh:\t0000000000000000\nCapPrm:\t000001ffffdfffff\n"
+		"CapEff:\t000001ffffdfffff\n";
+	static const char permitted_only[] =
+		"Name:\tx\nUid:\t0\t0\t0\t0\n"
+		"CapPrm:\t000001ffffffffff\nCapEff:\t0000000000000000\n";
+	static const char truncated[] = "Name:\tx\nUid:\t0\t0\t0\t0\n";
+	char path[64];
+	FILE *f;
+	unsigned long long capeff = 0;
+	char line[256];
+
+	/* Only the effective set counts, and only CAP_SYS_ADMIN in it */
+	CHECK_EQ(caller_status_cap_sys_admin(with_cap, 1000), 1);
+	CHECK_EQ(caller_status_cap_sys_admin(root_without_cap, 0), 0);
+	CHECK_EQ(caller_status_cap_sys_admin(permitted_only, 0), 0);
+	CHECK_EQ(caller_status_cap_sys_admin(truncated, 0), 0);
+	CHECK_EQ(caller_status_cap_sys_admin("", 0), 0);
+
+	/* A status of another UID than the request's is not the caller's */
+	CHECK_EQ(caller_status_cap_sys_admin(with_cap, 1001), 0);
+
+	/* No PID, no caller */
+	CHECK_EQ(caller_has_cap_sys_admin(0, 0), 0);
+	CHECK_EQ(caller_has_cap_sys_admin(-1, 0), 0);
+
+	/* This process, whatever it holds */
+	snprintf(path, sizeof(path), "/proc/%d/status", (int)getpid());
+	f = fopen(path, "r");
+	if (!f) {
+		CHECK(0, "cannot open %s: %s", path, strerror(errno));
+		return;
+	}
+	while (fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, "CapEff:", 7))
+			capeff = strtoull(line + 7, NULL, 16);
+	}
+	fclose(f);
+
+	CHECK_EQ(caller_has_cap_sys_admin(getpid(), geteuid()),
+		 !!(capeff & (1ULL << CAP_SYS_ADMIN)));
+}
+
+/*
  * The parts that change the process' credentials, in a child of their own.
  *
  * Setting a writable file raises to root for the RPC and drops to "nobody"
@@ -583,6 +639,7 @@ int main(int argc, char *argv[])
 	test_write_values_rejected();
 	test_fill_data_without_server();
 	test_pre_init();
+	test_caller_cap_sys_admin();
 	test_privileged_transitions();
 
 	/* The usage, which is all main() prints before it hands over to FUSE */

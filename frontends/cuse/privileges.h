@@ -42,6 +42,34 @@ int drop_privileges_transient(const char *user);
  */
 int raise_privilege_transient(uid_t uid, gid_t gid);
 
+/**
+ * @brief Whether the caller of a FUSE request holds CAP_SYS_ADMIN
+ *
+ * The kernel checks capable(CAP_SYS_ADMIN) for the privileged random ioctls,
+ * irrespective of the caller's UID. A FUSE request carries the PID and the file
+ * system UID of the caller, so its effective capabilities are looked up via
+ * /proc. The UID has to match as well, which guards against the PID naming
+ * another process by then - the caller is blocked in its request until it is
+ * answered, unless it is killed.
+ *
+ * @param [in] pid PID of the caller as given by the FUSE request
+ * @param [in] fsuid file system UID of the caller as given by the FUSE request
+ *
+ * @return 1 if the caller holds CAP_SYS_ADMIN in our user namespace, 0 if not
+ *	   or if that cannot be determined
+ */
+int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid);
+
+/**
+ * @brief The parser of caller_has_cap_sys_admin for /proc/<pid>/status
+ *
+ * @param [in] status NUL-terminated content of /proc/<pid>/status
+ * @param [in] fsuid file system UID the status has to report
+ *
+ * @return 1 if the status reports CAP_SYS_ADMIN as effective, 0 if not
+ */
+int caller_status_cap_sys_admin(const char *status, uid_t fsuid);
+
 #ifdef __cplusplus
 }
 #endif

@@ -19,9 +19,13 @@
 
 #define _DEFAULT_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <pwd.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -133,4 +137,92 @@ int raise_privilege_transient(uid_t uid, gid_t gid)
 		    gid);
 
 	return 0;
+}
+
+/* Read a /proc file of at most buflen - 1 bytes into buf, NUL-terminated */
+static int read_proc_file(const char *path, char *buf, size_t buflen)
+{
+	size_t len = 0;
+	ssize_t rc;
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0)
+		return -errno;
+
+	do {
+		rc = read(fd, buf + len, buflen - 1 - len);
+		if (rc > 0)
+			len += (size_t)rc;
+	} while ((rc > 0 || (rc < 0 && errno == EINTR)) && len < buflen - 1);
+
+	close(fd);
+
+	if (rc < 0)
+		return -EIO;
+
+	/* A file that does not fit is not one this parser understands */
+	if (len == buflen - 1)
+		return -EFBIG;
+
+	buf[len] = '\0';
+
+	return 0;
+}
+
+int caller_status_cap_sys_admin(const char *status, uid_t fsuid)
+{
+	unsigned int ruid, euid, suid, fs;
+	unsigned long long capeff;
+	const char *p;
+	char *end;
+
+	/* The UIDs are real, effective, saved and file system UID */
+	p = strstr(status, "\nUid:");
+	if (!p || sscanf(p + 5, "%u %u %u %u", &ruid, &euid, &suid, &fs) != 4)
+		return 0;
+
+	/*
+	 * The FUSE request carries the file system UID of the caller. A
+	 * different one means the PID no longer names the caller.
+	 */
+	if ((uid_t)fs != fsuid)
+		return 0;
+
+	p = strstr(status, "\nCapEff:");
+	if (!p)
+		return 0;
+
+	errno = 0;
+	capeff = strtoull(p + 8, &end, 16);
+	if (errno || end == p + 8)
+		return 0;
+
+	return !!(capeff & (1ULL << CAP_SYS_ADMIN));
+}
+
+int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	char path[64], buf[8192], own_map[256], caller_map[256];
+
+	/* A caller outside of our PID namespace is not identifiable */
+	if (pid <= 0)
+		return 0;
+
+	/*
+	 * Capabilities count in the user namespace they are held in, and only
+	 * those in ours are the kernel's capable(CAP_SYS_ADMIN). Reading the
+	 * namespace itself needs ptrace access to the caller, its UID map does
+	 * not - the caller has to have the map we have.
+	 */
+	snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)pid);
+	if (read_proc_file("/proc/self/uid_map", own_map, sizeof(own_map)) ||
+	    read_proc_file(path, caller_map, sizeof(caller_map)) ||
+	    strcmp(own_map, caller_map))
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+	if (read_proc_file(path, buf, sizeof(buf)))
+		return 0;
+
+	return caller_status_cap_sys_admin(buf, fsuid);
 }

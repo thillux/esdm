@@ -403,13 +403,15 @@ static bool esdm_cuse_client_privileged(fuse_req_t req)
 	const struct fuse_ctx *ctx = fuse_req_ctx(req);
 
 	/*
-	 * We are not checking the GID as we expect a root user to use any
-	 * GID.
+	 * The kernel requires CAP_SYS_ADMIN for the privileged ioctls, not a
+	 * UID: a root process without it is refused, a non-root one holding it
+	 * is not.
 	 *
 	 * WARNING: as documented for struct fuse_ctx, the CUSE daemon
-	 * MUST NOT run in a PID or user namespace.
+	 * MUST NOT run in a PID or user namespace - a caller outside of it is
+	 * not identifiable and thus refused.
 	 */
-	if (ctx->uid == 0) {
+	if (caller_has_cap_sys_admin(ctx->pid, ctx->uid)) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 			    "CUSE caller privileged\n");
 		return true;

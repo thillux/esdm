@@ -234,6 +234,17 @@ int drop_supplemental_groups(void)
 	return 0;
 }
 
+/* Whether the caller holds CAP_SYS_ADMIN, see caller_is() */
+static bool test_caller_cap;
+
+int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	(void)pid;
+	(void)fsuid;
+
+	return test_caller_cap;
+}
+
 /******************************************************************************
  * The device helpers of cuse_helper.c
  *
@@ -276,13 +287,22 @@ int esdm_cuse_bind_unmount(char **src, char **dst)
 #define TEST_REQ ((fuse_req_t)&reply)
 #define TEST_PH ((struct fuse_pollhandle *)&notify_calls)
 
-/* The caller of the requests that follow */
-static void caller_is_root(bool root)
+/*
+ * The caller of the requests that follow: its UID, and whether it holds
+ * CAP_SYS_ADMIN, which is what the kernel checks and the UID is not.
+ */
+static void caller_is(uid_t uid, bool cap_sys_admin)
 {
 	memset(&test_ctx, 0, sizeof(test_ctx));
-	test_ctx.uid = root ? 0 : 1000;
-	test_ctx.gid = root ? 0 : 1000;
+	test_ctx.uid = uid;
+	test_ctx.gid = uid;
 	test_ctx.pid = getpid();
+	test_caller_cap = cap_sys_admin;
+}
+
+static void caller_is_root(bool root)
+{
+	caller_is(root ? 0 : 1000, root);
 }
 
 static void ioctl_call(unsigned long cmd, const void *in_buf, size_t in_bufsz,
@@ -451,6 +471,35 @@ static void test_ioctl_privileged_refused(void)
 	ioctl_call(44, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EPERM);
+}
+
+/*
+ * What decides is CAP_SYS_ADMIN, as in the kernel, not the UID: root without
+ * the capability - a container's root, a service with a bounding set - is
+ * refused, and a user holding it is not.
+ */
+static void test_ioctl_privilege_is_capability(void)
+{
+	caller_is(0, false);
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+	CHECK_EQ(raise_calls, 0);
+
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+
+	caller_is(1000, true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind == REPLY_ERR || reply.kind == REPLY_IOCTL,
+	      "RNDRESEEDCRNG was not answered");
+	CHECK(reply.kind != REPLY_ERR || reply.err != EPERM,
+	      "a caller holding CAP_SYS_ADMIN was refused");
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
+
+	caller_is_root(false);
 }
 
 /*
@@ -894,6 +943,7 @@ int main(int argc, char *argv[])
 	test_ioctl_retries();
 	test_ioctl_addentropy_rejected();
 	test_ioctl_privileged_refused();
+	test_ioctl_privilege_is_capability();
 	test_ioctl_status_and_unknown();
 	test_read_fallback();
 	test_write_fallback();
