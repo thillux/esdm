@@ -40,6 +40,17 @@ if get_option('es_jent').enabled()
 	)
 
 	test('ES Jitter RNG', es_jent_tester, timeout: 300)
+
+	es_jent_init_fail_tester = executable(
+		'es_jent_init_fail_tester',
+		[ esdm_ipc_ns, 'es_jent_init_fail_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
+	test('ES Jitter RNG failing self test', es_jent_init_fail_tester,
+	     timeout: 120)
 endif
 
 if get_option('es_cpu').enabled()

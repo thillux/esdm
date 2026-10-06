@@ -424,7 +424,17 @@ static int esdm_jent_initialize(void)
 	 */
 	mutex_w_lock(&esdm_jent_lock);
 
-	CKINT(jent_entropy_init_ex(ESDM_JENT_OSR, flags));
+	/*
+	 * jent_entropy_init_ex() reports a failed startup health test with a
+	 * positive error code, which CKINT would let through.
+	 */
+	ret = jent_entropy_init_ex(ESDM_JENT_OSR, flags);
+	if (ret) {
+		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
+			    "Jitter RNG startup self test failed: %d\n", ret);
+		ret = -EFAULT;
+		goto out;
+	}
 
 #if (ESDM_JENT_ENTROPY_BLOCKS != 0)
 	/*
@@ -469,7 +479,11 @@ out:
 			    "Jitter RNG unusable on current system\n");
 	}
 
-	return ret;
+	/*
+	 * An unusable Jitter RNG is a source without entropy, not a failure of
+	 * the ESDM: it continues with the other sources, as the warning says.
+	 */
+	return 0;
 }
 
 static void esdm_jent_es_state(char *buf, size_t buflen)
