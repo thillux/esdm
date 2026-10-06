@@ -943,7 +943,9 @@ static bool __esdm_drng_seed_work(struct esdm_drng **esdm_drng, bool force)
 			atomic_store(&esdm_drng_pr.force_reseed, true);
 		esdm_drng_seed_work_one(&esdm_drng_pr, 0);
 		progress = atomic_load(&esdm_drng_pr.fully_seeded);
-		goto out;
+		/* The nodes are all seeded, so with this one all DRNGs are */
+		if (!progress)
+			goto out;
 	}
 
 	esdm_pool_all_nodes_seeded(true);
@@ -1824,8 +1826,16 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		outbuflen -= (size_t)ret;
 
 		if (pr) {
-			/* Force the async reseed for PR DRNG */
-			esdm_unset_fully_seeded(drng);
+			/*
+			 * Each output of the PR DRNG takes a fresh seed, which
+			 * the next one collects above. Only this instance is
+			 * marked: esdm_unset_fully_seeded() would also clear
+			 * the state that all DRNGs are seeded, which says
+			 * nothing about this one being spent on purpose, and
+			 * esdm_get_seed(), the reseed on entropy arrival and
+			 * the initial oversampling key off that state.
+			 */
+			atomic_store(&drng->fully_seeded, false);
 			if (outbuflen &&
 			    iterations++ % pr_yield_iterations == 0)
 				sched_yield();
