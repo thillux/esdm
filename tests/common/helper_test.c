@@ -29,6 +29,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -343,6 +344,60 @@ static void test_safe_read_write_errors(void)
 	signal(SIGPIPE, SIG_DFL);
 }
 
+/*
+ * An error after part of the buffer was transferred must not swallow what was
+ * transferred - the data is gone from the descriptor (or sent) either way.
+ * Like read(2) and write(2), the partial count is reported and the error is
+ * left for the next call. A non-blocking pipe produces exactly that sequence:
+ * a short transfer followed by EAGAIN.
+ */
+static void test_safe_read_write_partial_error(void)
+{
+	uint8_t out[2 * 4096], in[2 * 4096];
+	ssize_t capacity, ret;
+	int fds[2];
+
+	memset(out, 0x5a, sizeof(out));
+
+	if (pipe(fds) < 0) {
+		CHECK(0, "pipe() failed: %s", strerror(errno));
+		return;
+	}
+
+	/* Shrink the pipe below the buffer size (a page at the least) */
+	capacity = fcntl(fds[1], F_SETPIPE_SZ, 4096);
+	if (capacity < 0)
+		capacity = fcntl(fds[1], F_GETPIPE_SZ);
+	if (capacity <= 0 || (size_t)capacity >= sizeof(out)) {
+		CHECK(0, "cannot size the pipe below %zu bytes", sizeof(out));
+		goto out;
+	}
+
+	if (fcntl(fds[0], F_SETFL, O_NONBLOCK) < 0 ||
+	    fcntl(fds[1], F_SETFL, O_NONBLOCK) < 0) {
+		CHECK(0, "cannot make the pipe non-blocking: %s",
+		      strerror(errno));
+		goto out;
+	}
+
+	/* The pipe takes what fits, then the next write fails with EAGAIN */
+	ret = esdm_safe_write(fds[1], out, sizeof(out));
+	CHECK_EQ(ret, capacity);
+
+	/* The pipe hands out what it holds, then the next read fails */
+	ret = esdm_safe_read(fds[0], in, sizeof(in));
+	CHECK_EQ(ret, capacity);
+	if (ret > 0)
+		CHECK_MEM_EQ(in, out, (size_t)ret);
+
+	/* With nothing transferred, the error itself is reported */
+	CHECK_EQ(esdm_safe_read(fds[0], in, sizeof(in)), -EAGAIN);
+
+out:
+	close(fds[0]);
+	close(fds[1]);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -359,6 +414,7 @@ int main(int argc, char *argv[])
 	test_safe_write_partial();
 	test_safe_read_eintr();
 	test_safe_read_write_errors();
+	test_safe_read_write_partial_error();
 
 	return common_test_result("helper");
 }
