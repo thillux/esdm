@@ -534,6 +534,19 @@ int esdm_config_init(void)
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_hwrand_entropy_rate_bits);
 	complete_entropy_rate += esdm_config.esdm_es_hwrand_entropy_rate_bits;
+	esdm_config.esdm_es_tpm2_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_tpm2_entropy_rate_bits);
+	complete_entropy_rate += esdm_config.esdm_es_tpm2_entropy_rate_bits;
+	esdm_config.esdm_es_pkcs11_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_pkcs11_entropy_rate_bits);
+	complete_entropy_rate += esdm_config.esdm_es_pkcs11_entropy_rate_bits;
+	esdm_config.esdm_es_jent_kernel_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_jent_kernel_entropy_rate_bits);
+	complete_entropy_rate +=
+		esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
 
 	if (!complete_entropy_rate) {
 		esdm_logger_status(
