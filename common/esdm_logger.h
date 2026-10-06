@@ -65,11 +65,6 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 		  const enum esdm_logger_class class_, const char *file,
 		  const char *func, const uint32_t line, const char *fmt, ...)
 	__attribute__((format(printf, 6, 7)));
-void _esdm_logger_binary(const enum esdm_logger_verbosity severity,
-			 const enum esdm_logger_class class_,
-			 const unsigned char *bin, const uint32_t binlen,
-			 const char *str, const char *file, const char *func,
-			 const uint32_t line);
 
 /**
  * logger - log string with given severity
