@@ -310,6 +310,30 @@ static int seeder_test_cli(void)
 	}
 
 	/*
+	 * An interval the wait cannot use is refused as well: 0 would make the
+	 * feeder a busy loop draining the ESDM, a negative one would end it at
+	 * its first wait.
+	 */
+	{
+		char *argv[] = { bin, "-i", "0", NULL };
+
+		ret += seeder_run_expect("interval option rejects 0", argv,
+					 "interval 0 out of range");
+	}
+	{
+		char *argv[] = { bin, "--interval", "-5", NULL };
+
+		ret += seeder_run_expect("interval option rejects a negative value",
+					 argv, "interval -5 out of range");
+	}
+	{
+		char *argv[] = { bin, "-i", "4294967296", NULL };
+
+		ret += seeder_run_expect("interval option rejects a huge value",
+					 argv, "out of range");
+	}
+
+	/*
 	 * The remaining long options carry no argument. Combined with --help
 	 * they terminate regardless of privileges, and reaching the usage
 	 * output at all proves they were not dispatched to the interval

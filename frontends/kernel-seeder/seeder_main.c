@@ -76,6 +76,26 @@ static int64_t parse_int64_arg(const char *str, const char *name)
 }
 
 /*
+ * The seeding interval waits in ppoll(): 0 would turn the daemon into a busy
+ * loop draining the ESDM, a negative one fails the wait and ends the daemon.
+ * The upper bound keeps it within a 32 bit time_t.
+ */
+static int64_t parse_interval_arg(const char *str)
+{
+	int64_t val = parse_int64_arg(str, "interval");
+
+	if (val < 1 || val > INT32_MAX) {
+		/* Not esdm_logger(), see parse_int64_arg() */
+		fprintf(stderr,
+			"esdm-kernel-seeder: interval %s out of range, it has to be between 1 and %d seconds\n",
+			str, INT32_MAX);
+		exit(EXIT_FAILURE);
+	}
+
+	return val;
+}
+
+/*
  * modern Linux kernels have a 256 Bit entropy pool, always provide
  * twice the amount for full entropy inside the pool after leftover hashing
  * on pool updates.
@@ -371,7 +391,7 @@ int main(int argc, char **argv)
 			case 0:
 				/* seeding interval */
 				seeding_interval_secs =
-					parse_int64_arg(optarg, "interval");
+					parse_interval_arg(optarg);
 				break;
 			case 1:
 				/* help */
@@ -392,8 +412,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'i':
-			seeding_interval_secs =
-				parse_int64_arg(optarg, "interval");
+			seeding_interval_secs = parse_interval_arg(optarg);
 			break;
 		case 'h':
 			help = true;
