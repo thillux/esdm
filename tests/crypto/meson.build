@@ -45,4 +45,13 @@ if get_option('drng_hash_drbg').enabled()
 			link_with: esdm_static_lib,
 		)
 	test('Hash DRBG SHA512', hash_drbg_tester)
+
+	drbg_healthcheck_tester = executable(
+			'drbg_healthcheck_tester',
+			[ 'drbg_healthcheck_tester.c' ],
+			dependencies: dependencies_server,
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+		)
+	test('DRBG health check', drbg_healthcheck_tester)
 endif
