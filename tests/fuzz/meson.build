@@ -232,6 +232,20 @@ rpc_stress_test = executable(
 
 test('RPC request path under concurrent load', rpc_stress_test, timeout: 300)
 
+# The answers the server gives where it cannot give the one asked for, through
+# the same request path as the first harness.
+rpc_server_test = executable(
+		'rpc_server_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_c_args,
+	)
+
+test('RPC server failure answers', rpc_server_test)
+
 foreach fuzz_target : fuzz_targets
 	target_c_args = fuzz_c_args + fuzz_target.get('c_args', [ ])
 
