@@ -8,7 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <asm/ptrace.h>
-#include <crypto/drbg.h>
+#include "esdm_drbg_string.h"
 #include <linux/esdm_sched.h>
 #include <linux/module.h>
 #include <linux/random.h>

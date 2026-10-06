@@ -15,7 +15,7 @@
 #define _ESDM_ES_RING_H
 
 #include <asm/barrier.h>
-#include <crypto/drbg.h>
+#include "esdm_drbg_string.h"
 #include <linux/compiler.h>
 #include <linux/cpumask.h>
 #include <linux/percpu.h>

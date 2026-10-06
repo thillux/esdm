@@ -126,7 +126,7 @@
                 lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
               ++ lib.optionals kernelDebug (lpself.callPackage ./addon/linux_esdm_es/debug.nix { })
-              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { };
+              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { inherit (lpsuper) kernel; };
           };
           esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
         };

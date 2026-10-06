@@ -9,7 +9,7 @@
 
 #include <asm/irq_regs.h>
 #include <asm/ptrace.h>
-#include <crypto/drbg.h>
+#include "esdm_drbg_string.h"
 #include <linux/esdm_irq.h>
 #include <linux/module.h>
 #include <linux/random.h>
