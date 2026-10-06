@@ -70,8 +70,12 @@ endif
 
 if get_option('crypto_backend') == 'leancrypto'
 	conf_data.set('ESDM_LEANCRYPTO', true)
+	# Since leancrypto 1.6.0, lc_hash_init() reports a failed self test
+	conf_data.set('ESDM_LEANCRYPTO_HASH_INIT_RET',
+		      leancrypto_dep.version().version_compare('>= 1.6.0'))
 else
 	conf_data.set('ESDM_LEANCRYPTO', false)
+	conf_data.set('ESDM_LEANCRYPTO_HASH_INIT_RET', false)
 endif
 
 if get_option('crypto_backend') == 'openssl'

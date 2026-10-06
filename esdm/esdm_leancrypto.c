@@ -22,11 +22,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "esdm_crypto.h"
 #include "esdm_leancrypto.h"
 #include "esdm_logger.h"
+#include "memset_secure.h"
 
 #define ESDM_LEANCRYPTO_HASH lc_sha3_512
+
+/*
+ * Since leancrypto 1.6.0, lc_hash_init() fails when the self test of the hash
+ * failed - before, it could not fail.
+ */
+static int esdm_lc_hash_init(struct lc_hash_ctx *hash_ctx)
+{
+#ifdef ESDM_LEANCRYPTO_HASH_INIT_RET
+	return lc_hash_init(hash_ctx);
+#else
+	lc_hash_init(hash_ctx);
+	return 0;
+#endif
+}
 
 static uint32_t esdm_leancrypto_hash_digestsize(void *hash)
 {
@@ -39,8 +55,7 @@ static int esdm_leancrypto_hash_init(void *hash)
 {
 	struct lc_hash_ctx *hash_ctx = hash;
 
-	lc_hash_init(hash_ctx);
-	return 0;
+	return esdm_lc_hash_init(hash_ctx);
 }
 
 static int esdm_leancrypto_hash_update(void *hash, const uint8_t *inbuf,
@@ -102,13 +117,43 @@ const struct esdm_hash_cb esdm_leancrypto_hash_cb = {
 	.hash_dealloc = esdm_leancrypto_hash_dealloc,
 };
 
+/*
+ * The XDRBG encodes the length of its additional input in a single byte, which
+ * limits it to 84 bytes (XDRBG specification, appendix B.2). Older leancrypto
+ * versions silently use only the first 84 bytes, newer ones refuse longer
+ * input - while the DRNG manager hands over a struct entropy_buf, far longer
+ * than that.
+ */
+#define ESDM_LEANCRYPTO_XDRBG_MAX_ADDTL 84
+
 static int esdm_leancrypto_drbg_seed(void *drng, const uint8_t *inbuf,
 				     size_t inbuflen, const uint8_t *addtl,
 				     size_t addtllen)
 {
 	struct lc_rng_ctx *ctx = drng;
+	uint8_t digest[LC_SHA3_512_SIZE_DIGEST];
+	int ret;
 
-	return lc_rng_seed(ctx, inbuf, inbuflen, addtl, addtllen);
+	if (!addtl || addtllen <= ESDM_LEANCRYPTO_XDRBG_MAX_ADDTL)
+		return lc_rng_seed(ctx, inbuf, inbuflen, addtl, addtllen);
+
+	/*
+	 * Condense longer additional input with SHA3-512 so all of it is
+	 * mixed into the state, and pass on the digest instead.
+	 */
+	LC_HASH_CTX_ON_STACK(hash_ctx, lc_sha3_512);
+
+	ret = esdm_lc_hash_init(hash_ctx);
+	if (!ret) {
+		lc_hash_update(hash_ctx, addtl, addtllen);
+		lc_hash_final(hash_ctx, digest);
+		ret = lc_rng_seed(ctx, inbuf, inbuflen, digest, sizeof(digest));
+	}
+
+	lc_hash_zero(hash_ctx);
+	memset_secure(digest, 0, sizeof(digest));
+
+	return ret;
 }
 
 static ssize_t esdm_leancrypto_drbg_generate(void *drng, uint8_t *outbuf,

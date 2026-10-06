@@ -55,3 +55,14 @@ if get_option('drng_hash_drbg').enabled()
 		)
 	test('DRBG health check', drbg_healthcheck_tester)
 endif
+
+if get_option('crypto_backend') == 'leancrypto'
+	leancrypto_drbg_tester = executable(
+			'leancrypto_drbg_tester',
+			[ 'leancrypto_drbg_tester.c' ],
+			dependencies: dependencies_server,
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+		)
+	test('leancrypto DRBG', leancrypto_drbg_tester)
+endif
