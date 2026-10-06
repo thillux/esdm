@@ -216,6 +216,17 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 		 *
 		 * Note: const is cast away due to OpenSSL's OSSL_PARAM API
 		 * requiring void*. The buffer is not modified by OpenSSL.
+		 *
+		 * Note 2: TEST-RAND keeps a heap copy of TEST_ENTROPY and
+		 * TEST_NONCE for as long as it lives and releases it with a
+		 * plain OPENSSL_free() - not cleansed - when the next reseed
+		 * replaces it or the context is freed (test_rng.c as of
+		 * OpenSSL 3.6.3). ESDM cannot reach that copy: replacing
+		 * it with zeros right after seeding would only free the seed
+		 * earlier, just as uncleansed, as OpenSSL allocates the
+		 * replacement before it frees the old copy. Closing this
+		 * needs OPENSSL_clear_free() in TEST-RAND or a seed source
+		 * provider of ESDM's own.
 		 */
 		params[0] = OSSL_PARAM_construct_octet_string(
 			OSSL_RAND_PARAM_TEST_ENTROPY, (void *)inbuf, inbuflen);
