@@ -943,6 +943,17 @@ static void test_shm_status(void)
 	CHECK_STR_EQ((const char *)reply.buf, "ESDM");
 
 	/*
+	 * Without the version, the server has not finished writing the
+	 * report - it is starting, or restarting over this segment - so it is
+	 * not served half-written.
+	 */
+	esdm_cuse_shm_status->version = 0;
+	ioctl_call(42, NULL, 0, sizeof(reply.buf), -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
+
+	/*
 	 * A length beyond the segment is clamped rather than read past - the
 	 * segment is written by another process, so its length is not to be
 	 * trusted.

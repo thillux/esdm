@@ -878,12 +878,21 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 
 	/* ESDM-specific IOCTL: get ESDM information */
 	case 42: {
+		char info[ESDM_SHM_STATUS_INFO_SIZE];
 		size_t infolen;
 
-		if (!esdm_cuse_shm_status) {
+		/*
+		 * The server writes the report before it publishes the
+		 * segment's version, and withdraws the version before writing
+		 * it anew when it restarts. So the report is only complete
+		 * while the version is there - before the copy, and still
+		 * after it.
+		 */
+		if (!esdm_cuse_shm_status_avail()) {
 			fuse_reply_err(req, EAGAIN);
 			break;
 		}
+		atomic_thread_fence(memory_order_acquire);
 
 		/* Clamp infolen to buffer bounds to prevent overread */
 		infolen = esdm_cuse_shm_status->infolen;
@@ -894,10 +903,15 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			struct iovec iov = { arg, infolen };
 
 			fuse_reply_ioctl_retry(req, NULL, 0, &iov, 1);
-		} else {
-			fuse_reply_ioctl(req, 0, esdm_cuse_shm_status->info,
-					 infolen);
+			break;
 		}
+
+		memcpy(info, esdm_cuse_shm_status->info, infolen);
+		atomic_thread_fence(memory_order_acquire);
+		if (!esdm_cuse_shm_status_avail())
+			fuse_reply_err(req, EAGAIN);
+		else
+			fuse_reply_ioctl(req, 0, info, infolen);
 		break;
 	}
 
