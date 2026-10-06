@@ -276,6 +276,25 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 }
 
 /*
+ * Answer the request with a header-only failure status. A response that cannot
+ * be sent leaves the client without any answer - it would wait for its receive
+ * timeout and then send the request again, only to run into the same failure.
+ */
+static int esdm_rpcs_send_failure(struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpc_proto_sc_header sc_header;
+
+	sc_header.status_code =
+		le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SERVICE_FAILED);
+	sc_header.method_index = le_bswap32(rpc_conn->method_index);
+	sc_header.message_length = 0;
+	sc_header.request_id = le_bswap32(rpc_conn->request_id);
+
+	return esdm_rpcs_write_data(rpc_conn, (uint8_t *)&sc_header,
+				    sizeof(sc_header));
+}
+
+/*
  * Implementation of packing data and sending it out. Properties:
  *
  * - one call to write data out to the file descriptor
@@ -318,7 +337,7 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_RPC,
 				"Message too large for connection buffer\n");
-			return ret;
+			goto out_failure;
 		}
 	} else {
 		struct esdm_rpc_write_data_buf tmp = {
@@ -334,7 +353,8 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 				    "Unexpected message length: %zu > %zu\n",
 				    message_length,
 				    ESDM_RPC_MAX_INTERNAL_MSG_SIZE);
-			return -EFAULT;
+			ret = -EFAULT;
+			goto out_failure;
 		}
 
 		if (message_length > payload_max) {
@@ -343,7 +363,8 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 				"Message too large for connection buffer: %zu > %zu\n",
 				message_length + ESDM_RPCS_BUF_WRITE_HEADER_SZ,
 				sizeof(esdm_rpcs_reqbuf));
-			return -EOVERFLOW;
+			ret = -EOVERFLOW;
+			goto out_failure;
 		}
 
 		tmp.dst_buf = payload_buf;
@@ -352,8 +373,9 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 		    message_length) {
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
 				    "Short write of data to file descriptor\n");
+			memset_secure(payload_buf, 0, tmp.dst_written);
 			ret = -EFAULT;
-			goto out;
+			goto out_failure;
 		}
 	}
 
@@ -392,23 +414,19 @@ out:
 		      ESDM_RPCS_BUF_WRITE_HEADER_SZ + message_length);
 
 	return ret;
+
+out_failure:
+	/* Nothing was written yet - tell the client the call failed */
+	esdm_rpcs_send_failure(rpc_conn);
+	return ret;
 }
 
 /* Pack the message into a ProtobufC structure and write it to the receiver. */
 static int esdm_rpcs_pack(const ProtobufCMessage *message,
 			  struct esdm_rpcs_connection *rpc_conn)
 {
-	struct esdm_rpc_proto_sc_header sc_header;
-
-	if (!protobuf_c_message_check(message)) {
-		sc_header.status_code =
-			le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SERVICE_FAILED);
-		sc_header.method_index = le_bswap32(rpc_conn->method_index);
-		sc_header.message_length = 0;
-		sc_header.request_id = le_bswap32(rpc_conn->request_id);
-		return esdm_rpcs_write_data(rpc_conn, (uint8_t *)&sc_header,
-					    sizeof(sc_header));
-	}
+	if (!protobuf_c_message_check(message))
+		return esdm_rpcs_send_failure(rpc_conn);
 
 	return esdm_rpcs_pack_internal(message, rpc_conn);
 }
