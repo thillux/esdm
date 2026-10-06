@@ -253,14 +253,7 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 	} else {
 		params[0] = OSSL_PARAM_construct_octet_string(
 			OSSL_RAND_PARAM_TEST_ENTROPY, (void *)inbuf, inbuflen);
-		if (addtl) {
-			params[1] = OSSL_PARAM_construct_octet_string(
-				OSSL_RAND_PARAM_TEST_NONCE, (void *)addtl,
-				addtllen);
-			params[2] = OSSL_PARAM_construct_end();
-		} else {
-			params[1] = OSSL_PARAM_construct_end();
-		}
+		params[1] = OSSL_PARAM_construct_end();
 
 		if (!EVP_RAND_CTX_set_params(state->seed_source, params)) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_MD,
@@ -270,7 +263,13 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 			goto out;
 		}
 
-		if (!EVP_RAND_reseed(state->drbg, 0, NULL, 0, NULL, 0)) {
+		/*
+		 * A reseed never asks for a nonce, so the additional data must
+		 * go in as the reseed's additional input - setting it as the
+		 * TEST-RAND nonce would leave it unused.
+		 */
+		if (!EVP_RAND_reseed(state->drbg, 0, NULL, 0,
+				     addtl, addtl ? addtllen : 0)) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_MD,
 				    "Failed to reseed DRBG\n");
 			ret = -EFAULT;
