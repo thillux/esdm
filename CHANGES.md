@@ -14,8 +14,15 @@ cannot be reached, OpenSSH's sandboxed pre-authentication child included
 libesdm-egd-provider-pr.so - the EGD protocol cannot ask for prediction
 resistance per request, so it is a property of the socket
 
-* Split the build option ais2031 into ais2031_ntg1 (NTG.1 seeding strategy) and
-ais2031_drg4 (DRG.4.10 reseeding limits), which can now be selected independently
+* Split the build option ais2031 into ais2031_ntg1 (NTG.1 seeding strategy),
+ais2031_drg3 (DRG.3 class) and ais2031_drg4 (DRG.4.10 reseeding limits), which
+can now be selected independently - ais2031_drg3 and ais2031_drg4 are mutually
+exclusive
+
+* Add the build option ais2031_drg3: it applies the entropy source oversampling of
+the sp80090c option without the request size based reseeding limits of DRG.4,
+which are not brought back by setting sp80090c alongside; the status reports the
+AIS 20/31 DRG classes the build satisfies (a DRG.4 build reports DRG.3 as well)
 
 * NTG.1 seeding strategy: seed from the jitter RNG alone when it is operated in
 its own NTG.1 mode (es_jent_ntg1 with jitterentropy >= 3.7.0), as it is NTG.1
@@ -36,6 +43,10 @@ addon/es_ebpf_testing
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
+* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c or ais2031_drg4 the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
+
+* fix: esdm_get_seed() hands back the output of all entropy sources again, the zero-entropy ones collected as additional data included, without clearing the entropy estimates of the creditable sources; the returned entropy count covers the creditable sources only
+
 * Reseed the DRNGs proactively: an asynchronous worker reseeds a DRNG whose interval elapsed whether or not data was ever requested from it, brings up instances that never reached the fully seeded level, spreads the seed times over a random offset and sleeps until the next reseed falls due; the status reports the worker, its passes and the time left before each reseed
 
 * fix: An RPC client decoded a response whose header it had just rejected, handing the caller a payload reaching past the receive buffer - for the random calls, data generated for an earlier request (found by the new fuzz harnesses)
@@ -44,7 +55,7 @@ addon/es_ebpf_testing
 
 * fix: The OpenSSL RAND providers stored a new context lock over the old one when locking was enabled twice, leaking it and leaving the users of the shared context locking different things (found by the new fuzz harnesses)
 
-* Add fuzz harnesses for the RPC requests, responses and wire codec, the server as a client reaches it, both sides of the EGD interface and the library API (build option 'fuzzing', see tests/fuzz/README.md); beyond crashes they check what the code promised, and their seeds are replayed by the ordinary test suite
+* Add fuzz harnesses for the RPC requests, responses and wire codec, the server as a client reaches it, both sides of the EGD interface and the library API (build option 'fuzzing', see tests/fuzz/README.md); beyond crashes they check what the code promised, and when building with -Dfuzzing=enabled their seeds are additionally replayed as regression tests by the ordinary test suite (meson test), also without libFuzzer
 
 * Add a fuzz harness per shipped OpenSSL RAND provider module (build option 'openssl-rand-provider'), each loading its provider the way libcrypto does and holding it to the contract of <openssl/core_dispatch.h>
 
@@ -66,6 +77,8 @@ addon/es_ebpf_testing
 
 * esdm-tool: add --max-reseed-secs SECS to set the maximum interval between two DRNG reseeds
 
+* Add the status as a JSON document next to the human-readable text: esdm_status_json() in libesdm, the RPC call esdm_rpcc_status_json() and esdm-tool --status-json; the ESDM properties are members, the entropy sources an array below "entropy_sources" (json-c is a new build dependency)
+
 * Status report: add one section per DRNG instance - seeding state, reseed counters, seed generation and the time of the last seeding - to the status text and to the JSON document ("drngs" array), carrying the initial and the prediction resistance instance; an instance is identified by type and node now, so the "id" member is gone
 
 * Status reports are no longer truncated silently: a report that does not fit into the buffer is answered with -EMSGSIZE, a JSON document empty and a text report as far as it got, so esdm_status() returns a value now
@@ -73,6 +86,52 @@ addon/es_ebpf_testing
 * Add an RPC call to obtain the status of a single DRNG instance as JSON, addressed by the node it serves or by asking for the prediction resistance instance
 
 * esdm-tool: add --drng-status [=NODE|pr] and --drng-status-json [=NODE|pr] to print one DRNG instance or, without an argument, all of them as a JSON array
+
+* libesdm: export only the supported API, versioned by a linker version script (symbol versions LIBESDM_1.0 for the API of esdm.h and esdm_config.h, LIBESDM_PRIVATE_1.0 for in-tree consumers); every other DSO_PUBLIC symbol is hidden
+
+* Add man pages for esdm-server, esdm-tool, the CUSE daemons, esdm-proc, esdm-kernel-seeder, esdm-server-signal-helper, esdm-ebpf-collect, esdm-getrawentropy, esdm-extractlsb, the OpenSSL providers and the libesdm, libesdm_rpc_client, libesdm_egd_client, libesdm_getrandom and libesdm_aux_client libraries
+
+* esdm-server and the CUSE daemons no longer fork into an isolating PID namespace by default; pass --pid_namespace to enable it (without it, esdm-server removes its IPC resources itself at exit, best effort)
+
+* CPU ES: retry RDSEED up to 1024 times with PAUSE in between, as it underflows routinely under load, and retry transient RNDRRS failures on aarch64 the same way; a read failure no longer disables the CPU ES for the lifetime of the daemon, it is credited with no entropy until the next successful read
+
+* CPU ES: on s390, only use PRNO-TRNG when the facility list and the PRNO query report it, instead of dying with SIGILL on hardware without it (pre-z14)
+
+* Add a test that assesses 1 MiB of ESDM output with the SP800-90B non-IID estimators (ea_non_iid, skipped when not installed) and requires more than 6 bits of min-entropy per byte
+
+* Add a thread sanitizer build (nix build .#esdm-tsan) running the test suite
+
+* fix: data race on the job pointer of the worker thread slots (found by the thread sanitizer)
+
+* fix: SHA-3 on big-endian machines: the aligned input path absorbed host-endian lanes, so the digest depended on the alignment of the input and the known-answer self tests failed
+
+* fix: CUSE: a fallback read returning 0 bytes made the read loop spin forever; it now fails with -EIO
+
+* fix: CUSE: writes at a non-zero file offset to the proc tunables read the wrong bytes of the payload
+
+* fix: getentropy() of libesdm_getrandom returned -EIO for requests above 256 bytes instead of -1 with errno set
+
+* fix: status shared memory: access the mapping through an atomic pointer so that a concurrent detach is not dereferenced, do not remove the segment at exit while CUSE daemons are still attached, and do not destroy and recreate the live IPC on esdm_reinit(), which stranded attached CUSE daemons on an orphaned mapping and unlinked semaphores
+
+* fix: RPC client use-after-free when esdm_rpcc_fini_service() ran concurrently with a call, and a double free with two concurrent reallocating esdm_rpcc_init_*() calls
+
+* fix: Linux kernel addon: the boot-time raw entropy capture overwrote its first sample, the read pointer of the per-CPU rings was published before the DRBG consumed the data, letting the producer overwrite it mid-hash, the block size guard compared bytes with bits, and a reset scrubbed only the online CPUs, so events of an offline CPU were credited after a VM fork or an SP800-90B failure
+
+* fix: esdm-proc: /proc/sys/kernel/random/uuid read empty; a fresh UUID is now generated on every open, like the kernel's
+
+* fix: OpenSSL backend: the additional data from the uncredited entropy sources was dropped on every reseed instead of entering the DRBG as additional input
+
+* fix: Jitter RNG ES: a failed startup health test went unnoticed, and the Jitter RNG was credited regardless; when its collector could not be set up either, the initialization of the whole ESDM failed instead of continuing without the Jitter RNG
+
+* fix: without a reseed worker (esdm_init() without esdm_init_monitor()), node DRNGs were never reseeded; a request now reseeds them itself
+
+* fix: RPC server: a new connection could be closed as idle before its first request was read; the client now also retries once on a fresh connection when the server closes it without an answer
+
+* fix: RPC and EGD servers: running out of file descriptors made the workers spin on the listening socket; they stop accepting until a connection closes or the idle timer fires
+
+* fix: worker threads were cancelled asynchronously, which can strike in the middle of malloc(), the logger or a DRNG reseed holding its locks; cancellation is deferred now
+
+* fix: esdm.spec: package the EGD client library and the EGD OpenSSL providers
 
 Changes 1.2.3
 * Fix handling of non-blocking server response
