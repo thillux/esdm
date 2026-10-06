@@ -26,6 +26,8 @@
  * ea_non_iid is not installed.
  */
 
+#define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <stdint.h>
@@ -45,41 +47,105 @@
 
 static char workdir[400];
 
+/* run_ea_non_iid() results that are not an exit status of ea_non_iid */
+#define EA_NOT_INSTALLED -1	/* not found on PATH - skip */
+#define EA_SETUP_ERROR -2	/* the test could not run it - hard error */
+#define EA_ABNORMAL -3		/* it died from a signal - failure */
+
+/* What the child reports through the pipe when it does not get to exec */
+struct ea_child_err {
+	int chdir_failed;
+	int err;
+};
+
 /*
  * Run ea_non_iid on the sample file in workdir. It is run from there with
- * relative paths, as its usage text asks for. Returns its exit status, or -1
- * if it could not be run at all.
+ * relative paths, as its usage text asks for. Returns its exit status or one
+ * of the EA_* codes above.
+ *
+ * The child reports a failed chdir() or execvp() through a close-on-exec pipe
+ * rather than through an exit code of its own, which ea_non_iid could return
+ * just as well - so a working directory gone missing is not mistaken for an
+ * assessment that failed, nor a broken installation for a missing one.
  */
 static int run_ea_non_iid(void)
 {
 	char *argv[] = { (char *)"ea_non_iid", (char *)"-q", (char *)"-o",
 			 (char *)"result.json", (char *)"random.bin",
 			 (char *)"8", NULL };
-	pid_t pid = fork();
-	int status;
+	struct ea_child_err cerr = { 0, 0 };
+	int pipefd[2], status;
+	ssize_t rc;
+	pid_t pid;
 
-	if (pid < 0)
-		return -1;
+	if (pipe2(pipefd, O_CLOEXEC) < 0) {
+		printf("cannot create a pipe: %s\n", strerror(errno));
+		return EA_SETUP_ERROR;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		printf("cannot fork: %s\n", strerror(errno));
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return EA_SETUP_ERROR;
+	}
 
 	if (pid == 0) {
 		/* Its report goes to the JSON file, the log stays readable */
 		int devnull = open("/dev/null", O_WRONLY);
 
+		close(pipefd[0]);
 		if (devnull >= 0) {
 			dup2(devnull, STDOUT_FILENO);
 			dup2(devnull, STDERR_FILENO);
 			close(devnull);
 		}
-		if (chdir(workdir) < 0)
-			_exit(126);
-		execvp("ea_non_iid", argv);
+		if (chdir(workdir) < 0) {
+			cerr.chdir_failed = 1;
+			cerr.err = errno;
+		} else {
+			execvp("ea_non_iid", argv);
+			cerr.err = errno;
+		}
+		/* Nothing to do if this fails - the parent then sees a short read */
+		rc = write(pipefd[1], &cerr, sizeof(cerr));
+		(void)rc;
 		_exit(127);
 	}
 
-	if (waitpid(pid, &status, 0) < 0)
-		return -1;
-	if (!WIFEXITED(status))
-		return -1;
+	close(pipefd[1]);
+	do {
+		rc = read(pipefd[0], &cerr, sizeof(cerr));
+	} while (rc < 0 && errno == EINTR);
+	close(pipefd[0]);
+
+	while (waitpid(pid, &status, 0) < 0) {
+		if (errno != EINTR) {
+			printf("cannot wait for ea_non_iid: %s\n",
+			       strerror(errno));
+			return EA_SETUP_ERROR;
+		}
+	}
+
+	if (rc == sizeof(cerr)) {
+		if (cerr.chdir_failed) {
+			printf("cannot change to %s: %s\n", workdir,
+			       strerror(cerr.err));
+			return EA_SETUP_ERROR;
+		}
+		printf("cannot execute ea_non_iid: %s\n", strerror(cerr.err));
+		return cerr.err == ENOENT ? EA_NOT_INSTALLED : EA_SETUP_ERROR;
+	}
+	if (rc != 0) {
+		printf("cannot tell whether ea_non_iid started\n");
+		return EA_SETUP_ERROR;
+	}
+
+	if (!WIFEXITED(status)) {
+		printf("ea_non_iid terminated abnormally\n");
+		return EA_ABNORMAL;
+	}
 	return WEXITSTATUS(status);
 }
 
@@ -218,9 +284,18 @@ int main(int argc, char *argv[])
 		goto out;
 
 	ret = run_ea_non_iid();
-	if (ret == 127 || ret < 0) {
+	if (ret == EA_NOT_INSTALLED) {
 		printf("ea_non_iid is not available - skipping\n");
 		ret = 77;
+		goto out;
+	}
+	if (ret == EA_SETUP_ERROR) {
+		/* The GNU test protocol's hard error, not a failed assessment */
+		ret = 99;
+		goto out;
+	}
+	if (ret == EA_ABNORMAL) {
+		ret = 1;
 		goto out;
 	}
 	if (ret) {
