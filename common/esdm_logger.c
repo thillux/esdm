@@ -19,6 +19,7 @@
  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -54,6 +55,16 @@ struct esdm_logger_class_map {
  * the treatment of the verbosity/class levels above.
  */
 static _Atomic(FILE *) esdm_logger_stream = NULL;
+
+/*
+ * Serializes the use of esdm_logger_stream against replacing it. A writer
+ * holds it from loading the stream until its record is written, so the
+ * destructor and esdm_logger_set_file() can never fclose() a FILE another
+ * thread is still writing to - at exit, threads that are not yet joined
+ * may well still be logging.
+ */
+static pthread_mutex_t esdm_logger_stream_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static bool use_syslog = false;
 
 static void log_syslog(int severity, const char *format, ...);
@@ -199,14 +210,12 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 	char sev[10];
 	char c[30];
 	char thread_name[ESDM_THREAD_MAX_NAMELEN];
-	FILE *stream;
+	FILE *stream = NULL;
+	/* Read once, so the stream lock is dropped as it was taken */
+	const bool syslog_out = use_syslog;
 
 	if (severity > esdm_logger_verbosity_level)
 		return;
-
-	if (!esdm_logger_stream)
-		esdm_logger_stream = stderr;
-	stream = esdm_logger_stream;
 
 	va_start(args, fmt);
 	vsnprintf(msg, sizeof(msg), fmt, args);
@@ -252,16 +261,23 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 	 * The header and the message body are two separate stdio writes; hold
 	 * the stream lock across both so concurrent threads cannot interleave a
 	 * half-written record. flockfile()/funlockfile() nest with the implicit
-	 * per-call locking stdio already does.
+	 * per-call locking stdio already does. The stream itself is only
+	 * loaded under esdm_logger_stream_lock, which keeps it from being
+	 * closed underneath this writer.
 	 */
-	if (!use_syslog)
+	if (!syslog_out) {
+		pthread_mutex_lock(&esdm_logger_stream_lock);
+		if (!esdm_logger_stream)
+			esdm_logger_stream = stderr;
+		stream = esdm_logger_stream;
 		flockfile(stream);
+	}
 
 	switch (esdm_logger_verbosity_level) {
 	case LOGGER_TRACE:
 	case LOGGER_DEBUG2:
 	case LOGGER_DEBUG:
-		if (use_syslog) {
+		if (syslog_out) {
 			log_syslog((int)severity,
 				   "(%s) {%s} [%s:%s:%u] %s", thread_name, c,
 				   file, func, line, msg);
@@ -281,7 +297,7 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 	case LOGGER_NONE:
 	case LOGGER_MAX_LEVEL:
 	default:
-		if (use_syslog) {
+		if (syslog_out) {
 			log_syslog((int)severity,
 				   "(%s) {%s} %s", thread_name, c, msg);
 		} else {
@@ -293,27 +309,55 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 		break;
 	}
 
-	if (!use_syslog) {
+	if (!syslog_out) {
 		fprintf(stream, "%s", msg);
 		funlockfile(stream);
+		pthread_mutex_unlock(&esdm_logger_stream_lock);
 	}
 }
 
 static void esdm_logger_destructor(void)
 {
-	if (esdm_logger_stream && esdm_logger_stream != stderr) {
-		fclose(esdm_logger_stream);
-		esdm_logger_stream = NULL;
-	}
+	FILE *stream;
+
+	/*
+	 * Threads that are not joined yet may still log. Switch them over to
+	 * stderr under the lock first - once it is dropped again, no writer
+	 * can hold the old stream any more and it is safe to close.
+	 */
+	pthread_mutex_lock(&esdm_logger_stream_lock);
+	stream = esdm_logger_stream;
+	esdm_logger_stream = stderr;
+	pthread_mutex_unlock(&esdm_logger_stream_lock);
+
+	if (stream && stream != stderr)
+		fclose(stream);
 
 	if (use_syslog)
 		closelog();
+}
+
+/*
+ * A fork() while another thread holds esdm_logger_stream_lock must not leave
+ * the child with a lock nobody will ever release (stdio does the same for its
+ * own stream locks).
+ */
+static void esdm_logger_atfork_prepare(void)
+{
+	pthread_mutex_lock(&esdm_logger_stream_lock);
+}
+
+static void esdm_logger_atfork_release(void)
+{
+	pthread_mutex_unlock(&esdm_logger_stream_lock);
 }
 
 ESDM_DEFINE_CONSTRUCTOR(esdm_logger_constructor);
 static void esdm_logger_constructor(void)
 {
 	esdm_logger_stream = stderr;
+	pthread_atfork(esdm_logger_atfork_prepare, esdm_logger_atfork_release,
+		       esdm_logger_atfork_release);
 	atexit(esdm_logger_destructor);
 }
 
@@ -330,9 +374,14 @@ int esdm_logger_set_file(const char *pathname)
 	if (!out)
 		return -errno;
 
-	if (!esdm_logger_stream || esdm_logger_stream == stderr)
+	pthread_mutex_lock(&esdm_logger_stream_lock);
+	if (!esdm_logger_stream || esdm_logger_stream == stderr) {
 		esdm_logger_stream = out;
-	else {
+		out = NULL;
+	}
+	pthread_mutex_unlock(&esdm_logger_stream_lock);
+
+	if (out) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "Reject to set new log file\n");
 		fclose(out);

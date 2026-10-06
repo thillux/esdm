@@ -27,11 +27,15 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -313,6 +317,75 @@ static void test_logging(void)
 	check_logged("silenced-record", false, "verbosity none");
 }
 
+static void *log_forever(void *arg)
+{
+	(void)arg;
+
+	for (;;)
+		esdm_logger(LOGGER_STATUS, LOGGER_C_ANY, "exit-race-record\n");
+
+	return NULL;
+}
+
+/*
+ * The atexit handler closes the log file while threads that were never
+ * joined may still be writing to it. Each round forks a child that keeps a
+ * few threads logging and exits underneath them; a writer that gets hold of
+ * the closed FILE crashes the child (or ASan aborts it).
+ */
+static void test_exit_while_logging(void)
+{
+	const struct timespec delay = { .tv_sec = 0, .tv_nsec = 2000000 };
+	unsigned int round;
+
+	esdm_logger_set_class(LOGGER_C_ANY);
+	esdm_logger_set_verbosity(LOGGER_STATUS);
+	fflush(NULL);
+
+	for (round = 0; round < 50; round++) {
+		int status = 0;
+		pid_t pid = fork();
+
+		if (pid < 0) {
+			CHECK(0, "fork failed: %s", strerror(errno));
+			return;
+		}
+
+		if (!pid) {
+			pthread_t thread;
+			unsigned int i;
+			int devnull = open("/dev/null", O_WRONLY);
+
+			/* Once the file is closed the records go to stderr */
+			if (devnull >= 0)
+				dup2(devnull, STDERR_FILENO);
+
+			for (i = 0; i < 4; i++)
+				if (pthread_create(&thread, NULL, log_forever,
+						   NULL))
+					_exit(2);
+
+			nanosleep(&delay, NULL);
+			exit(0);
+		}
+
+		if (waitpid(pid, &status, 0) != pid) {
+			CHECK(0, "waitpid failed: %s", strerror(errno));
+			return;
+		}
+
+		CHECK(WIFEXITED(status) && !WEXITSTATUS(status),
+		      "exit with threads still logging failed in round %u "
+		      "(status 0x%x)",
+		      round, status);
+		if (!WIFEXITED(status) || WEXITSTATUS(status))
+			break;
+	}
+
+	esdm_logger_set_verbosity(LOGGER_NONE);
+	reset_logfile();
+}
+
 static void test_syslog(void)
 {
 	/*
@@ -345,6 +418,7 @@ int main(int argc, char *argv[])
 	test_get_class();
 	test_set_file();
 	test_logging();
+	test_exit_while_logging();
 	test_syslog();
 
 	ret = common_test_result("esdm_logger");
