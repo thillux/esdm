@@ -82,6 +82,26 @@ static void esdm_getrandom_lib_exit(void)
 }
 
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags);
+
+/*
+ * Whether a request for seeded randomness would block. The ESDM blocks such a
+ * request until it is fully seeded, and its RPC client keeps asking until then,
+ * so GRND_NONBLOCK has to be honored here, before the request is made.
+ *
+ * Returns 1 if it would block, 0 if not and < 0 if the ESDM cannot tell.
+ */
+static int esdm_getrandom_would_block(void)
+{
+	bool fully_seeded = false;
+	int ret;
+
+	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+	if (ret < 0)
+		return ret;
+
+	return !fully_seeded;
+}
+
 DSO_PUBLIC
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags)
 {
@@ -119,6 +139,23 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 
 	if (!atomic_load(&is_initialized)) {
 		esdm_getrandom_lib_init();
+	}
+
+	/*
+	 * getrandom(2) returns EAGAIN for GRND_NONBLOCK as long as it would
+	 * block. Without an answer from the ESDM, the kernel decides - which
+	 * also spares a non-blocking caller the wait for a second RPC that
+	 * would fail the same way.
+	 */
+	if ((flags & GRND_NONBLOCK) && !(flags & (GRND_INSECURE | GRND_SEED))) {
+		int rc = esdm_getrandom_would_block();
+
+		if (rc > 0) {
+			errno = EAGAIN;
+			return -1;
+		}
+		if (rc < 0)
+			return syscall(__NR_getrandom, buffer, length, flags);
 	}
 
 	if (flags & GRND_INSECURE) {
