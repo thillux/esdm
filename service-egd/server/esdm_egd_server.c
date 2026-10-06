@@ -65,7 +65,8 @@
  * it, connections stay queued in the listen backlog. Generous because such
  * consumers are typically idle long running daemons and nothing is preallocated
  * for them. Serving this many needs a RLIMIT_NOFILE above it; an accept failing
- * for want of a descriptor merely leaves the client queued.
+ * for want of a descriptor leaves the client queued, and the server stops
+ * listening for a moment rather than being woken for it over and over.
  */
 #define ESDM_EGD_MAX_CONNECTIONS 2048
 
@@ -1044,7 +1045,8 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 
 /* Accept one client and register it with the event loop. */
 static struct esdm_egd_conn *
-esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener)
+esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
+		bool *out_of_resources)
 {
 	struct esdm_egd_conn *conn;
 	struct ucred cred;
@@ -1053,8 +1055,19 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener)
 	int fd = accept4(listener->listening_fd, NULL, NULL,
 			 SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-	if (fd < 0)
+	if (fd < 0) {
+		/* The client stays queued, see the caller */
+		if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
+		    errno == ENOMEM) {
+			if (!*out_of_resources)
+				esdm_logger(
+					LOGGER_WARN, LOGGER_C_SERVER,
+					"EGD server: cannot accept connections: %s\n",
+					strerror(errno));
+			*out_of_resources = true;
+		}
 		return NULL;
+	}
 
 	conn = calloc(1, sizeof(struct esdm_egd_conn));
 	if (!conn) {
@@ -1125,6 +1138,13 @@ static int esdm_egd_handler(void __unused *args)
 	 * report it readable over and over and spin the worker.
 	 */
 	bool listen_armed = true;
+	/*
+	 * accept() ran out of descriptors or memory. The client stays queued,
+	 * so the level-triggered listener would wake us again at once: listen
+	 * no more until a connection closes or a poll interval passes quietly.
+	 */
+	bool accept_paused = false;
+	size_t paused_connections = 0;
 	int epfd = -1;
 	int ret = 0;
 
@@ -1177,7 +1197,8 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	while (atomic_load(&esdm_egd_exit) == 0) {
-		bool want_armed = (num_connections < ESDM_EGD_MAX_CONNECTIONS);
+		bool want_armed = (num_connections < ESDM_EGD_MAX_CONNECTIONS) &&
+				  !accept_paused;
 		int nfds, i;
 
 		if (want_armed != listen_armed) {
@@ -1223,6 +1244,10 @@ static int esdm_egd_handler(void __unused *args)
 			goto out;
 		}
 
+		if (accept_paused &&
+		    (!nfds || num_connections < paused_connections))
+			accept_paused = false;
+
 		for (i = 0; i < nfds; i++) {
 			/*
 			 * Tell the two apart by the pointer itself: the
@@ -1234,9 +1259,12 @@ static int esdm_egd_handler(void __unused *args)
 				    (void *)&esdm_egd_listeners[ARRAY_SIZE(
 					    esdm_egd_listeners)]) {
 				conn = esdm_egd_accept(epfd,
-						       events[i].data.ptr);
-				if (!conn)
+						       events[i].data.ptr,
+						       &accept_paused);
+				if (!conn) {
+					paused_connections = num_connections;
 					continue;
+				}
 
 				TAILQ_INSERT_TAIL(&conn_list, conn, tailq);
 				num_connections++;

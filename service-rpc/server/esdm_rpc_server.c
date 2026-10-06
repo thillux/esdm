@@ -670,6 +670,8 @@ static int esdm_rpcs_handler(void *args)
 	 * queued in the listen backlog instead of being dropped).
 	 */
 	bool listen_armed = true;
+	/* accept() ran out of resources - see the accept path below */
+	bool accept_paused = false;
 	int epfd = -1;
 	int tfd = -1;
 	int ret = 0;
@@ -758,7 +760,8 @@ static int esdm_rpcs_handler(void *args)
 		 * pending connection cannot busy-spin epoll_wait; re-arm once a
 		 * slot frees up so new connections are served again.
 		 */
-		bool want_armed = (num_connections < max_connections);
+		bool want_armed = (num_connections < max_connections) &&
+				  !accept_paused;
 		if (want_armed != listen_armed) {
 			struct epoll_event lev = {
 				.events = want_armed ? EPOLLIN : 0,
@@ -798,6 +801,7 @@ static int esdm_rpcs_handler(void *args)
 				ssize_t v = read(tfd, &expirations,
 						 sizeof(expirations));
 				do_cleanup = true;
+				accept_paused = false;
 				(void)v;
 				continue;
 			}
@@ -823,6 +827,25 @@ static int esdm_rpcs_handler(void *args)
 					NULL, NULL,
 					SOCK_NONBLOCK | SOCK_CLOEXEC);
 				if (accepted_fd < 0) {
+					/*
+					 * Out of file descriptors or memory: the
+					 * connection stays queued and the level
+					 * triggered listener would wake us again
+					 * right away. Stop listening until a
+					 * connection closes or the idle timer
+					 * fires instead of spinning.
+					 */
+					if (errno == EMFILE || errno == ENFILE ||
+					    errno == ENOBUFS ||
+					    errno == ENOMEM) {
+						if (!accept_paused)
+							esdm_logger(
+								LOGGER_WARN,
+								LOGGER_C_RPC,
+								"Cannot accept connections: %s\n",
+								strerror(errno));
+						accept_paused = true;
+					}
 					continue;
 				}
 				rpc_conn = calloc(
@@ -915,6 +938,7 @@ static int esdm_rpcs_handler(void *args)
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
 					--num_connections;
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
@@ -943,6 +967,7 @@ static int esdm_rpcs_handler(void *args)
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
 					--num_connections;
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
@@ -970,6 +995,7 @@ static int esdm_rpcs_handler(void *args)
 						  tmp1->child_fd, NULL);
 					esdm_rpcs_release_conn(tmp1);
 					--num_connections;
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
