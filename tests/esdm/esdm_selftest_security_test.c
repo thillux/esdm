@@ -33,6 +33,7 @@
 #include "esdm_logger.h"
 #include "esdm_selftest.h"
 #include "threading_support.h"
+#include "../test_plan.h"
 
 #ifdef ESDM_TESTMODE
 
@@ -92,13 +93,18 @@ static int esdm_selftest_test(void)
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
+	TEST_STEP("initialize the ESDM");
+	TEST_REQUIRE("the ESDM initializes");
 	ret = esdm_init();
-	if (ret)
+	if (!TEST_CHECK(ret == 0, "%d", ret))
 		return ret;
 
 	/* A full pass runs when the ESDM comes up */
-	if (!esdm_selftest_crypto_passed() ||
-	    strcmp(esdm_selftest_crypto_state_name(), "passed")) {
+	TEST_REQUIRE("the crypto self tests passed at start up");
+	if (!TEST_CHECK(esdm_selftest_crypto_passed(), "%d",
+			esdm_selftest_crypto_passed()) ||
+	    !TEST_CHECK(!strcmp(esdm_selftest_crypto_state_name(), "passed"),
+			"%s", esdm_selftest_crypto_state_name())) {
 		printf("self tests did not pass at start up: %s\n",
 		       esdm_selftest_crypto_state_name());
 		goto err;
@@ -108,40 +114,60 @@ static int esdm_selftest_test(void)
 	 * Including the entropy sources - their state is established at start
 	 * up and not only once the periodic worker got around to it.
 	 */
-	if (esdm_selftest_es_state() != esdm_selftest_passed ||
-	    strcmp(esdm_selftest_es_state_name(), "passed")) {
+	TEST_REQUIRE("the entropy source self tests passed at start up");
+	if (!TEST_CHECK(esdm_selftest_es_state() == esdm_selftest_passed, "%d",
+			(int)esdm_selftest_es_state()) ||
+	    !TEST_CHECK(!strcmp(esdm_selftest_es_state_name(), "passed"), "%s",
+			esdm_selftest_es_state_name())) {
 		printf("entropy source self tests did not pass at start up: %s\n",
 		       esdm_selftest_es_state_name());
 		goto err;
 	}
 
-	if (!esdm_selftest_es_sources() || esdm_selftest_es_failures()) {
+	TEST_REQUIRE(
+		"at least one entropy source was tested at start up, none failed");
+	if (!TEST_CHECK(esdm_selftest_es_sources() > 0, "%u",
+			esdm_selftest_es_sources()) ||
+	    !TEST_CHECK(esdm_selftest_es_failures() == 0, "%u",
+			esdm_selftest_es_failures())) {
 		printf("start up pass tested %u entropy sources, %u failed\n",
 		       esdm_selftest_es_sources(), esdm_selftest_es_failures());
 		goto err;
 	}
 
 	/* The pass at start up is counted like every other one */
+	TEST_STEP("read the number of self test passes");
 	passes = esdm_selftest_passes();
-	if (passes < 1) {
+	TEST_REQUIRE("the pass at start up is counted");
+	if (!TEST_CHECK(passes >= 1, "%lld", passes)) {
 		printf("the pass at start up was not counted: %lld\n", passes);
 		goto err;
 	}
 
 	/* Random bits are handed out while the self tests pass */
-	if (esdm_get_random_bytes_full(buf, sizeof(buf)) != sizeof(buf)) {
+	TEST_STEP("request %zu bytes from esdm_get_random_bytes_full",
+		  sizeof(buf));
+	rc = esdm_get_random_bytes_full(buf, sizeof(buf));
+	TEST_REQUIRE("%zu bytes are returned", sizeof(buf));
+	if (!TEST_CHECK(rc == (ssize_t)sizeof(buf), "%zd", rc)) {
 		printf("cannot obtain random data\n");
 		goto err;
 	}
 
 	/* The worker needs a thread pool to be taken from */
-	if (thread_init(1)) {
+	TEST_STEP("initialize threading support");
+	TEST_REQUIRE("threading support initializes");
+	ret = thread_init(1);
+	if (!TEST_CHECK(ret == 0, "%d", ret)) {
 		printf("cannot initialize threading support\n");
 		goto err;
 	}
 
-	if (!esdm_selftest_periodic_start() ||
-	    !esdm_selftest_periodic_running()) {
+	TEST_STEP("start the periodic self test worker");
+	esdm_selftest_periodic_start();
+	TEST_REQUIRE("the periodic self test worker is on duty");
+	if (!TEST_CHECK(esdm_selftest_periodic_running(), "%d",
+			esdm_selftest_periodic_running())) {
 		printf("periodic self test worker is not on duty\n");
 		goto err;
 	}
@@ -150,15 +176,23 @@ static int esdm_selftest_test(void)
 	 * The pass is repeated on its interval - one second in a test mode
 	 * build, so two more of them are seen without a long wait.
 	 */
+	TEST_RUNUNTIL(
+		"wait 100 ms until two more self test passes ran, at most %u times",
+		ESDM_SELFTEST_TEST_SLICES);
 	WAIT_FOR(esdm_selftest_passes() >= passes + 2);
-	if (esdm_selftest_passes() < passes + 2) {
+	TEST_REQUIRE("the self tests were repeated at least twice");
+	if (!TEST_CHECK(esdm_selftest_passes() >= passes + 2, "%lld",
+			esdm_selftest_passes())) {
 		printf("self tests are not repeated: %lld passes after %lld\n",
 		       esdm_selftest_passes(), passes);
 		goto err;
 	}
 
-	if (!esdm_selftest_crypto_passed() ||
-	    esdm_selftest_es_state() != esdm_selftest_passed) {
+	TEST_REQUIRE("the crypto and entropy source self tests still pass");
+	if (!TEST_CHECK(esdm_selftest_crypto_passed(), "%s",
+			esdm_selftest_crypto_state_name()) ||
+	    !TEST_CHECK(esdm_selftest_es_state() == esdm_selftest_passed, "%s",
+			esdm_selftest_es_state_name())) {
 		printf("periodic self test failed unexpectedly: %s / %s\n",
 		       esdm_selftest_crypto_state_name(),
 		       esdm_selftest_es_state_name());
@@ -167,14 +201,19 @@ static int esdm_selftest_test(void)
 
 	/* The same pass on demand - what the privileged RPC endpoint offers */
 	passes = esdm_selftest_passes();
+	TEST_STEP("run the self tests on demand");
 	rc = esdm_selftest_run();
-	if (rc) {
+	TEST_REQUIRE("the on-demand self test passes");
+	if (!TEST_CHECK(rc == 0, "%zd", rc)) {
 		printf("the on-demand self test failed: %zd\n", rc);
 		goto err;
 	}
 
-	if (!esdm_selftest_crypto_passed() ||
-	    esdm_selftest_es_state() != esdm_selftest_passed) {
+	TEST_REQUIRE("the crypto and entropy source self tests still pass");
+	if (!TEST_CHECK(esdm_selftest_crypto_passed(), "%s",
+			esdm_selftest_crypto_state_name()) ||
+	    !TEST_CHECK(esdm_selftest_es_state() == esdm_selftest_passed, "%s",
+			esdm_selftest_es_state_name())) {
 		printf("the on-demand self test left an unexpected state: %s / %s\n",
 		       esdm_selftest_crypto_state_name(),
 		       esdm_selftest_es_state_name());
@@ -182,31 +221,42 @@ static int esdm_selftest_test(void)
 	}
 
 	/* On demand or not, it is the same pass and is counted as one */
-	if (esdm_selftest_passes() <= passes) {
+	TEST_REQUIRE("the on-demand self test is counted as a pass");
+	if (!TEST_CHECK(esdm_selftest_passes() > passes, "%lld",
+			esdm_selftest_passes())) {
 		printf("the on-demand self test was not counted: %lld\n",
 		       esdm_selftest_passes());
 		goto err;
 	}
 
 	/* Now the same with a self test that failed */
+	TEST_STEP("mark the crypto self test as failed");
 	esdm_test_selftest_set_failed();
 
-	if (esdm_selftest_crypto_passed() ||
-	    strcmp(esdm_selftest_crypto_state_name(), "failed")) {
+	TEST_REQUIRE("the crypto self test is reported as failed");
+	if (!TEST_CHECK(!esdm_selftest_crypto_passed(), "%d",
+			!esdm_selftest_crypto_passed()) ||
+	    !TEST_CHECK(!strcmp(esdm_selftest_crypto_state_name(), "failed"),
+			"%s", esdm_selftest_crypto_state_name())) {
 		printf("failed self test is not reported: %s\n",
 		       esdm_selftest_crypto_state_name());
 		goto err;
 	}
 
+	TEST_STEP("request %zu bytes from esdm_get_random_bytes_full",
+		  sizeof(buf));
 	rc = esdm_get_random_bytes_full(buf, sizeof(buf));
-	if (rc != -EOPNOTSUPP) {
+	TEST_REQUIRE("the request is refused with -EOPNOTSUPP");
+	if (!TEST_CHECK(rc == -EOPNOTSUPP, "%zd", rc)) {
 		printf("random data is handed out after a failed self test: %zd\n",
 		       rc);
 		goto err;
 	}
 
+	TEST_STEP("request seed data from esdm_get_seed");
 	rc = esdm_selftest_test_get_seed();
-	if (rc != -EOPNOTSUPP) {
+	TEST_REQUIRE("the request is refused with -EOPNOTSUPP");
+	if (!TEST_CHECK(rc == -EOPNOTSUPP, "%zd", rc)) {
 		printf("seed data is handed out after a failed self test: %zd\n",
 		       rc);
 		goto err;
@@ -216,20 +266,29 @@ static int esdm_selftest_test(void)
 	 * A pass that runs after a failure passes on its own - the crypto is
 	 * not broken, the state is - and does not clear it.
 	 */
+	TEST_STEP("run the self tests on demand");
 	rc = esdm_selftest_run();
-	if (rc) {
+	TEST_REQUIRE("the on-demand self test passes");
+	if (!TEST_CHECK(rc == 0, "%zd", rc)) {
 		printf("the on-demand self test failed: %zd\n", rc);
 		goto err;
 	}
 
-	if (esdm_selftest_crypto_passed()) {
+	TEST_REQUIRE("the crypto self test is still reported as failed");
+	if (!TEST_CHECK(!esdm_selftest_crypto_passed(), "%s",
+			esdm_selftest_crypto_state_name())) {
 		printf("an on-demand self test cleared a failed self test\n");
 		goto err;
 	}
 
 	/* The worker leaves, as the state it reports cannot be recovered */
+	TEST_RUNUNTIL(
+		"wait 100 ms until the periodic self test worker left, at most %u times",
+		ESDM_SELFTEST_TEST_SLICES);
 	WAIT_FOR(!esdm_selftest_periodic_running());
-	if (esdm_selftest_periodic_running()) {
+	TEST_REQUIRE("the periodic self test worker left");
+	if (!TEST_CHECK(!esdm_selftest_periodic_running(), "%d",
+			!esdm_selftest_periodic_running())) {
 		printf("periodic self test worker stays on duty after a failure\n");
 		goto err;
 	}

@@ -41,6 +41,7 @@
 #include "esdm.h"
 #include "esdm_logger.h"
 #include "test_pertubation.h"
+#include "../test_plan.h"
 
 #define MIN_ENTROPY_BYTES (1024 * 1024)
 #define MIN_ENTROPY_LIMIT 6.0
@@ -48,9 +49,9 @@
 static char workdir[400];
 
 /* run_ea_non_iid() results that are not an exit status of ea_non_iid */
-#define EA_NOT_INSTALLED -1	/* not found on PATH - skip */
-#define EA_SETUP_ERROR -2	/* the test could not run it - hard error */
-#define EA_ABNORMAL -3		/* it died from a signal - failure */
+#define EA_NOT_INSTALLED -1 /* not found on PATH - skip */
+#define EA_SETUP_ERROR -2 /* the test could not run it - hard error */
+#define EA_ABNORMAL -3 /* it died from a signal - failure */
 
 /* What the child reports through the pipe when it does not get to exec */
 struct ea_child_err {
@@ -70,9 +71,13 @@ struct ea_child_err {
  */
 static int run_ea_non_iid(void)
 {
-	char *argv[] = { (char *)"ea_non_iid", (char *)"-q", (char *)"-o",
-			 (char *)"result.json", (char *)"random.bin",
-			 (char *)"8", NULL };
+	char *argv[] = { (char *)"ea_non_iid",
+			 (char *)"-q",
+			 (char *)"-o",
+			 (char *)"result.json",
+			 (char *)"random.bin",
+			 (char *)"8",
+			 NULL };
 	struct ea_child_err cerr = { 0, 0 };
 	int pipefd[2], status;
 	ssize_t rc;
@@ -153,6 +158,7 @@ static int write_samples(void)
 {
 	char path[sizeof(workdir) + 16];
 	uint8_t *buf;
+	size_t written = 0;
 	ssize_t rc;
 	FILE *f;
 	int ret = 1;
@@ -161,24 +167,27 @@ static int write_samples(void)
 	if (!buf)
 		return 1;
 
+	TEST_STEP("request %d bytes from esdm_get_random_bytes_full",
+		  MIN_ENTROPY_BYTES);
 	rc = esdm_get_random_bytes_full(buf, MIN_ENTROPY_BYTES);
-	if (rc != MIN_ENTROPY_BYTES) {
+	TEST_REQUIRE("%d bytes are returned", MIN_ENTROPY_BYTES);
+	if (!TEST_CHECK(rc == MIN_ENTROPY_BYTES, "%zd", rc)) {
 		printf("esdm_get_random_bytes_full returned %zd\n", rc);
 		goto out;
 	}
 
 	snprintf(path, sizeof(path), "%s/random.bin", workdir);
+	TEST_STEP("write the bytes to random.bin in a temporary directory");
 	f = fopen(path, "wb");
-	if (!f) {
-		printf("cannot create %s\n", path);
-		goto out;
+	if (f) {
+		written = fwrite(buf, 1, MIN_ENTROPY_BYTES, f);
+		/* What did not reach the file is not written */
+		if (fclose(f))
+			written = 0;
 	}
-	if (fwrite(buf, 1, MIN_ENTROPY_BYTES, f) != MIN_ENTROPY_BYTES) {
-		printf("cannot write %s\n", path);
-		fclose(f);
-		goto out;
-	}
-	if (fclose(f)) {
+
+	TEST_REQUIRE("all %d bytes are written to the file", MIN_ENTROPY_BYTES);
+	if (!TEST_CHECK(written == MIN_ENTROPY_BYTES, "%zu", written)) {
 		printf("cannot write %s\n", path);
 		goto out;
 	}
@@ -274,44 +283,56 @@ int main(int argc, char *argv[])
 	}
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
+	TEST_STEP("initialize the ESDM");
+	TEST_REQUIRE("the ESDM initializes");
 	ret = esdm_init();
-	if (ret)
+	if (!TEST_CHECK(ret == 0, "%d", ret))
 		goto out;
 
 	ret = write_samples();
+	TEST_STEP("shut the ESDM down");
 	esdm_fini();
 	if (ret)
 		goto out;
 
+	TEST_STEP(
+		"assess the bytes with the SP800-90B non-IID estimators of ea_non_iid, 8 bits per sample");
 	ret = run_ea_non_iid();
-	if (ret == EA_NOT_INSTALLED) {
+	TEST_REQUIRE("ea_non_iid is installed (test skipped otherwise)");
+	if (!TEST_CHECK(ret != EA_NOT_INSTALLED, "%d", ret)) {
 		printf("ea_non_iid is not available - skipping\n");
 		ret = 77;
 		goto out;
 	}
-	if (ret == EA_SETUP_ERROR) {
-		/* The GNU test protocol's hard error, not a failed assessment */
-		ret = 99;
-		goto out;
-	}
-	if (ret == EA_ABNORMAL) {
-		ret = 1;
-		goto out;
-	}
-	if (ret) {
-		printf("ea_non_iid failed with %d\n", ret);
+	TEST_REQUIRE("ea_non_iid completes successfully");
+	if (!TEST_CHECK(ret == 0, "%d", ret)) {
+		if (ret == EA_SETUP_ERROR) {
+			/*
+			 * The GNU test protocol's hard error, not a failed
+			 * assessment
+			 */
+			ret = 99;
+			goto out;
+		}
+		if (ret != EA_ABNORMAL)
+			printf("ea_non_iid failed with %d\n", ret);
 		ret = 1;
 		goto out;
 	}
 
+	TEST_STEP(
+		"read the overall assessed min-entropy from the ea_non_iid report");
 	h = assessed_min_entropy();
-	if (h < 0) {
+	TEST_REQUIRE("the report carries the overall assessed min-entropy");
+	if (!TEST_CHECK(h >= 0, "%f", h)) {
 		ret = 1;
 		goto out;
 	}
 
 	printf("assessed min-entropy: %f bits per byte\n", h);
-	if (h <= MIN_ENTROPY_LIMIT) {
+	TEST_REQUIRE("the assessed min-entropy is above %.1f bits per byte",
+		     MIN_ENTROPY_LIMIT);
+	if (!TEST_CHECK(h > MIN_ENTROPY_LIMIT, "%f", h)) {
 		printf("min-entropy %f is not above %f\n", h,
 		       MIN_ENTROPY_LIMIT);
 		ret = 1;

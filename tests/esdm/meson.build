@@ -133,9 +133,9 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
-	esdm_selftest_test = executable(
-		'esdm_selftest_test',
-		[ esdm_ipc_ns, 'esdm_selftest_test.c' ],
+	esdm_selftest_security_test = executable(
+		'esdm_selftest_security_test',
+		[ esdm_ipc_ns, 'esdm_selftest_security_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -149,6 +149,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_reseed_security_test = executable(
+		'esdm_reseed_security_test',
+		[ esdm_ipc_ns, 'esdm_reseed_security_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_jent_only_security_test = executable(
 		'esdm_jent_only_security_test',
 		[ esdm_ipc_ns, 'esdm_jent_only_security_test.c' ],
@@ -157,9 +165,9 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
-	esdm_output_min_entropy_test = executable(
-		'esdm_output_min_entropy_test',
-		[ esdm_ipc_ns, 'esdm_output_min_entropy_test.c' ],
+	esdm_output_min_entropy_security_test = executable(
+		'esdm_output_min_entropy_security_test',
+		[ esdm_ipc_ns, 'esdm_output_min_entropy_security_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_lib,
 		dependencies: dependencies_server,
@@ -326,10 +334,11 @@ if get_option('esdm-server').enabled()
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
 
 	# Skips without ea_non_iid in PATH; its estimators take a while on 1 MiB.
-	test('ESDM output min-entropy', esdm_output_min_entropy_test,
+	test('ESDM security - output min-entropy',
+		esdm_output_min_entropy_security_test,
 		timeout: 300)
 
-	test('ESDM self tests', esdm_selftest_test)
+	test('ESDM security - self tests', esdm_selftest_security_test)
 
 	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
 		timeout: 120)
@@ -338,5 +347,10 @@ if get_option('esdm-server').enabled()
 	# of 30 seconds only if the machine is loaded - keep some headroom.
 	test('ESDM security - Jitter RNG as the only credited source',
 		esdm_jent_only_security_test,
+		timeout: 120)
+
+	# Sits out a reseed interval of five seconds and 2^11 requests.
+	test('ESDM security - reseed on interval and request threshold',
+		esdm_reseed_security_test,
 		timeout: 120)
 endif

@@ -181,6 +181,8 @@ addon/es_ebpf_testing
 
 * tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above
 
+* tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 
