@@ -33,6 +33,7 @@
 #include "esdm_builtin_chacha20.h"
 #include "esdm_builtin_sha512.h"
 #include "esdm_config.h"
+#include "esdm_config_internal.h"
 #include "esdm_crypto.h"
 #include "esdm_drng_mgr.h"
 #include "esdm_es_aux.h"
@@ -205,6 +206,23 @@ static void esdm_drng_stagger_seed_time(struct esdm_drng *drng)
 	atomic_fetch_add(&drng->last_seeded_time, esdm_drng_reseed_stagger());
 }
 
+/*
+ * Generate requests left before a reseed is due, given the value of
+ * drng->requests. That counter runs down from ESDM_DRNG_RESEED_THRESH, so a
+ * lower configured threshold is reached that much earlier.
+ */
+static int esdm_drng_requests_left(int requests)
+{
+	return requests - (int)(ESDM_DRNG_RESEED_THRESH -
+				esdm_config_drng_reseed_thresh());
+}
+
+/* Count one generate request against the current seed of @drng */
+static void esdm_drng_count_request(struct esdm_drng *drng)
+{
+	atomic_fetch_sub(&drng->requests, 1);
+}
+
 /* Record the wall clock time of a seeding. */
 static void esdm_drng_set_seeded_wtime(struct esdm_drng *drng)
 {
@@ -221,8 +239,11 @@ static void esdm_drng_set_seeded_wtime(struct esdm_drng *drng)
  */
 void esdm_drng_reset(struct esdm_drng *drng)
 {
-	/* Ensure reseed during next call */
-	atomic_store(&drng->requests, 1);
+	/*
+	 * Ensure reseed during next call: no requests are left, whatever the
+	 * threshold is.
+	 */
+	atomic_store(&drng->requests, 0);
 	atomic_store(&drng->requests_since_fully_seeded, 0);
 	atomic_store(&drng->request_bits_since_fully_seeded, 0);
 	/*
@@ -518,7 +539,8 @@ static void esdm_drng_stats_one(struct esdm_drng *drng, const char *type,
 	stats.force_reseed = atomic_load(&drng->force_reseed);
 	stats.reseed_pending = atomic_load(&drng->reseed_pending);
 	stats.initiated = atomic_load(&drng->initiated);
-	stats.requests_until_reseed = atomic_load(&drng->requests);
+	stats.requests_until_reseed =
+		esdm_drng_requests_left(atomic_load(&drng->requests));
 	stats.requests_since_fully_seeded =
 		atomic_read_u32(&drng->requests_since_fully_seeded);
 	stats.bits_since_fully_seeded =
@@ -1086,25 +1108,27 @@ static bool esdm_drng_reseed_per_request(void)
 	return !atomic_load(&esdm_drng_reseed_max_time);
 }
 
-static bool esdm_drng_must_reseed(struct esdm_drng *drng, bool dec_requests)
+/*
+ * Is a reseed of @drng due? The generate requests served from its seed are
+ * counted by the caller once the answer is acted upon - see
+ * esdm_drng_count_request() - so that the request a reseed is made for counts
+ * against the new seed, and a seed serves exactly the threshold of requests.
+ */
+static bool esdm_drng_must_reseed(struct esdm_drng *drng)
 {
 	time_t check_time = (time_t)atomic_load(&drng->last_seeded_time);
 	bool request_bits_since_fully_seeded_reached =
 		(ESDM_DRNG_RESEED_THRESH_BITS != UINT32_MAX) &&
 		(atomic_read_u32(&drng->request_bits_since_fully_seeded) >=
 		 ESDM_DRNG_RESEED_THRESH_BITS);
-	/*
-	 * The decrement-and-test will only trigger for zero, but we may also are
-	 * already negative
-	 */
-	bool requests_check = atomic_load(&drng->requests) <= 0;
+	/* Negative once requests go on while a deferred reseed is pending */
+	bool requests_check =
+		esdm_drng_requests_left(atomic_load(&drng->requests)) <= 0;
 
 	/* The counters are beside the point - the answer is yes every time. */
 	if (esdm_drng_reseed_per_request())
 		return true;
 
-	if (dec_requests)
-		requests_check |= (atomic_fetch_sub(&drng->requests, 1) == 1);
 	check_time += (time_t)atomic_load(&esdm_drng_reseed_max_time);
 
 	return (requests_check || atomic_load(&drng->force_reseed) ||
@@ -1118,7 +1142,7 @@ static uint64_t esdm_drng_reseed_in(struct esdm_drng *drng)
 	uint64_t due, now;
 
 	/* Already due - nothing to wait for */
-	if (esdm_drng_must_reseed(drng, false))
+	if (esdm_drng_must_reseed(drng))
 		return 0;
 
 	due = (uint64_t)atomic_load(&drng->last_seeded_time) +
@@ -1239,10 +1263,9 @@ static bool esdm_drng_reseed_due(struct esdm_drng *drng)
 
 	if (drng == &esdm_drng_pr)
 		return atomic_load(&drng->initiated) &&
-		       esdm_drng_must_reseed(drng, false);
+		       esdm_drng_must_reseed(drng);
 
-	return atomic_load(&drng->fully_seeded) &&
-	       esdm_drng_must_reseed(drng, false);
+	return atomic_load(&drng->fully_seeded) && esdm_drng_must_reseed(drng);
 }
 
 /* Collect entropy for @drng and inject it */
@@ -1266,7 +1289,7 @@ static void esdm_drng_reseed_one(struct esdm_drng *drng, uint32_t node,
 	esdm_pool_lock();
 	mutex_w_lock(&drng->lock);
 	/* Another path may have reseeded it in the meantime */
-	if (esdm_drng_must_reseed(drng, false))
+	if (esdm_drng_must_reseed(drng))
 		esdm_drng_seed_nolock(drng);
 	mutex_w_unlock(&drng->lock);
 	esdm_pool_unlock();
@@ -1672,12 +1695,12 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 	 * (e.g. in esdm-tool --benchmark).
 	 */
 	if (drng == esdm_drng_init_instance()) {
-		if (esdm_drng_must_reseed(drng, false)) {
+		if (esdm_drng_must_reseed(drng)) {
 			esdm_pool_lock();
 
 			mutex_w_lock(&drng->lock);
 			/* double check, as we did not lock the DRNG in the first check*/
-			if (esdm_drng_must_reseed(drng, false)) {
+			if (esdm_drng_must_reseed(drng)) {
 				esdm_drng_seed_nolock(drng);
 				reseeded = true;
 			}
@@ -1710,7 +1733,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		 * the check says yes every time, and the first block would
 		 * otherwise be generated after two seedings in a row.
 		 */
-		if (!pr && !reseeded && esdm_drng_must_reseed(drng, true)) {
+		if (!pr && !reseeded && esdm_drng_must_reseed(drng)) {
 			if (esdm_drng_reseed_async_capable(drng) &&
 			    esdm_drng_reseed_async(drng)) {
 				/*
@@ -1739,13 +1762,17 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			} else { /* Perform synchronous reseed */
 				mutex_w_lock(&drng->lock);
 				/* double check, as we did not lock the DRNG in the first check*/
-				if (esdm_drng_must_reseed(drng, false)) {
+				if (esdm_drng_must_reseed(drng)) {
 					esdm_drng_seed_nolock(drng);
 				}
 				mutex_w_unlock(&drng->lock);
 				esdm_pool_unlock();
 			}
 		}
+
+		/* This block is generated from whatever seed the DRNG has now */
+		if (!pr)
+			esdm_drng_count_request(drng);
 
 		mutex_w_lock(&drng->lock);
 

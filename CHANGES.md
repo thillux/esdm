@@ -173,6 +173,8 @@ addon/es_ebpf_testing
 
 * fix: esdm_safe_read()/esdm_safe_write() return the bytes transferred before a later error
 
+* fix: a DRNG seed serves exactly ESDM_DRNG_RESEED_THRESH generate requests - the request that ran the counter out triggered the reseed and was counted against the old seed, so one fewer was served
+
 * fix: esdm.spec requires the protobuf-c runtime instead of protobuf
 
 * flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; support Linux 7.2 and 7.3 in the kernel addon
