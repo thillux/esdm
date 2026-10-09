@@ -1453,12 +1453,12 @@
           in
           {
           jitterentropy = pkgs.jitterentropy.overrideAttrs (_: {
-            version = "3.7.1";
+            version = "3.8.0-pre";
             src = pkgs.fetchFromGitHub {
               owner = "smuellerDD";
               repo = "jitterentropy-library";
-              rev = "8760e08ac3268946aedfcc6fc047dbadb02986ea";
-              hash = "sha256-3N1yz+mBSYUIdtAMxKrUV56lE5q2SMfcyRmULfYwcqY=";
+              rev = "4b90f5bfaa6cdb60617a22089f09e12d082cc69c";
+              hash = "sha256-evEeuo0ZigYh+IivbR+xNGPJHvPcGYdhzWoFnRtSUAs=";
             };
             patches = [ ];
             cmakeFlags = [
@@ -1578,8 +1578,8 @@
           # coverage build's -Des_jent_kernel=enabled - its kernel counterpart
           # as the two that qualify at 256 bits. Should that ever stop being
           # enough, es_jent_ntg1 makes a 3.7.0+ jitter RNG NTG.1 conformant on
-          # its own (the jitterentropy pinned above is 3.7.1) and one source
-          # then suffices.
+          # its own (the jitterentropy pinned above is a 3.8.0 prerelease)
+          # and one source then suffices.
           esdm-ais2031 = self.packages.${system}.esdm.overrideAttrs (prev: {
             mesonFlags =
               (builtins.filter (x: !lib.hasInfix "ais2031" x) prev.mesonFlags)
