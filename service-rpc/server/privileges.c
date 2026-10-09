@@ -22,6 +22,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -36,7 +37,7 @@ int drop_privileges_permanent(const char *user, const char *group)
 
 	uid_t uid;
 	gid_t gid;
-	int ret = 0;
+	int ret = 0, dumpable;
 
 	if (!user)
 		return -EINVAL;
@@ -61,6 +62,14 @@ int drop_privileges_permanent(const char *user, const char *group)
 
 	uid = pwd->pw_uid;
 	gid = pwd->pw_gid;
+
+	/*
+	 * Changing the UID or GID below makes the kernel reset the dumpable
+	 * attribute of the process to fs.suid_dumpable - which systemd sets to
+	 * 2 - and with it undoes a PR_SET_DUMPABLE 0 the caller applied, e.g.
+	 * the server for --memlock. Remember it to restore it afterwards.
+	 */
+	dumpable = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
 
 	if (grp) {
 		if (setgroups(1, &grp->gr_gid) == -1) {
@@ -95,6 +104,14 @@ int drop_privileges_permanent(const char *user, const char *group)
 		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "Cannot drop to unprivileged user: %s\n",
+			    strerror(errno));
+		return ret;
+	}
+
+	if (dumpable == 0 && prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Cannot keep core dumps disabled: %s\n",
 			    strerror(errno));
 		return ret;
 	}
