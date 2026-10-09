@@ -482,11 +482,15 @@ int __init esdm_test_init(void)
 		return 0;
 	}
 
+	/* debugfs_create_dir() reports failure via ERR_PTR, never NULL */
 	esdm_raw_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
-	if (!esdm_raw_debugfs_root) {
-		pr_warn("ESDM testing debugfs creation failed: %s\n",
-			KBUILD_MODNAME);
-		return -ENOENT;
+	if (IS_ERR(esdm_raw_debugfs_root)) {
+		int ret = PTR_ERR(esdm_raw_debugfs_root);
+
+		esdm_raw_debugfs_root = NULL;
+		pr_warn("ESDM testing debugfs creation failed: %s (%d)\n",
+			KBUILD_MODNAME, ret);
+		return ret;
 	} else {
 		pr_info("ESDM testing debugfs created: %s\n", KBUILD_MODNAME);
 	}
@@ -517,7 +521,8 @@ int __init esdm_test_init(void)
 	return 0;
 }
 
-void __exit esdm_test_exit(void)
+/* not __exit, the module init error path calls it too */
+void esdm_test_exit(void)
 {
 	if (esdm_raw_debugfs_root) {
 		debugfs_remove_recursive(esdm_raw_debugfs_root);

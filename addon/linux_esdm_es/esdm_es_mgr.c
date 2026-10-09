@@ -298,7 +298,7 @@ static int __init esdm_es_mgr_init(void)
 	ret = esdm_es_mgr_dev_init();
 	if (ret) {
 		pr_warn("esdm_es_mgr_dev_init() failed\n");
-		goto out;
+		goto out_test;
 	}
 
 	register_reboot_notifier(&esdm_es_mgr_notifier_reboot);
@@ -308,9 +308,13 @@ static int __init esdm_es_mgr_init(void)
 	register_pm_notifier(&esdm_es_mgr_notifier_power);
 	return 0;
 
+out_test:
+	esdm_test_exit();
 out:
-	esdm_es_mgr_irq_exit();
 	esdm_es_mgr_sched_exit();
+	esdm_es_mgr_irq_exit();
+	/* as in esdm_es_mgr_exit(), drain health messages the hooks queued */
+	esdm_health_exit();
 	return ret;
 }
 
