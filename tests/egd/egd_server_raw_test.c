@@ -51,6 +51,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_protocol.h"
@@ -386,11 +387,21 @@ static int test_cmd_write_entropy(int fd, const uint8_t *buf, uint8_t len,
  * whoever asks the ESDM for random data next is what turns it into an
  * operational state. That is deliberate - the point of the test is that the
  * deferred request of the server is what picks the entropy up.
+ *
+ * The NTG.1 seeding strategy wants two entropy sources of 240 bits each for
+ * the initial seeding, and the auxiliary pool is only one. The jitter RNG is
+ * credited again as the second one - at this moment rather than from the
+ * start, so the moment the ESDM becomes operational stays the test's to
+ * choose. An NTG.1 conformant jitter RNG suffices on its own, which makes no
+ * difference here.
  */
 static int test_esdm_seed(void)
 {
 	uint8_t seed[64];
 	unsigned int i, round;
+
+	if (esdm_ntg1_2024_compliant())
+		esdm_config_es_jent_entropy_rate_set(256);
 
 	for (round = 0; round < TEST_SEED_ROUNDS; round++) {
 		if (esdm_state_operational())
@@ -975,16 +986,18 @@ int main(int argc, char *argv[])
 		}
 	}
 
+#ifndef ESDM_ES_JENT
 	/*
 	 * The NTG.1 seeding strategy wants two entropy sources of 240 bits each
 	 * for the initial seeding, and the auxiliary pool the entropy is
-	 * inserted into is only one: with every other source taken out, the
-	 * ESDM would never become operational.
+	 * inserted into is only one: without the jitter RNG as the second, see
+	 * test_esdm_seed(), the ESDM would never become operational.
 	 */
 	if (esdm_ntg1_2024_compliant()) {
-		printf("the NTG.1 seeding strategy cannot be fed through the auxiliary pool alone\n");
+		printf("the NTG.1 seeding strategy needs the jitter RNG next to the auxiliary pool\n");
 		return 77;
 	}
+#endif
 
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
