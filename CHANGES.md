@@ -219,6 +219,10 @@ addon/es_ebpf_testing
 
 * fix: the maximum bits without full reseed is clamped to INT_MAX, as a larger value silently disabled the limit; the RPC client bounds the resubmission of a request by time rather than by attempts, independent of client-rx-tx-timeout-exponent; esdm_drbg_zero_free() unlocks the state memory
 
+* fix: esdm-server and the CUSE daemons keep a non-dumpable state across their privilege changes - changing the IDs reset it to fs.suid_dumpable, which silently re-enabled core dumps of a server started with --memlock under systemd's default of 2; in sanitizer builds the root-only dumpable state is turned into the non-dumpable one, so LeakSanitizer can check the daemons at exit instead of aborting
+
+* fix: RPC server: a worker thread failing while serving (epoll setup, epoll_wait() or registering a client) takes the server down with that error instead of silently leaving it with fewer workers; esdm_locked_mem_alloc() no longer reports success with a NULL pointer when mlock() fails without errno; the CUSE /proc reader refuses buffers too small for content and NUL; errno is only evaluated after calls that set it (found by the clang static analyzer)
+
 * ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes) and esdm-plain builds the default configuration
 
 * fix: esdm.spec names the jitterentropy packages as openSUSE ships them
@@ -227,7 +231,7 @@ addon/es_ebpf_testing
 
 * flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; build against the jitterentropy master (3.8.0) and libkcapi master, whose RNG tests are adjusted to Linux 7.2+; support Linux 7.2 and 7.3 in the kernel addon; hook patches for every vanilla kernel nixpkgs packages - 6.1, 6.6, 6.12, 6.18, 7.2 and 7.3 - each applying without fuzz; the kernels are enumerated from nixpkgs like jitterentropy-library does, linux_testing included; the ESDM kernels keep nixpkgs' own kernel patches instead of replacing them; CI builds the module and boots its VM test for every one of them
 
-* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the RPC random bytes tests no longer pass on a failed request
+* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the RPC random bytes tests no longer pass on a failed request; the kernel seeder test requires a clean server exit; a failing worker of the parallel CUSE stress test reports device, size, round and errno
 
 * tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
 
