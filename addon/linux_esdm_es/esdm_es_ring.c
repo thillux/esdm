@@ -138,7 +138,12 @@ u32 esdm_es_ring_collect(struct esdm_es_ring *ring, u32 requested_events,
 					 used_events * sizeof(u64));
 			list_add_tail(&rc->seed_data_0.list, seedlist);
 		} else { /* need to skip parts in the 'middle' of the array */
-			u32 used_at_end = ESDM_DATA_NUM_VALUES - r_pos;
+			/*
+			 * Hash only what rp_pending accounts for, else the
+			 * events past it are hashed and credited again later.
+			 */
+			u32 used_at_end = min_t(u32, ESDM_DATA_NUM_VALUES - r_pos,
+						used_events);
 
 			drbg_string_fill(&rc->seed_data_0,
 					 (u8 *)(rc->array + r_pos),
