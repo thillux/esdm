@@ -42,8 +42,16 @@ static void esdm_rpcc_drng_status_json_cb(const StatusResponse *response,
 
 	esdm_rpcc_error_check(response, buffer);
 	buffer->ret = response->ret;
-	if (response->ret < 0)
+	if (response->ret < 0) {
+		/*
+		 * Whatever the server could not deliver, -EMSGSIZE for a
+		 * document over its own limit included: the caller's buffer
+		 * is left empty, never holding a stale document.
+		 */
+		if (buffer->buf && buffer->buflen)
+			buffer->buf[0] = '\0';
 		return;
+	}
 	if (!response->buffer || !buffer->buflen || !buffer->buf) {
 		buffer->ret = -EFAULT;
 		return;
