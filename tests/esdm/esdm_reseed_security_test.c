@@ -50,6 +50,18 @@
 /* Requests made - twice the threshold */
 #define ESDM_RSEC_REQUESTS (1U << 11)
 
+/*
+ * Bytes per request. The output of a seed is limited as well: under SP800-90C
+ * the DRNG reseeds after ESDM_DRNG_RESEED_THRESH_BITS, three quarters of 2^17
+ * bits. All requests together stay below that, so that the request threshold
+ * is the only reason for a reseed.
+ */
+#define ESDM_RSEC_REQSIZE 1
+
+#if (ESDM_RSEC_REQUESTS * ESDM_RSEC_REQSIZE * 8 >= ESDM_DRNG_RESEED_THRESH_BITS)
+#error "the requests reach the reseed threshold in bits"
+#endif
+
 /* Reseed interval the worker is given, and how long it is waited for */
 #define ESDM_RSEC_INTERVAL 5
 #define ESDM_RSEC_WAIT 7
@@ -120,7 +132,7 @@ static void esdm_rsec_sleep(time_t sec, long nsec)
 
 static int esdm_reseed_security_test(void)
 {
-	uint8_t buf[32];
+	uint8_t buf[ESDM_RSEC_REQSIZE];
 	unsigned int i;
 	ssize_t rc = 0;
 	int ret;
