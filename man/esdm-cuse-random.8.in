@@ -106,6 +106,24 @@ CUSE device registered by
 CUSE device registered by
 .BR esdm\-cuse\-urandom .
 .SH NOTES
+The privileged
+.BR ioctl (2)
+commands require the caller to hold
+.B CAP_SYS_ADMIN
+in the daemon's user namespace, as with the kernel device. The daemon learns
+this from the caller's
+.IR /proc/ pid
+entries, which it reads with root privileges, so that a
+.I /proc
+mounted with
+.B hidepid=
+does not hide them. A caller whose entries root cannot read without
+.B CAP_SYS_PTRACE
+\- with
+.BR hidepid= ,
+one running under another user or group ID than root \- is refused, as the shipped
+units do not grant that capability.
+.PP
 Before each daemon overlays the kernel device with its own, it keeps a file
 descriptor on the original kernel
 .IR /dev/random " respectively " /dev/urandom

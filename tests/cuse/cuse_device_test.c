@@ -237,10 +237,15 @@ int drop_supplemental_groups(void)
 /* Whether the caller holds CAP_SYS_ADMIN, see caller_is() */
 static bool test_caller_cap;
 
+/* Whether the last check of the caller ran with the privileges raised */
+static bool checked_raised;
+
 int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
 {
 	(void)pid;
 	(void)fsuid;
+
+	checked_raised = raise_calls > drop_calls;
 
 	return test_caller_cap;
 }
@@ -461,7 +466,10 @@ static void test_ioctl_addtoentcnt_negative(void)
 	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
-	CHECK_EQ(raise_calls, 0);
+
+	/* Raised for the check of the caller only, and dropped right after */
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
 
 	bits = INT32_MIN;
 	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
@@ -535,10 +543,19 @@ static void test_ioctl_privileged_refused(void)
 static void test_ioctl_privilege_is_capability(void)
 {
 	caller_is(0, false);
+	checked_raised = false;
 	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EPERM);
-	CHECK_EQ(raise_calls, 0);
+
+	/*
+	 * The check reads the caller's /proc entries, which /proc mounted
+	 * with hidepid= only shows to root - so it runs with the privileges
+	 * raised, and a refused caller has them dropped again.
+	 */
+	CHECK(checked_raised, "the caller was checked without privileges");
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
 
 	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
@@ -1011,6 +1028,9 @@ int main(int argc, char *argv[])
 	(void)argv;
 
 	caller_is_root(false);
+
+	/* What the daemon is once the device is up: dropped to "nobody" */
+	esdm_cuse_dropped = true;
 
 	test_open();
 	test_ioctl_compat();

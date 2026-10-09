@@ -386,12 +386,15 @@ static bool esdm_cuse_fips_enabled(void)
 #endif
 
 static const char *esdm_cuse_unprivileged_user = "nobody";
+
+/* Whether the daemon runs as the unprivileged user and can raise back to root */
+static bool esdm_cuse_dropped = false;
+
 static int esdm_cuse_drop_privileges(void)
 {
-	static bool dropped = false;
 	int ret;
 
-	if (dropped)
+	if (esdm_cuse_dropped)
 		return 0;
 
 	/*
@@ -412,7 +415,7 @@ static int esdm_cuse_drop_privileges(void)
 		return ret;
 	}
 
-	dropped = true;
+	esdm_cuse_dropped = true;
 
 	return 0;
 }
@@ -455,12 +458,6 @@ static bool esdm_cuse_client_privileged(fuse_req_t req)
  * admin control path.
  */
 static mutex_t esdm_cuse_priv = MUTEX_UNLOCKED_PREFER_WRITER;
-static void esdm_cuse_raise_privilege_transient(fuse_req_t req)
-{
-	mutex_lock(&esdm_cuse_priv);
-	if (esdm_cuse_client_privileged(req))
-		raise_privilege_transient(0, 0);
-}
 
 static void esdm_cuse_drop_privilege_transient(void)
 {
@@ -479,6 +476,32 @@ static void esdm_cuse_drop_privilege_transient(void)
 			fuse_session_exit(se);
 	}
 	mutex_unlock(&esdm_cuse_priv);
+}
+
+/*
+ * Start a privileged request: raise the privileges and check the caller, with
+ * the write lock held so that no other request runs while they are raised.
+ *
+ * The check reads the caller's /proc entries. With /proc mounted with hidepid=,
+ * the unprivileged user cannot read them for any process but its own, which
+ * would refuse every caller. The check is hence made with the privileges
+ * raised already, and they are dropped again for a caller that fails it.
+ *
+ * Returns true with the privileges raised and the lock held, both released by
+ * esdm_cuse_drop_privilege_transient(); false with neither.
+ */
+static bool esdm_cuse_priv_call_start(fuse_req_t req)
+{
+	mutex_lock(&esdm_cuse_priv);
+	if (esdm_cuse_dropped)
+		raise_privilege_transient(0, 0);
+
+	if (esdm_cuse_client_privileged(req))
+		return true;
+
+	esdm_cuse_drop_privilege_transient();
+
+	return false;
 }
 
 static void esdm_cuse_unpriv_call_start(void)
@@ -755,7 +778,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_client_privileged(req)) {
+			if (!esdm_cuse_priv_call_start(req)) {
 				fuse_reply_err(req, EPERM);
 				return;
 			}
@@ -766,12 +789,12 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * largest entropy count possible instead.
 			 */
 			if (ent_count < 0) {
+				esdm_cuse_drop_privilege_transient();
 				fuse_reply_err(req, EINVAL);
 				return;
 			}
 			ent_count_bits = (uint32_t)ent_count;
 
-			esdm_cuse_raise_privilege_transient(req);
 			esdm_invoke(esdm_rpcc_rnd_add_to_ent_cnt_int(
 				ent_count_bits, req));
 			/* In case of an error, update the kernel */
@@ -822,11 +845,10 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_client_privileged(req)) {
+			if (!esdm_cuse_priv_call_start(req)) {
 				fuse_reply_err(req, EPERM);
 				return;
 			}
-			esdm_cuse_raise_privilege_transient(req);
 
 			esdm_invoke(esdm_rpcc_rnd_add_entropy_int(
 				(const uint8_t *)rpi->buf,
@@ -854,11 +876,10 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		 * This operation requires privileges. Thus, raise the
 		 * privilege level to the same level as the caller has.
 		 */
-		if (!esdm_cuse_client_privileged(req)) {
+		if (!esdm_cuse_priv_call_start(req)) {
 			fuse_reply_err(req, EPERM);
 			return;
 		}
-		esdm_cuse_raise_privilege_transient(req);
 		esdm_invoke(esdm_rpcc_rnd_clear_pool_int(req));
 		if (!ret) {
 			if (backend_fd >= 0 &&
@@ -876,11 +897,10 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		 * This operation requires privileges. Thus, raise the
 		 * privilege level to the same level as the caller has.
 		 */
-		if (!esdm_cuse_client_privileged(req)) {
+		if (!esdm_cuse_priv_call_start(req)) {
 			fuse_reply_err(req, EPERM);
 			return;
 		}
-		esdm_cuse_raise_privilege_transient(req);
 		esdm_invoke(esdm_rpcc_rnd_reseed_crng_int(req));
 		if (!ret) {
 			if (backend_fd >= 0 &&
@@ -956,11 +976,10 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_client_privileged(req)) {
+			if (!esdm_cuse_priv_call_start(req)) {
 				fuse_reply_err(req, EPERM);
 				return;
 			}
-			esdm_cuse_raise_privilege_transient(req);
 			if (backend_fd >= 0 &&
 			    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
 				ret = -errno;
@@ -980,11 +999,10 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		* This operation requires privileges. Thus, raise the
 		* privilege level to the same level as the caller has.
 		*/
-		if (!esdm_cuse_client_privileged(req)) {
+		if (!esdm_cuse_priv_call_start(req)) {
 			fuse_reply_err(req, EPERM);
 			return;
 		}
-		esdm_cuse_raise_privilege_transient(req);
 		if (backend_fd >= 0 && ioctl(backend_fd, RNDRESEEDCRNG) == -1)
 			ret = -errno;
 		else
