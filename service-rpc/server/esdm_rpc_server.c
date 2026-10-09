@@ -51,6 +51,7 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_peer_limit.h"
 #include "esdm_shm_status.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
@@ -83,6 +84,9 @@ struct esdm_rpcs {
 struct esdm_rpcs_connection {
 	struct esdm_rpcs *proto;
 	int child_fd;
+	/* Peer UID, accounted in esdm_rpcs_peer_limit if peer_counted */
+	uid_t peer_uid;
+	bool peer_counted;
 	uint32_t method_index;
 	uint32_t request_id;
 	struct timespec last_used;
@@ -129,6 +133,20 @@ static atomic_int esdm_rpc_init_state =
 static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 
 static atomic_int server_exit = 0;
+
+/*
+ * Concurrent connections of one unprivileged UID over all RPC worker threads -
+ * root is exempt. Each worker serves up to 1024 connections and all of them
+ * share one RLIMIT_NOFILE with the EGD interface; without a bound per peer a
+ * single local user could exhaust them and lock every other client out. A
+ * client process holds at most one connection per online node, and idle ones
+ * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC, which leaves plenty of room for
+ * the consumers of one user.
+ */
+#define ESDM_RPC_MAX_CONNECTIONS_PER_UID 512
+
+static struct esdm_peer_limit esdm_rpcs_peer_limit =
+	ESDM_PEER_LIMIT_INIT("RPC server", ESDM_RPC_MAX_CONNECTIONS_PER_UID);
 
 /*
  * Set while the thread serving the unprivileged interface runs. A master that
@@ -677,6 +695,8 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 		close(rpc_conn->child_fd);
 		rpc_conn->child_fd = -1;
 	}
+	if (rpc_conn->peer_counted)
+		esdm_peer_limit_put(&esdm_rpcs_peer_limit, rpc_conn->peer_uid);
 	/*
 	 * No per-connection request buffer to wipe here anymore - the shared
 	 * per-worker esdm_rpcs_reqbuf is zeroized after every request in
@@ -912,6 +932,34 @@ static int esdm_rpcs_handler(void *args)
 				}
 				rpc_conn->child_fd = accepted_fd;
 				rpc_conn->proto = thread->proto;
+
+				/*
+				 * Refuse a peer at its connection limit right
+				 * away rather than leave it queued, which would
+				 * block the backlog for everybody else.
+				 */
+				{
+					struct ucred cred;
+					socklen_t cred_len = sizeof(cred);
+
+					if (getsockopt(accepted_fd, SOL_SOCKET,
+						       SO_PEERCRED, &cred,
+						       &cred_len) < 0 ||
+					    !esdm_peer_limit_get(
+						    &esdm_rpcs_peer_limit,
+						    cred.uid)) {
+						esdm_logger(
+							LOGGER_DEBUG,
+							LOGGER_C_RPC,
+							"Refusing client FD %d\n",
+							accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
+						continue;
+					}
+					rpc_conn->peer_uid = cred.uid;
+					rpc_conn->peer_counted = true;
+				}
 				/*
 				 * Idle since now, not since the epoch - or the
 				 * idle reaper could close the connection before
@@ -935,8 +983,8 @@ static int esdm_rpcs_handler(void *args)
 							"Unable to add client FD %d to epoll: %s\n",
 							accepted_fd,
 							strerror(errno));
-						free(rpc_conn);
-						close(accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
 						continue;
 					default:
 						esdm_logger(
@@ -953,8 +1001,8 @@ static int esdm_rpcs_handler(void *args)
 						 * avoid leaking the conn and its fd.
 						 */
 						ret = -errno;
-						free(rpc_conn);
-						close(accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
 						goto out;
 					}
 				}

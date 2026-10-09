@@ -40,6 +40,7 @@
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
+#include "esdm_peer_limit.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
 #include "helper.h"
@@ -60,15 +61,37 @@
 #define ESDM_EGD_BUFSIZE (2 * ESDM_EGD_MAX_CMD_SIZE)
 
 /*
- * Upper bound of concurrently served clients. EGD clients hold their connection
- * open for their entire lifetime, so this limits clients, not requests; beyond
- * it, connections stay queued in the listen backlog. Generous because such
- * consumers are typically idle long running daemons and nothing is preallocated
- * for them. Serving this many needs a RLIMIT_NOFILE above it; an accept failing
- * for want of a descriptor leaves the client queued, and the server stops
- * listening for a moment rather than being woken for it over and over.
+ * Upper bound of concurrently served clients. EGD clients may hold their
+ * connection open for their entire lifetime, so this limits clients, not
+ * requests; beyond it, connections stay queued in the listen backlog. Generous
+ * because such consumers are typically idle long running daemons and nothing is
+ * preallocated for them. Serving this many needs a RLIMIT_NOFILE above it; an
+ * accept failing for want of a descriptor leaves the client queued, and the
+ * server stops listening for a moment rather than being woken for it over and
+ * over.
  */
 #define ESDM_EGD_MAX_CONNECTIONS 2048
+
+/*
+ * Concurrent connections of one unprivileged UID - root is exempt. Without it,
+ * any local user could take all ESDM_EGD_MAX_CONNECTIONS slots and lock every
+ * other EGD consumer out. A process that uses the EGD client library holds one
+ * connection, so this leaves room for many such consumers per user.
+ */
+#define ESDM_EGD_MAX_CONNECTIONS_PER_UID 256
+
+/*
+ * Time a connection may sit idle - no command received, no response owed -
+ * before it is closed, so that abandoned clients do not hold their slot and
+ * descriptor forever. The EGD client library reconnects transparently, as do
+ * clients that open a connection per request.
+ */
+#ifndef ESDM_EGD_IDLE_TIMEOUT_MS
+#define ESDM_EGD_IDLE_TIMEOUT_MS 60000
+#endif
+
+/* Interval of the scan for idle connections */
+#define ESDM_EGD_IDLE_SCAN_MS 1000
 
 /*
  * Connections that may wait to be accepted, matched to the number that may be
@@ -113,6 +136,13 @@ struct esdm_egd_conn {
 
 	/* Credentials of the peer, obtained once when the client connected. */
 	uid_t peer_uid;
+
+	/* Accounted in esdm_egd_peer_limit */
+	bool peer_counted;
+
+	/* Last time the client sent something or took a response, see
+	 * ESDM_EGD_IDLE_TIMEOUT_MS. */
+	uint64_t last_active;
 
 	/* Events this connection is currently watched for, see
 	 * esdm_egd_conn_arm(). */
@@ -208,6 +238,9 @@ static struct esdm_egd_listener esdm_egd_listeners[] = {
 	     listener++)
 
 static atomic_int esdm_egd_exit = 0;
+
+static struct esdm_peer_limit esdm_egd_peer_limit =
+	ESDM_PEER_LIMIT_INIT("EGD server", ESDM_EGD_MAX_CONNECTIONS_PER_UID);
 static atomic_bool esdm_egd_worker_running = false;
 
 static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
@@ -490,6 +523,7 @@ static int esdm_egd_flush(struct esdm_egd_conn *conn)
 
 		if (ret > 0) {
 			conn->out_off += (size_t)ret;
+			conn->last_active = esdm_egd_now_ms();
 			continue;
 		}
 
@@ -1019,6 +1053,7 @@ static int esdm_egd_read(struct esdm_egd_conn *conn)
 		}
 
 		conn->in_len += (size_t)received;
+		conn->last_active = esdm_egd_now_ms();
 
 		ret = esdm_egd_process(conn);
 		if (ret)
@@ -1036,6 +1071,9 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 		close(conn->fd);
 		conn->fd = -1;
 	}
+
+	if (conn->peer_counted)
+		esdm_peer_limit_put(&esdm_egd_peer_limit, conn->peer_uid);
 
 	memset_secure(conn->in, 0, sizeof(conn->in));
 	memset_secure(conn->out, 0, sizeof(conn->out));
@@ -1095,6 +1133,20 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 	}
 	conn->peer_uid = cred.uid;
 
+	/*
+	 * A peer at its limit is refused right away rather than left queued:
+	 * that would block the listen backlog for everybody else.
+	 */
+	if (!esdm_peer_limit_get(&esdm_egd_peer_limit, conn->peer_uid)) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+			    "EGD server: refusing connection from UID %u\n",
+			    conn->peer_uid);
+		esdm_egd_release_conn(conn);
+		return NULL;
+	}
+	conn->peer_counted = true;
+	conn->last_active = esdm_egd_now_ms();
+
 	ev.events = EPOLLIN | EPOLLRDHUP;
 	ev.data.ptr = conn;
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
@@ -1145,6 +1197,7 @@ static int esdm_egd_handler(void __unused *args)
 	 */
 	bool accept_paused = false;
 	size_t paused_connections = 0;
+	uint64_t last_idle_scan = esdm_egd_now_ms();
 	int epfd = -1;
 	int ret = 0;
 
@@ -1380,6 +1433,33 @@ static int esdm_egd_handler(void __unused *args)
 			}
 
 			esdm_egd_conn_arm(epfd, conn);
+		}
+
+		/*
+		 * Close the connections that sat idle for too long: nothing
+		 * owed to them, nothing heard from them. Without this, clients
+		 * that went away without closing - or never meant to send
+		 * anything - hold their slots and descriptors forever.
+		 */
+		if (esdm_egd_now_ms() - last_idle_scan >= ESDM_EGD_IDLE_SCAN_MS) {
+			uint64_t now = esdm_egd_now_ms();
+
+			last_idle_scan = now;
+			TAILQ_FOREACH_SAFE (conn, &conn_list, tailq, tmp) {
+				if (conn->deferred || esdm_egd_out_pending(conn) ||
+				    now - conn->last_active <=
+					    ESDM_EGD_IDLE_TIMEOUT_MS)
+					continue;
+
+				esdm_logger(
+					LOGGER_DEBUG, LOGGER_C_SERVER,
+					"EGD server: closing idle connection on FD %d\n",
+					conn->fd);
+				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
+				TAILQ_REMOVE(&conn_list, conn, tailq);
+				esdm_egd_release_conn(conn);
+				num_connections--;
+			}
 		}
 	}
 
