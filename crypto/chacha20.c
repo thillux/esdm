@@ -129,8 +129,9 @@ void cc20_block(struct esdm_sym_state *state, uint32_t *stream)
 	 * of keystream, after which the keystream repeats. This is a hard
 	 * per-key limit of the construction: callers MUST rekey/reseed before
 	 * generating that much from a single key. The ESDM ChaCha20 DRNG
-	 * reseeds far below this bound, so the wrap is unreachable in practice;
-	 * any new generic esdm_sym user must honor the same limit.
+	 * replaces its key at least every ESDM_CC20_DRNG_MAX_CHUNK bytes, far
+	 * below this bound; any new generic esdm_sym user must honor the same
+	 * limit.
 	 */
 	state_w[12]++;
 }
