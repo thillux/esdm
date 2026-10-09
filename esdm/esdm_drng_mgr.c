@@ -1717,9 +1717,18 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 	 * Note a reseed requested by drng->force_reseed or esdm_drng_seed()
 	 * does not imply that sufficient entropy was received to fill the DRNG.
 	 * If this state persists, then the following check applies.
+	 *
+	 * The PR DRNG takes a fresh seed for each of its outputs below anyway:
+	 * marking just this instance unseeded is enough, clearing the state
+	 * that all DRNGs are seeded is not warranted by it - see the end of
+	 * the generate loop.
 	 */
-	if (esdm_drng_check_disable_threshold(drng))
-		esdm_unset_fully_seeded(drng);
+	if (esdm_drng_check_disable_threshold(drng)) {
+		if (pr)
+			atomic_store(&drng->fully_seeded, false);
+		else
+			esdm_unset_fully_seeded(drng);
+	}
 
 	/* Loop to collect random bits for the caller. */
 	while (outbuflen) {
