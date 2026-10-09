@@ -30,6 +30,15 @@
 #include "privileges.h"
 #include "visibility.h"
 
+/* Does LeakSanitizer check this process for leaks when it exits? */
+#if defined(__SANITIZE_ADDRESS__)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#endif
+#endif
+
 int drop_privileges_permanent(const char *user, const char *group)
 {
 	const struct group *grp;
@@ -115,6 +124,22 @@ int drop_privileges_permanent(const char *user, const char *group)
 			    strerror(errno));
 		return ret;
 	}
+
+#ifdef PRIV_LEAK_CHECK_AT_EXIT
+	/*
+	 * The leak check at exit stops all threads by ptrace()ing them from a
+	 * helper task running with the credentials of the process. That only
+	 * works while the process is dumpable for its user (1): the sanitizer
+	 * runtime turns a non-dumpable process (0) dumpable for the check, but
+	 * leaves 2 alone - which is what the drop above leaves behind with
+	 * fs.suid_dumpable = 2. The attach then fails, the runtime reports a
+	 * "fatal error" instead of leaks and, as meson's ASAN_OPTIONS ask
+	 * for, aborts the server on its way out. Turn 2 into 0 so the check
+	 * runs; only sanitizer builds do this.
+	 */
+	if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 2)
+		prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+#endif
 
 	if ((chdir("/")) < 0) {
 		ret = -errno;
