@@ -138,6 +138,9 @@ static atomic_int server_exit = 0;
  */
 static atomic_bool esdm_rpc_unpriv_running = false;
 
+/* The error the thread serving the unprivileged interface gave up with. */
+static atomic_int esdm_rpc_unpriv_ret = 0;
+
 /* Remove a potentially left-over old Unix Domain socket. */
 void esdm_server_remove_stale_socket(const char *path, int socktype)
 {
@@ -1455,6 +1458,17 @@ static int esdm_rpcs_unpriv_init(void *args)
 out:
 	eesdm_rpcs_stop(&unpriv_proto);
 
+	/*
+	 * Without this interface the server is of no use to most of its
+	 * clients. Hand the error to the master and take the server down - the
+	 * master may well still be waiting for the notification above, which
+	 * is not going to come.
+	 */
+	if (ret) {
+		atomic_store(&esdm_rpc_unpriv_ret, ret);
+		esdm_rpc_server_signal_exit();
+	}
+
 	atomic_store(&esdm_rpc_unpriv_running, false);
 	thread_wake_all(&esdm_rpc_thread_init_wait);
 
@@ -1565,6 +1579,10 @@ static int esdm_rpcs_interfaces_init(const char *username,
 			   esdm_rpcs_state_unpriv_init) ||
 				  (atomic_load(&server_exit) != 0));
 
+	/* The unprivileged thread failed, or the server goes down meanwhile. */
+	if (atomic_load(&server_exit) != 0)
+		goto out;
+
 	/* Permanently drop all privileges */
 	CKINT(drop_privileges_permanent(username ? username : "nobody",
 					groupname ? groupname : NULL));
@@ -1587,9 +1605,7 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	systemd_notify_status("Running");
 
 	/* Server handing privileged interface in current thread */
-	CKINT(esdm_rpcs_workerloop(&priv_proto));
-
-	return 0;
+	ret = esdm_rpcs_workerloop(&priv_proto);
 
 out:
 	eesdm_rpcs_stop(&priv_proto);
@@ -1603,6 +1619,10 @@ out:
 		esdm_rpc_server_signal_exit();
 	thread_wait_event(&esdm_rpc_thread_init_wait,
 			  !atomic_load(&esdm_rpc_unpriv_running));
+
+	/* A failure of the unprivileged interface is a failure of the server. */
+	if (!ret)
+		ret = atomic_load(&esdm_rpc_unpriv_ret);
 
 	return ret;
 }
