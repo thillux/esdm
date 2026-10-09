@@ -83,7 +83,7 @@ struct thread_ctx {
  * Total number of all threads, including slaves and system threads.
  */
 #define THREADING_REALLY_ALL_THREADS                                           \
-	(THREADING_MAX_THREADS + ESDM_THREAD_MAX_SPECIAL_GROUPS)
+	(THREADING_MAX_THREADS + ESDM_THREAD_SPECIAL_SLOTS)
 
 /*
  * Array holding the thread state for all slaves and system threads.
@@ -121,20 +121,41 @@ static pthread_mutex_t thread_schedule_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t thread_wait_cv;
 static pthread_mutex_t thread_wait_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static inline unsigned int thread_get_special_slot(unsigned int thread_group)
+/*
+ * The slots [*lower, *upper) of a special group, which live above the regular
+ * pool in the order of the groups. All of them have one slot, except the EGD
+ * group, which has ESDM_THREAD_EGD_SLOTS.
+ */
+static inline bool thread_get_special_slots(unsigned int thread_group,
+					    unsigned int *lower,
+					    unsigned int *upper)
 {
+	unsigned int idx;
+
 	/*
 	 * Special groups are exactly (uint32_t)-1 .. -ESDM_THREAD_MAX_SPECIAL_GROUPS.
-	 * Only those map to a special slot; any other large value (the gap
-	 * between the normal groups and the specials) is NOT special and must
-	 * return 0 so thread_schedule()/thread_send_signal() reject it via the
-	 * validity check rather than indexing threads[] out of bounds with a
-	 * wrapped slot number.
+	 * Only those map to special slots; any other large value (the gap
+	 * between the normal groups and the specials) is NOT special, so
+	 * thread_schedule()/thread_send_signal() reject it via the validity
+	 * check rather than indexing threads[] out of bounds with a wrapped
+	 * slot number.
 	 */
 	if (thread_group <= UINT_MAX - ESDM_THREAD_MAX_SPECIAL_GROUPS)
-		return 0;
+		return false;
 
-	return (THREADING_MAX_THREADS + (UINT_MAX - thread_group));
+	idx = UINT_MAX - thread_group;
+	*lower = THREADING_MAX_THREADS + idx;
+	*upper = *lower + 1;
+
+	if (idx > UINT_MAX - ESDM_THREAD_EGD_GROUP) {
+		/* Behind the slots of the EGD group */
+		*lower += ESDM_THREAD_EGD_SLOTS - 1;
+		*upper += ESDM_THREAD_EGD_SLOTS - 1;
+	} else if (idx == UINT_MAX - ESDM_THREAD_EGD_GROUP) {
+		*upper = *lower + ESDM_THREAD_EGD_SLOTS;
+	}
+
+	return true;
 }
 
 static inline bool thread_is_special(struct thread_ctx *tctx)
@@ -472,21 +493,18 @@ void thread_send_signal(uint32_t thread_group, int signal)
 {
 	pthread_t self = pthread_self();
 	unsigned int i, upper;
-	unsigned int special_slot = thread_get_special_slot(thread_group);
+	bool special = thread_get_special_slots(thread_group, &i, &upper);
 
 	/*
 	 * Reject an out-of-range thread group instead of indexing threads[]
 	 * past its end (mirrors thread_schedule()). Special slots live at the
 	 * top of the array and are addressed directly.
 	 */
-	if (thread_group >= threads_groups && !special_slot)
+	if (thread_group >= threads_groups && !special)
 		return;
 
 	/* Get the range of slots of the thread_group */
-	if (special_slot) {
-		i = special_slot;
-		upper = special_slot + 1;
-	} else {
+	if (!special) {
 		i = thread_group * threads_per_threadgroup;
 		upper = (thread_group + 1) * threads_per_threadgroup;
 	}
@@ -516,10 +534,10 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 {
 	pthread_t self = pthread_self();
 	unsigned int lower, upper;
-	unsigned int special_slot = thread_get_special_slot(thread_group);
+	bool special = thread_get_special_slots(thread_group, &lower, &upper);
 	unsigned int num_elements, j, k;
 
-	if (thread_group >= threads_groups && !special_slot) {
+	if (thread_group >= threads_groups && !special) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_THREADING,
 			"undefined thread group requested (%u, max thread group is %u)\n",
@@ -528,10 +546,7 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 	}
 
 	/* Get the range of slots of the thread_group */
-	if (special_slot) {
-		lower = special_slot;
-		upper = special_slot + 1;
-	} else {
+	if (!special) {
 		lower = thread_group * threads_per_threadgroup;
 		upper = (thread_group + 1) * threads_per_threadgroup;
 	}
@@ -707,7 +722,7 @@ int thread_set_name(enum esdm_request_type type, uint32_t id)
 		snprintf(name, sizeof(name), "ESDM krnl_feed");
 		break;
 	case egd_server:
-		snprintf(name, sizeof(name), "ESDM egd_server");
+		snprintf(name, sizeof(name), "ESDM egd_srv%03u", id);
 		break;
 	case drng_reseed:
 		snprintf(name, sizeof(name), "ESDM drng_rsd");

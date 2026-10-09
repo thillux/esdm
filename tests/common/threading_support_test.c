@@ -30,7 +30,8 @@
  *   - a group outside the configured range - including the gap below the
  *     special groups - is rejected rather than indexing the slot array out of
  *     bounds,
- *   - the reserved special groups each get their own slot,
+ *   - the reserved special groups each get their own slot, and the EGD group
+ *     ESDM_THREAD_EGD_SLOTS of them,
  *   - thread_fork_join() runs every task exactly once, whether it can spawn
  *     threads or falls back to running them inline,
  *   - a forced release cancelling workers in the middle of a log record or
@@ -296,6 +297,40 @@ static void test_special_groups(void)
 	CHECK_EQ(thread_wait_all(true), 0);
 }
 
+/*
+ * The EGD group holds as many jobs at once as it has slots, without taking any
+ * from the special groups placed behind it.
+ */
+static void test_egd_slots(void)
+{
+	unsigned int i;
+
+	atomic_store(&jobs_run, 0);
+	atomic_store(&blocked_workers, 0);
+	atomic_store(&release_workers, false);
+
+	for (i = 0; i < ESDM_THREAD_EGD_SLOTS; i++)
+		CHECK_EQ(thread_start(job_block, NULL, ESDM_THREAD_EGD_GROUP,
+				      NULL),
+			 0);
+
+	CHECK(wait_until_uint(&blocked_workers, ESDM_THREAD_EGD_SLOTS),
+	      "only %u of %u EGD workers started",
+	      atomic_load(&blocked_workers), ESDM_THREAD_EGD_SLOTS);
+
+	CHECK_EQ(thread_start(job_count, NULL, ESDM_THREAD_DRNG_RESEED, NULL),
+		 0);
+	CHECK_EQ(thread_start(job_count, NULL, ESDM_THREAD_PERIODIC_SELFTEST,
+			      NULL),
+		 0);
+	CHECK(wait_until_uint(&jobs_run, 2),
+	      "the special groups behind the EGD slots did not get theirs");
+
+	atomic_store(&release_workers, true);
+
+	CHECK_EQ(thread_wait_all(true), 0);
+}
+
 static void test_group_isolation(void)
 {
 	unsigned int i;
@@ -520,7 +555,7 @@ static void test_thread_names(void)
 	check_thread_name(rpc_handler_unpriv, 7, "ESDM rpc_up007");
 	check_thread_name(rpc_handler_priv, 7, "ESDM rpc_p007");
 	check_thread_name(cuse_poll, 0, "ESDM cuse_poll");
-	check_thread_name(egd_server, 0, "ESDM egd_server");
+	check_thread_name(egd_server, 3, "ESDM egd_srv003");
 	check_thread_name(drng_reseed, 0, "ESDM drng_rsd");
 	check_thread_name(periodic_selftest, 0, "ESDM selftest");
 
@@ -671,6 +706,7 @@ int main(int argc, char *argv[])
 	test_return_codes();
 	test_invalid_group();
 	test_special_groups();
+	test_egd_slots();
 	test_group_isolation();
 	test_send_signal();
 	test_send_signal_race();
