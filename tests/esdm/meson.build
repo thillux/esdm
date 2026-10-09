@@ -349,7 +349,7 @@ if get_option('esdm-server').enabled()
 		esdm_jent_only_security_test,
 		timeout: 120)
 
-	# Sits out a reseed interval of five seconds and 2^11 requests.
+	# Sits out two reseed intervals of five seconds and 2^11 requests.
 	test('ESDM security - reseed on interval and request threshold',
 		esdm_reseed_security_test,
 		timeout: 120)
