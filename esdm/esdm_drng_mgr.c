@@ -1792,7 +1792,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				 * without a full reseed, so a quarter of it is
 				 * left to cover the collection - and
 				 * where it does not, the DRNG leaves the fully
-				 * seeded state below and the caller moves to
+				 * seeded state below and the request moves to
 				 * another node instead of waiting here.
 				 *
 				 * Without a worker the DRNG is reseeded right
@@ -1837,9 +1837,10 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				"DRNG reached its maximum output without full reseed\n");
 			/*
 			 * Hand out what was generated so far. The DRNG is no
-			 * longer fully seeded, so the caller moves to another
-			 * node with the next request - or, if the initial DRNG
-			 * is spent, the ESDM is not operational any more.
+			 * longer fully seeded, so the next request moves to
+			 * another node - and with nothing generated, so does
+			 * this one, see esdm_drng_get_sleep(). If the initial
+			 * DRNG is spent, the ESDM is not operational any more.
 			 */
 			if (processed)
 				return processed;
@@ -2059,9 +2060,32 @@ static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr)
 			"Using DRNG instance on node 0 to service generate request\n");
 	}
 
-	CKINT(esdm_drng_get(drng, outbuf, outbuflen));
+	ret = esdm_drng_get(drng, outbuf, outbuflen);
 
-out:
+	/*
+	 * A node DRNG that reached its maximum output without full reseed
+	 * before generating anything answers -EAGAIN. It is no longer fully
+	 * seeded and is skipped by the next request - serve this one from the
+	 * initial DRNG right away, as the next request would be, instead of
+	 * failing callers that do not retry. Once only, and with no more than
+	 * the initial DRNG has left: finding it spent takes the ESDM out of
+	 * the operational state, which is up to a request the initial DRNG
+	 * serves itself, not to one it serves on behalf of a node DRNG. If
+	 * nothing is left, -EAGAIN stands - a caller retrying on it makes that
+	 * request.
+	 */
+	if (ret == -EAGAIN && drng != &esdm_drng_init) {
+		uint32_t left = esdm_drng_bytes_left(&esdm_drng_init);
+
+		if (left) {
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_DRNG,
+				"Node DRNG spent, using DRNG instance on node 0 to service generate request\n");
+			ret = esdm_drng_get(&esdm_drng_init, outbuf,
+					    min_size(outbuflen, left));
+		}
+	}
+
 	esdm_drng_put_instances();
 	return ret;
 }
