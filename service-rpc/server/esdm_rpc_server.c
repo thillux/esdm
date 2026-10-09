@@ -1016,8 +1016,21 @@ static int esdm_rpcs_handler(void *args)
 		if (do_cleanup) {
 			struct timespec timeout_threshold;
 			clock_gettime(CLOCK_MONOTONIC, &timeout_threshold);
+			/*
+			 * Subtract the whole timeout, including the part below
+			 * one second - dropping it would keep a connection for
+			 * up to a second longer than configured, or reap it
+			 * not at all with a timeout below one second.
+			 */
 			timeout_threshold.tv_sec -=
 				ESDM_RPC_IDLE_TIMEOUT_USEC / 1000000;
+			timeout_threshold.tv_nsec -=
+				(long)(ESDM_RPC_IDLE_TIMEOUT_USEC % 1000000) *
+				1000;
+			if (timeout_threshold.tv_nsec < 0) {
+				timeout_threshold.tv_nsec += 1000000000L;
+				timeout_threshold.tv_sec--;
+			}
 
 			TAILQ_FOREACH_SAFE(tmp1, &rpc_conn_list, tailq, tmp2)
 			{
