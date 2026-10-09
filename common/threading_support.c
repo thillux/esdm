@@ -71,6 +71,7 @@ struct thread_ctx {
 	atomic_bool thread_pending; /* Is thread associated with structure? */
 	mutex_w_t inuse; /* Is thread data structure used? */
 	atomic_bool shutdown; /* Shall the thread be shut down? */
+	atomic_bool inuse_held; /* Does the worker hold inuse? */
 	bool scheduled; /* Is/was a job executed and return code
 					 * is ready for pickup? */
 
@@ -140,6 +141,12 @@ static inline bool thread_is_special(struct thread_ctx *tctx)
 	return (tctx->thread_num >= THREADING_MAX_THREADS) ? true : false;
 }
 
+/* Cancellation cleanup handler releasing a mutex held across a wait */
+static void thread_unlock_mutex(void *lock)
+{
+	pthread_mutex_unlock((pthread_mutex_t *)lock);
+}
+
 static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 {
 	struct timespec ts;
@@ -151,6 +158,11 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 	 * predicate instead of sleeping indefinitely on a missed wake-up.
 	 */
 	pthread_mutex_lock(lock);
+	/*
+	 * The timed wait is a cancellation point which returns with @lock
+	 * re-acquired - release it if the caller is cancelled there.
+	 */
+	pthread_cleanup_push(thread_unlock_mutex, lock);
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	ts.tv_nsec += 100 * 1000 * 1000;
 	if (ts.tv_nsec >= 1000000000L) {
@@ -158,7 +170,7 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 		ts.tv_nsec -= 1000000000L;
 	}
 	pthread_cond_timedwait(cv, lock, &ts);
-	pthread_mutex_unlock(lock);
+	pthread_cleanup_pop(1);
 }
 
 static inline bool thread_dirty(unsigned int slot)
@@ -322,6 +334,18 @@ out:
 	return ret;
 }
 
+/*
+ * Cancellation cleanup handler of a worker: release the inuse lock if the
+ * worker is cancelled while holding it.
+ */
+static void thread_worker_cancel_cleanup(void *arg)
+{
+	struct thread_ctx *tctx = (struct thread_ctx *)arg;
+
+	if (atomic_load(&tctx->inuse_held))
+		mutex_w_unlock(&tctx->inuse);
+}
+
 /* Worker loop of a thread */
 static void *thread_worker(void *arg)
 {
@@ -361,12 +385,23 @@ static void *thread_worker(void *arg)
 			return NULL;
 	}
 
+	/*
+	 * The worker holds inuse across the cancellation points of the job it
+	 * runs and of its idle wait (which returns with the lock re-acquired
+	 * on cancellation). A worker killed by thread_cancel() there would
+	 * leave the slot locked for good, so the cleanup handler releases it.
+	 * inuse_held tells the handler whether the lock is held.
+	 */
+	pthread_cleanup_push(thread_worker_cancel_cleanup, tctx);
+
 	while (1) {
 		mutex_w_lock(&tctx->inuse);
+		atomic_store(&tctx->inuse_held, true);
 
 	locked:
 		if (atomic_load(&tctx->shutdown)) {
 			/* Request for termination */
+			atomic_store(&tctx->inuse_held, false);
 			mutex_w_unlock(&tctx->inuse);
 			/*
 			 * As the while loop terminates, the thread will
@@ -385,6 +420,7 @@ static void *thread_worker(void *arg)
 			thread_cleanup(tctx);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
 				    "Thread %u completed\n", tctx->thread_num);
+			atomic_store(&tctx->inuse_held, false);
 			mutex_w_unlock(&tctx->inuse);
 			pthread_cond_broadcast(&thread_wait_cv);
 		} else {
@@ -395,6 +431,8 @@ static void *thread_worker(void *arg)
 			goto locked;
 		}
 	}
+
+	pthread_cleanup_pop(0);
 
 	return NULL;
 }
