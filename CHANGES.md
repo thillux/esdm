@@ -193,7 +193,7 @@ addon/es_ebpf_testing
 
 * esdm-server: an unprivileged peer is limited to 512 RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server
 
-* fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a status report truncated to the maximum message size is delivered with -EMSGSIZE
+* fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a privileged request is not sent again after the server closed the connection, as it may already have been applied; a status report truncated to the maximum message size is delivered with -EMSGSIZE, and the JSON status calls leave the buffer empty on any server error
 
 * Add esdm_rpcc_get_random_bytes_pr_nonblock(): getrandom(GRND_RANDOM|GRND_NONBLOCK) and O_NONBLOCK|O_SYNC reads of the CUSE devices no longer wait for a busy prediction resistance DRNG but fail with EAGAIN
 
