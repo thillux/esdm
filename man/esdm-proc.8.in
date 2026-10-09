@@ -44,9 +44,10 @@ kernel and lets a consumer tell the two apart.
 A writable file takes a single non\-negative number, in decimal, octal or
 hexadecimal notation, optionally surrounded by white space such as the newline
 .BR echo (1)
-appends. Anything else is refused with
+appends, in a write of less than 32 bytes. Anything else, a longer write
+included, is refused with
 .BR EINVAL ,
-a number that does not fit 32 bits with
+a number of 4294967295 (2^32\-1) or more with
 .BR ERANGE .
 .PP
 The daemon needs to be started as root to mount over
