@@ -175,11 +175,55 @@ addon/es_ebpf_testing
 
 * fix: a DRNG seed serves exactly ESDM_DRNG_RESEED_THRESH generate requests - the request that ran the counter out triggered the reseed and was counted against the old seed, so one fewer was served
 
+* Jitter RNG ES: with jitterentropy >= 3.8.0 the known answer tests of its conditioning component run through jent_selftest() bound to the synchronous and the asynchronous collector, a collector that failed them serves nothing, and a failed periodic self test empties the block cache
+
+* fix: the DRG.4 / SP800-90C limit of bits generated without a full reseed is enforced per block rather than once per request, so a large request no longer runs past it while the reseed is pending; a DRNG that reached the limit returns what it generated so far and the caller moves to another node; a DRNG left over the limit is no longer used for the rest of the request; the PR DRNG reaching it no longer clears the all-nodes-seeded state
+
+* fix: a seed the init DRNG rejected no longer makes the ESDM fully seeded and operational
+
+* fix: auxiliary pool: the hash states are replaced under the pool lock as a whole on reinit; choosing the pool to read no longer counts the oversampling twice
+
+* fix: the shared block cache of the asynchronous entropy sources discards a block whose fill started before a reset; the Jitter RNG ES falls back to its synchronous collector instead of serving a 0 bit block while credited
+
+* fix: eBPF entropy sources: events collected before a failed health test, still in flight in the ring buffer or a per-CPU batch, are no longer credited; pending events are no longer under-reported after a reset
+
+* fix: Linux kernel addon: a wrapped ring is hashed only as far as it is consumed, instead of crediting the tail again; no extraction before the internal DRBG exists (division by zero); the ring reset is serialized with the extraction and safe against concurrent producers; runtime entropy rates are floored at the configured module parameter; a failed module init removes the testing interface; unloading waits for in-flight hook callbacks (all hook patches)
+
+* fix: esdm-server exits with an error when the RPC or EGD interfaces cannot be set up, instead of 0, and no longer waits forever for an unprivileged interface that failed to start; the idle timeout is honored to the microsecond
+
+* esdm-server: an unprivileged peer is limited to 512 RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server
+
+* fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a status report truncated to the maximum message size is delivered with -EMSGSIZE
+
+* Add esdm_rpcc_get_random_bytes_pr_nonblock(): getrandom(GRND_RANDOM|GRND_NONBLOCK) and O_NONBLOCK|O_SYNC reads of the CUSE devices no longer wait for a busy prediction resistance DRNG but fail with EAGAIN
+
+* fix: getrandom wrapper: invalid flags fail with -1 and errno EINVAL as the system call does; the kernel fallback no longer passes GRND_FULLY_SEEDED
+
+* fix: esdm-server: --username takes its argument
+
+* fix: esdm-server-signal-helper: the exit status reflects the requested mode alone, exactly one of --suspend/--resume is required, and only the PID named by a PID file the server still holds locked is signaled
+
+* fix: CUSE: the caller of a privileged ioctl is checked with privileges raised, so it works with /proc mounted hidepid; the daemon stays in the mount namespace holding its bind mounts, so they are removed from the host at exit ("mnt" removed from RestrictNamespaces=); --pid_namespace is documented and warned about to refuse the privileged ioctls
+
+* fix: esdm-proc: writing a value that is not a number fails with EINVAL; esdm-tool wipes the seed when writing it out fails
+
+* fix: threading: a cancelled worker releases the locks it holds and is always joined; the logger can no longer be cancelled in the middle of a record, which left every later log call and the exit hanging
+
+* fix: ChaCha20 DRNG: the key is replaced at least every GiB of output of one request; the locked states of the ChaCha20 and the Hash DRBG own their pages, so freeing one no longer unlocks another, and an exhausted memlock budget no longer fails the allocation
+
+* fix: GnuTLS backend: hash init resets the state and the self test checks every step; Botan backend: the HMAC DRBG is instantiated over the seed and the personalization string in one step, covered by its known answer test
+
+* fix: FIPS integrity test: the HMAC file parser rejects characters that are not hex
+
+* fix: meson: fips140 implies the complete SP800-90C build configuration, reseeding limits and disabled entropy source caches included
+
+* fix: esdm.spec names the jitterentropy packages as openSUSE ships them
+
 * fix: esdm.spec requires the protobuf-c runtime instead of protobuf
 
-* flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; support Linux 7.2 and 7.3 in the kernel addon
+* flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; build against the jitterentropy master (3.8.0) and libkcapi master, whose RNG tests are adjusted to Linux 7.2+; support Linux 7.2 and 7.3 in the kernel addon
 
-* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above
+* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval and the operational state tests no longer depend on timing
 
 * tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
 
