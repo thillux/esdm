@@ -134,7 +134,12 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	if (buf[1] < (force_fips ? 384 : 128)) {
+	/*
+	 * The oversampled initial seed of SP800-90C is only collected where the
+	 * oversampling is compiled in (sp80090c or fips140) - forcing FIPS mode
+	 * at runtime does not add it to a build without.
+	 */
+	if (buf[1] < (esdm_es_oversampling() ? 384 : force_fips ? 256 : 128)) {
 		printf("esdm_get_seed returned insufficient seed: %" PRIu64
 		       "\n",
 		       buf[1]);
