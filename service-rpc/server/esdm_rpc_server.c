@@ -777,12 +777,13 @@ static int esdm_rpcs_handler(void *args)
 	int tfd = -1;
 	int ret = 0;
 
+	/* Initialized first - the cleanup at out: walks the list. */
+	TAILQ_INIT(&rpc_conn_list);
+
 	if (thread == NULL) {
 		ret = -EINVAL;
 		goto out;
 	}
-
-	TAILQ_INIT(&rpc_conn_list);
 
 	thread_set_name(thread->proto->privileged ? rpc_handler_priv :
 						    rpc_handler_unpriv,
@@ -791,6 +792,9 @@ static int esdm_rpcs_handler(void *args)
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to create epoll instance: %s\n",
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -800,10 +804,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.ptr = NULL,
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add server FD %d to epoll\n",
-			    thread->proto->server_listening_fd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add server FD %d to epoll: %s\n",
+			    thread->proto->server_listening_fd, strerror(-ret));
 		goto out;
 	}
 
@@ -820,10 +824,10 @@ static int esdm_rpcs_handler(void *args)
 		},
 	};
 	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to arm cleanup timer: %s\n",
-			    strerror(errno));
-		ret = -errno;
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -833,9 +837,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 1 /* no ptr will have this value */
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add timer FD %d to epoll\n", tfd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add timer FD %d to epoll: %s\n", tfd,
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -845,10 +850,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 2 /* no ptr will have this value */
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add event FD %d to epoll\n",
-			    thread->eventfd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add event FD %d to epoll: %s\n",
+			    thread->eventfd, strerror(-ret));
 		goto out;
 	}
 
@@ -883,9 +888,9 @@ static int esdm_rpcs_handler(void *args)
 		}
 
 		if (nfds < 0) {
-			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-				    "epoll_wait failed\n");
 			ret = -errno;
+			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+				    "epoll_wait failed: %s\n", strerror(-ret));
 			goto out;
 		}
 
@@ -1019,20 +1024,22 @@ static int esdm_rpcs_handler(void *args)
 							rpc_conn);
 						continue;
 					default:
+						/*
+						 * Capture errno before the logger
+						 * and the cleanup clobber it. This
+						 * conn was never inserted into
+						 * rpc_conn_list, so the out: cleanup
+						 * loop cannot reach it - free/close
+						 * here to avoid leaking the conn and
+						 * its fd.
+						 */
+						ret = -errno;
 						esdm_logger(
 							LOGGER_ERR,
 							LOGGER_C_RPC,
-							"Unable to add client FD %d to epoll, exiting worker\n",
-							accepted_fd);
-						/*
-						 * Capture errno before the cleanup
-						 * calls clobber it. This conn was
-						 * never inserted into rpc_conn_list,
-						 * so the out: cleanup loop cannot
-						 * reach it - free/close here to
-						 * avoid leaking the conn and its fd.
-						 */
-						ret = -errno;
+							"Unable to add client FD %d to epoll, exiting worker: %s\n",
+							accepted_fd,
+							strerror(-ret));
 						esdm_rpcs_release_conn(
 							rpc_conn);
 						goto out;
@@ -1074,7 +1081,7 @@ static int esdm_rpcs_handler(void *args)
 					continue;
 				}
 
-				ret = esdm_rpcs_read(rpc_conn);
+				int read_ret = esdm_rpcs_read(rpc_conn);
 				/*
 				 * Decide on the returned code, not the global
 				 * errno: intermediate logger/handler calls may
@@ -1084,7 +1091,7 @@ static int esdm_rpcs_handler(void *args)
 				 * closed on the EPIPE path) linger in the list
 				 * until the idle timeout reaps it.
 				 */
-				if (ret && ret != -EAGAIN) {
+				if (read_ret && read_ret != -EAGAIN) {
 					esdm_logger(
 						LOGGER_DEBUG, LOGGER_C_RPC,
 						"Closing incoming connection for FD %d\n",
@@ -1166,7 +1173,22 @@ out:
 		close(epfd);
 	}
 
-	return 0;
+	/*
+	 * A worker that gives up leaves its share of the clients unserved, and
+	 * the last one to go leaves the interface dead while the server looks
+	 * alive. Take the server down with an error instead, so that a service
+	 * manager notices and restarts it - the error reaches the exit status
+	 * through thread_wait() in esdm_rpcs_workerloop().
+	 */
+	if (ret) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_RPC,
+			"RPC worker thread failed, terminating server: %s\n",
+			strerror(-ret));
+		esdm_rpc_server_signal_exit();
+	}
+
+	return ret;
 }
 
 /* The ESDM RPC server main worker loop. */
@@ -1233,7 +1255,6 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 			if (!t)
 				goto out;
 			num_threads = t;
-			ret = 0;
 			break;
 		}
 
