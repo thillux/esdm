@@ -276,6 +276,37 @@ static void test_modified_target(void)
 
 static void test_malformed_checkfile(void)
 {
+	char content[256];
+	char line[EXPECTED_HMAC_FILE_LEN + 2];
+
+	/*
+	 * A trailing non-printable byte with the high bit set is stripped
+	 * like the line terminator - it is a negative char on most ABIs.
+	 */
+	unlink(hmacfile);
+	CHECK_EQ(fips_create_checkfile(hmacfile, target), 0);
+	if (read_file(hmacfile, content, sizeof(content)) ==
+	    EXPECTED_HMAC_FILE_LEN) {
+		memcpy(line, content, 64);
+		line[64] = (char)0xfe;
+		line[65] = '\n';
+		if (!write_file(hmacfile, line, 66))
+			return;
+		CHECK_EQ(fips_post_integrity(target), 0);
+	} else {
+		CHECK(0, "cannot read back %s", hmacfile);
+	}
+
+	/*
+	 * A digest of the right length holding a non-hex character is
+	 * malformed, rather than decoding to a digest that mismatches.
+	 */
+	memset(line, 'z', 64);
+	line[64] = '\n';
+	if (!write_file(hmacfile, line, 65))
+		return;
+	CHECK_EQ(fips_post_integrity(target), -EINVAL);
+
 	/* A digest of the wrong length is a violation, not a mismatch */
 	if (!write_file(hmacfile, "00112233445566778899aabbccddeeff\n", 33))
 		return;

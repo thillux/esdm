@@ -205,7 +205,7 @@ static int process_checkfile(const char *checkfile, const char *targetfile)
 
 		/* remove trailing CR and reduce buffer length */
 		for (i = linelen - 1; i > 0; i--) {
-			if (!isprint(buf[i])) {
+			if (!isprint((unsigned char)buf[i])) {
 				buf[i] = '\0';
 				linelen--;
 			} else
