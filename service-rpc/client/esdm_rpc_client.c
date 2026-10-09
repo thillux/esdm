@@ -88,11 +88,21 @@ static void register_fork_handler(void);
 #define ESDM_RPCC_PRIV_RX_TIMEOUT_MS 60000
 
 /*
- * How often an unprivileged request whose answer did not come in time is sent
- * again on a new connection - which may well be served by another, less busy,
- * server thread. Bounded, so a wedged server does not keep its caller forever.
+ * How long an unprivileged request is waited for in total. An answer that did
+ * not come in time is asked for again on a new connection - which may well be
+ * served by another, less busy, server thread - until this time is up, so a
+ * wedged server does not keep its caller forever. No new submission starts
+ * after it, an ongoing one still waits for its answer.
+ *
+ * Both are fixed times rather than multiples of ESDM_RPCC_RX_POLL_MS: with the
+ * shortest client-rx-tx-timeout-exponent a poll lasts a millisecond, and a
+ * budget counted in polls would let a caller fail behind a single request the
+ * server takes a little longer for.
  */
-#define ESDM_RPCC_MAX_RESUBMISSIONS 3
+#define ESDM_RPCC_RX_TIMEOUT_MS 6400
+
+/* How long one submission of an unprivileged request waits for its answer. */
+#define ESDM_RPCC_RX_SUBMISSION_MS 1600
 
 /*
  * Forget the connection's socket. Only the descriptor is closed unless
@@ -693,6 +703,17 @@ out:
 }
 #endif /* ESDM_FUZZING */
 
+/* Milliseconds passed since @start on CLOCK_MONOTONIC. */
+static int64_t esdm_rpcc_elapsed_ms(const struct timespec *start)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	return ((int64_t)now.tv_sec - (int64_t)start->tv_sec) * 1000LL +
+	       ((int64_t)now.tv_nsec - (int64_t)start->tv_nsec) / 1000000LL;
+}
+
 static void esdm_client_invoke(ProtobufCService *service,
 			       unsigned int method_index,
 			       const ProtobufCMessage *input,
@@ -704,16 +725,15 @@ static void esdm_client_invoke(ProtobufCService *service,
 		(esdm_rpc_client_connection_t *)service;
 	static const int64_t half_server_timeout_ns =
 		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC * 1000 / 2;
-	/* See ESDM_RPCC_PRIV_RX_TIMEOUT_MS and ESDM_RPCC_MAX_RESUBMISSIONS */
+	/* See ESDM_RPCC_PRIV_RX_TIMEOUT_MS and ESDM_RPCC_RX_TIMEOUT_MS */
 	const bool privileged = (desc == &priv_access__descriptor);
 	const unsigned int rx_retries =
 		privileged ?
 			ESDM_RPCC_PRIV_RX_TIMEOUT_MS / ESDM_RPCC_RX_POLL_MS :
-			ESDM_MAX_RX_TX_RETRIES;
-	const unsigned int max_resubmissions =
-		privileged ? 0 : ESDM_RPCC_MAX_RESUBMISSIONS;
-	unsigned int resubmissions = 0;
-	struct timespec current_time;
+			max_uint32(ESDM_MAX_RX_TX_RETRIES,
+				   ESDM_RPCC_RX_SUBMISSION_MS /
+					   ESDM_RPCC_RX_POLL_MS);
+	struct timespec current_time, start_time;
 	int64_t used_before_ns;
 	bool reconnected = false;
 	int ret;
@@ -729,6 +749,8 @@ static void esdm_client_invoke(ProtobufCService *service,
 		reset_conn_socket(rpc_conn);
 
 	rpc_conn->last_error = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &start_time);
 
 	do {
 		clock_gettime(CLOCK_MONOTONIC, &current_time);
@@ -776,7 +798,9 @@ static void esdm_client_invoke(ProtobufCService *service,
 			reconnected = true;
 			ret = -EAGAIN;
 		} else if (ret == -EAGAIN &&
-			   resubmissions++ >= max_resubmissions) {
+			   (privileged ||
+			    esdm_rpcc_elapsed_ms(&start_time) >=
+				    ESDM_RPCC_RX_TIMEOUT_MS)) {
 			/*
 			 * The answer did not come in time, again and again - or,
 			 * for a privileged request, once: give up rather than
