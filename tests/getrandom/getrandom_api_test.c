@@ -93,15 +93,19 @@ static void test_flags_refused(void)
 		 * Refused before any of it reaches the ESDM or the kernel, so
 		 * the buffer has to come back as it went in.
 		 */
+		errno = 0;
 		CHECK(__wrap_getrandom(buf, sizeof(buf), cases[i].flags) ==
-			      -EINVAL,
-		      "%s was not refused", cases[i].desc);
+				      -1 &&
+			      errno == EINVAL,
+		      "%s was not refused with EINVAL", cases[i].desc);
 		CHECK(is_untouched(buf, sizeof(buf)),
 		      "%s was refused after writing to the buffer",
 		      cases[i].desc);
 
 		/* The interposed entry point answers the same way */
-		CHECK(getrandom(buf, sizeof(buf), cases[i].flags) == -EINVAL,
+		errno = 0;
+		CHECK(getrandom(buf, sizeof(buf), cases[i].flags) == -1 &&
+			      errno == EINVAL,
 		      "%s was not refused through getrandom()", cases[i].desc);
 	}
 }
@@ -121,6 +125,8 @@ static void test_fallback_to_kernel(void)
 		{ "a non-blocking request", GRND_NONBLOCK },
 		{ "insecure randomness", GRND_INSECURE },
 		{ "prediction resistant randomness", GRND_RANDOM },
+		/* The ESDM's own flag must not make the kernel refuse it */
+		{ "a fully seeded request", GRND_FULLY_SEEDED },
 	};
 	uint8_t buf[32];
 	size_t i;

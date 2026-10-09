@@ -124,10 +124,14 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 {
 	ssize_t ret;
 
+	/*
+	 * getrandom(2) semantics: -1 with errno on error, never a negative
+	 * error code as return value.
+	 */
 	if (flags &
 	    (unsigned int)(~(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE |
 			     GRND_SEED | GRND_FULLY_SEEDED)))
-		return -EINVAL;
+		goto inval;
 
 	/*
 	 * Requesting insecure and blocking randomness at the same time makes
@@ -135,12 +139,12 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	 */
 	if ((flags & (GRND_INSECURE | GRND_RANDOM)) ==
 	    (GRND_INSECURE | GRND_RANDOM))
-		return -EINVAL;
+		goto inval;
 	if ((flags & (GRND_INSECURE | GRND_SEED)) ==
 	    (GRND_INSECURE | GRND_SEED))
-		return -EINVAL;
+		goto inval;
 	if ((flags & (GRND_RANDOM | GRND_SEED)) == (GRND_RANDOM | GRND_SEED))
-		return -EINVAL;
+		goto inval;
 
 	/*
 	 * Cap to INT_MAX to match the kernel getrandom() behavior which
@@ -167,7 +171,9 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 			return -1;
 		}
 		if (rc < 0)
-			return syscall(__NR_getrandom, buffer, length, flags);
+			return syscall(
+				__NR_getrandom, buffer, length,
+				flags & ~(unsigned int)GRND_FULLY_SEEDED);
 	}
 
 	if (flags & GRND_INSECURE) {
@@ -194,7 +200,13 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	if (ret >= 0)
 		return ret;
 
-	return syscall(__NR_getrandom, buffer, length, flags);
+	/* GRND_FULLY_SEEDED is ESDM's own, the kernel would refuse it */
+	return syscall(__NR_getrandom, buffer, length,
+		       flags & ~(unsigned int)GRND_FULLY_SEEDED);
+
+inval:
+	errno = EINVAL;
+	return -1;
 }
 
 /* Declare the prototype even though libc declares it internally */
