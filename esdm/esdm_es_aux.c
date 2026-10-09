@@ -198,30 +198,37 @@ static int esdm_aux_init(void)
 		 * undefined. The lock outlives esdm_aux_fini(), so an init after
 		 * a fini takes the same path with the states already NULL.
 		 */
-		if (pool->lock_initialized) {
-			mutex_w_lock(&pool->lock);
-			esdm_aux_fini_pool(pool);
-			mutex_w_unlock(&pool->lock);
-		} else {
+		if (!pool->lock_initialized) {
 			CKINT(mutex_w_init(&pool->lock, 0, 0));
 			pool->lock_initialized = true;
 		}
 
-		pool->aux_pool_state = NULL;
-		pool->aux_pool_out = NULL;
+		/*
+		 * Replace the hash states and reset the entropy count under
+		 * the pool lock as a whole: a concurrent
+		 * esdm_pool_insert_aux() must neither see the states released
+		 * or not yet allocated nor have the entropy it credits in
+		 * between wiped out.
+		 */
+		mutex_w_lock(&pool->lock);
+		if (pool->aux_pool_state || pool->aux_pool_out)
+			esdm_aux_fini_pool(pool);
 		atomic_store(&pool->aux_entropy_bits, 0);
 		pool->initialized = false;
 		pool->idx = i;
-		CKINT(esdm_aux_init_pool(pool));
+		ret = esdm_aux_init_pool(pool);
 
 		/*
 		 * The size of the hash the pool is conditioned with, which is
 		 * the most entropy the pool holds - read from the hash rather
 		 * than assumed to be the largest one supported.
 		 */
-		atomic_store(&pool->digestsize,
-			     (int)drng->hash_cb->hash_digestsize(
-				     pool->aux_pool_state));
+		if (!ret)
+			atomic_store(&pool->digestsize,
+				     (int)drng->hash_cb->hash_digestsize(
+					     pool->aux_pool_state));
+		mutex_w_unlock(&pool->lock);
+		CKINT(ret);
 	}
 
 	esdm_set_wakeup_bits();
@@ -243,7 +250,14 @@ static void esdm_aux_fini(void)
 	size_t i;
 
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
-		esdm_aux_fini_pool(&esdm_pools[i]);
+		struct esdm_pool *pool = &esdm_pools[i];
+
+		/* Release the states under the lock - see esdm_aux_init() */
+		if (pool->lock_initialized)
+			mutex_w_lock(&pool->lock);
+		esdm_aux_fini_pool(pool);
+		if (pool->lock_initialized)
+			mutex_w_unlock(&pool->lock);
 	}
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Aux ES hash deallocated\n");
