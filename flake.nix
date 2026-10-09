@@ -135,10 +135,10 @@
           esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
         };
 
-        # 6.6 is the first kernel version supported by ESDM.
+        # 6.1 is the first kernel version supported by ESDM.
         minKernel = {
           major = 6;
-          minor = 6;
+          minor = 1;
         };
 
         # All `linuxPackages_<major>_<minor>` sets nixpkgs currently exposes,
