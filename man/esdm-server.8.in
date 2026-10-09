@@ -1,4 +1,4 @@
-.TH ESDM\-SERVER 8 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH ESDM\-SERVER 8 "2026-10-09" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 esdm\-server \- Entropy Source and DRNG Manager daemon
 .SH SYNOPSIS
@@ -131,6 +131,32 @@ consumers waiting on it notice that the daemon is about to be suspended. This
 is what
 .BR esdm\-server\-signal\-helper (8)
 sends before the system goes to sleep.
+.SH CONNECTION LIMITS
+All interfaces share the file descriptor limit of the daemon (the shipped
+.B esdm\-server.service
+sets
+.BR LimitNOFILE=8192 ).
+So that no single local user can exhaust it and lock every other consumer out,
+the daemon bounds the connections of each unprivileged peer, identified by the
+UID of the connecting process. Processes running as root are exempt.
+.TP
+.B RPC interface
+At most 512 concurrent connections per UID, counted over all RPC connections
+of all server threads. A connection that has been idle for the period set by the
+.B esdm\-server\-rpc\-idle\-timeout\-usec
+build option (2 seconds by default) is closed;
+.BR libesdm_rpc_client (3)
+reconnects transparently.
+.TP
+.B EGD interface
+At most 2048 concurrent connections in total and 256 per UID. A connection
+that has received no command and owes no response for 60 seconds is closed;
+.BR libesdm_egd_client (3)
+reconnects transparently.
+.PP
+A connection beyond the limit of its UID is accepted and closed at once. The
+daemon logs a warning when a UID reaches its limit, and again only after the
+UID has closed all its connections in between. These limits are compile\-time constants.
 .SH FILES
 .TP
 .I /run/esdm\-rpc\-unpriv.socket
