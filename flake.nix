@@ -141,42 +141,42 @@
           minor = 1;
         };
 
-        # All `linuxPackages_<major>_<minor>` sets nixpkgs currently exposes,
-        # restricted to the versions ESDM supports (>= minKernel). Discovered
-        # automatically so newly packaged kernels are picked up without editing
-        # this file. Keyed by the suffix used for the generated outputs, e.g.
-        # "6_6" -> live_6_6-<system> / esdm_es_6_6. The rolling "latest" alias
-        # is added on top for convenience.
-        # Stock (unpatched) `linuxPackages_<major>_<minor>` sets nixpkgs
-        # currently exposes, restricted to the versions ESDM supports
-        # (>= minKernel). Keyed by the suffix used for the generated outputs.
+        # The stock (unpatched) kernel package sets of nixpkgs, enumerated like
+        # jitterentropy-library does: the numbered linuxKernel.packages sets
+        # plus linux_testing, the flavored variants (hardened, zen, ...) are of
+        # no interest. tryEval guards the sets that do not evaluate on the
+        # current system and the end-of-life aliases that throw. Restricted to
+        # the versions ESDM supports (>= minKernel), linux_testing always
+        # included. Keyed by the suffix used for the generated outputs, e.g.
+        # linux_6_18 -> "6_18" -> live_6_18-<system> / esdm_es_6_18,
+        # linux_testing -> "testing". The rolling "latest" alias is added on top.
         stockKernels =
           let
-            versioned = builtins.listToAttrs (
-              builtins.concatMap (
-                name:
-                let
-                  m = builtins.match "linuxPackages_([0-9]+)_([0-9]+)" name;
-                in
-                if m == null then
-                  [ ]
-                else
-                  let
-                    major = lib.toInt (builtins.elemAt m 0);
-                    minor = lib.toInt (builtins.elemAt m 1);
-                    supported = major > minKernel.major || (major == minKernel.major && minor >= minKernel.minor);
-                    # nixpkgs keeps end-of-life series (e.g. 6_13, 7_1) as
-                    # aliases that throw "was removed"; skip those.
-                    available = (builtins.tryEval pkgs.${name}.kernel.version).success;
-                  in
-                  lib.optional (supported && available) {
-                    name = "${toString major}_${toString minor}";
-                    value = pkgs.${name};
-                  }
-              ) (builtins.attrNames pkgs)
-            );
+            usable =
+              ps:
+              let
+                r = builtins.tryEval (lib.isAttrs ps && ps ? kernel && lib.isDerivation ps.kernel);
+              in
+              r.success && r.value;
+
+            supported =
+              name:
+              let
+                m = builtins.match "linux_([0-9]+)_([0-9]+)" name;
+                major = lib.toInt (builtins.elemAt m 0);
+                minor = lib.toInt (builtins.elemAt m 1);
+              in
+              name == "linux_testing"
+              || (
+                m != null && (major > minKernel.major || (major == minKernel.major && minor >= minKernel.minor))
+              );
+
+            sets = lib.filterAttrs (name: ps: supported name && usable ps) pkgs.linuxKernel.packages;
           in
-          versioned // { latest = pkgs.linuxPackages_latest; };
+          lib.mapAttrs' (name: ps: lib.nameValuePair (lib.removePrefix "linux_" name) ps) sets
+          // {
+            latest = pkgs.linuxPackages_latest;
+          };
 
         # The same kernels with the esdm_es patches applied.
         kernels = lib.mapAttrs (name: lp: lp.extend addEsdmToKernel) stockKernels;
