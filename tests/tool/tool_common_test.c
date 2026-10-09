@@ -210,11 +210,12 @@ static char *capture_end(void)
 	if (!in)
 		return NULL;
 
-	if (fseek(in, 0, SEEK_END) < 0 || (size = ftell(in)) < 0) {
+	/* fseek() rather than rewind(), which cannot report a failure */
+	if (fseek(in, 0, SEEK_END) < 0 || (size = ftell(in)) < 0 ||
+	    fseek(in, 0, SEEK_SET) < 0) {
 		fclose(in);
 		return NULL;
 	}
-	rewind(in);
 
 	content = calloc(1, (size_t)size + 1);
 	if (content && size &&

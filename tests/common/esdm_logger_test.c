@@ -64,9 +64,9 @@ static char *read_logfile(void)
 		return NULL;
 	}
 	size = ftell(in);
-	rewind(in);
 
-	if (size < 0) {
+	/* fseek() rather than rewind(), which cannot report a failure */
+	if (size < 0 || fseek(in, 0, SEEK_SET) < 0) {
 		fclose(in);
 		return NULL;
 	}

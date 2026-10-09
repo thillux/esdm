@@ -1175,8 +1175,10 @@ static void test_shm_status(void)
 	unsigned int mask;
 
 	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
-	CHECK(esdm_cuse_shm_status != NULL,
-	      "the status segment was not attached");
+	if (!esdm_cuse_shm_status) {
+		CHECK(0, "the status segment was not attached");
+		return;
+	}
 
 	/* A segment without the version this build speaks is not usable */
 	CHECK_EQ(esdm_cuse_shm_status_avail(), 0);
@@ -1189,8 +1191,10 @@ static void test_shm_status(void)
 	CHECK(esdm_cuse_shm_status == NULL,
 	      "the status segment was not detached");
 	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
-	CHECK(esdm_cuse_shm_status != NULL,
-	      "the status segment was not attached again");
+	if (!esdm_cuse_shm_status) {
+		CHECK(0, "the status segment was not attached again");
+		return;
+	}
 	CHECK_EQ(esdm_cuse_shm_status->version, 0);
 
 	/* A fresh segment, so the version has to be put back into it */

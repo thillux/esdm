@@ -51,7 +51,7 @@ void env_fini(void)
 
 int env_init(void)
 {
-	const char *server = getenv("ESDM_SERVER");
+	const char *server;
 	char *server_envp[TEST_ENV_MAX_VARS + 1];
 	pid_t pid;
 	int ret;
@@ -73,10 +73,6 @@ int env_init(void)
 		return -ret;
 	}
 
-	ret = test_env_check_file(server);
-	if (ret)
-		goto out;
-
 	/*
 	 * The EGD provider speaks the EGD protocol over a socket of its own, so
 	 * the server is given one and the client pointed at it. Doing this
@@ -85,6 +81,12 @@ int env_init(void)
 	 * test, so the fixed name cannot collide.
 	 */
 	setenv(ESDM_EGD_SOCKET_ENV, ESDM_TEST_EGD_SOCKET, 1);
+
+	/* Fetched only now - setenv() may invalidate what getenv() returned */
+	server = getenv("ESDM_SERVER");
+	ret = test_env_check_file(server);
+	if (ret)
+		goto out;
 
 	/* Built before the fork - see test_env_daemon_envp() */
 	test_env_daemon_envp(server_envp, TEST_ENV_MAX_VARS + 1);

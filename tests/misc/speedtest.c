@@ -179,16 +179,22 @@ static int print_status(struct opts *opts, uint64_t processed_bytes,
  * way a caller in the field reads it - one read() per request, held open across
  * all of them, which is what the round trip to the CUSE daemon costs.
  */
+/* @return number of bytes received or -errno */
 static ssize_t speedtest_request(struct opts *opts, int fd, uint8_t *buffer)
 {
-	if (0 <= fd)
-		return read(fd, buffer, opts->buflen);
+	ssize_t rc;
 
+	if (0 <= fd)
+		rc = read(fd, buffer, opts->buflen);
+	else
 #ifdef USE_GLIBC_GETRANDOM
-	return getrandom(buffer, opts->buflen, 0);
+		rc = getrandom(buffer, opts->buflen, 0);
 #else
-	return syscall(__NR_getrandom, buffer, opts->buflen, 0);
+		rc = syscall(__NR_getrandom, buffer, opts->buflen, 0);
 #endif
+
+	/* Before the time measurement following the call clobbers errno */
+	return (rc < 0) ? -errno : rc;
 }
 
 static int speedtest(struct opts *opts)
@@ -207,9 +213,9 @@ static int speedtest(struct opts *opts)
 	if (opts->devfile) {
 		fd = open(opts->devfile, O_RDONLY | O_CLOEXEC);
 		if (0 > fd) {
-			printf("Cannot open file %s: %d\n", opts->devfile,
-			       errno);
 			ret = -errno;
+			printf("Cannot open file %s: %d\n", opts->devfile,
+			       -ret);
 			goto out;
 		}
 	}
@@ -225,9 +231,9 @@ static int speedtest(struct opts *opts)
 		received = speedtest_request(opts, fd, buffer);
 		end_time(&end);
 		if (received < 0) {
-			if (EINTR == errno)
+			if (received == -EINTR)
 				continue;
-			ret = -errno;
+			ret = (int)received;
 			goto out;
 		}
 		/* A source that answers nothing would never end the loop */
