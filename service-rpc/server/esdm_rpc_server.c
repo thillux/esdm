@@ -21,6 +21,7 @@
 #include <bits/time.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -34,6 +35,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/queue.h>
+#include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -138,15 +140,45 @@ static atomic_int server_exit = 0;
  * Concurrent connections of one unprivileged UID over all RPC worker threads -
  * root is exempt. Each worker serves up to 1024 connections and all of them
  * share one RLIMIT_NOFILE with the EGD interface; without a bound per peer a
- * single local user could exhaust them and lock every other client out. A
- * client process holds at most one connection per online node, and idle ones
- * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC, which leaves plenty of room for
- * the consumers of one user.
+ * single local user could exhaust them and lock every other client out.
+ *
+ * A client process holds up to one connection per online node, and idle ones
+ * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC. A fixed bound would therefore
+ * only admit a handful of busy processes of one user on a large machine. The
+ * bound scales with the online nodes instead, admitting
+ * ESDM_RPC_PROCESSES_PER_UID such processes, but never less than
+ * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps the scaling: no
+ * single UID can take more than half of RLIMIT_NOFILE, which leaves the other
+ * half to the remaining users and the EGD interface (see
+ * esdm_rpcs_peer_limit_init()).
  */
-#define ESDM_RPC_MAX_CONNECTIONS_PER_UID 512
+#define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
+#define ESDM_RPC_PROCESSES_PER_UID 16
 
-static struct esdm_peer_limit esdm_rpcs_peer_limit =
-	ESDM_PEER_LIMIT_INIT("RPC server", ESDM_RPC_MAX_CONNECTIONS_PER_UID);
+static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
+	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
+
+/*
+ * Size the per-UID bound of the RPC interface. To be called before the first
+ * RPC worker thread starts.
+ */
+static void esdm_rpcs_peer_limit_init(void)
+{
+	uint64_t max = (uint64_t)esdm_online_nodes() *
+		       ESDM_RPC_PROCESSES_PER_UID;
+	struct rlimit rl;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+		max = min_uint64(max, rl.rlim_cur / 2);
+
+	max = max_uint64(max, ESDM_RPC_MIN_CONNECTIONS_PER_UID);
+	esdm_rpcs_peer_limit.max_per_uid = (unsigned int)min_uint64(max,
+								  UINT_MAX);
+
+	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
+		    "Admitting at most %u RPC connections per unprivileged UID\n",
+		    esdm_rpcs_peer_limit.max_per_uid);
+}
 
 /*
  * Set while the thread serving the unprivileged interface runs. A master that
@@ -1718,6 +1750,8 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 
 	/* Main ESDM Init DRNG state, ES', ... */
 	CKINT(esdm_init());
+
+	esdm_rpcs_peer_limit_init();
 
 	/* Initialize test pertubation support */
 	CKINT(esdm_test_shm_status_init());

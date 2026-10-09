@@ -141,8 +141,10 @@ the daemon bounds the connections of each unprivileged peer, identified by the
 UID of the connecting process. Processes running as root are exempt.
 .TP
 .B RPC interface
-At most 512 concurrent connections per UID, counted over all RPC connections
-of all server threads. A connection that has been idle for the period set by the
+At most 16 concurrent connections per online CPU and UID, counted over all
+RPC connections of all server threads - a client process holds up to one
+connection per online CPU. The bound is at least 512 and at most half of the
+file descriptor limit of the daemon; it is logged at startup. A connection that has been idle for the period set by the
 .B esdm\-server\-rpc\-idle\-timeout\-usec
 build option (2 seconds by default) is closed;
 .BR libesdm_rpc_client (3)
@@ -156,7 +158,8 @@ reconnects transparently.
 .PP
 A connection beyond the limit of its UID is accepted and closed at once. The
 daemon logs a warning when a UID reaches its limit, and again only after the
-UID has closed all its connections in between. These limits are compile\-time constants.
+UID has closed all its connections in between. Apart from the scaling of the RPC bound, these limits are compile\-time
+constants.
 .SH FILES
 .TP
 .I /run/esdm\-rpc\-unpriv.socket

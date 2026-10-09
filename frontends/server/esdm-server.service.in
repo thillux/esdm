@@ -59,8 +59,10 @@ LimitMEMLOCK=infinity
 # ones. systemd's default of 1024 is below the number of EGD clients the server
 # is willing to serve, which would turn into connections that are accepted and
 # immediately dropped rather than into a clean limit. No single unprivileged
-# user can claim them all: the server admits at most 512 RPC and 256 EGD
-# connections per UID (root is exempt) and closes EGD connections idle for 60s.
+# user can claim them all: the server admits at most 256 EGD connections per UID
+# and RPC connections per UID of 16 per online CPU, at least 512 and at most
+# half of this limit (root is exempt), and closes EGD connections idle for 60s.
+# Raise this limit on hosts with more than 256 CPUs to let the RPC bound grow.
 LimitNOFILE=8192
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
