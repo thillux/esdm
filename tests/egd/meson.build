@@ -50,6 +50,17 @@ if get_option('esdm-server').enabled()
 
 	test('EGD server raw protocol', egd_server_raw_test, timeout: 300)
 
+	# The per-UID connection accounting shared by the RPC and EGD servers,
+	# compiled into the test to inspect its table. Needs no server.
+	egd_peer_limit_test = executable(
+			'egd_peer_limit_test',
+			[ 'egd_peer_limit_test.c' ],
+			include_directories: include_dirs_server,
+			dependencies: egd_test_deps
+		)
+
+	test('EGD server peer limit', egd_peer_limit_test)
+
 	egd_server_test = executable(
 			'egd_server_test',
 			[ 'egd_server_test.c' ],
