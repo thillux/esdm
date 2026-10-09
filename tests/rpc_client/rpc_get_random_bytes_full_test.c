@@ -67,7 +67,8 @@ int main(int argc, char *argv[])
 
 		rc = esdm_rpcc_get_random_bytes_full(buf, len);
 		if (rc < 0) {
-			ret = (int)ret;
+			printf("request failed: %zd\n", rc);
+			ret = 1;
 			goto out;
 		}
 
