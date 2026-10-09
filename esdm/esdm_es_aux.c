@@ -632,18 +632,15 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 	uint32_t max_entropy = 0;
 	bool locked_pool = false;
 	/*
-	 * Evaluate the entropy threshold once up front. esdm_compress_osr()
-	 * depends on the runtime-writable force_fips flag; recomputing it per
-	 * iteration would let a concurrent flip change which pool satisfies the
-	 * break condition mid-loop, so we could break holding one pool's lock
-	 * while unlocking a different one afterwards (unlock of an unowned
-	 * mutex plus a permanently leaked lock).
+	 * The entropy a pool has to provide. esdm_aux_avail_entropy_pool()
+	 * already discounts the OSR the extraction applies, so the requested
+	 * bits are compared against without adding it once more. The threshold
+	 * stays the same for the whole loop: one changing mid-loop could let
+	 * us break holding one pool's lock while unlocking a different one
+	 * afterwards (unlock of an unowned mutex plus a permanently leaked
+	 * lock).
 	 */
-#ifdef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
 	const uint32_t entropy_threshold = requested_bits;
-#else
-	const uint32_t entropy_threshold = requested_bits + esdm_compress_osr();
-#endif
 
 	/*
 	 * Now we want to find the pool to extract the entropy from. The applied
@@ -674,7 +671,7 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 
 		/*
 		 * We found the pool that can already provide all our entropy
-		 * needs (including the discount for the OSR), take it.
+		 * needs (after the discount for the OSR), take it.
 		 */
 		if (entropy_threshold <= max_entropy) {
 			locked_pool = true;
