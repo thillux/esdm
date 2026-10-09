@@ -452,6 +452,35 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 					  void *int_data);
 
 /**
+ * @brief Non-blocking variant of esdm_rpcc_get_random_bytes_pr
+ *
+ * esdm_rpcc_get_random_bytes_pr waits as long as the server answers that it
+ * cannot serve prediction resistant data right now - the ESDM is not
+ * operational yet, or another prediction resistant request is in flight. This
+ * variant returns instead, with the data obtained so far, or -EAGAIN if that is
+ * none. A request the server accepted still waits for the entropy it collects.
+ *
+ * @param [out] buf Buffer to be filled with random bits.
+ * @param [in] buflen Size of the buffer to be filled.
+ *
+ * @return: read data length on success, which may be less than @buflen;
+ *	    -EAGAIN if no data was available without blocking; < 0 on other
+ *	    errors (-EINTR means connection was interrupted and the caller may
+ *	    try again)
+ */
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen);
+
+/**
+ * @brief See esdm_rpcc_get_random_bytes_pr_nonblock
+ *
+ * The function allows specifying an interrupt callback data structure that
+ * is used when invoking the interrupt check function registered with
+ * esdm_rpcc_init_priv_service / esdm_rpcc_init_unpriv_service
+ */
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock_int(uint8_t *buf, size_t buflen,
+						   void *int_data);
+
+/**
  * @brief RPC-version of esdm_get_random_bytes
  *
  * This call uses the unprivileged RPC endpoint of the ESDM server. It therefore

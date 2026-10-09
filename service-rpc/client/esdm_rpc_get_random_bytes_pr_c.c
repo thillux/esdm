@@ -18,6 +18,7 @@
  */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
@@ -61,9 +62,14 @@ esdm_rpcc_get_random_bytes_pr_cb(const RandValResponse *response,
 	/* Zeroization of response is handled in esdm_rpc_client_read_handler */
 }
 
-DSO_PUBLIC
-ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
-					  void *int_data)
+/*
+ * With @nonblock, an -EAGAIN from the server - the PR DRNG is busy or not
+ * operational - ends the request instead of being retried: it returns what was
+ * obtained up to then, and -EAGAIN if that is nothing.
+ */
+static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
+						    void *int_data,
+						    bool nonblock)
 {
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
@@ -126,6 +132,12 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 			maxbuflen = new_max;
 			continue;
 		} else if (buffer.ret == -EAGAIN) {
+			if (nonblock) {
+				ret = (buflen == orig_buflen) ?
+					      -EAGAIN :
+					      (ssize_t)(orig_buflen - buflen);
+				goto out;
+			}
 			nanosleep(&esdm_client_poll_ts, NULL);
 			continue;
 		} else if (buffer.ret < 0) {
@@ -138,13 +150,37 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 		buf += buffer.ret;
 	}
 
+	ret = (ssize_t)orig_buflen;
+
 out:
 	esdm_rpcc_put_unpriv_service(rpc_conn);
-	return (ret < 0) ? ret : (ssize_t)orig_buflen;
+	return ret;
+}
+
+DSO_PUBLIC
+ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
+					  void *int_data)
+{
+	return esdm_rpcc_get_random_bytes_pr_common(buf, buflen, int_data,
+						    false);
 }
 
 DSO_PUBLIC
 ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *buf, size_t buflen)
 {
 	return esdm_rpcc_get_random_bytes_pr_int(buf, buflen, NULL);
+}
+
+DSO_PUBLIC
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock_int(uint8_t *buf, size_t buflen,
+						   void *int_data)
+{
+	return esdm_rpcc_get_random_bytes_pr_common(buf, buflen, int_data,
+						    true);
+}
+
+DSO_PUBLIC
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen)
+{
+	return esdm_rpcc_get_random_bytes_pr_nonblock_int(buf, buflen, NULL);
 }
