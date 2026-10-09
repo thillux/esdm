@@ -124,8 +124,12 @@
 
         addEsdmToKernel = lpself: lpsuper: {
           kernel = lpsuper.kernel.override {
+            # Keep nixpkgs' own patches (bridge-stp-helper, request-key-helper
+            # and fixes such as 6.1's c23-compat-libbpf), override replaces the
+            # list rather than appending to it.
             kernelPatches =
-              lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
+              lpsuper.kernel.kernelPatches
+              ++ lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
               ++ lib.optionals kernelFips (
                 lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
