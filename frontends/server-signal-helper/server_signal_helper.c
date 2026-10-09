@@ -18,6 +18,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -25,19 +26,56 @@
 #include <stdlib.h>
 #include <esdm_rpc_client.h>
 
+/*
+ * Whether the PID file is held by @pid. The server keeps a lockf() lock on its
+ * PID file for as long as it runs; a file nobody locks is stale - left behind
+ * by a crash - and the PID in it may meanwhile belong to an unrelated process.
+ * The lock owner also has to be the process named there.
+ */
+static bool pidfile_held_by(int fd, pid_t pid)
+{
+	struct flock fl = {
+		.l_type = F_WRLCK,
+		.l_whence = SEEK_SET,
+		.l_start = 0,
+		.l_len = 0,
+	};
+
+	if (fcntl(fd, F_GETLK, &fl) < 0) {
+		perror("Cannot test the lock of the PID file");
+		return false;
+	}
+
+	if (fl.l_type == F_UNLCK) {
+		fprintf(stderr,
+			"PID file is not locked, the ESDM server is not running\n");
+		return false;
+	}
+
+	if (fl.l_pid != pid) {
+		fprintf(stderr,
+			"PID file names %d, but is locked by %d - refusing\n",
+			(int)pid, (int)fl.l_pid);
+		return false;
+	}
+
+	return true;
+}
+
 static bool signal_suspend(char *pidfile_path)
 {
 	char pid_string[30] = { 0 };
 	FILE *pidfile = NULL;
 	size_t read_ret;
 	pid_t pid = -1;
+	bool held;
 
 	/* read PID */
 	if (pidfile_path == NULL) {
 		return false;
 	}
 
-	pidfile = fopen(pidfile_path, "r");
+	pidfile = fopen(pidfile_path, "re");
 	if (pidfile == NULL) {
 		return false;
 	}
@@ -47,14 +85,19 @@ static bool signal_suspend(char *pidfile_path)
 		fclose(pidfile);
 		return false;
 	}
-	fclose(pidfile);
 
 	errno = 0;
 	pid = (pid_t)strtol(pid_string, NULL, 10);
 	if (errno || pid <= 0) {
 		perror("PID conversion failed");
+		fclose(pidfile);
 		return false;
 	}
+
+	held = pidfile_held_by(fileno(pidfile), pid);
+	fclose(pidfile);
+	if (!held)
+		return false;
 
 	fprintf(stdout, "Signal suspend to ESDM\n");
 	return kill(pid, SIGUSR1) == 0;

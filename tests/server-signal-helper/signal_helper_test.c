@@ -30,10 +30,12 @@
  */
 
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -69,6 +71,87 @@ static int write_pidfile(const char *content)
 	if (content && *content)
 		fwrite(content, 1, strlen(content), f);
 	return fclose(f);
+}
+
+/*
+ * A stand-in for the server: a child that holds the lockf() lock on the
+ * pidfile, as the server does while it runs, and writes @content into it -
+ * its own PID followed by @suffix if @content is NULL. It exits 0 once SIGUSR1
+ * arrives and 1 if none does within a few seconds.
+ *
+ * The lock has to be another process's: the test cannot hold it itself, as
+ * F_GETLK does not report the caller's own locks.
+ */
+static pid_t spawn_lock_holder(const char *content, const char *suffix)
+{
+	int ready[2];
+	char c = 0;
+	pid_t pid;
+
+	if (pipe(ready) < 0)
+		return -1;
+
+	pid = fork();
+	if (pid < 0) {
+		close(ready[0]);
+		close(ready[1]);
+		return -1;
+	}
+
+	if (pid == 0) {
+		struct timespec ts = { .tv_sec = 10 };
+		char buf[64];
+		sigset_t set;
+		int fd;
+
+		close(ready[0]);
+
+		sigemptyset(&set);
+		sigaddset(&set, SIGUSR1);
+		sigprocmask(SIG_BLOCK, &set, NULL);
+
+		fd = open(pidfile_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+		if (fd < 0 || lockf(fd, F_LOCK, 0) < 0)
+			_exit(2);
+		if (!content) {
+			snprintf(buf, sizeof(buf), "%d\n%s", (int)getpid(),
+				 suffix ? suffix : "");
+			content = buf;
+		}
+		if (write(fd, content, strlen(content)) !=
+		    (ssize_t)strlen(content))
+			_exit(2);
+
+		if (write(ready[1], &c, 1) != 1)
+			_exit(2);
+		close(ready[1]);
+
+		_exit(sigtimedwait(&set, NULL, &ts) == SIGUSR1 ? 0 : 1);
+	}
+
+	close(ready[1]);
+	if (read(ready[0], &c, 1) != 1) {
+		close(ready[0]);
+		waitpid(pid, NULL, 0);
+		return -1;
+	}
+	close(ready[0]);
+
+	return pid;
+}
+
+/* Whether the stand-in got its SIGUSR1; reaps it either way */
+static bool lock_holder_signalled(pid_t pid, bool expected)
+{
+	int status;
+
+	/* Do not wait for the timeout of one that is not going to get it */
+	if (!expected)
+		kill(pid, SIGKILL);
+	if (waitpid(pid, &status, 0) != pid)
+		return false;
+
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static void test_suspend_no_pidfile(void)
@@ -153,35 +236,72 @@ static void test_suspend_unsignalable_pid(void)
 static void test_suspend_signals(void)
 {
 	/*
-	 * The one case that has to work: point it at ourselves and check that
-	 * SIGUSR1 - the signal the server installs its suspend handler for -
-	 * actually arrives.
+	 * The one case that has to work: a pidfile locked by the process it
+	 * names, which has to receive SIGUSR1 - the signal the server installs
+	 * its suspend handler for.
+	 */
+	pid_t holder = spawn_lock_holder(NULL, NULL);
+
+	CHECK(holder > 0, "cannot start the lock holder");
+	if (holder <= 0)
+		return;
+	CHECK(signal_suspend(pidfile_path),
+	      "suspend failed for a locked PID file");
+	CHECK(lock_holder_signalled(holder, true),
+	      "suspend did not deliver SIGUSR1");
+}
+
+static void test_suspend_unlocked_pidfile(void)
+{
+	/*
+	 * A pidfile nobody holds is a leftover of a server that is gone, and
+	 * the PID in it may by now belong to anybody - here to ourselves.
 	 */
 	char buf[32];
 
 	got_sigusr1 = 0;
 	snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
 	CHECK_EQ(write_pidfile(buf), 0);
-	CHECK(signal_suspend(pidfile_path), "suspend failed for our own PID");
-	CHECK(got_sigusr1, "suspend did not deliver SIGUSR1");
+	CHECK(!signal_suspend(pidfile_path),
+	      "suspend accepted a PID file nobody locks");
+	CHECK(!got_sigusr1, "suspend signalled the PID of a stale PID file");
 }
 
+static void test_suspend_locked_by_other(void)
+{
+	/* Locked, but by somebody else than the process it names */
+	char buf[32];
+	pid_t holder;
+
+	got_sigusr1 = 0;
+	snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+	holder = spawn_lock_holder(buf, NULL);
+	CHECK(holder > 0, "cannot start the lock holder");
+	if (holder <= 0)
+		return;
+	CHECK(!signal_suspend(pidfile_path),
+	      "suspend accepted a PID file locked by another process");
+	CHECK(!got_sigusr1,
+	      "suspend signalled a PID that does not hold the lock");
+	CHECK(!lock_holder_signalled(holder, false),
+	      "suspend signalled the lock holder it was not named");
+}
 static void test_suspend_trailing_junk(void)
 {
 	/*
 	 * The server writes the PID followed by a newline; anything trailing
 	 * it must not stop the number in front from being used.
 	 */
-	char buf[64];
+	pid_t holder = spawn_lock_holder(NULL, "junk\n");
 
-	got_sigusr1 = 0;
-	snprintf(buf, sizeof(buf), "%d\njunk\n", (int)getpid());
-	CHECK_EQ(write_pidfile(buf), 0);
+	CHECK(holder > 0, "cannot start the lock holder");
+	if (holder <= 0)
+		return;
 	CHECK(signal_suspend(pidfile_path),
 	      "suspend rejected a pidfile with trailing content");
-	CHECK(got_sigusr1, "suspend did not deliver SIGUSR1");
+	CHECK(lock_holder_signalled(holder, true),
+	      "suspend did not deliver SIGUSR1");
 }
-
 static void test_resume_without_server(void)
 {
 	/*
@@ -270,20 +390,24 @@ static void test_cli_suspend_with_pid(void)
 			 pidfile_path, (char *)"--suspend", NULL };
 	char *argv_short[] = { (char *)"esdm-server-signal-helper",
 			       (char *)"-p", pidfile_path, (char *)"-s", NULL };
-	char buf[32];
+	pid_t holder;
 
-	snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
-	CHECK_EQ(write_pidfile(buf), 0);
+	holder = spawn_lock_holder(NULL, NULL);
+	CHECK(holder > 0, "cannot start the lock holder");
+	if (holder > 0) {
+		CHECK_EQ(run_main(4, argv), EXIT_SUCCESS);
+		CHECK(lock_holder_signalled(holder, true),
+		      "--pid/--suspend did not deliver SIGUSR1");
+	}
 
-	got_sigusr1 = 0;
-	CHECK_EQ(run_main(4, argv), EXIT_SUCCESS);
-	CHECK(got_sigusr1, "--pid/--suspend did not deliver SIGUSR1");
-
-	got_sigusr1 = 0;
-	CHECK_EQ(run_main(4, argv_short), EXIT_SUCCESS);
-	CHECK(got_sigusr1, "-p/-s did not deliver SIGUSR1");
+	holder = spawn_lock_holder(NULL, NULL);
+	CHECK(holder > 0, "cannot start the lock holder");
+	if (holder > 0) {
+		CHECK_EQ(run_main(4, argv_short), EXIT_SUCCESS);
+		CHECK(lock_holder_signalled(holder, true),
+		      "-p/-s did not deliver SIGUSR1");
+	}
 }
-
 static void test_cli_suspend_bad_pidfile(void)
 {
 	char *argv[] = { (char *)"esdm-server-signal-helper", (char *)"--pid",
@@ -334,6 +458,8 @@ int main(int argc, char *argv[])
 	test_suspend_out_of_range_pid();
 	test_suspend_unsignalable_pid();
 	test_suspend_signals();
+	test_suspend_unlocked_pidfile();
+	test_suspend_locked_by_other();
 	test_suspend_trailing_junk();
 
 	test_resume_without_server();

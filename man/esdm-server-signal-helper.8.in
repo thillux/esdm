@@ -19,6 +19,10 @@ On
 .BR \-\-suspend ,
 the helper reads the PID of the daemon from its PID file and sends it
 .BR SIGUSR1 .
+It only does so while the PID file is locked by the process it names, as the
+daemon keeps it locked for as long as it runs; a stale PID file left behind by
+a daemon that is gone is refused, as its PID may by now belong to an unrelated
+process.
 The daemon then marks itself as suspended in the status shared memory segment,
 so that consumers waiting on it do not block on a daemon that is about to stop
 running.
