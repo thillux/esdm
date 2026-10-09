@@ -146,8 +146,13 @@ static int read_proc_file(const char *path, char *buf, size_t buflen)
 {
 	size_t len = 0;
 	ssize_t rc;
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	int fd;
 
+	/* Room for at least one byte and the terminating NUL */
+	if (buflen < 2)
+		return -EINVAL;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return -errno;
 
@@ -163,7 +168,7 @@ static int read_proc_file(const char *path, char *buf, size_t buflen)
 		return -EIO;
 
 	/* A file that does not fit is not one this parser understands */
-	if (len == buflen - 1)
+	if (len >= buflen - 1)
 		return -EFBIG;
 
 	buf[len] = '\0';
