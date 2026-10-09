@@ -16,7 +16,7 @@ BuildRequires:  gcc
 BuildRequires:  fuse3
 BuildRequires:  fuse3-devel
 BuildRequires:  leancrypto-devel
-BuildRequires:  libjitterentropy3
+BuildRequires:  jitterentropy-devel
 BuildRequires:  libjson-c-devel
 BuildRequires:  libprotobuf-c-devel
 BuildRequires:  pkgconfig
@@ -35,7 +35,7 @@ processing is designed to maintain this strength.
 
 %package %{name}
 Summary:        Entropy Source and DRNG Manager
-Requires:       libjitterentropy
+Requires:       libjitterentropy3
 Requires:       libleancrypto1
 Requires:       libprotobuf-c1
 Requires:       systemd
