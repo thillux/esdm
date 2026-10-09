@@ -488,6 +488,9 @@ ssize_t esdm_rpcc_get_random_bytes_pr_nonblock_int(uint8_t *buf, size_t buflen,
  *
  * This function never blocks and therefore provides no guarantee whether the
  * DRNG is seeded or the initial seed level stipulated by SP800-90C is reached.
+ * A request the server answers with -EAGAIN - the DRNG it went to reached its
+ * maximum output without full reseed - is sent again: at once, and after the
+ * poll interval should the server keep answering so.
  *
  * @param [out] buf Buffer to be filled with random bits.
  * @param [in] buflen Size of the buffer to be filled.

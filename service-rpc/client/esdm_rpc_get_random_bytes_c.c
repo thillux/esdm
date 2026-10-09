@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 
 #include "esdm_rpc_client_helper.h"
 #include "esdm_rpc_client_internal.h"
@@ -70,6 +71,7 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_buf buffer;
 	size_t maxbuflen = buflen, orig_buflen = buflen;
+	unsigned int eagain = 0;
 	ssize_t ret = 0;
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
@@ -113,11 +115,26 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 			}
 			maxbuflen = new_max;
 			continue;
+		} else if (buffer.ret == -EAGAIN) {
+			/*
+			 * A node DRNG that reached its maximum output without
+			 * full reseed answers -EAGAIN and is out of rotation for
+			 * the next request, which another DRNG serves - or
+			 * refuses for good once the ESDM is not operational any
+			 * more. So ask again at once, and only should that be
+			 * answered -EAGAIN as well, wait the poll interval as
+			 * esdm_rpcc_get_random_bytes_full() does rather than
+			 * spin.
+			 */
+			if (eagain++)
+				nanosleep(&esdm_client_poll_ts, NULL);
+			continue;
 		} else if (buffer.ret < 0) {
 			ret = buffer.ret;
 			goto out;
 		}
 
+		eagain = 0;
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;

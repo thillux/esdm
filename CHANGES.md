@@ -219,6 +219,8 @@ addon/es_ebpf_testing
 
 * fix: the maximum bits without full reseed is clamped to INT_MAX, as a larger value silently disabled the limit; the RPC client bounds the resubmission of a request by time rather than by attempts, independent of client-rx-tx-timeout-exponent; esdm_drbg_zero_free() unlocks the state memory
 
+* fix: esdm_rpcc_get_random_bytes() sends a request again that the ESDM answered with -EAGAIN - the DRNG serving it reached its maximum output without full reseed - at once and, should that be answered the same way, after the poll interval, as esdm_rpcc_get_random_bytes_full() does; a blocking read of /dev/urandom no longer fails with EAGAIN
+
 * fix: a request no longer seeds a node DRNG that is not fully seeded in the caller's thread while the ESDM is operational - it is served by another node or the initial DRNG, and the reseed worker brings the node up; before, every request did, under the pool lock, for as long as a spent node DRNG could not be fully reseeded, which stalled the EGD server and serialized the RPC workers
 
 * fix: esdm-server and the CUSE daemons keep a non-dumpable state across their privilege changes - changing the IDs reset it to fs.suid_dumpable, which silently re-enabled core dumps of a server started with --memlock under systemd's default of 2; in sanitizer builds the root-only dumpable state is turned into the non-dumpable one, so LeakSanitizer can check the daemons at exit instead of aborting

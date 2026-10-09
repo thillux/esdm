@@ -67,7 +67,11 @@ form with a NULL
 .SS Obtaining random data
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes(uint8_t *" buf ", size_t " buflen ");"
-Random data without a guarantee that the ESDM is fully seeded.
+Random data without a guarantee that the ESDM is fully seeded. A request the
+ESDM answers with
+.B \-EAGAIN
+\- the DRNG serving it reached its maximum output without full reseed \- is
+sent again, at once and, should that be answered the same way, after a second.
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *" buf ", size_t " buflen ");"
 Random data, blocking until the ESDM is fully seeded.
