@@ -174,7 +174,8 @@ static void esdm_sched_es_state_json(unsigned char *buf, size_t buflen)
 
 static void esdm_sched_set_entropy_rate(u32 rate)
 {
-	esdm_sched_drbg.entropy_bits = max_t(u32, ESDM_SCHED_ENTROPY_BITS, rate);
+	/* never credit more than the rate configured at load time */
+	esdm_sched_drbg.entropy_bits = max_t(u32, sched_entropy, rate);
 }
 
 struct esdm_es_cb esdm_es_sched = {

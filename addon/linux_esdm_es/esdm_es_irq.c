@@ -174,7 +174,8 @@ static void esdm_irq_es_state_json(unsigned char *buf, size_t buflen)
 
 static void esdm_irq_set_entropy_rate(u32 rate)
 {
-	esdm_irq_drbg.entropy_bits = max_t(u32, ESDM_IRQ_ENTROPY_BITS, rate);
+	/* never credit more than the rate configured at load time */
+	esdm_irq_drbg.entropy_bits = max_t(u32, irq_entropy, rate);
 }
 
 struct esdm_es_cb esdm_es_irq = {
