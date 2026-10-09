@@ -32,7 +32,9 @@
  *     bounds,
  *   - the reserved special groups each get their own slot,
  *   - thread_fork_join() runs every task exactly once, whether it can spawn
- *     threads or falls back to running them inline.
+ *     threads or falls back to running them inline,
+ *   - a forced release cancelling workers in the middle of a log record or
+ *     a wait queue leaves neither the logger nor the queue locked.
  *
  * Every wait is bounded, so a regression that wedges the pool shows up as a
  * failed check rather than a test that never returns.
@@ -51,6 +53,8 @@
 
 #include "common_test.h"
 #include "config.h"
+#include "esdm_logger.h"
+#include "queue.h"
 #include "threading_support.h"
 
 #define TEST_GROUPS 2
@@ -502,6 +506,81 @@ static void test_thread_names(void)
 	CHECK_EQ(thread_get_name(name, 4), -ERANGE);
 }
 
+static atomic_uint cancel_victims;
+static atomic_bool logged_after_cancel;
+static DECLARE_WAIT_QUEUE(cancel_queue);
+
+/* A job logging until it is cancelled - mostly in the middle of a record */
+static int job_log_forever(void *data)
+{
+	(void)data;
+	atomic_fetch_add(&cancel_victims, 1);
+	for (;;) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY, "cancel victim\n");
+		pthread_testcancel();
+	}
+
+	return 0;
+}
+
+/* A job waiting on a wait queue until it is cancelled */
+static int job_wait_forever(void *data)
+{
+	(void)data;
+	atomic_fetch_add(&cancel_victims, 1);
+	thread_wait_event(&cancel_queue, false);
+
+	return 0;
+}
+
+static void *log_after_cancel(void *data)
+{
+	(void)data;
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY, "logged after cancel\n");
+	atomic_store(&logged_after_cancel, true);
+	return NULL;
+}
+
+/* Start the victims of the forced release of test_stop_spawning() */
+static void test_cancel_start(void)
+{
+	unsigned int i;
+
+	/* The records are of no interest, only the locks they take */
+	CHECK_EQ(esdm_logger_set_file("/dev/null"), 0);
+	esdm_logger_set_verbosity(LOGGER_ERR);
+
+	atomic_store(&cancel_victims, 0);
+	for (i = 0; i < 2; i++)
+		CHECK_EQ(thread_start(job_log_forever, NULL, 0, NULL), 0);
+	CHECK_EQ(thread_start(job_wait_forever, NULL, 0, NULL), 0);
+	CHECK(wait_until_uint(&cancel_victims, 3), "cancel victims not running");
+	/* Let the loggers get going */
+	usleep(10000);
+}
+
+/* Neither the logger nor the wait queue may be left locked by the victims */
+static void test_cancel_check(void)
+{
+	pthread_t tid;
+
+	CHECK_EQ(pthread_mutex_trylock(&cancel_queue.thread_wait_lock), 0);
+	pthread_mutex_unlock(&cancel_queue.thread_wait_lock);
+
+	/*
+	 * Log from a helper thread, so a logger left locked fails the check
+	 * instead of hanging the test.
+	 */
+	CHECK_EQ(pthread_create(&tid, NULL, log_after_cancel, NULL), 0);
+	if (!wait_until_bool(&logged_after_cancel)) {
+		CHECK(0, "logger locked after a forced release");
+		/* exit() would hang in the destructor of the logger */
+		fflush(NULL);
+		_exit(1);
+	}
+	pthread_join(tid, NULL);
+}
+
 static void test_stop_spawning(void)
 {
 	struct fork_join_arg args[4];
@@ -557,7 +636,9 @@ int main(int argc, char *argv[])
 	test_thread_names();
 
 	/* Stops the pool for good, so it has to come last */
+	test_cancel_start();
 	test_stop_spawning();
+	test_cancel_check();
 
 	return common_test_result("threading_support");
 }
