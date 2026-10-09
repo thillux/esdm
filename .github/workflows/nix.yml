@@ -1,0 +1,109 @@
+name: Nix kernel module
+
+# The esdm_es kernel module against every kernel the pinned nixpkgs packages
+# (flake.nix: stockKernels), each booted in its live_* NixOS VM test.
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  nix-list:
+    name: list outputs
+    runs-on: ubuntu-latest
+    outputs:
+      pairs: ${{ steps.list.outputs.pairs }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: List the kernel module outputs and their VM tests
+        id: list
+        run: |
+          modules=$(nix eval --json .#packages.x86_64-linux --apply \
+            'ps: builtins.filter
+                   (n: builtins.match "esdm_es_.*" n != null)
+                   (builtins.attrNames ps)')
+          vms=$(nix eval --json .#checks.x86_64-linux --apply \
+            'cs: builtins.attrNames cs')
+
+          if [ "$(jq 'length' <<<"$modules")" -eq 0 ]; then
+            echo "::error::no esdm_es_* outputs in .#packages.x86_64-linux"
+            exit 1
+          fi
+
+          pairs=$(jq -cn --argjson modules "$modules" --argjson vms "$vms" '
+            $modules
+            | map({ attr: ., vm: sub("^esdm_es_"; "live_") })
+            | map(select([.vm] | inside($vms)))')
+
+          missing=$(jq -rn --argjson modules "$modules" --argjson pairs "$pairs" \
+            '($modules - ($pairs | map(.attr))) | join(" ")')
+          if [ -n "$missing" ]; then
+            echo "::error::no live_* VM test in .#checks.x86_64-linux for: $missing"
+            exit 1
+          fi
+
+          jq -r '.[] | "\(.attr) -> \(.vm)"' <<<"$pairs"
+          echo "pairs=$pairs" >> "$GITHUB_OUTPUT"
+
+  nix-kmod:
+    name: ${{ matrix.attr }}
+    runs-on: ubuntu-latest
+    needs: nix-list
+    # Builds the ESDM patched kernel from source before the module.
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.nix-list.outputs.pairs) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            # Nix only advertises kvm if /dev/kvm existed at daemon start.
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Build
+        run: nix build --no-link --print-build-logs ".#${{ matrix.attr }}"
+
+      - name: Show the result
+        run: |
+          # The kernel's modules_install may compress it (esdm_es.ko.xz).
+          ko=$(find "$(nix path-info ".#${{ matrix.attr }}")" \
+            -name 'esdm_es.ko*' | head -n 1)
+          if [ -z "$ko" ]; then
+            echo "::error::no esdm_es.ko in ${{ matrix.attr }}"
+            exit 1
+          fi
+          ls -l "$ko"
+          nix shell nixpkgs#kmod -c modinfo "$ko"
+
+      # /dev/kvm is root-only on the runners; without this QEMU uses TCG.
+      - name: Enable KVM for the unprivileged builder
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot the VM integration test
+        run: |
+          nix build --no-link --print-build-logs \
+            ".#checks.x86_64-linux.${{ matrix.vm }}"
