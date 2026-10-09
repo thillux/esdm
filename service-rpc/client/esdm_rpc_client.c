@@ -761,11 +761,17 @@ static void esdm_client_invoke(ProtobufCService *service,
 						   closure, closure_data,
 						   rx_retries);
 
-		if (ret == -ECONNRESET && !reconnected) {
+		if (ret == -ECONNRESET && !reconnected && !privileged) {
 			/*
 			 * The server closed the connection without answering.
 			 * Ask once more on a fresh one - only once, so a server
 			 * that keeps closing on us cannot hold the caller here.
+			 *
+			 * Not for a privileged request: those change the state
+			 * of the ESDM, e.g. credit entropy, and whether the
+			 * server applied it before the connection went away
+			 * cannot be told. Applying it twice is worse than
+			 * reporting the failure.
 			 */
 			reconnected = true;
 			ret = -EAGAIN;
