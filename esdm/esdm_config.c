@@ -18,6 +18,8 @@
  * DAMAGE.
  */
 
+#include <limits.h>
+
 #include "build_bug_on.h"
 #include "config.h"
 #include "esdm_config.h"
@@ -64,6 +66,17 @@ struct esdm_config {
 	_Atomic bool esdm_jent_entropy_async_enable;
 	_Atomic bool esdm_ipc_cleanup;
 };
+
+/*
+ * The bits a DRNG generated since it was last fully seeded saturate at INT_MAX
+ * (see esdm_drng_get()), so a limit above that would never be reached - the
+ * maximum output without full reseed would be disabled without saying so.
+ * Clamp such a limit to INT_MAX. UINT32_MAX stays: it disables the limit on
+ * purpose.
+ */
+#define ESDM_CONFIG_MAX_WO_RESEED_BITS(val)                                    \
+	(((val) == UINT32_MAX || (val) <= INT_MAX) ? (uint32_t)(val) :         \
+						     (uint32_t)INT_MAX)
 
 static struct esdm_config esdm_config = {
 	/*
@@ -137,7 +150,8 @@ static struct esdm_config esdm_config = {
 	/*
 	 * See documentation of ESDM_DRNG_MAX_RESEED_BITS.
 	 */
-	.esdm_drng_max_wo_reseed_bits = ESDM_DRNG_MAX_RESEED_BITS,
+	.esdm_drng_max_wo_reseed_bits =
+		ESDM_CONFIG_MAX_WO_RESEED_BITS(ESDM_DRNG_MAX_RESEED_BITS),
 
 	/*
 	 * See documentation of ESDM_DRNG_RESEED_THRESH.
@@ -463,7 +477,8 @@ void esdm_config_drng_max_wo_reseed_set(uint32_t val)
 
 void esdm_config_drng_max_wo_reseed_bits_set(uint32_t val)
 {
-	esdm_config.esdm_drng_max_wo_reseed_bits = val;
+	esdm_config.esdm_drng_max_wo_reseed_bits =
+		ESDM_CONFIG_MAX_WO_RESEED_BITS(val);
 }
 #endif
 

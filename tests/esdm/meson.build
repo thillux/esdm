@@ -274,6 +274,17 @@ if get_option('esdm-server').enabled()
 	test('ESDM config timing ES rates exclusive',
 		esdm_config_timing_rate_test)
 
+	esdm_config_max_wo_reseed_bits_test = executable(
+		'esdm_config_max_wo_reseed_bits_test',
+		[ 'esdm_config_max_wo_reseed_bits_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM config maximum bits without full reseed clamped',
+		esdm_config_max_wo_reseed_bits_test)
+
 	esdm_init_unwind_test = executable(
 		'esdm_init_unwind_test',
 		[ esdm_ipc_ns, 'esdm_init_unwind_test.c' ],
