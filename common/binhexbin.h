@@ -27,8 +27,8 @@
 extern "C" {
 #endif
 
-void hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
-	     const size_t binlen);
+int hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
+	    const size_t binlen);
 int hex2bin_alloc(const char *hex, const size_t hexlen, uint8_t **bin,
 		  size_t *binlen);
 int bin2hex_alloc(const uint8_t *bin, const size_t binlen, char **hex,
