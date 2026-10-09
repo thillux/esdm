@@ -73,6 +73,27 @@ static __thread uint8_t esdm_rpcc_unpack_buf[ESDM_RPC_MAX_UNPACK_SIZE];
 
 static void register_fork_handler(void);
 
+/* Wait for one answer, in milliseconds, see esdm_rpc_client_read_handler(). */
+#define ESDM_RPCC_RX_POLL_MS                                                   \
+	((1 << ESDM_CLIENT_RX_TX_TIMEOUT_EXPONENT) / 1000000)
+
+/*
+ * How long a privileged request may take to be answered. Its requests are
+ * served one at a time by a single server thread and include long running
+ * ones - the self test runs all of them -, and none of them may be sent again
+ * once it went out: the second RNDADDENTROPY would be credited a second time,
+ * a self test that takes longer than the wait would be started over and over.
+ * So the answer is waited for, generously, rather than asked for again.
+ */
+#define ESDM_RPCC_PRIV_RX_TIMEOUT_MS 60000
+
+/*
+ * How often an unprivileged request whose answer did not come in time is sent
+ * again on a new connection - which may well be served by another, less busy,
+ * server thread. Bounded, so a wedged server does not keep its caller forever.
+ */
+#define ESDM_RPCC_MAX_RESUBMISSIONS 3
+
 /*
  * Forget the connection's socket. Only the descriptor is closed unless
  * @shut_down asks for the connection itself to be torn down, which also ends it
@@ -375,13 +396,17 @@ out:
 	return ret;
 }
 
+/*
+ * Receive the answer, waiting for at most @max_retries rounds of
+ * ESDM_RPCC_RX_POLL_MS. Returns -EAGAIN when it did not come in that time.
+ */
 static int
 esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			     const ProtobufCMessageDescriptor *message_desc,
-			     ProtobufCClosure closure, void *closure_data)
+			     ProtobufCClosure closure, void *closure_data,
+			     unsigned int max_retries)
 {
-	static const int CLIENT_RX_TIMEOUT_MS =
-		(1 << ESDM_CLIENT_RX_TX_TIMEOUT_EXPONENT) / 1000000;
+	static const int CLIENT_RX_TIMEOUT_MS = ESDM_RPCC_RX_POLL_MS;
 	struct esdm_rpc_proto_sc *received_data;
 	struct esdm_rpc_proto_sc_header *header = NULL;
 	/*
@@ -446,8 +471,9 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 				 * would produce the answer twice and leave the
 				 * first one queued as the reply to the next
 				 * call, as responses are matched by order. The
-				 * retry budget bounds the wait; re-submission
-				 * stays available once it is exhausted, below.
+				 * retry budget bounds the wait; whether the
+				 * request is sent again once it is exhausted is
+				 * up to the caller.
 				 */
 				continue;
 			}
@@ -500,11 +526,11 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			ret = -EPROTO;
 			break;
 		}
-	} while (received <= 0 && retries <= ESDM_MAX_RX_TX_RETRIES);
+	} while (received <= 0 && retries <= max_retries);
 
 	/*
-	 * The answer never came within the whole budget. Ask again from a clean
-	 * slate - the caller resets the connection first, so the answer to the
+	 * The answer never came within the whole budget. The caller resets the
+	 * connection before anything else goes out on it, so the answer to the
 	 * abandoned request cannot turn up later and be taken for the next one.
 	 */
 	if (!interrupted && received < 0 && !ret)
@@ -656,7 +682,8 @@ int esdm_rpcc_fuzz_response(const ProtobufCMessageDescriptor *message_desc,
 	rpc_conn.fd = sockets[0];
 
 	ret = esdm_rpc_client_read_handler(&rpc_conn, message_desc, closure,
-					   closure_data);
+					   closure_data,
+					   ESDM_MAX_RX_TX_RETRIES);
 
 out:
 	close(sockets[0]);
@@ -677,6 +704,15 @@ static void esdm_client_invoke(ProtobufCService *service,
 		(esdm_rpc_client_connection_t *)service;
 	static const int64_t half_server_timeout_ns =
 		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC * 1000 / 2;
+	/* See ESDM_RPCC_PRIV_RX_TIMEOUT_MS and ESDM_RPCC_MAX_RESUBMISSIONS */
+	const bool privileged = (desc == &priv_access__descriptor);
+	const unsigned int rx_retries =
+		privileged ?
+			ESDM_RPCC_PRIV_RX_TIMEOUT_MS / ESDM_RPCC_RX_POLL_MS :
+			ESDM_MAX_RX_TX_RETRIES;
+	const unsigned int max_resubmissions =
+		privileged ? 0 : ESDM_RPCC_MAX_RESUBMISSIONS;
+	unsigned int resubmissions = 0;
 	struct timespec current_time;
 	int64_t used_before_ns;
 	bool reconnected = false;
@@ -722,17 +758,27 @@ static void esdm_client_invoke(ProtobufCService *service,
 
 		/* Receive data */
 		ret = esdm_rpc_client_read_handler(rpc_conn, method->output,
-						   closure, closure_data);
+						   closure, closure_data,
+						   rx_retries);
 
-		/*
-		 * The server closed the connection without answering. Ask once
-		 * more on a fresh one - only once, so a server that keeps
-		 * closing on us cannot hold the caller here.
-		 */
 		if (ret == -ECONNRESET && !reconnected) {
+			/*
+			 * The server closed the connection without answering.
+			 * Ask once more on a fresh one - only once, so a server
+			 * that keeps closing on us cannot hold the caller here.
+			 */
 			reconnected = true;
 			ret = -EAGAIN;
+		} else if (ret == -EAGAIN &&
+			   resubmissions++ >= max_resubmissions) {
+			/*
+			 * The answer did not come in time, again and again - or,
+			 * for a privileged request, once: give up rather than
+			 * wait for a wedged server forever.
+			 */
+			ret = -ETIMEDOUT;
 		}
+
 		/* EAGAIN is ok here, since sockets are non-blocking now */
 		if (ret < 0 && ret != -EAGAIN) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
@@ -740,12 +786,12 @@ static void esdm_client_invoke(ProtobufCService *service,
 		}
 
 		/*
-		 * Re-submitting gives up on the answer to the request just
-		 * sent. Drop the socket so it cannot arrive afterwards:
+		 * Re-submitting or giving up abandons the answer to the request
+		 * just sent. Drop the socket so it cannot arrive afterwards:
 		 * responses are matched purely by order, so a late one would be
 		 * handed out as the reply to the next call.
 		 */
-		if (ret == -EAGAIN)
+		if (ret == -EAGAIN || ret == -ETIMEDOUT)
 			reset_conn_socket(rpc_conn);
 	} while (ret == -EAGAIN);
 
