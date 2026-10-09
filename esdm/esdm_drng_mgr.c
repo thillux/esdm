@@ -1724,10 +1724,23 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 	 * the generate loop.
 	 */
 	if (esdm_drng_check_disable_threshold(drng)) {
-		if (pr)
+		if (pr) {
 			atomic_store(&drng->fully_seeded, false);
-		else
+		} else {
 			esdm_unset_fully_seeded(drng);
+
+			/*
+			 * esdm_unset_fully_seeded() tried a forced seeding. Only
+			 * a full reseed resets the counters, so if the DRNG is
+			 * still over the threshold, it is spent: nothing may be
+			 * generated from it. The same holds for the ESDM as a
+			 * whole if the initial DRNG could not be brought back.
+			 */
+			if (esdm_drng_check_disable_threshold(drng) ||
+			    !atomic_load(&drng->fully_seeded) ||
+			    !esdm_state_operational())
+				return -EOPNOTSUPP;
+		}
 	}
 
 	/* Loop to collect random bits for the caller. */
