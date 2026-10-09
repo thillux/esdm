@@ -255,6 +255,16 @@ extern PrivAccess_Service priv_access_service;
 	(ESDM_RPC_MAX_INTERNAL_MSG_SIZE - ESDM_RPC_MAX_INTERNAL_MSG_HEADER_SIZE)
 
 /*
+ * Largest status report, including its terminating NUL, that a StatusResponse
+ * carries within ESDM_RPC_MAX_INTERNAL_MSG_SIZE. Next to the text, the message
+ * holds its ret field - a tag and, for a negative value such as the -EMSGSIZE
+ * of a truncated report, a 10 byte varint - and the tag and 3 byte length of
+ * the string. ESDM_RPC_MAX_DATA does not leave room for all of that.
+ */
+#define ESDM_RPC_MAX_STATUS_DATA                                               \
+	(ESDM_RPC_MAX_INTERNAL_MSG_SIZE - (1 + 10) - (1 + 3) + 1)
+
+/*
  * Scratch buffer size for unpacking a received protobuf message with the
  * esdm_rpc_alloc() bump allocator instead of malloc()/free() on every call.
  * It must hold the unpacked message struct plus the largest possible

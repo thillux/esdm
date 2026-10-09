@@ -40,7 +40,8 @@ void esdm_rpc_status_json(UnprivAccess_Service *service,
 		return;
 	}
 
-	size_t alloc_size = min_uint32(request->maxlen, ESDM_RPC_MAX_DATA);
+	size_t alloc_size =
+		min_uint32(request->maxlen, ESDM_RPC_MAX_STATUS_DATA);
 
 	/*
 	 * Guarantee at least one byte (avoid malloc(0)) and use calloc so the

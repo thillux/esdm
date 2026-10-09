@@ -33,13 +33,15 @@
  *
  * Also covered: the arena allocator handed to protobuf-c for the request
  * decoding, the descriptor lookup turning a wire method index into a message
- * type, and the bounded append callback the server packs responses through.
+ * type, the bounded append callback the server packs responses through, and
+ * the size bound of the status reports.
  */
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -47,6 +49,7 @@
 #include "common_test.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
+#include "esdm_rpc_service.h"
 #include "unpriv_access.pb-c.h"
 
 /******************************************************************************
@@ -737,6 +740,57 @@ static void test_append_data_overflow(void)
 	CHECK_EQ(dst[5], 0xff);
 }
 
+/******************************************************************************
+ * Size bound of the status reports
+ ******************************************************************************/
+
+/*
+ * The server hands a report out as far as it fits into a buffer of
+ * ESDM_RPC_MAX_STATUS_DATA bytes, with -EMSGSIZE when it was cut short. That
+ * response must still fit into a message - or the client receives a failure
+ * instead of the partial report. The bound is also not wasteful: one more
+ * character would no longer fit.
+ */
+static void test_status_response_size(void)
+{
+	static const int32_t rets[] = { 0, 1, -EMSGSIZE, INT32_MIN };
+	const size_t len = ESDM_RPC_MAX_STATUS_DATA - 1;
+	char *text = malloc(len + 2);
+	unsigned int i;
+
+	CHECK(text != NULL, "allocating the report failed");
+	if (!text)
+		return;
+
+	memset(text, 'x', len + 1);
+
+	for (i = 0; i < sizeof(rets) / sizeof(rets[0]); i++) {
+		StatusResponse response = STATUS_RESPONSE__INIT;
+
+		response.ret = rets[i];
+
+		/* What the server sends at most */
+		text[len] = '\0';
+		response.buffer = text;
+		CHECK(protobuf_c_message_get_packed_size(
+			      (const ProtobufCMessage *)&response) <=
+			      ESDM_RPC_MAX_INTERNAL_MSG_SIZE,
+		      "a full report with ret %d does not fit into a message",
+		      rets[i]);
+
+		/* One character more */
+		text[len] = 'x';
+		text[len + 1] = '\0';
+		if (rets[i] < 0)
+			CHECK(protobuf_c_message_get_packed_size(
+				      (const ProtobufCMessage *)&response) >
+				      ESDM_RPC_MAX_INTERNAL_MSG_SIZE,
+			      "ESDM_RPC_MAX_STATUS_DATA is smaller than needed");
+	}
+
+	free(text);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -756,6 +810,7 @@ int main(int argc, char *argv[])
 	test_decode_edge_cases();
 	test_append_data();
 	test_append_data_overflow();
+	test_status_response_size();
 
 	return common_test_result("rpc_protocol");
 }
