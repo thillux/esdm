@@ -951,6 +951,77 @@ out:
 		close(other);
 }
 
+static uint64_t test_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/*
+ * A connection that sits idle is closed, one that is in use is not.
+ *
+ * This build of the server closes idle connections after the short
+ * ESDM_EGD_IDLE_TIMEOUT_MS it is compiled with instead of a minute. The server
+ * scans for them once a second, so the close comes up to that much later.
+ */
+static void test_idle_close(void)
+{
+	const int scan_slack_ms = 1000 + 2000;
+	uint64_t last_answer, closed_after;
+	uint32_t bits = 0;
+	uint8_t byte;
+	unsigned int i;
+	int fd, other, rc;
+
+	printf("EGD raw: idle connections are closed\n");
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	/*
+	 * In use for longer than the idle timeout, with pauses shorter than
+	 * it: every command keeps the connection alive.
+	 */
+	for (i = 0; i < 6; i++) {
+		CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+		      "a connection in use was not served after %u pauses", i);
+		test_sleep_ms(ESDM_EGD_IDLE_TIMEOUT_MS / 3);
+	}
+	CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+	      "a connection in use was closed");
+	last_answer = test_now_ms();
+
+	/* Now it falls silent, and the server is to close it. */
+	rc = test_recv(fd, &byte, sizeof(byte),
+		       ESDM_EGD_IDLE_TIMEOUT_MS + scan_slack_ms);
+	closed_after = test_now_ms() - last_answer;
+	CHECK(rc == -EPIPE || rc == -ECONNRESET,
+	      "an idle connection was not closed: %d", rc);
+	CHECK(closed_after >= ESDM_EGD_IDLE_TIMEOUT_MS,
+	      "an idle connection was closed after %llu ms, its timeout is %u ms",
+	      (unsigned long long)closed_after,
+	      (unsigned int)ESDM_EGD_IDLE_TIMEOUT_MS);
+	printf("  closed after %llu ms of silence\n",
+	       (unsigned long long)closed_after);
+	close(fd);
+
+	/* Closing it costs nobody else anything. */
+	other = test_connect();
+	CHECK(other >= 0, "the server stopped accepting clients");
+	if (other >= 0) {
+		CHECK(test_cmd_entropy_count(other, &bits, TEST_RESPONSE_MS) ==
+			      0,
+		      "the server stopped serving after closing an idle client");
+		close(other);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	struct stat sb;
@@ -1056,6 +1127,7 @@ int main(int argc, char *argv[])
 	test_unread_responses();
 	test_vanishing_client();
 	test_unknown_command();
+	test_idle_close();
 
 	/* Nothing anywhere above may have signalled the process. */
 	CHECK(!test_sigpipe, "the server raised SIGPIPE");

@@ -38,11 +38,14 @@ if get_option('esdm-server').enabled()
 	# bytes. Unlike the test below it needs no daemon and therefore no
 	# privileges, and it decides itself when the ESDM turns operational -
 	# which is the only way to observe what the blocking read command does
-	# while it is not.
+	# while it is not. Its server closes idle connections after a few
+	# seconds rather than a minute, so that this can be tested as well -
+	# well above anything the other tests leave a connection unused for.
 	egd_server_raw_test = executable(
 			'egd_server_raw_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_raw_test.c' ],
+			c_args: [ '-DESDM_EGD_IDLE_TIMEOUT_MS=3000' ],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
 			link_with: esdm_static_lib
