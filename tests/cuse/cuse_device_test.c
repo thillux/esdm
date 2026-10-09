@@ -868,6 +868,15 @@ static void test_read_nonblock(void)
 	atomic_store(&esdm_cuse_shm_status->operational, true);
 	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/*
+	 * The prediction resistant one takes the non-blocking RPC, which only
+	 * stops at an EAGAIN of the ESDM - one that cannot be reached at all is
+	 * covered by the fallback as before.
+	 */
+	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
 	atomic_store(&esdm_cuse_shm_status->operational, false);
 
 	close(fd);

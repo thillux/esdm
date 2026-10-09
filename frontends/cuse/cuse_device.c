@@ -552,8 +552,14 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 
 	fallback_fd = esdm_test_fallback_fd(fallback_fd);
 
+	/*
+	 * The blocking PR call waits for as long as the PR DRNG is busy or not
+	 * operational, which an O_NONBLOCK reader must not.
+	 */
 	if (fi->flags & O_SYNC)
-		get = esdm_rpcc_get_random_bytes_pr_int;
+		get = (fi->flags & O_NONBLOCK) ?
+			      esdm_rpcc_get_random_bytes_pr_nonblock_int :
+			      esdm_rpcc_get_random_bytes_pr_int;
 
 	/*
 	 * Everything but the plain urandom read blocks until the ESDM is
@@ -577,6 +583,18 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		esdm_cuse_unpriv_call_start();
 		esdm_invoke(get(tmpbuf_p + read_bytes, todo, req));
 		esdm_cuse_unpriv_call_end();
+
+		/*
+		 * The ESDM cannot serve without blocking: that is its answer,
+		 * not a failure to cover for. What was read is returned as a
+		 * short read, nothing read is EAGAIN.
+		 */
+		if (ret == -EAGAIN &&
+		    get == esdm_rpcc_get_random_bytes_pr_nonblock_int) {
+			if (read_bytes)
+				break;
+			goto out;
+		}
 
 		/*
 		 * If call to the ESDM server failed, let us fall back to the
@@ -606,7 +624,7 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			goto out;
 		read_bytes += (size_t)ret;
 	}
-	ret = fuse_reply_buf(req, (const char *)tmpbuf_p, size);
+	ret = fuse_reply_buf(req, (const char *)tmpbuf_p, read_bytes);
 
 out:
 	if (tmpbuf) {
