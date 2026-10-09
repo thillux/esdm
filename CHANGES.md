@@ -43,7 +43,7 @@ addon/es_ebpf_testing
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
-* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c or ais2031_drg4 the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
+* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
 
 * fix: esdm_get_seed() hands back the output of all entropy sources again, the zero-entropy ones collected as additional data included, without clearing the entropy estimates of the creditable sources; the returned entropy count covers the creditable sources only
 
@@ -125,7 +125,7 @@ addon/es_ebpf_testing
 
 * fix: without a reseed worker (esdm_init() without esdm_init_monitor()), node DRNGs were never reseeded; a request now reseeds them itself
 
-* fix: RPC server: a new connection could be closed as idle before its first request was read; the client now also retries once on a fresh connection when the server closes it without an answer
+* fix: RPC server: a new connection could be closed as idle before its first request was read; the client now also retries an unprivileged request once on a fresh connection when the server closes it without an answer
 
 * fix: RPC and EGD servers: running out of file descriptors made the workers spin on the listening socket; they stop accepting until a connection closes or the idle timer fires
 
@@ -177,7 +177,7 @@ addon/es_ebpf_testing
 
 * Jitter RNG ES: with jitterentropy >= 3.8.0 the known answer tests of its conditioning component run through jent_selftest() bound to the synchronous and the asynchronous collector, a collector that failed them serves nothing, and a failed periodic self test empties the block cache
 
-* fix: the DRG.4 / SP800-90C limit of bits generated without a full reseed is enforced per block rather than once per request, so a large request no longer runs past it while the reseed is pending; a DRNG that reached the limit returns what it generated so far and the caller moves to another node; a DRNG left over the limit is no longer used for the rest of the request; the PR DRNG reaching it no longer clears the all-nodes-seeded state
+* fix: the DRG.4 / SP800-90C limit of bits generated without a full reseed is enforced per block rather than once per request, so a large request no longer runs past it while the reseed is pending; a node DRNG that reached the limit hands out what it generated so far and the rest of the request is served by the initial DRNG while it has output left; a DRNG left over the limit is no longer used for the rest of the request; the PR DRNG reaching it no longer clears the all-nodes-seeded state
 
 * fix: a seed the init DRNG rejected no longer makes the ESDM fully seeded and operational
 
@@ -185,13 +185,13 @@ addon/es_ebpf_testing
 
 * fix: the shared block cache of the asynchronous entropy sources discards a block whose fill started before a reset; the Jitter RNG ES falls back to its synchronous collector instead of serving a 0 bit block while credited
 
-* fix: eBPF entropy sources: events collected before a failed health test, still in flight in the ring buffer or a per-CPU batch, are no longer credited; pending events are no longer under-reported after a reset
+* fix: eBPF entropy sources: events collected before a failed health test, still in flight in the ring buffer or a per-CPU batch, are no longer credited; the pending events are counted per reset generation and health epoch, so they are reported correctly after a reset or a failure
 
-* fix: Linux kernel addon: a wrapped ring is hashed only as far as it is consumed, instead of crediting the tail again; no extraction before the internal DRBG exists (division by zero); the ring reset is serialized with the extraction and safe against concurrent producers; runtime entropy rates are floored at the configured module parameter; a failed module init removes the testing interface; unloading waits for in-flight hook callbacks (all hook patches)
+* fix: Linux kernel addon: a wrapped ring is hashed only as far as it is consumed, instead of crediting the tail again; no extraction before the internal DRBG exists (division by zero); the ring reset is serialized with the extraction and safe against concurrent producers; runtime entropy rates are floored at the configured module parameter; a failed module init removes the testing interface, and a missing debugfs disables only the testing interface; a reset between the blocks of one extraction discards the whole extraction; unloading waits for in-flight hook callbacks (all hook patches)
 
 * fix: esdm-server exits with an error when the RPC or EGD interfaces cannot be set up, instead of 0, and no longer waits forever for an unprivileged interface that failed to start; the idle timeout is honored to the microsecond
 
-* esdm-server: an unprivileged peer is limited to 512 RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server
+* esdm-server: an unprivileged peer is limited to max(512, min(16 per online CPU, half the RLIMIT_NOFILE)) RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server
 
 * fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a privileged request is not sent again after the server closed the connection, as it may already have been applied; a status report truncated to the maximum message size is delivered with -EMSGSIZE, and the JSON status calls leave the buffer empty on any server error
 
@@ -203,7 +203,7 @@ addon/es_ebpf_testing
 
 * fix: esdm-server-signal-helper: the exit status reflects the requested mode alone, exactly one of --suspend/--resume is required, and only the PID named by a PID file the server still holds locked is signaled
 
-* fix: CUSE: the caller of a privileged ioctl is checked with privileges raised, so it works with /proc mounted hidepid; the daemon stays in the mount namespace holding its bind mounts, so they are removed from the host at exit ("mnt" removed from RestrictNamespaces=); --pid_namespace is documented and warned about to refuse the privileged ioctls
+* fix: CUSE: the caller of a privileged ioctl is checked before any lock is taken, reading /proc with file system root credentials of the checking thread alone, so it works with /proc mounted hidepid and a refused caller cannot stall other requests; privileged ioctls are refused with EAGAIN until the device is set up; the daemon stays in the mount namespace holding its bind mounts, so they are removed from the host at exit ("mnt" removed from RestrictNamespaces=); --pid_namespace is documented and warned about to refuse the privileged ioctls
 
 * fix: esdm-proc: writing a value that is not a number fails with EINVAL; esdm-tool wipes the seed when writing it out fails
 
@@ -213,9 +213,13 @@ addon/es_ebpf_testing
 
 * fix: GnuTLS backend: hash init resets the state and the self test checks every step; Botan backend: the HMAC DRBG is instantiated over the seed and the personalization string in one step, covered by its known answer test
 
-* fix: FIPS integrity test: the HMAC file parser rejects characters that are not hex
+* fix: FIPS integrity test: the HMAC file parser rejects characters that are not hex and logs why, tolerates trailing white space and blank lines, and reports a file without a reference value
 
-* fix: meson: fips140 implies the complete SP800-90C build configuration, reseeding limits and disabled entropy source caches included
+* fix: meson: fips140 implies the complete SP800-90C build configuration, reseeding limits and disabled entropy source caches included - except for the reseeding limits when combined with ais2031_drg3
+
+* fix: the maximum bits without full reseed is clamped to INT_MAX, as a larger value silently disabled the limit; the RPC client bounds the resubmission of a request by time rather than by attempts, independent of client-rx-tx-timeout-exponent; esdm_drbg_zero_free() unlocks the state memory
+
+* ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes) and esdm-plain builds the default configuration
 
 * fix: esdm.spec names the jitterentropy packages as openSUSE ships them
 
@@ -223,7 +227,7 @@ addon/es_ebpf_testing
 
 * flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; build against the jitterentropy master (3.8.0) and libkcapi master, whose RNG tests are adjusted to Linux 7.2+; support Linux 7.2 and 7.3 in the kernel addon
 
-* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval and the operational state tests no longer depend on timing
+* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the RPC random bytes tests no longer pass on a failed request
 
 * tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
 
