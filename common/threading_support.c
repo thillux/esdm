@@ -796,6 +796,7 @@ static void thread_cancel(bool system_threads)
 {
 	unsigned int i, upper = system_threads ? THREADING_REALLY_ALL_THREADS :
 						 THREADING_MAX_THREADS;
+	bool join_me[THREADING_REALLY_ALL_THREADS];
 
 	atomic_store(&threads_in_cancel, true);
 	mutex_w_lock(&threads_cleanup);
@@ -810,6 +811,13 @@ static void thread_cancel(bool system_threads)
 	 * worker, so the write is redundant as well as unsafe.
 	 */
 	for (i = 0; i < upper; i++) {
+		/*
+		 * Snapshot the live slots before requesting shutdown, as in
+		 * thread_wait_all(): a worker observing the flag clears
+		 * thread_pending when it exits, and deciding on thread_dirty()
+		 * after that would skip joining it.
+		 */
+		join_me[i] = thread_dirty(i);
 		atomic_store(&threads[i].shutdown, true);
 		pthread_cond_broadcast(&threads[i].worker_cv);
 	}
@@ -817,7 +825,7 @@ static void thread_cancel(bool system_threads)
 
 	/* Kill all worker threads. */
 	for (i = 0; i < upper; i++) {
-		if (thread_dirty(i)) {
+		if (join_me[i]) {
 			pthread_cancel(atomic_load(&threads[i].thread_id));
 			pthread_join(atomic_load(&threads[i].thread_id), NULL);
 			thread_cleanup_full(&threads[i]);
