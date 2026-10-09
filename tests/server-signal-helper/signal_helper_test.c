@@ -216,6 +216,42 @@ static void test_cli_help(void)
 	CHECK_EQ(run_main(2, argv_short), EXIT_FAILURE);
 }
 
+static void test_cli_no_mode(void)
+{
+	char *argv[] = { (char *)"esdm-server-signal-helper", NULL };
+	char *argv_pid[] = { (char *)"esdm-server-signal-helper",
+			     (char *)"--pid", pidfile_path, NULL };
+
+	/*
+	 * Nothing asked for is a usage error. errno is cleared before each
+	 * run, which once was all that decided it - so a clean errno must not
+	 * turn it into a success.
+	 */
+	CHECK_EQ(run_main(1, argv), EXIT_FAILURE);
+	CHECK_EQ(run_main(3, argv_pid), EXIT_FAILURE);
+}
+
+static void test_cli_both_modes(void)
+{
+	char *argv[] = { (char *)"esdm-server-signal-helper", (char *)"-s",
+			 (char *)"-r", NULL };
+
+	got_sigusr1 = 0;
+	CHECK_EQ(run_main(3, argv), EXIT_FAILURE);
+	CHECK(!got_sigusr1, "contradicting modes still signalled");
+}
+
+static void test_cli_bad_args(void)
+{
+	char *argv_opt[] = { (char *)"esdm-server-signal-helper",
+			     (char *)"--resume", (char *)"--bogus", NULL };
+	char *argv_operand[] = { (char *)"esdm-server-signal-helper",
+				 (char *)"--resume", (char *)"stray", NULL };
+
+	CHECK_EQ(run_main(3, argv_opt), EXIT_FAILURE);
+	CHECK_EQ(run_main(3, argv_operand), EXIT_FAILURE);
+}
+
 static void test_cli_suspend_without_pid(void)
 {
 	char *argv[] = { (char *)"esdm-server-signal-helper",
@@ -303,6 +339,9 @@ int main(int argc, char *argv[])
 	test_resume_without_server();
 
 	test_cli_help();
+	test_cli_no_mode();
+	test_cli_both_modes();
+	test_cli_bad_args();
 	test_cli_suspend_without_pid();
 	test_cli_suspend_with_pid();
 	test_cli_suspend_bad_pidfile();

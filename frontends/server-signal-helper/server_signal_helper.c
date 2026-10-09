@@ -81,7 +81,7 @@ static bool signal_resume(void)
 static void usage(void)
 {
 	fprintf(stderr,
-		"esdm-server-signal-helper [--resume] [--suspend] [--pid PIDFILE] [--help]\n");
+		"esdm-server-signal-helper --suspend [--pid PIDFILE] | --resume | --help\n");
 }
 
 int main(int argc, char **argv)
@@ -91,7 +91,7 @@ int main(int argc, char **argv)
 	bool suspend = false;
 	bool resume = false;
 	bool help = false;
-	int ret = EXIT_SUCCESS;
+	bool bad_opt = false;
 
 	while (1) {
 		int opt_index = 0;
@@ -136,23 +136,34 @@ int main(int argc, char **argv)
 		case 'h':
 			help = true;
 			break;
+		default:
+			/* getopt_long() already named the offending option */
+			bad_opt = true;
+			break;
 		}
 	}
 
-	if (suspend && !signal_suspend(pidfile_path)) {
-		fprintf(stderr, "Failure during suspend signaling\n");
-		ret = EXIT_FAILURE;
-	} else if (resume && !signal_resume()) {
-		fprintf(stderr, "Failure during resume signaling\n");
-		ret = EXIT_FAILURE;
-	} else if (help) {
+	/*
+	 * Exactly one mode has to be asked for. The outcome is decided by the
+	 * return value of the mode alone - errno is not reset on success and
+	 * may hold anything left over from the work done on the way.
+	 */
+	if (help || bad_opt || optind < argc || suspend == resume) {
 		usage();
-		ret = EXIT_FAILURE;
-	} else if (errno) {
-		perror("Unknown mode or error:");
-		usage();
-		ret = EXIT_FAILURE;
+		return EXIT_FAILURE;
 	}
 
-	return ret;
+	if (suspend) {
+		if (!signal_suspend(pidfile_path)) {
+			fprintf(stderr, "Failure during suspend signaling\n");
+			return EXIT_FAILURE;
+		}
+	} else {
+		if (!signal_resume()) {
+			fprintf(stderr, "Failure during resume signaling\n");
+			return EXIT_FAILURE;
+		}
+	}
+
+	return EXIT_SUCCESS;
 }

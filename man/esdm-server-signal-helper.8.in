@@ -33,6 +33,9 @@ Both operations are wired to the sleep targets by the shipped
 .BR esdm\-server\-suspend.service " and " esdm\-server\-resume.service
 systemd units, so the helper rarely needs to be invoked by hand.
 .SH OPTIONS
+Exactly one of
+.BR \-\-suspend " and " \-\-resume
+has to be given.
 .TP
 .BR \-s ", " \-\-suspend
 Signal the impending suspend.
@@ -50,7 +53,8 @@ Only used by
 Print a usage summary and exit with a non\-zero status.
 .SH EXIT STATUS
 Returns 0 when the requested notification was delivered, and a non\-zero status
-otherwise \- including when no mode was requested at all.
+otherwise \- including when no mode, both modes or an unknown option or
+operand was given.
 .SH FILES
 .TP
 .I /run/esdm\-server.pid
