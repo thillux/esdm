@@ -72,9 +72,10 @@ void esdm_es_ring_reset(struct esdm_es_ring *ring)
 	 * Discard by moving rp up to wp, i.e. act as a consumer: wp belongs to
 	 * the lock-free producer, zeroing it (or the slots) races with a
 	 * producer that then publishes its old wp + 1 and makes stale or
-	 * zeroed slots count as events. The worst left is one event a producer
-	 * stores concurrently with the reset. The discarded slots are not
-	 * zeroized, just like consumed ones.
+	 * zeroed slots count as events. What can survive is the event each
+	 * producer stores concurrently with the reset, i.e. at most one per CPU
+	 * of this ring. The discarded slots are not zeroized, just like
+	 * consumed ones.
 	 */
 	for_each_possible_cpu (cpu) {
 		struct esdm_es_ring_cpu *rc = per_cpu_ptr(ring->cpu, cpu);
