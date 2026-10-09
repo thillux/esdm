@@ -323,9 +323,58 @@ out:
 	return ret;
 }
 
+/* Locked memory of the process in kB as /proc reports it, -1 if unknown */
+static long vm_locked_kb(void)
+{
+	char line[128];
+	long kb = -1;
+	FILE *f = fopen("/proc/self/status", "r");
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "VmLck: %ld kB", &kb) == 1)
+			break;
+	}
+	fclose(f);
+
+	return kb;
+}
+
+/*
+ * The SP800-90A uninstantiate function releases a state from
+ * esdm_drbg_hash_alloc() including its memory lock.
+ */
+static int hash_drbg_uninstantiate_tester(void)
+{
+	struct esdm_drbg_state *drbg = NULL;
+	long before = vm_locked_kb(), locked, after;
+
+	if (esdm_drbg_hash_alloc(&drbg))
+		return 1;
+	locked = vm_locked_kb();
+	esdm_drbg_zero_free(drbg);
+	after = vm_locked_kb();
+
+	/* Without the privilege or budget to lock, there is nothing to see */
+	if (before < 0 || locked <= before) {
+		printf("DRBG state not locked, unlock not checked\n");
+		return 0;
+	}
+
+	if (after != before) {
+		printf("DRBG state still locked after uninstantiate (%ld kB, expected %ld kB)\n",
+		       after, before);
+		return 1;
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
-	return hash_drbg_tester() + hash_drbg_locked_mem_tester();
+	return hash_drbg_tester() + hash_drbg_locked_mem_tester() +
+	       hash_drbg_uninstantiate_tester();
 }

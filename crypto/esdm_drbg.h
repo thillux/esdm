@@ -139,7 +139,8 @@ ssize_t esdm_drbg_generate(struct esdm_drbg_state *drbg, uint8_t *buf,
 
 /**
  * @brief DRBG uninstantiate function as required by SP800-90A - this function
- *	  frees all buffers and the DRBG handle
+ *	  frees all buffers and the DRBG handle allocated with
+ *	  esdm_drbg_hash_alloc
  *
  * @param [in] drbg DRBG state handle
  *

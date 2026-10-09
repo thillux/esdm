@@ -23,6 +23,7 @@
 #include <stdlib.h>
 
 #include "esdm_drbg.h"
+#include "esdm_hash_drbg_sha512.h"
 #include "visibility.h"
 
 /*************************************************************************
@@ -99,12 +100,13 @@ ssize_t esdm_drbg_generate(struct esdm_drbg_state *drbg, uint8_t *buf,
 DSO_PUBLIC
 void esdm_drbg_zero_free(struct esdm_drbg_state *drbg)
 {
-	if (!drbg)
-		return;
-
-	esdm_drbg_zero(drbg);
-
-	free(drbg);
+	/*
+	 * The Hash DRBG is the only DRBG and esdm_drbg_hash_alloc() its only
+	 * allocator. Its state is page-locked memory owning its pages, which
+	 * must be unlocked before it is freed - leave that to the matching
+	 * release function.
+	 */
+	esdm_drbg_hash_zero_free(drbg);
 }
 
 DSO_PUBLIC
