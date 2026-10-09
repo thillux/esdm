@@ -590,12 +590,21 @@ static void test_unknown_command(void)
 static void test_unread_responses(void)
 {
 	/*
-	 * One command of two bytes is answered with up to 256, so a few
-	 * thousand of them are far more than a socket buffer holds. The writes
-	 * stop at the first that would block, which is where the client's own
-	 * end is congested as well.
+	 * A UNIX socket accounts its buffer per queued message, at several
+	 * hundred bytes for even the smallest, so a few thousand answers of
+	 * two bytes are far more than it holds. The writes stop at the first
+	 * that would block, which is where the client's own end is congested
+	 * as well.
+	 *
+	 * One byte per request, not the largest transfer: a few hundred of
+	 * those take the DRNG past its reseed threshold, and the entropy
+	 * sources this test switched off cannot complete that reseed. Every
+	 * request after it would retry the reseed, polling the entropy
+	 * sources, which is the DRNG manager's business and not what this
+	 * tests - on a slow machine it delays the answers to the other
+	 * client beyond the response timeout.
 	 */
-	uint8_t cmd[2] = { ESDM_EGD_CMD_READ_NONBLOCK, ESDM_EGD_MAX_TRANSFER };
+	uint8_t cmd[2] = { ESDM_EGD_CMD_READ_NONBLOCK, 1 };
 	unsigned int sent = 0, i;
 	uint32_t bits = 0;
 	pid_t pid = 0;
@@ -658,14 +667,13 @@ static void test_unread_responses(void)
 		uint8_t delivered = 0;
 		uint8_t buf[ESDM_EGD_MAX_TRANSFER];
 
-		/*
-		 * The length byte cannot exceed what was asked for: the request
-		 * was for the largest transfer the byte can express.
-		 */
 		CHECK(test_recv(slow, &delivered, sizeof(delivered),
 				TEST_RESPONSE_MS) == 0,
 		      "the stuck client got nothing at all");
-		if (delivered) {
+		CHECK(delivered <= cmd[1],
+		      "the stuck client got %u bytes for a request of %u",
+		      delivered, cmd[1]);
+		if (delivered && delivered <= cmd[1]) {
 			CHECK(test_recv(slow, buf, delivered,
 					TEST_RESPONSE_MS) == 0,
 			      "the answer of the stuck client is truncated");
