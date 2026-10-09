@@ -123,7 +123,16 @@ enum esdm_ebpf_health_test {
  */
 struct esdm_ebpf_percpu_state {
 	/* Read by user space */
-	__u64 events; /* events this CPU put into the ring buffer */
+	/*
+	 * Events this CPU put into the ring buffer, counted per reset
+	 * generation and health epoch of their records: the count starts over
+	 * with the first record of a new pair. Only the records of the current
+	 * pair are creditable, so this is all user space needs to know what is
+	 * still to be had - by tallying what it fetched the same way.
+	 */
+	__u64 events;
+	__u32 events_reset_gen; /* reset generation ->events counts under */
+	__u32 events_health_epoch; /* health epoch ->events counts under */
 	__u32 startup_done; /* SP800-90B startup test completed */
 	__u32 health_failures; /* SP800-90B health test failures observed */
 	__u32 permanent_failure; /* sticky SP800-90B permanent failure */

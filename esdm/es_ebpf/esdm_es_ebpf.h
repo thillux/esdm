@@ -34,6 +34,13 @@ struct bpf_program;
 struct ring_buffer;
 struct entropy_es;
 
+/* Events of one CPU counted under one reset generation and health epoch */
+struct esdm_ebpf_cpu_tally {
+	uint64_t events;
+	uint32_t reset_gen;
+	uint32_t health_epoch;
+};
+
 /* State of one eBPF-based entropy source */
 struct esdm_ebpf_es {
 	const char *name;
@@ -76,19 +83,18 @@ struct esdm_ebpf_es {
 	uint64_t fetch_target;
 
 	/*
-	 * Events fetched from the ring buffer over the lifetime of the source,
-	 * and the ones the programs deposited but nobody has fetched yet - the
-	 * entropy the source can still extract without waiting for new events.
+	 * Events fetched from the ring buffer, one tally per CPU kept the way
+	 * the programs count what they deposited (struct
+	 * esdm_ebpf_percpu_state): per reset generation and health epoch of the
+	 * records, starting over with the first record of a new pair.
 	 */
-	uint64_t consumed_events;
-	uint64_t pending_events;
-	/* Events the programs deposited over that lifetime, as last read */
-	uint64_t submitted_events;
+	struct esdm_ebpf_cpu_tally *fetched;
 	/*
-	 * Events still in the ring buffer that a reset or a health test failure
-	 * wrote off: they will be fetched, but credited they will not be.
+	 * Creditable events the programs deposited but nobody has fetched yet -
+	 * the entropy the source can still extract without waiting for new
+	 * events.
 	 */
-	uint64_t stale_events;
+	uint64_t pending_events;
 
 	/* CPUs whose SP800-90B startup test has completed */
 	unsigned int startup_done_cpus;

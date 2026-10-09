@@ -195,11 +195,26 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	/*
 	 * Count only what made it in: the difference to what user space has
 	 * fetched is what is still waiting in the ring buffer, and dropped
-	 * deltas are not.
+	 * deltas are not. The count is per reset generation and health epoch
+	 * of the record, and moved ahead of the hand-over, taking it back if
+	 * that fails: user space may fetch the record the moment it is in, and
+	 * must not find more fetched than deposited under its pair. A new pair
+	 * gets its count before its name, so a read of the state catching this
+	 * in between is off by this batch, not by all of the previous pair.
 	 */
-	if (events && !bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
-					  ESDM_EBPF_EVENT_REC_LEN(events), 0))
-		state->events += events;
+	if (events) {
+		if (state->events_reset_gen != state->rec.reset_gen ||
+		    state->events_health_epoch != state->rec.health_epoch) {
+			state->events = events;
+			state->events_reset_gen = state->rec.reset_gen;
+			state->events_health_epoch = state->rec.health_epoch;
+		} else {
+			state->events += events;
+		}
+		if (bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
+				       ESDM_EBPF_EVENT_REC_LEN(events), 0))
+			state->events -= events;
+	}
 
 	/*
 	 * The deltas have left the collection buffer, so the record sitting in
