@@ -431,7 +431,8 @@ static bool esdm_cuse_client_privileged(fuse_req_t req)
 	 *
 	 * WARNING: as documented for struct fuse_ctx, the CUSE daemon
 	 * MUST NOT run in a PID or user namespace - a caller outside of it is
-	 * not identifiable and thus refused.
+	 * not identifiable and thus refused. That is every caller with
+	 * --pid_namespace.
 	 */
 	if (caller_has_cap_sys_admin(ctx->pid, ctx->uid)) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
@@ -1323,6 +1324,7 @@ static const char *usage =
 	"    --verbosity=NUM|-v NUM  verbosity level\n"
 	"    --username=USER|-u USER unprivileged user name (default: \"nobody\")\n"
 	"    --pid_namespace         fork the daemon into an isolating PID namespace\n"
+	"                            (refuses the privileged ioctls to every caller)\n"
 	"    -d   -o debug           enable debug output (implies -f)\n"
 	"    -f                      foreground operation\n"
 	"    -s                      disable multi-threaded operation\n"
@@ -1462,9 +1464,20 @@ int main_common(const char *_devname, const char *target, const char *semname,
 	CKINT_LOG(esdm_rpcc_init_priv_service(esdm_cuse_interrupt),
 		  "Initialization of dispatcher failed\n");
 
-	/* Enter PID namespace (opt-in via --pid_namespace) */
-	if (param.pid_namespace)
+	/*
+	 * Enter PID namespace (opt-in via --pid_namespace)
+	 *
+	 * The kernel reports the PID of a caller in the PID namespace that
+	 * opens /dev/cuse, which libfuse does after this fork. A caller outside
+	 * of it has no PID there, so none can be checked for CAP_SYS_ADMIN and
+	 * the privileged ioctls are refused to every caller.
+	 */
+	if (param.pid_namespace) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_CUSE,
+			"PID namespace requested: the privileged ioctls (RNDADDTOENTCNT, RNDADDENTROPY, RNDCLEARPOOL, RNDZAPENTCNT, RNDRESEEDCRNG) are refused to every caller\n");
 		CKINT(linux_isolate_namespace_prefork(NULL));
+	}
 
 	/* One thread group */
 	CKINT(thread_init(1));

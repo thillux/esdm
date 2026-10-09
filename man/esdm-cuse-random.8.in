@@ -82,7 +82,14 @@ Unprivileged user to switch to once the device exists. Defaults to
 .BR nobody .
 .TP
 .B \-\-pid_namespace
-Fork the daemon into an isolating PID namespace.
+Fork the daemon into an isolating PID namespace. The callers are outside of it,
+so the daemon cannot identify them to check for
+.BR CAP_SYS_ADMIN ,
+and the privileged
+.BR ioctl (2)
+commands are refused to every caller with
+.BR EPERM .
+Reading and writing the device is not affected.
 .TP
 .BR \-d ", " "\-o debug"
 Enable debug output. Implies
