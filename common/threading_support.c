@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -804,8 +805,8 @@ static void thread_cancel(bool system_threads)
 	 * Ensure that no new thread is spawned.
 	 *
 	 * Do not clear threads[i].start_routine here: it is protected by the
-	 * per-slot inuse lock (which we intentionally do not take on this kill
-	 * path), and a running worker dereferences it under that lock. An
+	 * per-slot inuse lock (which we intentionally do not take for a live
+	 * slot on this kill path), and a running worker dereferences it under that lock. An
 	 * unlocked write races that dereference and can crash the worker. The
 	 * shutdown flag plus the pthread_cancel below already terminate every
 	 * worker, so the write is redundant as well as unsafe.
@@ -816,9 +817,32 @@ static void thread_cancel(bool system_threads)
 		 * thread_wait_all(): a worker observing the flag clears
 		 * thread_pending when it exits, and deciding on thread_dirty()
 		 * after that would skip joining it.
+		 *
+		 * A slot without a thread may still be in the middle of
+		 * thread_schedule() -> thread_create(), which runs under the
+		 * slot's inuse lock and publishes thread_pending only before
+		 * releasing it. Read without the lock, such a slot looks empty,
+		 * its new worker sees the shutdown flag, exits and is never
+		 * joined. So an empty slot is decided under its inuse lock: no
+		 * job can hold it while thread_pending is false, only a
+		 * scheduler for the short time of thread_create(), and with the
+		 * flag set under the lock no scheduler creates a thread after
+		 * us. A live slot is still not locked, its job may run forever.
 		 */
-		join_me[i] = thread_dirty(i);
-		atomic_store(&threads[i].shutdown, true);
+		for (;;) {
+			if (thread_dirty(i)) {
+				join_me[i] = true;
+				atomic_store(&threads[i].shutdown, true);
+				break;
+			}
+			if (mutex_w_trylock(&threads[i].inuse) == 0) {
+				join_me[i] = thread_dirty(i);
+				atomic_store(&threads[i].shutdown, true);
+				mutex_w_unlock(&threads[i].inuse);
+				break;
+			}
+			sched_yield();
+		}
 		pthread_cond_broadcast(&threads[i].worker_cv);
 	}
 	pthread_cond_broadcast(&thread_wait_cv);
