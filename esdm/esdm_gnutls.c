@@ -40,7 +40,14 @@ static uint32_t esdm_gnutls_hash_digestsize(void *hash)
 
 static int esdm_gnutls_hash_init(void *hash)
 {
-	(void)hash;
+	gnutls_hash_hd_t hd = (gnutls_hash_hd_t)hash;
+
+	/*
+	 * Start from an empty state like the other backends do, discarding
+	 * whatever a previous user absorbed without finalizing it. A NULL
+	 * digest makes gnutls_hash_output() only reset the state.
+	 */
+	gnutls_hash_output(hd, NULL);
 	return 0;
 }
 
@@ -127,10 +134,15 @@ static int esdm_gnutls_hash_selftest(void)
 	if (ret)
 		return ret;
 
-	esdm_gnutls_hash_update(hd, msg_512, sizeof(msg_512));
-	esdm_gnutls_hash_final(hd, act);
+	ret = esdm_gnutls_hash_init(hd);
+	if (!ret)
+		ret = esdm_gnutls_hash_update(hd, msg_512, sizeof(msg_512));
+	if (!ret)
+		ret = esdm_gnutls_hash_final(hd, act);
 	esdm_gnutls_hash_desc_zero(hd);
 	esdm_gnutls_hash_dealloc(hd);
+	if (ret)
+		return ret;
 
 	ret = esdm_kat_check(act, exp_512, sizeof(exp_512));
 	if (ret)
@@ -145,10 +157,15 @@ static int esdm_gnutls_hash_selftest(void)
 	if (ret)
 		return ret;
 
-	esdm_gnutls_hash_update(hd, mod, sizeof(mod));
-	esdm_gnutls_hash_final(hd, act);
+	ret = esdm_gnutls_hash_init(hd);
+	if (!ret)
+		ret = esdm_gnutls_hash_update(hd, mod, sizeof(mod));
+	if (!ret)
+		ret = esdm_gnutls_hash_final(hd, act);
 	esdm_gnutls_hash_desc_zero(hd);
 	esdm_gnutls_hash_dealloc(hd);
+	if (ret)
+		return ret;
 
 	return esdm_kat_check_differs(act, exp_512, sizeof(exp_512));
 }
