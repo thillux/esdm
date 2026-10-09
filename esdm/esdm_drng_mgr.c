@@ -2189,9 +2189,47 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 	return 0;
 }
 
+/*
+ * Bring up the DRNGs that are not fully seeded on the way into a request.
+ *
+ * An operational ESDM does not need them for the request: it is served by a
+ * fully seeded node or by the initial DRNG. Their bring-up is then the reseed
+ * worker's, which retries an instance it could not bring up every second on its
+ * own and is only woken here when its next pass is further away than that.
+ * Without a worker, the request seeds one only when the entropy sources report
+ * enough for it, as their arrival does in esdm_es_add_entropy(). Seeding
+ * regardless collects entropy in the caller's thread under the pool lock on
+ * every request for as long as the entropy sources cannot fully seed one - a
+ * non-blocking request blocking on it, and a server serving all its clients
+ * from one thread, like the EGD server, stalling every one of them.
+ */
+static void esdm_drng_bring_up_for_request(void)
+{
+	uint64_t wakeup;
+
+	if (esdm_pool_all_nodes_seeded_get())
+		return;
+
+	if (!esdm_state_operational()) {
+		esdm_force_fully_seeded();
+		return;
+	}
+
+	if (!esdm_drng_mgr_reseed_worker_running()) {
+		if (esdm_es_reseed_wanted())
+			esdm_force_fully_seeded();
+		return;
+	}
+
+	wakeup = atomic_load(&esdm_drng_reseed_worker_wakeup);
+	if (wakeup > (uint64_t)esdm_monotonic_now() +
+			     ESDM_DRNG_RESEED_PASS_BUSY_SEC)
+		esdm_drng_reseed_notify();
+}
+
 static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 {
-	esdm_force_fully_seeded();
+	esdm_drng_bring_up_for_request();
 	if (esdm_state_operational())
 		return 0;
 	if (nonblock)
