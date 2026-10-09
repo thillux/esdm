@@ -51,6 +51,13 @@ struct {
 	__type(value, struct esdm_ebpf_status);
 } esdm_ebpf_status_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct esdm_ebpf_health);
+} esdm_ebpf_health_map SEC(".maps");
+
 /*
  * Zero source of the ring buffer zeroization. An array map value is
  * zero-initialized by the kernel and nothing ever writes to this one, so it
@@ -172,6 +179,14 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	if (events > ESDM_EBPF_BATCH_EVENTS)
 		events = ESDM_EBPF_BATCH_EVENTS;
 
+	/*
+	 * A health test failure on another CPU while this batch was filling
+	 * invalidated the deltas collected before it - user space would credit
+	 * none of them, so they are not handed over at all.
+	 */
+	if (state->rec.health_epoch != esdm_ebpf_health_epoch())
+		events = 0;
+
 	state->rec.type = esdm_ebpf_rec_event;
 	state->rec.cpu = bpf_get_smp_processor_id();
 	state->rec.reset_gen = state->reset_gen;
@@ -182,8 +197,8 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	 * fetched is what is still waiting in the ring buffer, and dropped
 	 * deltas are not.
 	 */
-	if (!bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
-				ESDM_EBPF_EVENT_REC_LEN(events), 0))
+	if (events && !bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
+					  ESDM_EBPF_EVENT_REC_LEN(events), 0))
 		state->events += events;
 
 	/*
@@ -369,7 +384,8 @@ static __always_inline void esdm_ebpf_collect(void)
 	 * add-on does the same (esdm_time_process_common()).
 	 *
 	 * Only deltas the health tests vouch for are collected, so the record
-	 * carries no health state and user space may credit all of it.
+	 * carries no health state of this CPU - only the health epoch, which
+	 * tells user space whether a failure since invalidated it.
 	 */
 	if (gcd_known && state->last_ts) {
 		__u64 delta = ts - state->last_ts;
@@ -386,6 +402,10 @@ static __always_inline void esdm_ebpf_collect(void)
 
 		if (esdm_ebpf_health_ok(state) &&
 		    state->pos < ESDM_EBPF_BATCH_EVENTS) {
+			/* The batch belongs to the epoch it started in */
+			if (!state->pos)
+				state->rec.health_epoch =
+					esdm_ebpf_health_epoch();
 			state->rec.delta[state->pos &
 					 (ESDM_EBPF_BATCH_EVENTS - 1)] = delta;
 			state->pos++;

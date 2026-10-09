@@ -55,6 +55,7 @@
 #define ESDM_EBPF_BTF_PATH "/sys/kernel/btf/vmlinux"
 #define ESDM_EBPF_RB_MAP_NAME "esdm_ebpf_rb"
 #define ESDM_EBPF_STATUS_MAP_NAME "esdm_ebpf_status_map"
+#define ESDM_EBPF_HEALTH_MAP_NAME "esdm_ebpf_health_map"
 #define ESDM_EBPF_STATE_MAP_NAME "esdm_ebpf_state"
 #define ESDM_EBPF_TIMERS_MAP_NAME "esdm_ebpf_timers"
 
@@ -405,6 +406,43 @@ out:
 
 /******************************** Status map **********************************/
 
+/* Read the health epoch of the programs (struct esdm_ebpf_health) */
+static int esdm_ebpf_read_health_epoch(struct esdm_ebpf_es *es,
+				       uint32_t *epoch)
+{
+	struct esdm_ebpf_health health;
+	uint32_t zero = 0;
+
+	if (!es->health_map)
+		return -EINVAL;
+
+	if (bpf_map__lookup_elem(es->health_map, &zero, sizeof(zero), &health,
+				 sizeof(health), 0))
+		return -errno;
+
+	*epoch = health.epoch;
+	return 0;
+}
+
+/*
+ * Write off the events the programs deposited and nobody fetched yet, as of the
+ * last status read: they are no entropy this source can still deliver, as the
+ * ingest will credit none of them. Counting them as pending would have the
+ * source report the very entropy that was just invalidated.
+ *
+ * Written off by remembering how many of them there are rather than by
+ * advancing the consumed count past them: the records are still in the ring
+ * buffer and will still be consumed - the ring buffer hands them out in order,
+ * so they are the next that many events the ingest takes.
+ */
+static void esdm_ebpf_write_off(struct esdm_ebpf_es *es)
+{
+	es->stale_events = (es->submitted_events > es->consumed_events) ?
+				   es->submitted_events - es->consumed_events :
+				   0;
+	es->pending_events = 0;
+}
+
 /*
  * Read the per-CPU state the eBPF programs maintain. This is what tells user
  * space how much entropy is still to be had - the events deposited but not yet
@@ -413,10 +451,10 @@ out:
  */
 static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 {
-	uint64_t events = 0, failures = 0;
+	uint64_t events = 0, failures = 0, outstanding;
 	unsigned int i, startup_done = 0, test = 0;
+	uint32_t zero = 0, epoch = es->health_epoch;
 	bool permanent = false;
-	uint32_t zero = 0;
 
 	if (!es->state_map || !es->cpu_state)
 		return;
@@ -424,6 +462,14 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 	if (bpf_map__lookup_elem(es->state_map, &zero, sizeof(zero),
 				 es->cpu_state, es->cpu_state_sz, 0))
 		return;
+
+	/*
+	 * Read after the per-CPU state: the programs move the epoch before they
+	 * count the failure, so a failure seen in the per-CPU state is seen
+	 * here as well. A failing read keeps the epoch last seen.
+	 */
+	if (esdm_ebpf_read_health_epoch(es, &epoch))
+		epoch = es->health_epoch;
 
 	for (i = 0; i < es->nr_cpus; i++) {
 		const struct esdm_ebpf_percpu_state *cpu = &es->cpu_state[i];
@@ -463,8 +509,11 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 	memset_secure(es->cpu_state, 0, es->cpu_state_sz);
 
 	es->submitted_events = events;
-	es->pending_events = (events > es->consumed_events) ?
-				     events - es->consumed_events :
+	outstanding = (events > es->consumed_events) ?
+			      events - es->consumed_events :
+			      0;
+	es->pending_events = (outstanding > es->stale_events) ?
+				     outstanding - es->stale_events :
 				     0;
 
 	if (startup_done != es->startup_done_cpus) {
@@ -478,23 +527,29 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 
 	/*
 	 * SP800-90B fail-closed handling: a health test failure invalidates all
-	 * collected entropy. The data itself stays in the pool as uncredited
-	 * stirring input. A count that dropped is a reset having cleared the
-	 * per-CPU counters, which is no new failure.
+	 * collected entropy - what the pool absorbed, and what the programs
+	 * deposited but nobody fetched yet. The ingest credits nothing of an
+	 * earlier health epoch, so the latter is written off here, and the
+	 * programs drop the batches they had begun. The data itself stays in
+	 * the pool as uncredited stirring input. A count that dropped is a
+	 * reset having cleared the per-CPU counters, which is no new failure.
 	 */
-	if (failures > es->health_failures) {
+	if (epoch != es->health_epoch || failures > es->health_failures) {
 		es->credited_events = 0;
+		esdm_ebpf_write_off(es);
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"%s ES: SP800-90B %s health test failure - invalidating all existing entropy\n",
 			es->name,
 			(test == esdm_ebpf_health_test_rct) ? "RCT" : "APT");
 	}
+	es->health_epoch = epoch;
 	es->health_failures = failures;
 
 	if (permanent && !es->perm_failure) {
 		es->perm_failure = true;
 		es->credited_events = 0;
+		esdm_ebpf_write_off(es);
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"%s ES: SP800-90B permanent health test failure - invalidating all existing entropy\n",
@@ -842,18 +897,10 @@ void esdm_ebpf_pool_reset(struct esdm_ebpf_es *es)
 	 * Everything the programs have deposited so far belongs to the
 	 * generation being left behind: the ingest inserts it as uncredited
 	 * stirring input and drops its entropy on the generation mismatch. So
-	 * it is not entropy this source can still deliver either - counting it
-	 * as pending would have the reset report the very entropy it just
-	 * invalidated.
-	 *
-	 * Written off by moving the consumed count up to what was deposited,
-	 * rather than by zeroing the difference: the records are still in the
-	 * ring buffer and will still be consumed, and a fetch that ran after a
-	 * plain zeroing would count them a second time.
+	 * it is not entropy this source can still deliver either.
 	 */
 	esdm_ebpf_update_status(es);
-	es->consumed_events = es->submitted_events;
-	es->pending_events = 0;
+	esdm_ebpf_write_off(es);
 
 	/*
 	 * es->health_failures is deliberately left alone: it mirrors the
@@ -896,6 +943,7 @@ static void esdm_ebpf_handle_events(struct esdm_ebpf_es *es,
 	 */
 	es->consumed_events += events;
 	es->ingested += (uint32_t)events;
+	es->stale_events -= min_uint64(es->stale_events, events);
 
 	/* The deltas are inserted in full, not folded into bytes */
 	if (esdm_ebpf_pool_insert(es, (const uint8_t *)rec->delta,
@@ -909,6 +957,14 @@ static void esdm_ebpf_handle_events(struct esdm_ebpf_es *es,
 	 * invalidated their entropy.
 	 */
 	if (rec->reset_gen != es->reset_gen)
+		return;
+
+	/*
+	 * Likewise for the events collected before the latest health test
+	 * failure on any CPU: the failure invalidated their entropy, and the
+	 * health epoch is what tells them apart from the ones collected since.
+	 */
+	if (rec->health_epoch != es->health_epoch)
 		return;
 
 	if (es->perm_failure)
@@ -1101,6 +1157,14 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 	CKNULL_LOG(es->status_map, -EINVAL, "%s ES: status map not found\n",
 		   es->name);
 
+	es->health_map =
+		bpf_object__find_map_by_name(obj, ESDM_EBPF_HEALTH_MAP_NAME);
+	CKNULL_LOG(es->health_map, -EINVAL, "%s ES: health map not found\n",
+		   es->name);
+	es->health_epoch = 0;
+	CKINT_LOG(esdm_ebpf_read_health_epoch(es, &es->health_epoch),
+		  "%s ES: cannot read the health map\n", es->name);
+
 	es->state_map =
 		bpf_object__find_map_by_name(obj, ESDM_EBPF_STATE_MAP_NAME);
 	CKNULL_LOG(es->state_map, -EINVAL, "%s ES: per-CPU state map not found\n",
@@ -1139,6 +1203,7 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 
 out:
 	es->status_map = NULL;
+	es->health_map = NULL;
 	es->state_map = NULL;
 	free(es->cpu_state);
 	es->cpu_state = NULL;
@@ -1206,8 +1271,15 @@ int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 	 * finds it.
 	 */
 	es->fetch_target = esdm_ebpf_events_per_block(es);
-	if (es->credited_events >= es->fetch_target)
+	if (es->credited_events >= es->fetch_target) {
+		/*
+		 * Nothing to fetch, but the caller is about to rely on the
+		 * credited events: a health test failure since the last status
+		 * read has to have invalidated them by then.
+		 */
+		esdm_ebpf_update_status(es);
 		return 0;
+	}
 
 	es->ingested = 0;
 	ret = ring_buffer__consume(es->rb);
@@ -1255,6 +1327,7 @@ void esdm_ebpf_fini_es(struct esdm_ebpf_es *es)
 
 	es->obj = NULL;
 	es->status_map = NULL;
+	es->health_map = NULL;
 	es->state_map = NULL;
 	es->wipe_prog = NULL;
 	es->rb_size = 0;
@@ -1265,6 +1338,8 @@ void esdm_ebpf_fini_es(struct esdm_ebpf_es *es)
 	es->consumed_events = 0;
 	es->pending_events = 0;
 	es->submitted_events = 0;
+	es->stale_events = 0;
+	es->health_epoch = 0;
 	es->health_failures = 0;
 	es->startup_done_cpus = 0;
 }

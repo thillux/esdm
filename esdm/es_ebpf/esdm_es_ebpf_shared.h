@@ -67,17 +67,22 @@ enum esdm_ebpf_rec_type {
  * measurement instead of a truncation of it.
  *
  * The record carries no health state: only events that passed the health
- * tests are collected at all, so everything delivered here may be used and
- * credited. It does carry the number of deltas it holds - a batch handed over
- * by the flush timer is only partially filled, and the record is submitted
- * with exactly the length those deltas occupy rather than always at its full
- * size.
+ * tests are collected at all. What it does carry is the health epoch (struct
+ * esdm_ebpf_health) its first delta was collected under: a health test failure
+ * on any CPU invalidates all entropy collected before it, including what
+ * already sits in the ring buffer, and the epoch is how user space tells those
+ * records apart from the ones collected after the failure. It also carries the
+ * number of deltas it holds - a batch handed over by the flush timer is only
+ * partially filled, and the record is submitted with exactly the length those
+ * deltas occupy rather than always at its full size.
  */
 struct esdm_ebpf_event_rec {
 	__u32 type; /* esdm_ebpf_rec_event */
 	__u32 cpu; /* CPU the deltas were observed on */
 	__u32 reset_gen; /* reset generation they were observed under */
 	__u32 events; /* valid entries in ->delta */
+	__u32 health_epoch; /* health epoch they were observed under */
+	__u32 reserved; /* explicit padding, always 0 */
 	__u64 delta[ESDM_EBPF_BATCH_EVENTS];
 };
 
@@ -203,6 +208,17 @@ struct esdm_ebpf_config {
  */
 struct esdm_ebpf_status {
 	__u32 reset_gen; /* incremented by user space on reset */
+};
+
+/*
+ * Health epoch of one eBPF entropy source in a single-entry array map: the
+ * number of SP800-90B health test failures any CPU observed. Only the programs
+ * write it, atomically, so it is kept apart from the status map that user space
+ * rewrites whole on a reset - a failure counted there could be lost to that.
+ * It is never reset, a reset generation and a health epoch are independent.
+ */
+struct esdm_ebpf_health {
+	__u32 epoch; /* incremented by the programs on every health failure */
 };
 
 #endif /* _ESDM_ES_EBPF_SHARED_H */

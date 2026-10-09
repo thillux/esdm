@@ -62,6 +62,7 @@ struct esdm_ebpf_es {
 	struct bpf_program *wipe_prog;
 	bool wiping;
 	struct bpf_map *status_map;
+	struct bpf_map *health_map;
 	/* Per-CPU state of the programs, read whole into ->cpu_state */
 	struct bpf_map *state_map;
 	struct esdm_ebpf_percpu_state *cpu_state;
@@ -83,6 +84,11 @@ struct esdm_ebpf_es {
 	uint64_t pending_events;
 	/* Events the programs deposited over that lifetime, as last read */
 	uint64_t submitted_events;
+	/*
+	 * Events still in the ring buffer that a reset or a health test failure
+	 * wrote off: they will be fetched, but credited they will not be.
+	 */
+	uint64_t stale_events;
 
 	/* CPUs whose SP800-90B startup test has completed */
 	unsigned int startup_done_cpus;
@@ -91,6 +97,7 @@ struct esdm_ebpf_es {
 	bool health_enabled;
 	bool perm_failure;
 	uint32_t reset_gen;
+	uint32_t health_epoch;
 	uint64_t health_failures;
 
 	/* Conditioning pool: digest states (internal and output) */
