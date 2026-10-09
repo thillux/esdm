@@ -65,7 +65,8 @@ static inline int esdm_locked_mem_alloc(void **mem, size_t size)
 
 	ret = mlock(tmp, len);
 	if (ret && errno != EPERM && errno != EAGAIN && errno != ENOMEM) {
-		int errsv = errno;
+		/* A failure must never read as success with *mem left NULL */
+		int errsv = errno ? errno : ENOMEM;
 
 		free(tmp);
 		return -errsv;
