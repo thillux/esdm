@@ -13,6 +13,10 @@
  * seeding triggered elsewhere, e.g. by an entropy source buffer being filled,
  * got to the initial DRNG first. That attempt shows nothing and is repeated.
  *
+ * The NTG.1 seeding strategy wants a second source for the initial seeding of
+ * the DRNGs, so the Jitter RNG is credited for that seeding and taken out
+ * again before the attempts.
+ *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
  * License: see LICENSE file in root directory
@@ -187,19 +191,23 @@ static int esdm_oid_test(void)
 		return 77;
 	}
 
-	/*
-	 * The aux pool is a single entropy source, which the NTG.1 seeding
-	 * strategy does not accept for the initial seeding - nor, before the
-	 * fix this test is for, would the seeding of the node DRNG have made
-	 * the ESDM operational from it.
-	 */
-	if (esdm_ntg1_2024_compliant()) {
-		printf("the NTG.1 seeding strategy cannot be seeded from the aux pool alone\n");
-		return 77;
-	}
-
 	esdm_config_max_nodes_set(ESDM_OID_NODES);
 	esdm_test_es_rates_zero();
+
+	/*
+	 * The aux pool is a single entropy source, which the NTG.1 seeding
+	 * strategy does not accept for the initial seeding. The Jitter RNG is
+	 * credited as the second one for that seeding only.
+	 */
+	if (esdm_ntg1_2024_compliant()) {
+#ifdef ESDM_ES_JENT
+		esdm_config_es_jent_entropy_rate_set(
+			ESDM_DRNG_SECURITY_STRENGTH_BITS);
+#else
+		printf("the NTG.1 seeding strategy needs the Jitter RNG next to the aux pool\n");
+		return 77;
+#endif
+	}
 
 	ret = esdm_init();
 	if (ret)
@@ -213,10 +221,19 @@ static int esdm_oid_test(void)
 		esdm_force_fully_seeded_all_drbgs();
 	}
 	if (!esdm_pool_all_nodes_seeded_get() || !esdm_state_operational()) {
+		/* No working Jitter RNG on this machine to stand next to it */
+		if (esdm_ntg1_2024_compliant()) {
+			printf("DRNGs cannot be seeded from the aux pool and the Jitter RNG, skipping test\n");
+			ret = 77;
+			goto out;
+		}
 		printf("DRNGs cannot be seeded from the aux pool\n");
 		ret = 1;
 		goto out;
 	}
+
+	/* From here on, the aux pool is the only credited source again */
+	esdm_config_es_jent_entropy_rate_set(0);
 
 	if (thread_init(1)) {
 		printf("cannot initialize threading support\n");

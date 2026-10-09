@@ -21,6 +21,13 @@
  * hands out the state it was seeded with while the source still worked and
  * has nothing to collect for the request after it.
  *
+ * The NTG.1 seeding strategy does not let a single entropy source seed the
+ * ESDM initially, unless that source is a Jitter RNG in its own NTG.1 mode.
+ * Without that mode, the auxiliary pool is credited with one seed's worth of
+ * entropy for the initial seeding as the second source. It is spent by that
+ * seeding, so after it the Jitter RNG is again the only credited source, and
+ * the rest of the test is unchanged.
+ *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
  * License: see LICENSE file in root directory
@@ -52,6 +59,7 @@
 #include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_drng_mgr.h"
+#include "esdm_es_jent.h"
 #include "esdm_logger.h"
 #include "es_rates.h"
 #include "ret_checkers.h"
@@ -70,6 +78,38 @@
  * of generate operations without a full reseed is set to its minimum.
  */
 #define ESDM_SEC_MAX_REQUESTS 8
+
+/*
+ * Does the initial seeding need a second entropy source next to the Jitter
+ * RNG? The NTG.1 seeding strategy wants two, unless the Jitter RNG is NTG.1
+ * conformant on its own - see esdm_fully_seeded().
+ */
+static bool esdm_sec_needs_second_source(void)
+{
+	return esdm_ntg1_2024_compliant() && !esdm_jent_ntg1();
+}
+
+/*
+ * Provide the second source for the initial seeding: one seed's worth of
+ * entropy in the auxiliary pool, plus what the conditioning discounts for
+ * oversampling, so that the pool counts as a source of its own. Inserted only
+ * while the pool is empty, and no more than one seeding collects, so that
+ * nothing is left over once the seeding has collected it.
+ */
+static void esdm_sec_feed_aux(void)
+{
+	uint8_t seed[2 * ESDM_DRNG_SECURITY_STRENGTH_BYTES];
+	size_t i;
+
+	if (esdm_avail_entropy_aux())
+		return;
+
+	for (i = 0; i < sizeof(seed); i++)
+		seed[i] = (uint8_t)i;
+	esdm_pool_insert_aux(seed, sizeof(seed),
+			     ESDM_DRNG_SECURITY_STRENGTH_BITS +
+				     esdm_compress_osr());
+}
 
 /*
  * The counters of the DRNG serving ordinary requests, read back from the
@@ -163,14 +203,25 @@ static int esdm_jent_only_security_test(void)
 	if (!TEST_CHECK(ret == 0, "%d", ret))
 		goto out;
 
-	TEST_RUNUNTIL(
-		"wait 100 ms until the ESDM is fully seeded, at most %u times",
-		ESDM_SEC_SEED_SLICES);
-	for (i = 0; i < ESDM_SEC_SEED_SLICES && !esdm_state_fully_seeded(); i++)
+	if (esdm_sec_needs_second_source()) {
+		TEST_RUNUNTIL(
+			"credit the auxiliary pool with %u bits whenever it is empty and wait 100 ms until the ESDM is fully seeded, at most %u times",
+			ESDM_DRNG_SECURITY_STRENGTH_BITS + esdm_compress_osr(),
+			ESDM_SEC_SEED_SLICES);
+	} else {
+		TEST_RUNUNTIL(
+			"wait 100 ms until the ESDM is fully seeded, at most %u times",
+			ESDM_SEC_SEED_SLICES);
+	}
+	for (i = 0; i < ESDM_SEC_SEED_SLICES && !esdm_state_fully_seeded();
+	     i++) {
+		if (esdm_sec_needs_second_source())
+			esdm_sec_feed_aux();
 		esdm_sec_sleep(0, 100 * 1000 * 1000);
+	}
 
 	TEST_REQUIRE(
-		"the ESDM is fully seeded from the Jitter RNG alone (test skipped otherwise)");
+		"the ESDM is fully seeded with the Jitter RNG credited (test skipped otherwise)");
 	if (!TEST_CHECK(esdm_state_fully_seeded(), "%d",
 			esdm_state_fully_seeded())) {
 		/*
@@ -178,9 +229,21 @@ static int esdm_jent_only_security_test(void)
 		 * test is about never delivered - there is nothing to observe
 		 * losing.
 		 */
-		printf("the ESDM is not fully seeded from the Jitter RNG alone, skipping test\n");
+		printf("the ESDM is not fully seeded with the Jitter RNG credited, skipping test\n");
 		ret = 77;
 		goto out;
+	}
+
+	/*
+	 * Entropy left in the auxiliary pool would be a second source the
+	 * reseeds below could collect from after the Jitter RNG is gone.
+	 */
+	TEST_REQUIRE("no entropy is left in the auxiliary pool");
+	if (!TEST_CHECK(!esdm_avail_entropy_aux(), "%u",
+			esdm_avail_entropy_aux())) {
+		printf("%u bits left in the auxiliary pool after the initial seeding\n",
+		       esdm_avail_entropy_aux());
+		goto err;
 	}
 
 	/* The Jitter RNG on its own carries the ESDM */
