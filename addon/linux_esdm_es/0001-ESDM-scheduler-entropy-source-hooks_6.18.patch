@@ -14,7 +14,7 @@ Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
  drivers/misc/Makefile      |  2 ++
  drivers/misc/esdm_sched.c  | 55 ++++++++++++++++++++++++++++++++++++++
- include/linux/esdm_sched.h | 20 +++++++++++++++++++
+ include/linux/esdm_sched.h | 20 ++++++++++++++
  kernel/sched/core.c        |  3 +++
  4 files changed, 80 insertions(+)
  create mode 100644 drivers/misc/esdm_sched.c

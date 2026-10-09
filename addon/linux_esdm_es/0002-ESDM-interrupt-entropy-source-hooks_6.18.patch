@@ -18,10 +18,10 @@ a while.
 
 Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
- drivers/char/random.c    | 14 ++++++++++---
+ drivers/char/random.c    | 14 ++++++++--
  drivers/misc/Makefile    |  1 +
  drivers/misc/esdm_irq.c  | 60 ++++++++++++++++++++++++++++++++++++++++
- include/linux/esdm_irq.h | 20 +++++++++++++++++++
+ include/linux/esdm_irq.h | 20 ++++++++++++++
  4 files changed, 92 insertions(+), 3 deletions(-)
  create mode 100644 drivers/misc/esdm_irq.c
  create mode 100644 include/linux/esdm_irq.h
