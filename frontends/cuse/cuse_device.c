@@ -393,6 +393,13 @@ static const char *esdm_cuse_unprivileged_user = "nobody";
 static bool esdm_cuse_dropped = false;
 
 /*
+ * Whether esdm_cuse_init_done() completed. The device accepts requests from
+ * any user before that - libfuse serves them on other threads already, and the
+ * device is made world-writeable before the privileges are dropped.
+ */
+static atomic_bool esdm_cuse_ready = false;
+
+/*
  * The namespaces of linux_isolate_namespace(), but for the mount namespace.
  *
  * The daemon owns the bind mount over the kernel device, made in the mount
@@ -532,11 +539,17 @@ static bool esdm_cuse_client_privileged(fuse_req_t req)
 static void esdm_cuse_drop_privilege_transient(void)
 {
 	/*
+	 * Only what esdm_cuse_priv_call_start() raised is dropped. A daemon
+	 * that never dropped its privileges, e.g. one not started as root,
+	 * has nothing to drop - and dropping it to the unprivileged user here
+	 * would leave it there, unable to raise again.
+	 *
 	 * Still being root after the drop would run every request that follows
 	 * with the privileges of this one. That is not recoverable, so stop
 	 * serving requests.
 	 */
-	if (drop_privileges_transient(esdm_cuse_unprivileged_user) &&
+	if (esdm_cuse_dropped &&
+	    drop_privileges_transient(esdm_cuse_unprivileged_user) &&
 	    geteuid() == 0) {
 		struct fuse_session *se = esdm_cuse_session;
 
@@ -556,19 +569,29 @@ static void esdm_cuse_drop_privilege_transient(void)
  * keeps every new read and write of the device waiting as well, which a caller
  * that is refused anyway must not be able to cause.
  *
- * Returns true with the privileges raised and the lock held, both released by
- * esdm_cuse_drop_privilege_transient(); false with neither.
+ * Until esdm_cuse_init_done() completed, whether the daemon has dropped its
+ * privileges - and so whether they are to be raised and dropped again - is not
+ * settled yet. A privileged request is answered with EAGAIN meanwhile: the
+ * caller may well be entitled to it, and is so in a moment, which EPERM would
+ * tell it otherwise. It is what the status ioctl answers while the ESDM is not
+ * there yet as well.
+ *
+ * Returns 0 with the privileges raised and the lock held, both released by
+ * esdm_cuse_drop_privilege_transient(); the error to reply with neither.
  */
-static bool esdm_cuse_priv_call_start(fuse_req_t req)
+static int esdm_cuse_priv_call_start(fuse_req_t req)
 {
+	if (!atomic_load(&esdm_cuse_ready))
+		return EAGAIN;
+
 	if (!esdm_cuse_client_privileged(req))
-		return false;
+		return EPERM;
 
 	mutex_lock(&esdm_cuse_priv);
 	if (esdm_cuse_dropped)
 		raise_privilege_transient(0, 0);
 
-	return true;
+	return 0;
 }
 
 /******************************************************************************
@@ -835,8 +858,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_priv_call_start(req)) {
-				fuse_reply_err(req, EPERM);
+			ret = esdm_cuse_priv_call_start(req);
+			if (ret) {
+				fuse_reply_err(req, ret);
 				return;
 			}
 
@@ -902,8 +926,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_priv_call_start(req)) {
-				fuse_reply_err(req, EPERM);
+			ret = esdm_cuse_priv_call_start(req);
+			if (ret) {
+				fuse_reply_err(req, ret);
 				return;
 			}
 
@@ -933,8 +958,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		 * This operation requires privileges. Thus, raise the
 		 * privilege level to the same level as the caller has.
 		 */
-		if (!esdm_cuse_priv_call_start(req)) {
-			fuse_reply_err(req, EPERM);
+		ret = esdm_cuse_priv_call_start(req);
+		if (ret) {
+			fuse_reply_err(req, ret);
 			return;
 		}
 		esdm_invoke(esdm_rpcc_rnd_clear_pool_int(req));
@@ -954,8 +980,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		 * This operation requires privileges. Thus, raise the
 		 * privilege level to the same level as the caller has.
 		 */
-		if (!esdm_cuse_priv_call_start(req)) {
-			fuse_reply_err(req, EPERM);
+		ret = esdm_cuse_priv_call_start(req);
+		if (ret) {
+			fuse_reply_err(req, ret);
 			return;
 		}
 		esdm_invoke(esdm_rpcc_rnd_reseed_crng_int(req));
@@ -1033,8 +1060,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
 			 */
-			if (!esdm_cuse_priv_call_start(req)) {
-				fuse_reply_err(req, EPERM);
+			ret = esdm_cuse_priv_call_start(req);
+			if (ret) {
+				fuse_reply_err(req, ret);
 				return;
 			}
 			if (backend_fd >= 0 &&
@@ -1056,8 +1084,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		* This operation requires privileges. Thus, raise the
 		* privilege level to the same level as the caller has.
 		*/
-		if (!esdm_cuse_priv_call_start(req)) {
-			fuse_reply_err(req, EPERM);
+		ret = esdm_cuse_priv_call_start(req);
+		if (ret) {
+			fuse_reply_err(req, ret);
 			return;
 		}
 		if (backend_fd >= 0 && ioctl(backend_fd, RNDRESEEDCRNG) == -1)
@@ -1347,6 +1376,9 @@ void esdm_cuse_init_done(void *userdata)
 			  atomic_load(&esdm_cuse_poll_checker_ready) ||
 				  atomic_load(
 					  &esdm_cuse_poll_thread_shutdown));
+
+	/* From here on, esdm_cuse_dropped stays as it is */
+	atomic_store(&esdm_cuse_ready, true);
 
 	return;
 

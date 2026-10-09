@@ -626,6 +626,49 @@ static void test_ioctl_privilege_is_capability(void)
 	caller_is_root(false);
 }
 
+/*
+ * The device takes requests of any user while esdm_cuse_init_done() still
+ * runs, before the privileges are dropped. A privileged ioctl must neither be
+ * served then nor drop the privileges early: the daemon would stay with the
+ * unprivileged user for good, never knowing it can raise again.
+ */
+static void test_ioctl_before_init_done(void)
+{
+	atomic_store(&esdm_cuse_ready, false);
+	esdm_cuse_dropped = false;
+
+	caller_is_root(false);
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	/* Not refused: the caller may be entitled to it in a moment */
+	caller_is_root(true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	/* A daemon that never dropped has nothing to raise or drop */
+	atomic_store(&esdm_cuse_ready, true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind == REPLY_ERR || reply.kind == REPLY_IOCTL,
+	      "RNDRESEEDCRNG was not answered");
+	CHECK(reply.kind != REPLY_ERR || reply.err != EAGAIN,
+	      "RNDRESEEDCRNG was refused after the initialization");
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	caller_is_root(false);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+	CHECK_EQ(drop_calls, 0);
+}
+
 static void *refused_ioctl(void *arg)
 {
 	(void)arg;
@@ -1135,8 +1178,11 @@ int main(int argc, char *argv[])
 
 	caller_is_root(false);
 
+	test_ioctl_before_init_done();
+
 	/* What the daemon is once the device is up: dropped to "nobody" */
 	esdm_cuse_dropped = true;
+	atomic_store(&esdm_cuse_ready, true);
 
 	test_open();
 	test_ioctl_compat();

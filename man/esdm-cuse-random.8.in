@@ -129,7 +129,10 @@ does not hide them. A caller whose entries root cannot read without
 \- with
 .BR hidepid= ,
 one running under another user or group ID than root \- is refused, as the shipped
-units do not grant that capability.
+units do not grant that capability. Until the daemon has finished setting up the
+device and dropped its privileges, the privileged commands fail with
+.B EAGAIN
+for every caller.
 .PP
 Before each daemon overlays the kernel device with its own, it keeps a file
 descriptor on the original kernel
