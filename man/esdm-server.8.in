@@ -151,7 +151,9 @@ build option (2 seconds by default) is closed;
 reconnects transparently.
 .TP
 .B EGD interface
-At most 2048 concurrent connections in total and 256 per UID. A connection
+Served by one worker thread per online CPU, at most four, each serving the
+clients it accepted. At most 2048 concurrent connections in total and 256 per
+UID. A connection
 that has received no command and owes no response for 60 seconds is closed;
 .BR libesdm_egd_client (3)
 reconnects transparently.

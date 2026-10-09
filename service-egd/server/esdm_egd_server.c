@@ -37,6 +37,7 @@
 #include "bitshift_be.h"
 #include "build_bug_on.h"
 #include "esdm.h"
+#include "esdm_config.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
@@ -140,6 +141,9 @@ struct esdm_egd_conn {
 	/* Accounted in esdm_egd_peer_limit */
 	bool peer_counted;
 
+	/* Holds one of the ESDM_EGD_MAX_CONNECTIONS in esdm_egd_connections */
+	bool slot_counted;
+
 	/* Last time the client sent something or took a response, see
 	 * ESDM_EGD_IDLE_TIMEOUT_MS. */
 	uint64_t last_active;
@@ -241,7 +245,14 @@ static atomic_int esdm_egd_exit = 0;
 
 static struct esdm_peer_limit esdm_egd_peer_limit =
 	ESDM_PEER_LIMIT_INIT("EGD server", ESDM_EGD_MAX_CONNECTIONS_PER_UID);
-static atomic_bool esdm_egd_worker_running = false;
+/* Workers serving the EGD sockets, see esdm_egd_server_start() */
+static atomic_uint esdm_egd_workers_running = 0;
+
+/*
+ * Connections served by all workers together - each worker takes the clients it
+ * accepts, and ESDM_EGD_MAX_CONNECTIONS bounds them all.
+ */
+static atomic_size_t esdm_egd_connections = 0;
 
 static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
 				    const char *socket_path)
@@ -584,8 +595,8 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
  * Exactly one non-blocking generation is attempted. A request it does not cover
  * goes back to the event loop as a deferred request (see
  * esdm_egd_cmd_read_block()) rather than being retried here, which would tie the
- * worker - it serves every client of both sockets - to a single request for as
- * long as the entropy sources need.
+ * worker - it serves every client it accepted on both sockets - to a single
+ * request for as long as the entropy sources need.
  *
  * @generated reports how much was produced, which matters for the prediction
  * resistance generator: it hands out no more than was just delivered, so a
@@ -1075,6 +1086,9 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 	if (conn->peer_counted)
 		esdm_peer_limit_put(&esdm_egd_peer_limit, conn->peer_uid);
 
+	if (conn->slot_counted)
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+
 	memset_secure(conn->in, 0, sizeof(conn->in));
 	memset_secure(conn->out, 0, sizeof(conn->out));
 	memset_secure(conn->answer, 0, sizeof(conn->answer));
@@ -1145,6 +1159,22 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 		return NULL;
 	}
 	conn->peer_counted = true;
+
+	/*
+	 * Several workers accept from the same listener, and each saw room
+	 * before it accepted - which one of them takes the last slot is decided
+	 * here.
+	 */
+	if (atomic_fetch_add(&esdm_egd_connections, 1) >=
+	    ESDM_EGD_MAX_CONNECTIONS) {
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+			    "EGD server: no room for a connection on FD %d\n",
+			    fd);
+		esdm_egd_release_conn(conn);
+		return NULL;
+	}
+	conn->slot_counted = true;
 	conn->last_active = esdm_egd_now_ms();
 
 	ev.events = EPOLLIN | EPOLLRDHUP;
@@ -1167,14 +1197,17 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 	return conn;
 }
 
-/* Thread main serving the EGD socket. */
-static int esdm_egd_handler(void __unused *args)
+/*
+ * Thread main of one worker serving the EGD sockets. The workers share both
+ * listeners, and each serves the clients it accepted.
+ */
+static int esdm_egd_handler(void *args)
 {
+	uint32_t id = (uint32_t)(uintptr_t)args;
 	struct esdm_egd_conn_list conn_list;
 	struct esdm_egd_conn *conn, *tmp;
 	struct esdm_egd_listener *listener;
 	struct epoll_event events[ESDM_EGD_MAX_EVENTS];
-	size_t num_connections = 0;
 	size_t deferred_requests = 0;
 	/*
 	 * Did a deferred request get any data in the last round? As long as one
@@ -1201,7 +1234,7 @@ static int esdm_egd_handler(void __unused *args)
 	int epfd = -1;
 	int ret = 0;
 
-	thread_set_name(egd_server, 0);
+	thread_set_name(egd_server, id);
 	TAILQ_INIT(&conn_list);
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -1214,7 +1247,7 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	/*
-	 * Both sockets are served by this one thread: a listener is identified
+	 * Both sockets are served by every worker: a listener is identified
 	 * by its own pointer in the epoll data, a connection by the pointer to
 	 * its own structure, and the two can never collide.
 	 */
@@ -1250,7 +1283,8 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	while (atomic_load(&esdm_egd_exit) == 0) {
-		bool want_armed = (num_connections < ESDM_EGD_MAX_CONNECTIONS) &&
+		bool want_armed = (atomic_load(&esdm_egd_connections) <
+				   ESDM_EGD_MAX_CONNECTIONS) &&
 				  !accept_paused;
 		int nfds, i;
 
@@ -1298,7 +1332,8 @@ static int esdm_egd_handler(void __unused *args)
 		}
 
 		if (accept_paused &&
-		    (!nfds || num_connections < paused_connections))
+		    (!nfds ||
+		     atomic_load(&esdm_egd_connections) < paused_connections))
 			accept_paused = false;
 
 		for (i = 0; i < nfds; i++) {
@@ -1315,12 +1350,12 @@ static int esdm_egd_handler(void __unused *args)
 						       events[i].data.ptr,
 						       &accept_paused);
 				if (!conn) {
-					paused_connections = num_connections;
+					paused_connections = atomic_load(
+						&esdm_egd_connections);
 					continue;
 				}
 
 				TAILQ_INSERT_TAIL(&conn_list, conn, tailq);
-				num_connections++;
 				continue;
 			}
 
@@ -1353,7 +1388,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1391,7 +1425,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1412,7 +1445,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1458,7 +1490,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 			}
 		}
 	}
@@ -1477,31 +1508,62 @@ out:
 	if (epfd >= 0)
 		close(epfd);
 
-	atomic_store(&esdm_egd_worker_running, false);
+	atomic_fetch_sub(&esdm_egd_workers_running, 1);
 
 	return ret;
 }
 
 int esdm_egd_server_start(void)
 {
-	int ret;
+	uint32_t num_workers, t;
+	int ret = 0;
 
 	/*
 	 * The interface is active exactly when esdm_egd_server_socket_init()
 	 * obtained a listening socket - either from systemd or by binding the
-	 * path requested on the command line. One worker serves both of them.
+	 * path requested on the command line. Every worker serves both of them.
 	 */
 	if (!esdm_egd_server_active())
 		return 0;
 
-	atomic_store(&esdm_egd_worker_running, true);
+	/*
+	 * A worker serves its clients one request at a time, and a request may
+	 * take as long as the DRNG it goes to needs for a reseed. More workers
+	 * keep the other clients going meanwhile - up to one per CPU, within
+	 * the thread slots reserved for them.
+	 */
+	num_workers = esdm_config_online_nodes();
+	if (num_workers > ESDM_THREAD_EGD_SLOTS)
+		num_workers = ESDM_THREAD_EGD_SLOTS;
+	if (!num_workers)
+		num_workers = 1;
 
-	ret = thread_start(esdm_egd_handler, NULL, ESDM_THREAD_EGD_GROUP, NULL);
-	if (ret) {
-		atomic_store(&esdm_egd_worker_running, false);
-		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
-			    "EGD server: starting worker thread failed\n");
+	for (t = 0; t < num_workers; t++) {
+		atomic_fetch_add(&esdm_egd_workers_running, 1);
+
+		ret = thread_start(esdm_egd_handler, (void *)(uintptr_t)t,
+				   ESDM_THREAD_EGD_GROUP, NULL);
+		if (ret) {
+			atomic_fetch_sub(&esdm_egd_workers_running, 1);
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_SERVER,
+				"EGD server: starting worker thread %u failed\n",
+				t);
+
+			/*
+			 * The workers started so far serve both sockets
+			 * already - carry on with them, and fail only if there
+			 * is none at all.
+			 */
+			if (t)
+				ret = 0;
+			break;
+		}
 	}
+
+	esdm_logger(LOGGER_STATUS, LOGGER_C_SERVER,
+		    "EGD server: %u worker thread(s)\n",
+		    atomic_load(&esdm_egd_workers_running));
 
 	return ret;
 }
@@ -1522,13 +1584,13 @@ void esdm_egd_server_fini(void)
 	esdm_egd_server_signal_exit_safe();
 
 	/*
-	 * Wait for the worker to leave its event loop before the ESDM is
-	 * finalized - it must not be inside esdm_get_random_bytes_full_noblock
-	 * or esdm_pool_insert_aux by then. It is a special thread and thus not
+	 * Wait for the workers to leave their event loops before the ESDM is
+	 * finalized - none may be inside esdm_get_random_bytes_full_noblock or
+	 * esdm_pool_insert_aux by then. They are special threads and thus not
 	 * covered by the RPC server's thread_wait_all(). The bound is generous
 	 * against the poll interval, but shutdown must not hang either.
 	 */
-	for (i = 0; i < 100 && atomic_load(&esdm_egd_worker_running); i++) {
+	for (i = 0; i < 100 && atomic_load(&esdm_egd_workers_running); i++) {
 		struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
 
 		nanosleep(&ts, NULL);

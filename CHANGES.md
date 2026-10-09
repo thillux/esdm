@@ -219,6 +219,8 @@ addon/es_ebpf_testing
 
 * fix: the maximum bits without full reseed is clamped to INT_MAX, as a larger value silently disabled the limit; the RPC client bounds the resubmission of a request by time rather than by attempts, independent of client-rx-tx-timeout-exponent; esdm_drbg_zero_free() unlocks the state memory
 
+* EGD server: served by one worker thread per online CPU, at most four, each serving the clients it accepted on both sockets, so a request waiting for a DRNG reseed no longer holds up every other EGD client; the workers run in thread slots reserved for them rather than in the shared pool
+
 * fix: esdm_rpcc_get_random_bytes() sends a request again that the ESDM answered with -EAGAIN - the DRNG serving it reached its maximum output without full reseed - at once and, should that be answered the same way, after the poll interval, as esdm_rpcc_get_random_bytes_full() does; a blocking read of /dev/urandom no longer fails with EAGAIN
 
 * fix: a request no longer seeds a node DRNG that is not fully seeded in the caller's thread while the ESDM is operational - it is served by another node or the initial DRNG, and the reseed worker brings the node up; before, every request did, under the pool lock, for as long as a spent node DRNG could not be fully reseeded, which stalled the EGD server and serialized the RPC workers
