@@ -40,6 +40,6 @@ stdenv.mkDerivation rec {
     ];
     maintainers = with maintainers; [ thillux ];
     platforms = platforms.linux;
-    broken = versionOlder kernel.version "6.6";
+    broken = versionOlder kernel.version "6.1";
   };
 }
