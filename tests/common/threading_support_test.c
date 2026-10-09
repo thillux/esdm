@@ -63,6 +63,12 @@
 /* Upper bound for every wait below - generous, but never reached when sane */
 #define WAIT_TIMEOUT_MS 20000
 #define WAIT_STEP_US 1000
+/*
+ * Bound of the waits on the forced release: the cancellation it does is
+ * immediate when sane, and a wedged release has to fail well within the
+ * timeout meson grants the whole test.
+ */
+#define CANCEL_TIMEOUT_MS 5000
 
 static atomic_uint jobs_run;
 static atomic_bool release_workers;
@@ -91,18 +97,34 @@ static bool wait_until_uint(atomic_uint *flag, unsigned int value)
 	return atomic_load(flag) >= value;
 }
 
-static bool wait_until_bool(atomic_bool *flag)
+static bool wait_until_bool_ms(atomic_bool *flag, unsigned int timeout_ms)
 {
 	unsigned int waited;
 
-	for (waited = 0; waited < WAIT_TIMEOUT_MS * 1000;
-	     waited += WAIT_STEP_US) {
+	for (waited = 0; waited < timeout_ms * 1000; waited += WAIT_STEP_US) {
 		if (atomic_load(flag))
 			return true;
 		usleep(WAIT_STEP_US);
 	}
 
 	return atomic_load(flag);
+}
+
+static bool wait_until_bool(atomic_bool *flag)
+{
+	return wait_until_bool_ms(flag, WAIT_TIMEOUT_MS);
+}
+
+/*
+ * Give up on a check that found the process wedged: exit() would hang in
+ * the destructor of a logger left locked, and so would fflush(NULL) on its
+ * stream.
+ */
+static void bail_out(void)
+{
+	fflush(stdout);
+	fflush(stderr);
+	_exit(1);
 }
 
 static void sighup_handler(int sig)
@@ -508,6 +530,8 @@ static void test_thread_names(void)
 
 static atomic_uint cancel_victims;
 static atomic_bool logged_after_cancel;
+static atomic_bool released;
+static atomic_int release_ret;
 static DECLARE_WAIT_QUEUE(cancel_queue);
 
 /* A job logging until it is cancelled - mostly in the middle of a record */
@@ -572,18 +596,25 @@ static void test_cancel_check(void)
 	 * instead of hanging the test.
 	 */
 	CHECK_EQ(pthread_create(&tid, NULL, log_after_cancel, NULL), 0);
-	if (!wait_until_bool(&logged_after_cancel)) {
+	if (!wait_until_bool_ms(&logged_after_cancel, CANCEL_TIMEOUT_MS)) {
 		CHECK(0, "logger locked after a forced release");
-		/* exit() would hang in the destructor of the logger */
-		fflush(NULL);
-		_exit(1);
+		bail_out();
 	}
 	pthread_join(tid, NULL);
+}
+
+static void *release_pool(void *data)
+{
+	(void)data;
+	atomic_store(&release_ret, thread_release(false, true));
+	atomic_store(&released, true);
+	return NULL;
 }
 
 static void test_stop_spawning(void)
 {
 	struct fork_join_arg args[4];
+	pthread_t tid;
 	unsigned int i;
 
 	for (i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
@@ -615,8 +646,19 @@ static void test_stop_spawning(void)
 		      "task %u was not run inline during teardown", i);
 	}
 
-	/* A wait while a cancellation is pending is turned into one */
-	CHECK_EQ(thread_release(false, true), 0);
+	/*
+	 * A wait while a cancellation is pending is turned into one. Release
+	 * from a helper thread, so a release wedged on a cancelled victim
+	 * fails the check instead of hanging the test.
+	 */
+	CHECK_EQ(pthread_create(&tid, NULL, release_pool, NULL), 0);
+	if (!wait_until_bool_ms(&released, CANCEL_TIMEOUT_MS)) {
+		CHECK(0, "forced release did not complete within %u ms",
+		      CANCEL_TIMEOUT_MS);
+		bail_out();
+	}
+	pthread_join(tid, NULL);
+	CHECK_EQ(atomic_load(&release_ret), 0);
 }
 
 int main(int argc, char *argv[])
