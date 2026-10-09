@@ -103,11 +103,15 @@
                 {
                   lib,
                   config,
+                  modulesPath,
                   ...
                 }:
                 {
+                  # modulesPath rather than "${pkgs.path}/...": interpolating
+                  # the path copies nixpkgs into the store once more, which
+                  # nix flake check --no-build does not do and then fails on.
                   imports = [
-                    "${pkgs.path}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+                    (modulesPath + "/installer/cd-dvd/installation-cd-minimal.nix")
                   ];
                   isoImage = {
                     isoName = "esdm-live.iso";
@@ -141,8 +145,8 @@
         # restricted to the versions ESDM supports (>= minKernel). Discovered
         # automatically so newly packaged kernels are picked up without editing
         # this file. Keyed by the suffix used for the generated outputs, e.g.
-        # "6_6" -> live_6_6 / esdm_es_6_6. The rolling "latest" alias is added
-        # on top for convenience.
+        # "6_6" -> live_6_6-<system> / esdm_es_6_6. The rolling "latest" alias
+        # is added on top for convenience.
         # Stock (unpatched) `linuxPackages_<major>_<minor>` sets nixpkgs
         # currently exposes, restricted to the versions ESDM supports
         # (>= minKernel). Keyed by the suffix used for the generated outputs.
@@ -1852,8 +1856,10 @@
           )
         ) kernels;
 
-        # One live system per defined kernel version, e.g. live_6_18.
-        nixosConfigurations = lib.mapAttrs' (
+        # One live system per defined kernel version, e.g. live_6_18. Only
+        # collected here: nixosConfigurations is not a per system output, see
+        # the end of this file.
+        legacyPackages.liveSystems = lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "live_${name}" (mkLiveSystem {
             inherit (self.packages.${system}) esdm;
@@ -1896,7 +1902,18 @@
 
         # shortcut for development - track the rolling "latest" kernel so this
         # does not break when nixpkgs drops a specific versioned attribute.
-        liveIso = self.nixosConfigurations.${system}.live_latest.config.system.build.isoImage;
+        liveIso = self.nixosConfigurations."live_latest-${system}".config.system.build.isoImage;
       }
-    );
+    )
+    // {
+      # nix expects nixosConfigurations.<name>, without a system level in
+      # between, so the live systems of every system share one attribute set
+      # with the system in the name, e.g. live_6_18-x86_64-linux.
+      nixosConfigurations = nixpkgs.lib.concatMapAttrs (
+        system: legacyPackages:
+        nixpkgs.lib.mapAttrs' (
+          name: nixpkgs.lib.nameValuePair "${name}-${system}"
+        ) legacyPackages.liveSystems
+      ) self.legacyPackages;
+    };
 }
