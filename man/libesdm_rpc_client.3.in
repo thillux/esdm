@@ -99,10 +99,35 @@ for the layout of the returned buffer.
 .SS Status
 .TP
 .BI "int esdm_rpcc_status(char *" buf ", size_t " buflen ");"
-Status of the ESDM and its entropy sources as human readable text.
+Status of the ESDM and its entropy sources as human readable text. A report
+that does not fit into
+.I buflen
+is cut short there, still NUL\-terminated, and
+.B \-EMSGSIZE
+is returned. The server caps the report at just under 64 KiB
+.RB ( ESDM_RPC_MAX_STATUS_DATA );
+a longer one arrives cut short in the same way, with the same return value.
 .TP
 .BI "int esdm_rpcc_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document.
+The same information as a JSON document. A document is never cut short: when it
+does not fit into
+.I buflen
+or exceeds the cap of the server,
+.B \-EMSGSIZE
+is returned. On any error,
+.I buf
+holds the empty string rather than a partial or stale document.
+.TP
+.BI "int esdm_rpcc_drng_status_json(uint32_t " node ", char *" buf ", size_t " buflen ");"
+Status of the DRNG instance of
+.I node
+as a JSON document, with the error handling of
+.BR esdm_rpcc_status_json ().
+.B \-ENODEV
+means the node has no DRNG instance.
+.TP
+.BI "int esdm_rpcc_drng_status_pr_json(char *" buf ", size_t " buflen ");"
+The same for the DRNG instance serving prediction resistant requests.
 .TP
 .BI "int esdm_rpcc_jent_status(char *" buf ", size_t " buflen ");"
 Internal status of the Jitter RNG entropy source.
@@ -169,6 +194,17 @@ macro declared in the header does that up to five times.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
+.PP
+.B \-ETIMEDOUT
+means the server did not answer in time. A request of the unprivileged endpoint
+whose answer is late is sent again on a fresh connection, which may be served by
+a less busy server thread, until about 6.4 seconds have passed in all; one the
+server closed the connection on without answering is sent again once.
+A request of the privileged endpoint is waited for up to 60 seconds and never
+sent a second time \- neither after a timeout nor after a connection reset
+.RB ( \-ECONNRESET ),
+since the server may already have applied it, and applying it twice \- such as
+crediting entropy twice \- is worse than reporting the failure.
 .SH THREAD SAFETY
 The library maintains a pool of connections. A call takes one out of the pool
 for its duration, so calls from several threads proceed concurrently as long as
