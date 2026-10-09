@@ -43,10 +43,8 @@ MODULE_PARM_DESC(
 
 /* Per-CPU ring buffer holding concatenated IRQ entropy events */
 static DEFINE_PER_CPU(struct esdm_es_ring_cpu, esdm_irq_ring_cpu);
-static struct esdm_es_ring esdm_irq_ring = {
-	.cpu = &esdm_irq_ring_cpu,
-	.name = "interrupt",
-};
+static struct esdm_es_ring esdm_irq_ring =
+	ESDM_ES_RING_INIT(esdm_irq_ring, esdm_irq_ring_cpu, "interrupt");
 
 /* DRBG post-processing description for the interrupt entropy source */
 static struct esdm_es_drbg esdm_irq_drbg = {

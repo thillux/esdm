@@ -43,10 +43,8 @@ MODULE_PARM_DESC(
 
 /* Per-CPU ring buffer holding concatenated scheduler entropy events */
 static DEFINE_PER_CPU(struct esdm_es_ring_cpu, esdm_sched_ring_cpu);
-static struct esdm_es_ring esdm_sched_ring = {
-	.cpu = &esdm_sched_ring_cpu,
-	.name = "scheduler",
-};
+static struct esdm_es_ring esdm_sched_ring =
+	ESDM_ES_RING_INIT(esdm_sched_ring, esdm_sched_ring_cpu, "scheduler");
 
 /* DRBG post-processing description for the scheduler entropy source */
 static struct esdm_es_drbg esdm_sched_drbg = {

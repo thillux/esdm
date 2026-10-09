@@ -56,7 +56,11 @@ void esdm_es_ring_free(struct esdm_es_ring *ring)
 
 void esdm_es_ring_reset(struct esdm_es_ring *ring)
 {
+	unsigned long flags;
 	int cpu;
+
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	ring->gen++;
 
 	/*
 	 * Iterate the possible mask, not the online mask: the per-CPU arrays
@@ -64,17 +68,22 @@ void esdm_es_ring_reset(struct esdm_es_ring *ring)
 	 * its events and pointers. Reset invalidates ALL prior entropy (VM fork
 	 * via the vmgenid notifier, SP800-90B failure), so pre-reset events must
 	 * not survive a later CPU online and be credited as fresh.
+	 *
+	 * Discard by moving rp up to wp, i.e. act as a consumer: wp belongs to
+	 * the lock-free producer, zeroing it (or the slots) races with a
+	 * producer that then publishes its old wp + 1 and makes stale or
+	 * zeroed slots count as events. The worst left is one event a producer
+	 * stores concurrently with the reset. The discarded slots are not
+	 * zeroized, just like consumed ones.
 	 */
 	for_each_possible_cpu (cpu) {
 		struct esdm_es_ring_cpu *rc = per_cpu_ptr(ring->cpu, cpu);
 
-		smp_store_release(&rc->rp, 0);
-		smp_store_release(&rc->wp, 0);
-		if (rc->array)
-			memzero_explicit(rc->array,
-					 ESDM_DATA_NUM_VALUES * sizeof(u64));
-		rc->last_timestamp = 0;
+		smp_store_release(&rc->rp, READ_ONCE(rc->wp));
+		WRITE_ONCE(rc->last_timestamp, 0);
 	}
+
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
 }
 
 u32 esdm_es_ring_avail_events(struct esdm_es_ring *ring)
@@ -98,8 +107,14 @@ u32 esdm_es_ring_avail_events(struct esdm_es_ring *ring)
 u32 esdm_es_ring_collect(struct esdm_es_ring *ring, u32 requested_events,
 			 struct list_head *seedlist)
 {
+	unsigned long flags;
 	u32 collected_events = 0;
 	int cpu;
+
+	/* the lock orders the read pointer loads below after a prior reset */
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	ring->rp_pending_gen = ring->gen;
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
 
 	for_each_online_cpu (cpu) {
 		struct esdm_es_ring_cpu *rc = per_cpu_ptr(ring->cpu, cpu);
@@ -172,14 +187,32 @@ u32 esdm_es_ring_collect(struct esdm_es_ring *ring, u32 requested_events,
 	return collected_events;
 }
 
-void esdm_es_ring_release(struct esdm_es_ring *ring)
+bool esdm_es_ring_release(struct esdm_es_ring *ring)
 {
+	unsigned long flags;
+	bool valid;
 	int cpu;
 
-	for_each_cpu (cpu, &ring->rp_pending_mask) {
-		struct esdm_es_ring_cpu *rc = per_cpu_ptr(ring->cpu, cpu);
+	raw_spin_lock_irqsave(&ring->lock, flags);
 
-		smp_store_release(&rc->rp, rc->rp_pending);
+	/*
+	 * A reset since the collection already moved rp past the staged
+	 * positions, publishing rp_pending would move it back and hand out the
+	 * discarded events again.
+	 */
+	valid = ring->gen == ring->rp_pending_gen;
+	if (valid) {
+		for_each_cpu (cpu, &ring->rp_pending_mask) {
+			struct esdm_es_ring_cpu *rc =
+				per_cpu_ptr(ring->cpu, cpu);
+
+			smp_store_release(&rc->rp, rc->rp_pending);
+		}
 	}
+
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
+
 	cpumask_clear(&ring->rp_pending_mask);
+
+	return valid;
 }

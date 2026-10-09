@@ -119,7 +119,14 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 	}
 
 out:
-	esdm_es_ring_release(drbg->ring);
+	/* a ring reset since the collection invalidated the seed events */
+	if (!esdm_es_ring_release(drbg->ring) && ok) {
+		pr_warn("%s-based noise source reset during extraction\n",
+			drbg->name);
+		memzero_explicit(block, partial_len);
+		*returned_bits = 0;
+		ok = false;
+	}
 	return ok;
 }
 
