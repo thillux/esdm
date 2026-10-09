@@ -64,6 +64,9 @@
 /* Upper bound for the feeder to react to SIGTERM */
 #define SEEDER_TERM_TIMEOUT_MS 15000
 
+/* Upper bound for the ESDM server to shut down on SIGTERM */
+#define SEEDER_SERVER_TERM_TIMEOUT_MS 60000
+
 /* Upper bound for a one-shot invocation (--help and friends) to terminate */
 #define SEEDER_CLI_TIMEOUT_MS 15000
 
@@ -71,6 +74,8 @@ static const char *seeder_bin;
 static const char *server_bin;
 
 static pid_t server_pid = 0;
+static char server_log[] = "/tmp/esdm-kernel-seeder-server-XXXXXX";
+static bool server_log_created = false;
 
 static void seeder_sleep_ms(unsigned int msecs)
 {
@@ -171,7 +176,7 @@ static bool seeder_log_contains(const char *logfile, const char *needle)
 	return found;
 }
 
-static void seeder_dump_log(const char *logfile)
+static void seeder_dump_log_of(const char *logfile, const char *what)
 {
 	char buf[4096];
 	ssize_t len;
@@ -180,13 +185,18 @@ static void seeder_dump_log(const char *logfile)
 	if (fd < 0)
 		return;
 
-	printf("---- output of the kernel seeder ----\n");
+	printf("---- output of the %s ----\n", what);
 	while ((len = read(fd, buf, sizeof(buf) - 1)) > 0) {
 		buf[len] = '\0';
 		printf("%s", buf);
 	}
 	printf("---- end of output ----\n");
 	close(fd);
+}
+
+static void seeder_dump_log(const char *logfile)
+{
+	seeder_dump_log_of(logfile, "kernel seeder");
 }
 
 /* Wait until @needle shows up in @logfile, but no longer than @timeout_ms. */
@@ -383,10 +393,25 @@ static int seeder_start_server(void)
 {
 	char bin[FILENAME_MAX];
 	char *argv[] = { bin, "-v", "-v", "-v", NULL };
+	int fd;
 
 	snprintf(bin, sizeof(bin), "%s", server_bin);
 
-	server_pid = seeder_spawn(server_bin, argv, "/dev/null");
+	/*
+	 * Keep what the server says: its exit is checked below, and a server
+	 * dying on the way out - a sanitizer report included - is only
+	 * explicable with its output at hand.
+	 */
+	fd = mkstemp(server_log);
+	if (fd < 0) {
+		printf("Kernel seeder - fail: temporary file: %s\n",
+		       strerror(errno));
+		return 1;
+	}
+	close(fd);
+	server_log_created = true;
+
+	server_pid = seeder_spawn(server_bin, argv, server_log);
 	if (server_pid < 0)
 		return 1;
 
@@ -395,6 +420,7 @@ static int seeder_start_server(void)
 
 	if (waitpid(server_pid, NULL, WNOHANG) == server_pid) {
 		printf("Kernel seeder - fail: ESDM server died during startup\n");
+		seeder_dump_log_of(server_log, "ESDM server");
 		server_pid = 0;
 		return 1;
 	}
@@ -486,6 +512,40 @@ static int seeder_test_feed(void)
 	return ret;
 }
 
+/*
+ * Stop the server the way a service manager does and check that it leaves
+ * cleanly: a server crashing on its way down after serving the feeder would
+ * otherwise go unnoticed, as would a sanitizer finding it aborts on.
+ */
+static int seeder_stop_server(void)
+{
+	int status = 0;
+	int ret = 0;
+
+	kill(server_pid, SIGTERM);
+	if (!seeder_wait(server_pid, SEEDER_SERVER_TERM_TIMEOUT_MS, &status)) {
+		printf("Kernel seeder - fail: ESDM server did not terminate on SIGTERM\n");
+		seeder_kill(server_pid);
+		ret = 1;
+	} else if (WIFSIGNALED(status)) {
+		printf("Kernel seeder - fail: ESDM server killed by signal %d on SIGTERM\n",
+		       WTERMSIG(status));
+		ret = 1;
+	} else if (WEXITSTATUS(status)) {
+		printf("Kernel seeder - fail: ESDM server exit code %d after SIGTERM, expected success\n",
+		       WEXITSTATUS(status));
+		ret = 1;
+	} else {
+		printf("Kernel seeder - pass: ESDM server terminates successfully on SIGTERM\n");
+	}
+
+	if (ret)
+		seeder_dump_log_of(server_log, "ESDM server");
+
+	server_pid = 0;
+	return ret;
+}
+
 /********************************** Driver ***********************************/
 
 static int seeder_check_bin(const char *path, const char *name)
@@ -537,10 +597,11 @@ int main(int argc, char *argv[])
 
 	ret += seeder_test_feed();
 
-	if (server_pid > 0) {
-		seeder_kill(server_pid);
-		server_pid = 0;
-	}
+	if (server_pid > 0)
+		ret += seeder_stop_server();
+
+	if (server_log_created)
+		unlink(server_log);
 
 	return ret;
 }
