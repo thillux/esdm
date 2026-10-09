@@ -482,18 +482,21 @@ int __init esdm_test_init(void)
 		return 0;
 	}
 
-	/* debugfs_create_dir() reports failure via ERR_PTR, never NULL */
+	/*
+	 * debugfs_create_dir() reports failure via ERR_PTR, never NULL. The
+	 * testing interface is optional: a kernel without debugfs or with it
+	 * disabled (debugfs=off) must not cost ESDM its entropy sources, so
+	 * only skip the interface, as for lockdown above.
+	 */
 	esdm_raw_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
 	if (IS_ERR(esdm_raw_debugfs_root)) {
-		int ret = PTR_ERR(esdm_raw_debugfs_root);
-
+		pr_warn("ESDM testing debugfs creation failed, interface disabled: %s (%ld)\n",
+			KBUILD_MODNAME, PTR_ERR(esdm_raw_debugfs_root));
 		esdm_raw_debugfs_root = NULL;
-		pr_warn("ESDM testing debugfs creation failed: %s (%d)\n",
-			KBUILD_MODNAME, ret);
-		return ret;
-	} else {
-		pr_info("ESDM testing debugfs created: %s\n", KBUILD_MODNAME);
+		return 0;
 	}
+
+	pr_info("ESDM testing debugfs created: %s\n", KBUILD_MODNAME);
 
 #ifdef CONFIG_ESDM_RAW_HIRES_ENTROPY
 	debugfs_create_file_unsafe("esdm_raw_hires", 0400,
@@ -528,7 +531,7 @@ void esdm_test_exit(void)
 		debugfs_remove_recursive(esdm_raw_debugfs_root);
 		esdm_raw_debugfs_root = NULL;
 	} else {
-		pr_warn("ESDM debugfs root was never created, possibly due to lockdown mode: %s!\n",
+		pr_info("ESDM debugfs root was never created (lockdown or debugfs unavailable): %s\n",
 			KBUILD_MODNAME);
 	}
 }
