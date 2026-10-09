@@ -992,7 +992,7 @@
               # softhsm supplies the module it loads plus the softhsm2-util
               # the test initializes the token with. ea_non_iid assesses the
               # output's min-entropy.
-              buildInputs = prev.buildInputs ++ [ pkgs.libkcapi ];
+              buildInputs = prev.buildInputs ++ [ self.packages.${system}.libkcapi ];
               nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [
                 pkgs.softhsm
                 pkgs.sp800-90b-entropyassessment
@@ -1467,6 +1467,18 @@
             ];
           });
 
+          # libkcapi master: its RNG tests are adjusted to kernels 7.2+, after
+          # the 1.5.1 that nixpkgs ships
+          libkcapi = pkgs.libkcapi.overrideAttrs (_: {
+            version = "1.5.1-unstable-2026-09-19";
+            src = pkgs.fetchFromGitHub {
+              owner = "smuellerDD";
+              repo = "libkcapi";
+              rev = "6af53720de505aef4a104d2ce80d1aee5beab3e6";
+              hash = "sha256-CQzXxvYo/eb5onIliNxkJQOFiiWszkXP/myhh19T65w=";
+            };
+          });
+
           # this currently defaults to the botan crypto backend
           esdm =
             (pkgs.esdm.override {
@@ -1828,11 +1840,11 @@
               gnutls
               json_c
               libbpf
-              libkcapi
               libselinux
               openssl
               protobufc
               self.packages.${system}.jitterentropy
+              self.packages.${system}.libkcapi
             ];
             nativeBuildInputs = with pkgs; [
               bpftools
