@@ -317,10 +317,119 @@ static void test_malformed_checkfile(void)
 		return;
 	CHECK_EQ(fips_post_integrity(target), -EBADF);
 
-	/* A file holding only a line terminator is no digest either */
+	/*
+	 * A file holding only a line terminator is no digest either - the
+	 * blank line is skipped, leaving nothing verified.
+	 */
 	if (!write_file(hmacfile, "\n", 1))
 		return;
-	CHECK_EQ(fips_post_integrity(target), -EINVAL);
+	CHECK_EQ(fips_post_integrity(target), -EBADF);
+
+	unlink(hmacfile);
+}
+
+/*
+ * Run fips_post_integrity() on the current HMAC file and report whether its
+ * log on stderr holds @msg.
+ */
+static bool post_integrity_logs(int expected, const char *msg)
+{
+	char logfile[700], log[1024];
+	int saved, fd;
+	bool found;
+
+	snprintf(logfile, sizeof(logfile), "%s/esdm_fips_log_%u.txt", tmpdir,
+		 (unsigned int)getpid());
+	fflush(stderr);
+	saved = dup(STDERR_FILENO);
+	fd = open(logfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (saved < 0 || fd < 0) {
+		CHECK(0, "cannot redirect stderr to %s", logfile);
+		if (saved >= 0)
+			close(saved);
+		if (fd >= 0)
+			close(fd);
+		return false;
+	}
+	dup2(fd, STDERR_FILENO);
+	close(fd);
+
+	CHECK_EQ(fips_post_integrity(target), expected);
+
+	fflush(stderr);
+	dup2(saved, STDERR_FILENO);
+	close(saved);
+
+	found = read_file(logfile, log, sizeof(log)) > 0 && strstr(log, msg);
+	unlink(logfile);
+
+	return found;
+}
+
+/*
+ * The trailing white space of a line is tolerated, and so are blank lines:
+ * an editor or a sha*sum-style tool may well leave either behind. Anything
+ * else that is not hex is logged as a malformed checkfile.
+ */
+static void test_checkfile_whitespace(void)
+{
+	char content[256];
+	char digest[65];
+	char line[256];
+	int len;
+
+	unlink(hmacfile);
+	CHECK_EQ(fips_create_checkfile(hmacfile, target), 0);
+	if (read_file(hmacfile, content, sizeof(content)) !=
+	    EXPECTED_HMAC_FILE_LEN) {
+		CHECK(0, "cannot read back %s", hmacfile);
+		return;
+	}
+	memcpy(digest, content, 64);
+	digest[64] = '\0';
+
+	/* A trailing blank line */
+	len = snprintf(line, sizeof(line), "%s\n\n", digest);
+	if (!write_file(hmacfile, line, (size_t)len))
+		return;
+	CHECK_EQ(fips_post_integrity(target), 0);
+
+	/* Trailing blanks and a CRLF line terminator */
+	len = snprintf(line, sizeof(line), "%s \t\r\n", digest);
+	if (!write_file(hmacfile, line, (size_t)len))
+		return;
+	CHECK_EQ(fips_post_integrity(target), 0);
+
+	/* A blank line holding only blanks, followed by the digest */
+	len = snprintf(line, sizeof(line), "  \r\n%s\n", digest);
+	if (!write_file(hmacfile, line, (size_t)len))
+		return;
+	CHECK_EQ(fips_post_integrity(target), 0);
+
+	/* No line terminator at all */
+	if (!write_file(hmacfile, digest, 64))
+		return;
+	CHECK_EQ(fips_post_integrity(target), 0);
+
+	/* A stray blank inside the line is malformed - and says so */
+	len = snprintf(line, sizeof(line), " %s\n", digest);
+	if (!write_file(hmacfile, line, (size_t)len))
+		return;
+	CHECK(post_integrity_logs(-EINVAL, "Invalid checkfile format"),
+	      "leading blank not logged as an invalid checkfile");
+
+	/* A malformed line after a good one still fails the self test */
+	len = snprintf(line, sizeof(line), "%s\n\nnot a digest\n", digest);
+	if (!write_file(hmacfile, line, (size_t)len))
+		return;
+	CHECK(post_integrity_logs(-EINVAL, "Invalid checkfile format"),
+	      "trailing garbage not logged as an invalid checkfile");
+
+	/* Nothing but white space verifies nothing - and says so */
+	if (!write_file(hmacfile, " \n\t\n", 4))
+		return;
+	CHECK(post_integrity_logs(-EBADF, "No reference value"),
+	      "missing digest not logged");
 
 	unlink(hmacfile);
 }
@@ -552,6 +661,7 @@ int main(int argc, char *argv[])
 	test_post_integrity_relative_path();
 	test_modified_target();
 	test_malformed_checkfile();
+	test_checkfile_whitespace();
 	test_unreadable_target();
 	test_empty_target();
 	test_overlong_pathname();
