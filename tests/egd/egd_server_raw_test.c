@@ -975,6 +975,17 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/*
+	 * The NTG.1 seeding strategy wants two entropy sources of 240 bits each
+	 * for the initial seeding, and the auxiliary pool the entropy is
+	 * inserted into is only one: with every other source taken out, the
+	 * ESDM would never become operational.
+	 */
+	if (esdm_ntg1_2024_compliant()) {
+		printf("the NTG.1 seeding strategy cannot be fed through the auxiliary pool alone\n");
+		return 77;
+	}
+
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
 	/*
