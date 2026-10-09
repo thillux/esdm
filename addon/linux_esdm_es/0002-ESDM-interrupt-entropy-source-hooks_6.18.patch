@@ -20,9 +20,9 @@ Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
  drivers/char/random.c    | 14 ++++++++++---
  drivers/misc/Makefile    |  1 +
- drivers/misc/esdm_irq.c  | 43 ++++++++++++++++++++++++++++++++++++++++
+ drivers/misc/esdm_irq.c  | 60 ++++++++++++++++++++++++++++++++++++++++
  include/linux/esdm_irq.h | 20 +++++++++++++++++++
- 4 files changed, 75 insertions(+), 3 deletions(-)
+ 4 files changed, 92 insertions(+), 3 deletions(-)
  create mode 100644 drivers/misc/esdm_irq.c
  create mode 100644 include/linux/esdm_irq.h
 
@@ -74,10 +74,10 @@ index 890a9525598c..8f03a20205ad 100644
  obj-$(CONFIG_IBMVMC)		+= ibmvmc.o
 diff --git a/drivers/misc/esdm_irq.c b/drivers/misc/esdm_irq.c
 new file mode 100644
-index 000000000000..5a21672216bc
+index 000000000000..8db9bb3bee3a
 --- /dev/null
 +++ b/drivers/misc/esdm_irq.c
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 +/*
 + * Copyright (C) 2026, Stephan Mueller <smueller@chronox.de>
@@ -89,15 +89,22 @@ index 000000000000..5a21672216bc
 +
 +#include <linux/esdm_irq.h>
 +#include <linux/module.h>
++#include <linux/rcupdate.h>
 +
 +static esdm_irq_randomness_t esdm_irq_randomness_func = NULL;
 +
++/*
++ * Called from add_interrupt_randomness() in hard interrupt context, which is
++ * an RCU read-side critical section that esdm_irq_unregister() waits for.
++ */
 +int add_esdm_interrupt_randomness(int irq)
 +{
-+	if (!esdm_irq_randomness_func)
++	esdm_irq_randomness_t func = READ_ONCE(esdm_irq_randomness_func);
++
++	if (!func)
 +		return 0;
 +
-+	esdm_irq_randomness_func(irq);
++	func(irq);
 +	return 1;
 +}
 +
@@ -112,13 +119,23 @@ index 000000000000..5a21672216bc
 +}
 +EXPORT_SYMBOL(esdm_irq_register);
 +
++/*
++ * Returns once no CPU executes the callback any more, so the caller may free
++ * what the callback uses afterwards. synchronize_irq() would not do: it only
++ * waits for the handlers of a single interrupt line, synchronize_rcu() for
++ * every interrupt handler that may still use the old callback. Might sleep.
++ */
 +void esdm_irq_unregister(esdm_irq_randomness_t func)
 +{
 +	if (!func)
 +		return;
 +
-+	if (cmpxchg(&esdm_irq_randomness_func, func, NULL) != func)
-+		pr_warn("Cannot unregister ESDM irquler callback\n");
++	if (cmpxchg(&esdm_irq_randomness_func, func, NULL) != func) {
++		pr_warn("Cannot unregister ESDM interrupt callback\n");
++		return;
++	}
++
++	synchronize_rcu();
 +}
 +EXPORT_SYMBOL(esdm_irq_unregister);
 diff --git a/include/linux/esdm_irq.h b/include/linux/esdm_irq.h

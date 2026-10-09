@@ -13,10 +13,10 @@ noop.
 Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
  drivers/misc/Makefile      |  2 ++
- drivers/misc/esdm_sched.c  | 40 ++++++++++++++++++++++++++++++++++++++
+ drivers/misc/esdm_sched.c  | 55 ++++++++++++++++++++++++++++++++++++++
  include/linux/esdm_sched.h | 20 +++++++++++++++++++
  kernel/sched/core.c        |  3 +++
- 4 files changed, 65 insertions(+)
+ 4 files changed, 80 insertions(+)
  create mode 100644 drivers/misc/esdm_sched.c
  create mode 100644 include/linux/esdm_sched.h
 
@@ -35,10 +35,10 @@ index 56de43943cd5..7272f3c80719 100644
  obj-$(CONFIG_AD525X_DPOT)	+= ad525x_dpot.o
 diff --git a/drivers/misc/esdm_sched.c b/drivers/misc/esdm_sched.c
 new file mode 100644
-index 000000000000..d42f4997b8ca
+index 000000000000..dfe537936c15
 --- /dev/null
 +++ b/drivers/misc/esdm_sched.c
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,55 @@
 +/* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 +/*
 + * Copyright (C) 2026, Stephan Mueller <smueller@chronox.de>
@@ -50,13 +50,20 @@ index 000000000000..d42f4997b8ca
 +
 +#include <linux/esdm_sched.h>
 +#include <linux/module.h>
++#include <linux/rcupdate.h>
 +
 +static esdm_sched_randomness_t esdm_sched_randomness_func = NULL;
 +
++/*
++ * Called from try_to_wake_up() with preemption disabled, which is an RCU
++ * read-side critical section that esdm_sched_unregister() waits for.
++ */
 +void add_sched_randomness(const struct task_struct *p, int cpu)
 +{
-+	if (esdm_sched_randomness_func)
-+		esdm_sched_randomness_func(p, cpu);
++	esdm_sched_randomness_t func = READ_ONCE(esdm_sched_randomness_func);
++
++	if (func)
++		func(p, cpu);
 +}
 +
 +int esdm_sched_register(esdm_sched_randomness_t func)
@@ -70,13 +77,21 @@ index 000000000000..d42f4997b8ca
 +}
 +EXPORT_SYMBOL(esdm_sched_register);
 +
++/*
++ * Returns once no CPU executes the callback any more, so the caller may free
++ * what the callback uses afterwards. Might sleep.
++ */
 +void esdm_sched_unregister(esdm_sched_randomness_t func)
 +{
 +	if (!func)
 +		return;
 +
-+	if (cmpxchg(&esdm_sched_randomness_func, func, NULL) != func)
++	if (cmpxchg(&esdm_sched_randomness_func, func, NULL) != func) {
 +		pr_warn("Cannot unregister ESDM scheduler callback\n");
++		return;
++	}
++
++	synchronize_rcu();
 +}
 +EXPORT_SYMBOL(esdm_sched_unregister);
 diff --git a/include/linux/esdm_sched.h b/include/linux/esdm_sched.h
