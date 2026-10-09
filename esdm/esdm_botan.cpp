@@ -289,33 +289,22 @@ static int esdm_botan_drbg_seed(void *drng, const uint8_t *inbuf,
 #endif
 
 	try {
-		if (state->initialized) {
-			/*
-			 * SP800-90A reseeds over
-			 * seed_material = entropy_input || additional_input,
-			 * i.e. one Update across the concatenation. Dropping
-			 * addtl loses the caller's additional input, and a
-			 * second add_entropy() call would be two Updates and
-			 * thus a different state transition.
-			 */
-			if (addtl && addtllen) {
-				Botan::secure_vector<uint8_t> seed_material(
-					inbuflen + addtllen);
+		/*
+		 * SP800-90A instantiates over
+		 * seed_material = entropy_input || nonce || personalization
+		 * and reseeds over
+		 * seed_material = entropy_input || additional_input,
+		 * i.e. one Update across the concatenation either way. Dropping
+		 * addtl loses the caller's additional input, and a second
+		 * add_entropy() call would be two Updates and thus a different
+		 * state transition. inbuf carries entropy || nonce on the
+		 * initial seed, addtl the personalization.
+		 */
+		const uint8_t *seed = inbuf;
+		size_t seedlen = inbuflen;
+		Botan::secure_vector<uint8_t> seed_material;
 
-				memcpy(seed_material.data(), inbuf, inbuflen);
-				memcpy(seed_material.data() + inbuflen, addtl,
-				       addtllen);
-
-				state->drbg->add_entropy(seed_material.data(),
-							 seed_material.size());
-			} else {
-				state->drbg->add_entropy(inbuf, inbuflen);
-			}
-
-			return 0;
-		}
-
-		if (inbuflen < min_init_seedlen) {
+		if (!state->initialized && inbuflen < min_init_seedlen) {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ANY,
 				"Botan DRNG initial seed too short: %zu < %zu bytes\n",
@@ -323,9 +312,22 @@ static int esdm_botan_drbg_seed(void *drng, const uint8_t *inbuf,
 			return -EINVAL;
 		}
 
-		state->drbg->initialize_with(inbuf, inbuflen);
-		if (addtl)
-			state->drbg->add_entropy(addtl, addtllen);
+		if (addtl && addtllen) {
+			seed_material.resize(inbuflen + addtllen);
+			memcpy(seed_material.data(), inbuf, inbuflen);
+			memcpy(seed_material.data() + inbuflen, addtl,
+			       addtllen);
+			seed = seed_material.data();
+			seedlen = seed_material.size();
+		}
+
+		if (state->initialized) {
+			state->drbg->add_entropy(seed, seedlen);
+			return 0;
+		}
+
+		/* Instantiate: reset the state and Update over seed_material */
+		state->drbg->initialize_with(seed, seedlen);
 		state->initialized = true;
 
 		return 0;
@@ -832,12 +834,16 @@ static int esdm_botan_drbg_selftest_hmac()
 
 		CKINT(esdm_botan_drbg_alloc(&drng, 256));
 		/*
-		 * No additional data on the seeding call: the vector's
-		 * personalization string is already concatenated into
-		 * seed_material above, as SP800-90A instantiation expects.
+		 * Seed like the DRNG manager does: entropy || nonce as the
+		 * seed and the personalization string as additional data,
+		 * which the instantiation has to concatenate into one
+		 * seed_material as SP800-90A expects.
 		 */
 		CKINT(esdm_botan_drbg_seed(drng, seed_material,
-					   seed_material_size, NULL, 0));
+					   entropy_size + nonce_size,
+					   seed_material + entropy_size +
+						   nonce_size,
+					   pers_size));
 		if (test_vectors[i].reseed) {
 			CKINT(esdm_botan_drbg_seed(drng, test_vectors[i].reseed,
 						   entropy_size, NULL, 0));
@@ -876,8 +882,10 @@ static int esdm_botan_drbg_selftest_hmac()
 				      seed_material_size));
 
 		CKINT(esdm_botan_drbg_alloc(&drng, 256));
-		CKINT(esdm_botan_drbg_seed(drng, mod_seed, seed_material_size,
-					   NULL, 0));
+		CKINT(esdm_botan_drbg_seed(drng, mod_seed,
+					   entropy_size + nonce_size,
+					   mod_seed + entropy_size + nonce_size,
+					   pers_size));
 		if (test_vectors[i].reseed) {
 			CKINT(esdm_botan_drbg_seed(drng, test_vectors[i].reseed,
 						   entropy_size, NULL, 0));
