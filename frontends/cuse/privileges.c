@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fsuid.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -36,13 +37,41 @@
 #include "privileges.h"
 #include "visibility.h"
 
+/*
+ * Changing the effective or file system UID or GID makes the kernel reset the
+ * dumpable attribute of the process to fs.suid_dumpable - which systemd sets
+ * to 2 - and with it undoes a PR_SET_DUMPABLE 0 applied before, e.g. to keep
+ * secrets out of core dumps. The transient drops and raises below change
+ * those IDs on every privileged request, so each of them records the
+ * attribute up front and restores a non-dumpable state afterwards.
+ */
+static int priv_dumpable_get(void)
+{
+	return prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+}
+
+static int priv_dumpable_restore(int before)
+{
+	if (before == 0 && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 &&
+	    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+		int errsv = errno;
+
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Cannot keep core dumps disabled: %s\n",
+			    strerror(errsv));
+		return -errsv;
+	}
+
+	return 0;
+}
+
 int drop_privileges_transient(const char *user)
 {
 	const struct passwd *pwd;
 	static uid_t uid = 0;
 	static gid_t gid = 0;
 	static bool initialized = false;
-	int ret = 0;
+	int ret = 0, dumpable;
 
 	if (!user)
 		return -EINVAL;
@@ -59,6 +88,8 @@ int drop_privileges_transient(const char *user)
 		gid = pwd->pw_gid;
 		initialized = true;
 	}
+
+	dumpable = priv_dumpable_get();
 
 	/* Drop privileged group */
 	if (setegid(gid) == -1) {
@@ -77,6 +108,10 @@ int drop_privileges_transient(const char *user)
 			    strerror(errno));
 		return ret;
 	}
+
+	ret = priv_dumpable_restore(dumpable);
+	if (ret)
+		return ret;
 
 	esdm_logger(
 		LOGGER_VERBOSE, LOGGER_C_ANY,
@@ -114,6 +149,8 @@ int drop_supplemental_groups(void)
 
 int raise_privilege_transient(uid_t uid, gid_t gid)
 {
+	int ret, dumpable = priv_dumpable_get();
+
 	/* Raise privileged group */
 	if (setegid(gid) == -1) {
 		int errsv = errno;
@@ -133,6 +170,10 @@ int raise_privilege_transient(uid_t uid, gid_t gid)
 			    strerror(errsv));
 		return -errsv;
 	}
+
+	ret = priv_dumpable_restore(dumpable);
+	if (ret)
+		return ret;
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
 		    "Successfully raised privileges to UID %u, GID %u\n", uid,
@@ -274,7 +315,7 @@ int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
 	uid_t old_fsuid;
 	gid_t old_fsgid;
 	unsigned int i;
-	int ret = 0;
+	int ret = 0, dumpable;
 
 	/*
 	 * Opening a /proc entry is decided on the file system IDs and the
@@ -290,6 +331,7 @@ int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
 	for (i = 0; i < _LINUX_CAPABILITY_U32S_3; i++)
 		raised[i].effective = raised[i].permitted;
 
+	dumpable = priv_dumpable_get();
 	old_fsuid = (uid_t)setfsuid((uid_t)-1);
 	old_fsgid = (gid_t)setfsgid((gid_t)-1);
 
@@ -302,7 +344,8 @@ int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
 	setfsuid(old_fsuid);
 	setfsgid(old_fsgid);
 	if (syscall(SYS_capset, &hdr, caps) ||
-	    !thread_fsids_are(old_fsuid, old_fsgid)) {
+	    !thread_fsids_are(old_fsuid, old_fsgid) ||
+	    priv_dumpable_restore(dumpable)) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "Cannot restore the file system IDs and capabilities\n");
 		return -ENOTRECOVERABLE;
