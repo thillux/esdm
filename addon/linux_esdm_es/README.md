@@ -42,8 +42,10 @@ To use the entropy source, the following kernel patches must be applied
   (only up to Linux 7.1; from 7.2 on the kernel DRBG is private and the
   module carries its own HMAC_DRBG)
 and the Linux kernel compiled. Use the patch suffixed with the highest kernel
-version not newer than the target kernel (`_6.6`, `_6.18`, `_7.3`; the hooks
-of `_6.18` apply up to 7.2).
+version not newer than the target kernel (hooks: `_6.1`, `_6.6`, `_6.12`,
+`_6.18`, `_7.3`, the `_6.18` hooks apply up to 7.2; DRBG: `_6.6` for 6.1 to
+6.11, `_6.18` for 6.12 to 7.1). Linux 6.1 is the oldest supported kernel;
+`kernelPatches.nix` holds the exact mapping.
 This patch adds a small framework that allows a kernel
 module to be inserted into the kernel at runtime that will provide the
 entropy source implementation.

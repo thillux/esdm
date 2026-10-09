@@ -5,11 +5,18 @@
 }:
 
 let
-  # drivers/misc/Makefile lost the ibmasm entry the 6.18 hooks used as patch
-  # context in 7.3.
+  # The hook patches only differ in their context: 6.6 added the
+  # sched/isolation.h include random.c's hunk uses, 6.12 reworded the
+  # kernel/sched/core.c header, 6.18 reordered both and 7.3 dropped the ibmasm
+  # entry of drivers/misc/Makefile. A 7.3-rc version compares newer than
+  # "7.3", so linux_testing gets the 7.3 series too.
   hooksVersion =
-    if lib.versionOlder kernel.version "6.18" then
+    if lib.versionOlder kernel.version "6.6" then
+      "6.1"
+    else if lib.versionOlder kernel.version "6.12" then
       "6.6"
+    else if lib.versionOlder kernel.version "6.18" then
+      "6.12"
     else if lib.versionOlder kernel.version "7.3" then
       "6.18"
     else
@@ -30,7 +37,7 @@ in
 ++ lib.optional (lib.versionOlder kernel.version "7.2") {
   name = "esdm_drbg_visibility";
   patch =
-    if lib.versionOlder kernel.version "6.18" then
+    if lib.versionOlder kernel.version "6.12" then
       ./0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM_6.6.patch
     else
       ./0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM_6.18.patch;
