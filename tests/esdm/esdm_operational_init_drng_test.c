@@ -8,7 +8,10 @@
  * again.
  *
  * The aux pool is the only source credited, so the test decides which seeding
- * gets entropy.
+ * gets entropy. The reseed worker looks after the seeded node DRNG before it
+ * brings up the initial one, so the entropy goes to the node DRNG - unless a
+ * seeding triggered elsewhere, e.g. by an entropy source buffer being filled,
+ * got to the initial DRNG first. That attempt shows nothing and is repeated.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -28,6 +31,8 @@
  * DAMAGE.
  */
 
+#include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +59,9 @@
 
 /* Wait for the reseed worker at most this many 100ms slices */
 #define ESDM_OID_SLICES 100
+
+/* Attempts at handing the entropy to the node DRNG rather than the initial */
+#define ESDM_OID_ATTEMPTS 10
 
 struct esdm_oid_state {
 	bool init_seeded;
@@ -86,10 +94,89 @@ static void esdm_oid_sleep_slice(void)
 	nanosleep(&ts, NULL);
 }
 
-static int esdm_oid_test(void)
+/*
+ * Take the seed away from the initial DRNG, make entropy for one seed available
+ * and have the node DRNG reseeded with it.
+ *
+ * @return 0 if the node DRNG got the entropy and the ESDM stayed out of the
+ *	   operational state, 1 if it did not stay out, -EAGAIN if the initial
+ *	   DRNG got the entropy instead
+ */
+static int esdm_oid_attempt(const uint8_t *data, size_t datalen,
+			    bool *worker_started)
 {
 	struct esdm_oid_state before, after;
+	unsigned int i;
+	bool operational;
+
+	/* The initial DRNG loses its seed, and there is nothing to restore it */
+	esdm_pool_set_entropy(0);
+	esdm_unset_fully_seeded(esdm_drng_init_instance());
+	if (esdm_state_operational()) {
+		printf("ESDM operational without a seeded initial DRNG\n");
+		return 1;
+	}
+
+	/*
+	 * Entropy for one seed arrives. Holding the pool lock keeps the
+	 * arrival from seeding the DRNGs right away, which would serve the
+	 * initial DRNG first.
+	 */
+	esdm_pool_lock();
+	esdm_pool_insert_aux(data, datalen, ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	esdm_pool_unlock();
+
+	/*
+	 * The other DRNG is asked to reseed, and the reseed worker gets to
+	 * it before it looks after the initial DRNG.
+	 */
+	before = esdm_oid_state_get();
+	esdm_drng_force_reseed();
+
+	if (!*worker_started) {
+		if (!esdm_drng_mgr_reseed_worker_start()) {
+			printf("the reseed worker is not on duty\n");
+			return 1;
+		}
+		*worker_started = true;
+	}
+
+	for (i = 0; i < ESDM_OID_SLICES; i++) {
+		after = esdm_oid_state_get();
+		if (after.node_seed_generation > before.node_seed_generation)
+			break;
+		esdm_oid_sleep_slice();
+	}
+
+	/*
+	 * The operational state before the initial DRNG: a seeding of the
+	 * initial DRNG in between may make the ESDM operational, but cannot
+	 * hide that it was operational before the initial DRNG was seeded.
+	 */
+	operational = esdm_state_operational();
+	after = esdm_oid_state_get();
+
+	if (after.node_seed_generation <= before.node_seed_generation) {
+		printf("the other DRNG was not reseeded within %u slices\n",
+		       ESDM_OID_SLICES);
+		return 1;
+	}
+
+	if (operational && !after.init_seeded) {
+		printf("ESDM operational without a seeded initial DRNG after another DRNG was reseeded\n");
+		return 1;
+	}
+
+	if (after.init_seeded)
+		return -EAGAIN;
+
+	return 0;
+}
+
+static int esdm_oid_test(void)
+{
 	uint8_t data[ESDM_MAX_DIGESTSIZE];
+	bool worker_started = false;
 	unsigned int i;
 	int ret;
 
@@ -97,6 +184,17 @@ static int esdm_oid_test(void)
 
 	if (sysconf(_SC_NPROCESSORS_ONLN) < ESDM_OID_NODES) {
 		printf("Need %d CPUs\n", ESDM_OID_NODES);
+		return 77;
+	}
+
+	/*
+	 * The aux pool is a single entropy source, which the NTG.1 seeding
+	 * strategy does not accept for the initial seeding - nor, before the
+	 * fix this test is for, would the seeding of the node DRNG have made
+	 * the ESDM operational from it.
+	 */
+	if (esdm_ntg1_2024_compliant()) {
+		printf("the NTG.1 seeding strategy cannot be seeded from the aux pool alone\n");
 		return 77;
 	}
 
@@ -115,71 +213,32 @@ static int esdm_oid_test(void)
 		esdm_force_fully_seeded_all_drbgs();
 	}
 	if (!esdm_pool_all_nodes_seeded_get() || !esdm_state_operational()) {
-		printf("DRNGs cannot be seeded, skipping test\n");
-		ret = 77;
-		goto out;
-	}
-
-	/* The initial DRNG loses its seed, and there is nothing to restore it */
-	esdm_pool_set_entropy(0);
-	esdm_unset_fully_seeded(esdm_drng_init_instance());
-	if (esdm_state_operational()) {
-		printf("ESDM operational without a seeded initial DRNG\n");
+		printf("DRNGs cannot be seeded from the aux pool\n");
 		ret = 1;
 		goto out;
 	}
-
-	/*
-	 * Entropy for one seed arrives. Holding the pool lock keeps the
-	 * arrival from seeding the DRNGs right away, which would serve the
-	 * initial DRNG first.
-	 */
-	esdm_pool_lock();
-	esdm_pool_insert_aux(data, sizeof(data),
-			     ESDM_DRNG_SECURITY_STRENGTH_BITS);
-	esdm_pool_unlock();
-
-	/*
-	 * The other DRNG is asked to reseed, and the reseed worker gets to
-	 * it before it looks after the initial DRNG.
-	 */
-	before = esdm_oid_state_get();
-	esdm_drng_force_reseed();
 
 	if (thread_init(1)) {
 		printf("cannot initialize threading support\n");
 		ret = 1;
 		goto out;
 	}
-	if (!esdm_drng_mgr_reseed_worker_start()) {
-		printf("the reseed worker is not on duty\n");
-		ret = 1;
-		goto out;
+
+	for (i = 0; i < ESDM_OID_ATTEMPTS; i++) {
+		ret = esdm_oid_attempt(data, sizeof(data), &worker_started);
+		if (ret != -EAGAIN)
+			goto out;
+
+		printf("the initial DRNG got the entropy first, attempt %u of %u\n",
+		       i + 1, ESDM_OID_ATTEMPTS);
 	}
 
-	for (i = 0; i < ESDM_OID_SLICES; i++) {
-		after = esdm_oid_state_get();
-		if (after.node_seed_generation > before.node_seed_generation)
-			break;
-		esdm_oid_sleep_slice();
-	}
-
-	after = esdm_oid_state_get();
-	if (after.node_seed_generation <= before.node_seed_generation) {
-		printf("the other DRNG was not reseeded, skipping test\n");
-		ret = 77;
-		goto out;
-	}
-
-	if (esdm_state_operational() && !after.init_seeded) {
-		printf("ESDM operational without a seeded initial DRNG after another DRNG was reseeded\n");
-		ret = 1;
-		goto out;
-	}
-
-	ret = 0;
+	printf("the node DRNG never got the entropy ahead of the initial DRNG\n");
+	ret = 1;
 
 out:
+	if (worker_started)
+		esdm_drng_mgr_reseed_worker_stop();
 	esdm_fini();
 	return ret;
 }
