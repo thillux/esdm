@@ -35,7 +35,13 @@
  * The ESDM is deliberately absent, so every RPC below fails - the only way to
  * reach the fallback to the kernel device that keeps /dev/random working while
  * the daemon is not running.
+ *
+ * The one exception is the non-blocking prediction resistant read, whose
+ * EAGAIN is an answer of the ESDM rather than a failure. It is replaced by
+ * test_pr_nonblock() below, which answers as scripted.
  */
+
+#define esdm_rpcc_get_random_bytes_pr_nonblock_int test_pr_nonblock
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -1003,6 +1009,111 @@ static void read_call(int flags, get_func_t get, int fd)
 	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi, get, fd);
 }
 
+/*
+ * What test_pr_nonblock() answers, call by call: a number of bytes it fills
+ * in, or an error. Past the script, the ESDM cannot be reached.
+ */
+static ssize_t pr_script[4];
+static unsigned int pr_script_len;
+static unsigned int pr_calls;
+
+#define PR_BYTE 0xa5
+
+ssize_t test_pr_nonblock(uint8_t *buf, size_t buflen, void *int_data)
+{
+	ssize_t ret = -ECONNREFUSED;
+
+	(void)int_data;
+
+	if (pr_calls < pr_script_len)
+		ret = pr_script[pr_calls];
+	pr_calls++;
+
+	if (ret > 0) {
+		if ((size_t)ret > buflen)
+			ret = (ssize_t)buflen;
+		memset(buf, PR_BYTE, (size_t)ret);
+	}
+
+	return ret;
+}
+
+static void pr_script_set(ssize_t first, ssize_t second, ssize_t third)
+{
+	pr_script[0] = first;
+	pr_script[1] = second;
+	pr_script[2] = third;
+	pr_script_len = 3;
+	pr_calls = 0;
+}
+
+static void read_call_size(int flags, size_t size, int fd)
+{
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = flags;
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, size, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+}
+
+/* Whether the reply carries what test_pr_nonblock() filled in */
+static bool reply_is_pr_bytes(void)
+{
+	size_t i;
+
+	for (i = 0; i < reply.size && i < sizeof(reply.buf); i++) {
+		if (reply.buf[i] != PR_BYTE)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * A non-blocking prediction resistant read of a seeded ESDM. Its EAGAIN is
+ * the ESDM's answer that it cannot serve without blocking - no failure the
+ * kernel device is to cover for, although there is one here.
+ */
+static void test_read_pr_nonblock(int fd)
+{
+	const int flags = O_NONBLOCK | O_SYNC;
+
+	/* Nothing read: the reader is told to try again */
+	pr_script_set(-EAGAIN, 32, 32);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(pr_calls, 1);
+
+	/* A full chunk, then EAGAIN: a short read of that chunk */
+	pr_script_set(ESDM_RPC_MAX_DATA, -EAGAIN, 32);
+	read_call_size(flags, ESDM_RPC_MAX_DATA + 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, ESDM_RPC_MAX_DATA);
+	CHECK_EQ(pr_calls, 2);
+
+	/* Partial answers within one chunk, then EAGAIN: what was read */
+	pr_script_set(8, 8, -EAGAIN);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 16);
+	CHECK(reply_is_pr_bytes(), "the short read is not what the ESDM gave");
+	CHECK_EQ(pr_calls, 3);
+
+	/* And a partial answer the ESDM completes is a full read */
+	pr_script_set(8, 24, -EAGAIN);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
+	CHECK(reply_is_pr_bytes(), "the read is not what the ESDM gave");
+	CHECK_EQ(pr_calls, 2);
+
+	/* Past the script, the ESDM is unreachable, as for every other test */
+	pr_script_len = 0;
+}
+
 static void test_read_nonblock(void)
 {
 	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -1043,6 +1154,8 @@ static void test_read_nonblock(void)
 	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
 	CHECK_EQ(reply.size, 32);
+
+	test_read_pr_nonblock(fd);
 	atomic_store(&esdm_cuse_shm_status->operational, false);
 
 	close(fd);
