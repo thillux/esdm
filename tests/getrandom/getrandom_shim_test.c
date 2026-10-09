@@ -47,7 +47,9 @@
 
 static bool stub_fully_seeded;
 static int stub_seeded_ret;
-static unsigned int stub_full_calls, stub_pr_calls, stub_init_calls;
+static ssize_t stub_pr_nonblock_ret;
+static unsigned int stub_full_calls, stub_pr_calls, stub_pr_nonblock_calls,
+	stub_init_calls;
 
 int esdm_rpcc_set_max_online_nodes(uint32_t nodes)
 {
@@ -98,6 +100,16 @@ ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *buf, size_t buflen)
 ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *buf, size_t buflen)
 {
 	stub_pr_calls++;
+
+	return stub_fill(buf, buflen);
+}
+
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen)
+{
+	stub_pr_nonblock_calls++;
+
+	if (stub_pr_nonblock_ret)
+		return stub_pr_nonblock_ret;
 
 	return stub_fill(buf, buflen);
 }
@@ -161,7 +173,14 @@ static void test_nonblock_seeded(void)
 	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM),
 		 (ssize_t)sizeof(buf));
 	CHECK_EQ(stub_full_calls, 1);
+
+	/* The prediction resistant request is made without waiting, too */
+	CHECK_EQ(stub_pr_calls, 0);
+	CHECK_EQ(stub_pr_nonblock_calls, 1);
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_RANDOM),
+		 (ssize_t)sizeof(buf));
 	CHECK_EQ(stub_pr_calls, 1);
+	CHECK_EQ(stub_pr_nonblock_calls, 1);
 
 	/* A blocking request does not ask first */
 	stub_fully_seeded = false;
@@ -170,6 +189,36 @@ static void test_nonblock_seeded(void)
 }
 
 /* Without an answer from the ESDM, the kernel decides */
+/*
+ * Seeded, but the PR DRNG cannot serve right now - not operational, or busy
+ * with another request. The blocking RPC client waits that out; a
+ * non-blocking caller is told EAGAIN, and not served by the kernel instead,
+ * as the ESDM did answer.
+ */
+static void test_nonblock_pr_busy(void)
+{
+	uint8_t buf[16];
+
+	stub_seeded_ret = 0;
+	stub_fully_seeded = true;
+	stub_pr_nonblock_ret = -EAGAIN;
+	stub_pr_calls = stub_pr_nonblock_calls = 0;
+
+	memset(buf, 0xa5, sizeof(buf));
+	errno = 0;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM), -1);
+	CHECK_EQ(errno, EAGAIN);
+	CHECK_EQ(stub_pr_nonblock_calls, 1);
+	CHECK_EQ(stub_pr_calls, 0);
+	CHECK(buf[0] == 0xa5, "the kernel served the request instead");
+
+	/* A short answer is passed on as such, as getrandom(2) may do */
+	stub_pr_nonblock_ret = 8;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM), 8);
+
+	stub_pr_nonblock_ret = 0;
+}
+
 static void test_nonblock_no_esdm(void)
 {
 	uint8_t buf[16];
@@ -234,6 +283,7 @@ int main(int argc, char *argv[])
 
 	test_nonblock_unseeded();
 	test_nonblock_seeded();
+	test_nonblock_pr_busy();
 	test_nonblock_no_esdm();
 
 	ret = common_test_result("getrandom_shim");

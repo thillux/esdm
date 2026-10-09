@@ -179,7 +179,23 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	if (flags & GRND_INSECURE) {
 		esdm_invoke(esdm_rpcc_get_random_bytes(buffer, length));
 	} else if (flags & GRND_RANDOM) {
-		esdm_invoke(esdm_rpcc_get_random_bytes_pr(buffer, length));
+		if (!(flags & GRND_NONBLOCK)) {
+			esdm_invoke(
+				esdm_rpcc_get_random_bytes_pr(buffer, length));
+		} else {
+			/*
+			 * Seeded is not enough: the RPC client waits for as
+			 * long as the PR DRNG is busy or not operational.
+			 * That is the ESDM's answer, not a failure, so it is
+			 * not handed to the kernel either.
+			 */
+			esdm_invoke(esdm_rpcc_get_random_bytes_pr_nonblock(
+				buffer, length));
+			if (ret == -EAGAIN) {
+				errno = EAGAIN;
+				return -1;
+			}
+		}
 	} else if (flags & GRND_SEED) {
 		unsigned int seed_flags =
 			(flags & GRND_NONBLOCK) ? ESDM_GET_SEED_NONBLOCK : 0;
