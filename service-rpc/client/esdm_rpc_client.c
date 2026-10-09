@@ -73,17 +73,29 @@ static __thread uint8_t esdm_rpcc_unpack_buf[ESDM_RPC_MAX_UNPACK_SIZE];
 
 static void register_fork_handler(void);
 
-static void reset_conn_socket(esdm_rpc_client_connection_t *rpc_conn)
+/*
+ * Forget the connection's socket. Only the descriptor is closed unless
+ * @shut_down asks for the connection itself to be torn down, which also ends it
+ * for every other process holding a copy of the descriptor.
+ */
+static void drop_conn_socket(esdm_rpc_client_connection_t *rpc_conn,
+			     bool shut_down)
 {
 	if (rpc_conn == NULL) {
 		return;
 	}
 	if (rpc_conn->fd >= 0) {
-		shutdown(rpc_conn->fd, SHUT_RDWR);
+		if (shut_down)
+			shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 	}
 	rpc_conn->fd = -1;
 	memset(&rpc_conn->last_used, 0, sizeof(rpc_conn->last_used));
+}
+
+static void reset_conn_socket(esdm_rpc_client_connection_t *rpc_conn)
+{
+	drop_conn_socket(rpc_conn, true);
 }
 
 static void esdm_fini_proto_service(esdm_rpc_client_connection_t *rpc_conn)
@@ -1366,7 +1378,14 @@ static void reinit_conns_after_fork(
 	 * the robustness protocol to hand it over to.
 	 */
 	for (i = 0; i < num_conn; ++i) {
-		reset_conn_socket(&rpc_conn_array[i]);
+		/*
+		 * Close only - no shutdown(). The socket is shared with the
+		 * parent, which may be in the middle of a request on it: a
+		 * shutdown would end the connection for the parent as well,
+		 * which then re-sends its request on a new one, and a request
+		 * such as RNDADDENTROPY would be credited twice.
+		 */
+		drop_conn_socket(&rpc_conn_array[i], false);
 		mutex_w_destroy(&rpc_conn_array[i].ref_cnt);
 		mutex_w_destroy(&rpc_conn_array[i].lock);
 		mutex_w_init(&rpc_conn_array[i].ref_cnt, 0, 1);
