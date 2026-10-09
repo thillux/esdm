@@ -207,6 +207,8 @@ int linux_personalization_string(char **ptr, size_t *length)
 		goto out;
 	}
 
+	/* errno tells an error from the end of the file apart below */
+	errno = 0;
 	if (!fgets(buf, sizeof(buf), f)) {
 		/*
 		 * fgets() returns NULL without setting errno at EOF (empty
