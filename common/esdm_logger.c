@@ -213,6 +213,7 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 	FILE *stream = NULL;
 	/* Read once, so the stream lock is dropped as it was taken */
 	const bool syslog_out = use_syslog;
+	int oldstate;
 
 	if (severity > esdm_logger_verbosity_level)
 		return;
@@ -264,7 +265,15 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 	 * per-call locking stdio already does. The stream itself is only
 	 * loaded under esdm_logger_stream_lock, which keeps it from being
 	 * closed underneath this writer.
+	 *
+	 * fprintf() is a cancellation point. A worker cancelled by
+	 * thread_cancel() in the middle of a record would die holding both
+	 * esdm_logger_stream_lock and the stdio lock of the stream, hanging
+	 * every later log call and the destructor below. Hence, cancellation
+	 * is disabled while the record is written; a pending request is acted
+	 * upon at the next cancellation point after the locks are dropped.
 	 */
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
 	if (!syslog_out) {
 		pthread_mutex_lock(&esdm_logger_stream_lock);
 		if (!esdm_logger_stream)
@@ -314,6 +323,7 @@ void _esdm_logger(const enum esdm_logger_verbosity severity,
 		funlockfile(stream);
 		pthread_mutex_unlock(&esdm_logger_stream_lock);
 	}
+	pthread_setcancelstate(oldstate, NULL);
 }
 
 static void esdm_logger_destructor(void)
