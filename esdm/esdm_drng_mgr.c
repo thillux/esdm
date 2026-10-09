@@ -751,9 +751,9 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 	struct entropy_buf seedbuf __aligned(ESDM_KCAPI_ALIGN),
 			   addtl __aligned(ESDM_KCAPI_ALIGN),
 		collected_seedbuf;
-	uint32_t requested_bits, collected_entropy = 0;
+	uint32_t requested_bits, collected_entropy = 0, pass_entropy;
 	unsigned int i, num_es_delivered = 0;
-	bool seeded = false;
+	bool seeded = false, injected;
 	unsigned int es_delivered_threshold = 1;
 	bool do_full_init =
 		(drng == &esdm_drng_pr && !atomic_load(&drng->initiated)) ||
@@ -806,7 +806,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 		 */
 		esdm_get_seed_buffers(&seedbuf, &addtl, requested_bits, forced);
 
-		collected_entropy += esdm_entropy_rate_eb(&seedbuf);
+		pass_entropy = esdm_entropy_rate_eb(&seedbuf);
+		collected_entropy += pass_entropy;
 
 		/* Sum iterations up. */
 		for_each_esdm_es (i) {
@@ -834,7 +835,7 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 		 * requested with: s + 64 bits of entropy for s bits of full
 		 * entropy output.
 		 */
-		seeded |= esdm_drng_inject(
+		injected = esdm_drng_inject(
 			drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
 			(uint8_t *)&addtl, sizeof(addtl),
 			esdm_fully_seeded(do_full_init, collected_entropy,
@@ -842,6 +843,19 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 				(!full_entropy ||
 				 collected_entropy >= requested_bits),
 			"regular");
+		seeded |= injected;
+
+		/*
+		 * A seed the DRNG implementation rejected never reached the
+		 * DRNG: it must neither make the ESDM operational below nor be
+		 * added up with the next pass of the emergency reseeding, and
+		 * its entropy is not reported as injected. The DRNG is marked
+		 * for a forced reseed already.
+		 */
+		if (!injected) {
+			collected_entropy -= pass_entropy;
+			break;
+		}
 
 		/*
 		 * Set the seeding state of the ESDM - which is the state of
