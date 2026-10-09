@@ -331,7 +331,6 @@ int esdm_drng_mgr_initialize(void)
 			LOGGER_WARN, LOGGER_C_DRNG,
 			"no seed for the reseed stagger available (%d) - the DRNGs reseed unstaggered\n",
 			ret);
-		ret = 0;
 	} else {
 		esdm_drng_stagger_avail = true;
 	}

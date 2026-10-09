@@ -400,10 +400,8 @@ static int handle_drng_status(enum drng_status_target target, uint32_t node,
 		 */
 		for (node = 0;; node++) {
 			ret = drng_status_add(doc, node, false, &obj);
-			if (ret == -ENODEV) {
-				ret = 0;
+			if (ret == -ENODEV)
 				break;
-			}
 			if (ret)
 				goto out;
 		}
@@ -476,7 +474,6 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 
 	while (bytes_to_fetch > 0) {
 		size_t chunk_size = min_size(BUFFER_SIZE, bytes_to_fetch);
-		ret = 0;
 		switch (mode) {
 		case RAND_MODE_NONE:
 			esdm_invoke(

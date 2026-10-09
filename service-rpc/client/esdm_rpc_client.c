@@ -1274,7 +1274,6 @@ static int esdm_rpcc_get_service(
 		 * ref_cnt if we obtained the connection handle.
 		 */
 		mutex_w_lock(&rpc_conn_p->ref_cnt);
-		found_unused_conn = true;
 	}
 
 	if (atomic_load(&rpc_conn_p->state) != esdm_rpcc_initialized) {
