@@ -82,6 +82,12 @@ void esdm_es_ring_free(struct esdm_es_ring *ring);
 /* Discard all collected events and invalidate an in-flight extraction. */
 void esdm_es_ring_reset(struct esdm_es_ring *ring);
 
+/*
+ * Reset generation of the ring. Two equal snapshots taken around a sequence of
+ * extractions mean no reset happened in between.
+ */
+u32 esdm_es_ring_gen(struct esdm_es_ring *ring);
+
 /* Number of unused events currently held across all online CPUs. */
 u32 esdm_es_ring_avail_events(struct esdm_es_ring *ring);
 

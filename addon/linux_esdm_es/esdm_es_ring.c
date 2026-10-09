@@ -86,6 +86,18 @@ void esdm_es_ring_reset(struct esdm_es_ring *ring)
 	raw_spin_unlock_irqrestore(&ring->lock, flags);
 }
 
+u32 esdm_es_ring_gen(struct esdm_es_ring *ring)
+{
+	unsigned long flags;
+	u32 gen;
+
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	gen = ring->gen;
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
+
+	return gen;
+}
+
 u32 esdm_es_ring_avail_events(struct esdm_es_ring *ring)
 {
 	u32 events = 0;

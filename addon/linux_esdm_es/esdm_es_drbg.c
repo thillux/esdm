@@ -150,7 +150,7 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 {
 	const u32 esdm_security_strength =
 		esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state);
-	u32 full_blocks, done;
+	u32 full_blocks, done, gen;
 
 	/* only set entropy, when generate was successful */
 	eb->e_bits = 0;
@@ -189,6 +189,14 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 		return;
 	}
 
+	/*
+	 * Each block detects a reset between its own collection and release,
+	 * but one request spans several blocks: a reset between two of them
+	 * leaves earlier blocks derived from invalidated events. Check the
+	 * generation across the whole request, too.
+	 */
+	gen = esdm_es_ring_gen(drbg->ring);
+
 	done = 0;
 	while (done < requested_bits) {
 		u32 bits_returned;
@@ -204,6 +212,14 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 		}
 		done += esdm_security_strength;
 	}
+
+	if (esdm_es_ring_gen(drbg->ring) != gen) {
+		pr_warn("%s-based noise source reset during extraction\n",
+			drbg->name);
+		memzero_explicit(eb->e, sizeof(eb->e));
+		goto out;
+	}
+
 	eb->e_bits = requested_bits;
 
 out:
