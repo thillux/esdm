@@ -911,6 +911,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 {
 	uint8_t *buffer = calloc(1, ESDM_RPC_MAX_DATA);
 	unsigned int flags = 0;
+	int result = EXIT_FAILURE;
 	ssize_t ret;
 
 	if (buffer == NULL) {
@@ -926,9 +927,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 	if (ret < 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Unable to fetch seed, exiting.\n");
-		memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
-		free(buffer);
-		return EXIT_FAILURE;
+		goto out;
 	}
 
 	if (raw) {
@@ -936,7 +935,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		if (written != ret) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 				    "error writing bytes to stdout\n");
-			return EXIT_FAILURE;
+			goto out;
 		}
 	} else {
 		for (ssize_t i = 0; i < ret; ++i) {
@@ -945,9 +944,13 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		}
 	}
 
+	result = EXIT_SUCCESS;
+
+out:
+	/* The seed is wiped on every way out, not only on success */
 	memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
 	free(buffer);
-	return EXIT_SUCCESS;
+	return result;
 }
 
 /*
