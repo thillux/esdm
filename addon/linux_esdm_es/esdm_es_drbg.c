@@ -143,12 +143,17 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 {
 	const u32 esdm_security_strength =
 		esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state);
-	const u32 full_blocks =
-		esdm_full_blocks(requested_bits, esdm_security_strength);
-	u32 done;
+	u32 full_blocks, done;
 
 	/* only set entropy, when generate was successful */
 	eb->e_bits = 0;
+
+	/*
+	 * The DRBG is allocated by the deferred registration work, until then
+	 * the state is NULL and its security strength 0.
+	 */
+	if (!esdm_security_strength)
+		return;
 
 	/*
 	 * Defense in depth: the extraction loop below writes requested_bits/8
@@ -163,6 +168,8 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	if (!esdm_sp80090b_startup_complete_es(drbg->es)) {
 		return;
 	}
+
+	full_blocks = esdm_full_blocks(requested_bits, esdm_security_strength);
 
 	/*
 	 * Only deliver, when at least all requested blocks are available, one compress osr for the
