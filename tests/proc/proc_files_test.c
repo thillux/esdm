@@ -495,6 +495,11 @@ static void test_write_values_rejected(void)
 		  -ERANGE },
 		{ "a number beyond what fits at all",
 		  "99999999999999999999999", 23, -ERANGE },
+		{ "no number at all", "foo", 3, -EINVAL },
+		{ "a number with junk behind it", "12abc", 5, -EINVAL },
+		{ "a negative number", "-1", 2, -EINVAL },
+		{ "only white space", " \n", 2, -EINVAL },
+		{ "two numbers", "1 2", 3, -EINVAL },
 	};
 	struct esdm_proc_file *thresh = file_by_name("write_wakeup_threshold");
 	struct esdm_proc_file *secs = file_by_name("urandom_min_reseed_secs");
@@ -512,6 +517,38 @@ static void test_write_values_rejected(void)
 						    cases[i].len) ==
 			      cases[i].expected,
 		      "the reseed interval accepted %s", cases[i].desc);
+	}
+}
+
+/*
+ * What the writable files accept: a number as "echo" writes it, white space
+ * around it included, in any base strtoul() knows.
+ */
+static void test_write_values_parsed(void)
+{
+	static const struct {
+		const char *val;
+		uint32_t expected;
+	} cases[] = {
+		{ "0", 0 },
+		{ "12", 12 },
+		{ "12\n", 12 },
+		{ " 12 \n", 12 },
+		{ "\t60\n", 60 },
+		{ "0x10", 16 },
+		{ "010", 8 },
+		{ "4294967294", 4294967294U },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		uint32_t val = 0xdeadbeef;
+
+		CHECK(esdm_proc_parse_u32(cases[i].val, strlen(cases[i].val),
+					  &val) == 0,
+		      "\"%s\" was refused", cases[i].val);
+		CHECK(val == cases[i].expected, "\"%s\" parsed as %u",
+		      cases[i].val, val);
 	}
 }
 
@@ -734,6 +771,7 @@ int main(int argc, char *argv[])
 	test_read_uuid();
 	test_write_dispatch();
 	test_write_values_rejected();
+	test_write_values_parsed();
 	test_fill_data_without_server();
 	test_pre_init();
 	test_caller_cap_sys_admin();

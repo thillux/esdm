@@ -20,6 +20,7 @@
 
 #define FUSE_USE_VERSION 31
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse3/fuse.h>
@@ -240,14 +241,17 @@ static int esdm_proc_get_write_wakeup_thresh(struct esdm_proc_file *file)
 	return esdm_proc_data(file, esdm_rpcc_get_write_wakeup_thresh);
 }
 
-static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
-					     const char *buf, size_t buflen)
+/*
+ * Parse a number written to one of the writable files the way the kernel's
+ * proc_dointvec() does: white space around it - such as the newline of an
+ * "echo" - is fine, anything else that is not part of the number is not. The
+ * value has to fit the 32 bit interface of the ESDM.
+ */
+static int esdm_proc_parse_u32(const char *buf, size_t buflen, uint32_t *val)
 {
 	char tmp[32];
-	unsigned long thresh;
-	int ret = 0;
-
-	(void)file;
+	unsigned long parsed;
+	char *start, *end;
 
 	/* Ensure NUL-terminated input for strtoul */
 	if (buflen == 0 || buflen >= sizeof(tmp))
@@ -255,15 +259,44 @@ static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
 	memcpy(tmp, buf, buflen);
 	tmp[buflen] = '\0';
 
+	start = tmp;
+	while (isspace((unsigned char)*start))
+		start++;
+
+	/* strtoul() takes a sign, and wraps a negative number around */
+	if (!isdigit((unsigned char)*start))
+		return -EINVAL;
+
 	errno = 0;
-	thresh = strtoul(tmp, NULL, 0);
-	if (errno || thresh >= UINT32_MAX)
+	parsed = strtoul(start, &end, 0);
+	if (errno || parsed >= UINT32_MAX)
 		return -ERANGE;
 
+	while (isspace((unsigned char)*end))
+		end++;
+	if (*end != '\0')
+		return -EINVAL;
+
+	*val = (uint32_t)parsed;
+
+	return 0;
+}
+
+static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
+					     const char *buf, size_t buflen)
+{
+	uint32_t thresh;
+	int ret;
+
+	(void)file;
+
+	CKINT(esdm_proc_parse_u32(buf, buflen, &thresh));
+
 	esdm_proc_raise_privilege();
-	esdm_invoke(esdm_rpcc_set_write_wakeup_thresh((uint32_t)thresh));
+	esdm_invoke(esdm_rpcc_set_write_wakeup_thresh(thresh));
 	esdm_proc_drop_privilege();
 
+out:
 	return ret;
 }
 
@@ -275,27 +308,18 @@ static int esdm_proc_get_min_reseed_secs(struct esdm_proc_file *file)
 static int esdm_proc_set_min_reseed_secs(struct esdm_proc_file *file,
 					 const char *buf, size_t buflen)
 {
-	char tmp[32];
-	unsigned long thresh;
-	int ret = 0;
+	uint32_t thresh;
+	int ret;
 
 	(void)file;
 
-	/* Ensure NUL-terminated input for strtoul */
-	if (buflen == 0 || buflen >= sizeof(tmp))
-		return -EINVAL;
-	memcpy(tmp, buf, buflen);
-	tmp[buflen] = '\0';
-
-	errno = 0;
-	thresh = strtoul(tmp, NULL, 0);
-	if (errno || thresh >= UINT32_MAX)
-		return -ERANGE;
+	CKINT(esdm_proc_parse_u32(buf, buflen, &thresh));
 
 	esdm_proc_raise_privilege();
-	esdm_invoke(esdm_rpcc_set_min_reseed_secs((uint32_t)thresh));
+	esdm_invoke(esdm_rpcc_set_min_reseed_secs(thresh));
 	esdm_proc_drop_privilege();
 
+out:
 	return ret;
 }
 
