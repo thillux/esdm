@@ -876,6 +876,9 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # The test suite in a build without fips140 - see esdm-plain.
+            plain = self.packages.${system}.esdm-plain;
           };
 
         packages =
@@ -1599,6 +1602,34 @@
                 "-Dais2031_ntg1=true"
                 "-Dais2031_drg4=true"
               ];
+          });
+
+
+          # The ESDM without fips140 and sp80090c, running the meson test suite
+          # as its check phase. The package above sets fips140, which implies
+          # the full SP800-90C configuration - reseeding caps and oversampling
+          # on, the entropy source buffers compiled out - as does every variant
+          # built from it. This is the one that compiles and runs what a build
+          # without those options does instead.
+          esdm-plain = self.packages.${system}.esdm.overrideAttrs (prev: {
+            pname = "esdm-plain";
+
+            mesonFlags =
+              (builtins.filter (
+                x: (!lib.hasInfix "fips140" x) && (!lib.hasInfix "sp80090c" x)
+              ) prev.mesonFlags)
+              ++ [
+                "-Dfips140=false"
+                "-Dsp80090c=false"
+                # Compiles in the test hooks the suite needs.
+                "-Dtestmode=enabled"
+              ];
+
+            doCheck = true;
+
+            meta = prev.meta // {
+              description = "ESDM built without fips140 and sp80090c, running the meson test suite";
+            };
           });
 
 

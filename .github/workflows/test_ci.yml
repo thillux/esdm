@@ -286,6 +286,66 @@ jobs:
         sudo env LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
              meson test -v -C build 'EGD server interface'
 
+  # The plain default configuration: no option but the test hooks. Every
+  # other job builds with fips140, which implies the full SP800-90C
+  # configuration - reseeding caps and oversampling on, the entropy source
+  # buffers compiled out. What a build without those options does, the
+  # unbounded reseeding and the asynchronously filled es_buf caches, is only
+  # compiled and run here. SELinux stays at its default as well, so
+  # libselinux is needed.
+  default:
+    name: ${{ matrix.runner }} / default options
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y meson ninja-build pkg-config \
+                                libprotobuf-c-dev libfuse3-dev \
+                                libjson-c-dev libselinux1-dev
+
+    - name: Install Jitter RNG
+      run: |
+        wget -O jent.tar.gz https://github.com/smuellerDD/jitterentropy-library/archive/refs/tags/v${JITTERENTROPY_VERSION}.tar.gz
+        tar xfz jent.tar.gz
+        make -C jitterentropy-library-${JITTERENTROPY_VERSION}
+        sudo make -C jitterentropy-library-${JITTERENTROPY_VERSION} install
+        sudo ldconfig
+
+    - name: Meson setup
+      run: meson setup build -Dtestmode=enabled
+
+    - name: Check the configuration is the plain one
+      run: |
+        # Guard against a changed option default quietly turning this job
+        # into another copy of the fips140 ones above.
+        meson introspect --buildoptions build | python3 -c '
+        import json, sys
+        opts = {o["name"]: o["value"] for o in json.load(sys.stdin)}
+        on = [n for n in ("fips140", "sp80090c") if opts[n]]
+        if on:
+            sys.exit("::error::enabled in this build: " + ", ".join(on))
+        '
+
+    - name: Meson compile
+      run: meson compile -C build
+
+    - name: Meson test
+      run: meson test -v -C build
+
+    - name: Meson test (privileged)
+      run: |
+        # See the build job: the EGD server test only runs as root.
+        sudo meson test -v -C build 'EGD server interface'
+
   # Memory safety: the same sources built with AddressSanitizer and
   # UndefinedBehaviorSanitizer, then driven hard through the esdm-tool stress
   # tests. These exercise the threading, fork and RPC paths that the ordinary
