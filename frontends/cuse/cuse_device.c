@@ -21,9 +21,11 @@
 #include <errno.h>
 #include <linux/random.h>
 #include <poll.h>
+#include <sched.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mount.h>
 #include <sys/shm.h>
 #include <time.h>
@@ -390,6 +392,33 @@ static const char *esdm_cuse_unprivileged_user = "nobody";
 /* Whether the daemon runs as the unprivileged user and can raise back to root */
 static bool esdm_cuse_dropped = false;
 
+/*
+ * The namespaces of linux_isolate_namespace(), but for the mount namespace.
+ *
+ * The daemon owns the bind mount over the kernel device, made in the mount
+ * namespace it was started in, and has to remove it from there when it
+ * terminates. In a mount namespace of its own, that umount would only reach its
+ * copy of the mount table: with private mount propagation, the bind mount stays
+ * behind and keeps covering the kernel device with one no daemon serves any
+ * more. Going back for the umount is no way out either - setns() into a mount
+ * namespace takes CAP_SYS_CHROOT, which the shipped units do not grant, and is
+ * refused to a process with more than one thread.
+ *
+ * The shipped units do not give the daemon a mount namespace for the same
+ * reason.
+ */
+static void esdm_cuse_isolate_namespace(void)
+{
+	if (unshare(CLONE_NEWCGROUP | CLONE_NEWNET) == -1) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+			    "Cannot enter namespaces: %s\n", strerror(errno));
+		return;
+	}
+
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_CUSE,
+		    "Successfully entered isolating namespaces\n");
+}
+
 static int esdm_cuse_drop_privileges(void)
 {
 	int ret;
@@ -399,10 +428,10 @@ static int esdm_cuse_drop_privileges(void)
 
 	/*
 	 * The namespaces are hardening on top of the privilege drop, a failure
-	 * to enter them is logged by the helper. It must not keep the daemon
-	 * from dropping its privileges.
+	 * to enter them is logged. It must not keep the daemon from dropping
+	 * its privileges.
 	 */
-	linux_isolate_namespace();
+	esdm_cuse_isolate_namespace();
 
 	/* Without root, there is nothing to drop */
 	if (geteuid() != 0)

@@ -64,9 +64,11 @@ RestrictAddressFamilies=AF_UNIX
 # Further confinement that does not require a mount namespace
 ProtectClock=yes
 ProtectHostname=yes
+# cgroup, net: entered by the daemon once it dropped its privileges - not mnt,
+# as it has to stay in the host mount namespace to remove its bind mount
 # pid: allow the daemon to fork itself into an isolating PID namespace when
 # it is started with --pid_namespace (disabled by default)
-RestrictNamespaces=mnt cgroup net pid
+RestrictNamespaces=cgroup net pid
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
