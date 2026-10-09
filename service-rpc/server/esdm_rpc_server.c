@@ -130,6 +130,14 @@ static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 
 static atomic_int server_exit = 0;
 
+/*
+ * Set while the thread serving the unprivileged interface runs. A master that
+ * gives up during the initialization waits for it before it returns: the
+ * teardown that follows takes the thread pool down, and a thread still busy
+ * starting its workers then waits for a free slot forever.
+ */
+static atomic_bool esdm_rpc_unpriv_running = false;
+
 /* Remove a potentially left-over old Unix Domain socket. */
 void esdm_server_remove_stale_socket(const char *path, int socktype)
 {
@@ -1432,6 +1440,11 @@ static int esdm_rpcs_unpriv_init(void *args)
 			  (atomic_load(&esdm_rpc_init_state) ==
 			   esdm_rpcs_state_perm_dropped) ||
 				  (atomic_load(&server_exit) != 0));
+
+	/* The privilege drop failed, or the server goes down meanwhile. */
+	if (atomic_load(&server_exit) != 0)
+		goto out;
+
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 		    "Unprivileged server thread for %s available\n",
 		    ESDM_RPC_UNPRIV_SOCKET);
@@ -1439,10 +1452,11 @@ static int esdm_rpcs_unpriv_init(void *args)
 	/* Server handing unprivileged interface in current thread */
 	CKINT(esdm_rpcs_workerloop(&unpriv_proto));
 
-	return 0;
-
 out:
 	eesdm_rpcs_stop(&unpriv_proto);
+
+	atomic_store(&esdm_rpc_unpriv_running, false);
+	thread_wake_all(&esdm_rpc_thread_init_wait);
 
 	return ret;
 }
@@ -1531,9 +1545,15 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	CKINT(esdm_egd_server_socket_init());
 
 	/* Spawn the thread handling the unprivileged interface */
-	CKINT_LOG(thread_start(esdm_rpcs_unpriv_init, NULL,
-			       ESDM_THREAD_RPC_UNPRIV_GROUP, NULL),
-		  "Starting server thread failed\n");
+	atomic_store(&esdm_rpc_unpriv_running, true);
+	ret = thread_start(esdm_rpcs_unpriv_init, NULL,
+			   ESDM_THREAD_RPC_UNPRIV_GROUP, NULL);
+	if (ret) {
+		atomic_store(&esdm_rpc_unpriv_running, false);
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Starting server thread failed\n");
+		goto out;
+	}
 
 	if (atomic_load(&server_exit) != 0) {
 		goto out;
@@ -1573,6 +1593,17 @@ static int esdm_rpcs_interfaces_init(const char *username,
 
 out:
 	eesdm_rpcs_stop(&priv_proto);
+
+	/*
+	 * Take the threads started so far down with us - the unprivileged one
+	 * may still wait for the privilege drop that is not going to happen -
+	 * and let it finish before the caller tears everything down.
+	 */
+	if (ret)
+		esdm_rpc_server_signal_exit();
+	thread_wait_event(&esdm_rpc_thread_init_wait,
+			  !atomic_load(&esdm_rpc_unpriv_running));
+
 	return ret;
 }
 
@@ -1654,8 +1685,12 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 
 	esdm_logger(LOGGER_WARN, LOGGER_C_RPC, "RPC server started\n");
 
-	/* start the RPC server threads */
-	esdm_rpcs_interfaces_init(username, groupname);
+	/*
+	 * Start the RPC server threads. A failure must reach the exit status:
+	 * a daemon that cannot serve its interfaces and still exits with 0 is
+	 * not restarted by a service manager watching for failures.
+	 */
+	ret = esdm_rpcs_interfaces_init(username, groupname);
 
 out:
 	return ret;
