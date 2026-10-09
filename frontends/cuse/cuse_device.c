@@ -449,30 +449,6 @@ static int esdm_cuse_drop_privileges(void)
 	return 0;
 }
 
-static bool esdm_cuse_client_privileged(fuse_req_t req)
-{
-	const struct fuse_ctx *ctx = fuse_req_ctx(req);
-
-	/*
-	 * The kernel requires CAP_SYS_ADMIN for the privileged ioctls, not a
-	 * UID: a root process without it is refused, a non-root one holding it
-	 * is not.
-	 *
-	 * WARNING: as documented for struct fuse_ctx, the CUSE daemon
-	 * MUST NOT run in a PID or user namespace - a caller outside of it is
-	 * not identifiable and thus refused. That is every caller with
-	 * --pid_namespace.
-	 */
-	if (caller_has_cap_sys_admin(ctx->pid, ctx->uid)) {
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
-			    "CUSE caller privileged\n");
-		return true;
-	}
-
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE, "CUSE caller unprivileged\n");
-	return false;
-}
-
 /*
  * When a privilege level is changed, the write lock must be taken to ensure
  * that no other caller is executing at the same time. If the privilege level
@@ -488,6 +464,70 @@ static bool esdm_cuse_client_privileged(fuse_req_t req)
  * admin control path.
  */
 static mutex_t esdm_cuse_priv = MUTEX_UNLOCKED_PREFER_WRITER;
+
+static void esdm_cuse_unpriv_call_start(void)
+{
+	mutex_reader_lock(&esdm_cuse_priv);
+}
+
+static void esdm_cuse_unpriv_call_end(void)
+{
+	mutex_reader_unlock(&esdm_cuse_priv);
+}
+
+static bool esdm_cuse_client_privileged(fuse_req_t req)
+{
+	const struct fuse_ctx *ctx = fuse_req_ctx(req);
+	int ret;
+
+	/*
+	 * The kernel requires CAP_SYS_ADMIN for the privileged ioctls, not a
+	 * UID: a root process without it is refused, a non-root one holding it
+	 * is not.
+	 *
+	 * WARNING: as documented for struct fuse_ctx, the CUSE daemon
+	 * MUST NOT run in a PID or user namespace - a caller outside of it is
+	 * not identifiable and thus refused. That is every caller with
+	 * --pid_namespace.
+	 */
+	ret = caller_cap_sys_admin(ctx->pid, ctx->uid);
+
+	/*
+	 * With /proc mounted with hidepid=, the unprivileged user cannot open
+	 * the caller's entries, which root can. They are opened with the /proc
+	 * access of root then, for this thread only, so that every other
+	 * request keeps running and none has to wait for a caller that is
+	 * refused in the end. The reader lock keeps a privileged request from
+	 * changing the credentials of the process meanwhile.
+	 */
+	if (ret == -EACCES && esdm_cuse_dropped) {
+		esdm_cuse_unpriv_call_start();
+		ret = caller_cap_sys_admin_fsroot(ctx->pid, ctx->uid);
+		esdm_cuse_unpriv_call_end();
+
+		/*
+		 * This thread would serve every request that follows with the
+		 * /proc access of root. Not recoverable, as below.
+		 */
+		if (ret == -ENOTRECOVERABLE) {
+			struct fuse_session *se = esdm_cuse_session;
+
+			esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+				    "Cannot drop privileges after checking a caller, terminating\n");
+			if (se)
+				fuse_session_exit(se);
+		}
+	}
+
+	if (ret > 0) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
+			    "CUSE caller privileged\n");
+		return true;
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE, "CUSE caller unprivileged\n");
+	return false;
+}
 
 static void esdm_cuse_drop_privilege_transient(void)
 {
@@ -509,39 +549,26 @@ static void esdm_cuse_drop_privilege_transient(void)
 }
 
 /*
- * Start a privileged request: raise the privileges and check the caller, with
+ * Start a privileged request: check the caller, then raise the privileges with
  * the write lock held so that no other request runs while they are raised.
  *
- * The check reads the caller's /proc entries. With /proc mounted with hidepid=,
- * the unprivileged user cannot read them for any process but its own, which
- * would refuse every caller. The check is hence made with the privileges
- * raised already, and they are dropped again for a caller that fails it.
+ * The caller is checked before the write lock is taken. A writer waiting for it
+ * keeps every new read and write of the device waiting as well, which a caller
+ * that is refused anyway must not be able to cause.
  *
  * Returns true with the privileges raised and the lock held, both released by
  * esdm_cuse_drop_privilege_transient(); false with neither.
  */
 static bool esdm_cuse_priv_call_start(fuse_req_t req)
 {
+	if (!esdm_cuse_client_privileged(req))
+		return false;
+
 	mutex_lock(&esdm_cuse_priv);
 	if (esdm_cuse_dropped)
 		raise_privilege_transient(0, 0);
 
-	if (esdm_cuse_client_privileged(req))
-		return true;
-
-	esdm_cuse_drop_privilege_transient();
-
-	return false;
-}
-
-static void esdm_cuse_unpriv_call_start(void)
-{
-	mutex_reader_lock(&esdm_cuse_priv);
-}
-
-static void esdm_cuse_unpriv_call_end(void)
-{
-	mutex_reader_unlock(&esdm_cuse_priv);
+	return true;
 }
 
 /******************************************************************************

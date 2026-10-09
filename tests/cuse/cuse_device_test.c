@@ -41,6 +41,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/random.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +84,10 @@ static unsigned int destroy_calls;
 static unsigned int raise_calls;
 static unsigned int drop_calls;
 
+/* The check with the /proc access of root, and whether it held a reader lock */
+static unsigned int fsroot_calls;
+static bool fsroot_reader_locked;
+
 static void reply_reset(void)
 {
 	memset(&reply, 0, sizeof(reply));
@@ -90,6 +95,8 @@ static void reply_reset(void)
 	destroy_calls = 0;
 	raise_calls = 0;
 	drop_calls = 0;
+	fsroot_calls = 0;
+	fsroot_reader_locked = false;
 }
 
 /******************************************************************************
@@ -237,15 +244,37 @@ int drop_supplemental_groups(void)
 /* Whether the caller holds CAP_SYS_ADMIN, see caller_is() */
 static bool test_caller_cap;
 
+/* Whether the caller's /proc entries are hidden from the unprivileged user */
+static bool test_proc_hidden;
+
 /* Whether the last check of the caller ran with the privileges raised */
 static bool checked_raised;
 
-int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+int caller_cap_sys_admin(pid_t pid, uid_t fsuid)
 {
 	(void)pid;
 	(void)fsuid;
 
 	checked_raised = raise_calls > drop_calls;
+
+	return test_proc_hidden ? -EACCES : test_caller_cap;
+}
+
+int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
+{
+	int ret;
+
+	(void)pid;
+	(void)fsuid;
+
+	fsroot_calls++;
+	checked_raised = raise_calls > drop_calls;
+
+	/* Held, but not for writing - which would be this thread's own */
+	ret = pthread_rwlock_trywrlock(&esdm_cuse_priv);
+	if (!ret)
+		pthread_rwlock_unlock(&esdm_cuse_priv);
+	fsroot_reader_locked = (ret == EBUSY);
 
 	return test_caller_cap;
 }
@@ -543,19 +572,15 @@ static void test_ioctl_privileged_refused(void)
 static void test_ioctl_privilege_is_capability(void)
 {
 	caller_is(0, false);
-	checked_raised = false;
 	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EPERM);
 
-	/*
-	 * The check reads the caller's /proc entries, which /proc mounted
-	 * with hidepid= only shows to root - so it runs with the privileges
-	 * raised, and a refused caller has them dropped again.
-	 */
-	CHECK(checked_raised, "the caller was checked without privileges");
-	CHECK_EQ(raise_calls, 1);
-	CHECK_EQ(drop_calls, 1);
+	/* A refused caller does not get the privileges raised at all */
+	CHECK(!checked_raised, "the caller was checked with privileges");
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+	CHECK_EQ(fsroot_calls, 0);
 
 	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
@@ -567,10 +592,91 @@ static void test_ioctl_privilege_is_capability(void)
 	      "RNDRESEEDCRNG was not answered");
 	CHECK(reply.kind != REPLY_ERR || reply.err != EPERM,
 	      "a caller holding CAP_SYS_ADMIN was refused");
+	CHECK(!checked_raised, "the caller was checked with privileges");
 	CHECK_EQ(raise_calls, 1);
 	CHECK_EQ(drop_calls, 1);
 
+	/*
+	 * With /proc mounted with hidepid=, the unprivileged user cannot open
+	 * the caller's entries. They are opened once more with the /proc
+	 * access of root then - for the checking thread only, so with no
+	 * privileges raised, but under the reader lock that keeps them from
+	 * being raised meanwhile.
+	 */
+	test_proc_hidden = true;
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind != REPLY_ERR || reply.err != EPERM,
+	      "a hidden caller holding CAP_SYS_ADMIN was refused");
+	CHECK_EQ(fsroot_calls, 1);
+	CHECK(fsroot_reader_locked,
+	      "the caller was checked without the reader lock");
+	CHECK(!checked_raised, "the caller was checked with privileges");
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
+
+	caller_is(1000, false);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+	CHECK_EQ(fsroot_calls, 1);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+	test_proc_hidden = false;
+
 	caller_is_root(false);
+}
+
+static void *refused_ioctl(void *arg)
+{
+	(void)arg;
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+
+	return NULL;
+}
+
+/*
+ * A privileged ioctl of a caller that is refused must not wait for the write
+ * lock. The lock prefers writers, so a waiting one keeps every new read and
+ * write of the device waiting as well - with a reader in a long read holding
+ * the lock, any user could stall the device by asking for RNDCLEARPOOL.
+ */
+static void test_ioctl_refused_without_write_lock(void)
+{
+	unsigned int hidden;
+
+	caller_is_root(false);
+
+	for (hidden = 0; hidden < 2; hidden++) {
+		struct timespec deadline;
+		pthread_t thread;
+
+		test_proc_hidden = hidden;
+
+		/* The long read */
+		mutex_reader_lock(&esdm_cuse_priv);
+
+		if (pthread_create(&thread, NULL, refused_ioctl, NULL)) {
+			mutex_reader_unlock(&esdm_cuse_priv);
+			CHECK(0, "cannot start the ioctl thread");
+			break;
+		}
+
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_sec += 5;
+		if (pthread_timedjoin_np(thread, NULL, &deadline)) {
+			CHECK(0, "a refused caller waited for the write lock");
+			mutex_reader_unlock(&esdm_cuse_priv);
+			pthread_join(thread, NULL);
+		} else {
+			mutex_reader_unlock(&esdm_cuse_priv);
+		}
+
+		CHECK_EQ(reply.kind, REPLY_ERR);
+		CHECK_EQ(reply.err, EPERM);
+		CHECK_EQ(fsroot_calls, hidden);
+	}
+
+	test_proc_hidden = false;
 }
 
 /*
@@ -1039,6 +1145,7 @@ int main(int argc, char *argv[])
 	test_ioctl_addtoentcnt_negative();
 	test_ioctl_privileged_refused();
 	test_ioctl_privilege_is_capability();
+	test_ioctl_refused_without_write_lock();
 	test_ioctl_status_and_unknown();
 	test_read_fallback();
 	test_write_fallback();

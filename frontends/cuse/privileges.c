@@ -27,6 +27,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/fsuid.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -200,9 +202,23 @@ int caller_status_cap_sys_admin(const char *status, uid_t fsuid)
 	return !!(capeff & (1ULL << CAP_SYS_ADMIN));
 }
 
-int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+/*
+ * A /proc entry of the caller that cannot be opened says nothing about its
+ * capabilities: with /proc mounted with hidepid=, that is what every process
+ * but our own looks like to the unprivileged user.
+ */
+static int caller_proc_err(int ret)
+{
+	if (ret == -EACCES || ret == -EPERM || ret == -ENOENT)
+		return -EACCES;
+
+	return 0;
+}
+
+int caller_cap_sys_admin(pid_t pid, uid_t fsuid)
 {
 	char path[64], buf[8192], own_map[256], caller_map[256];
+	int ret;
 
 	/* A caller outside of our PID namespace is not identifiable */
 	if (pid <= 0)
@@ -214,15 +230,78 @@ int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
 	 * namespace itself needs ptrace access to the caller, its UID map does
 	 * not - the caller has to have the map we have.
 	 */
+	if (read_proc_file("/proc/self/uid_map", own_map, sizeof(own_map)))
+		return 0;
+
 	snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)pid);
-	if (read_proc_file("/proc/self/uid_map", own_map, sizeof(own_map)) ||
-	    read_proc_file(path, caller_map, sizeof(caller_map)) ||
-	    strcmp(own_map, caller_map))
+	ret = read_proc_file(path, caller_map, sizeof(caller_map));
+	if (ret)
+		return caller_proc_err(ret);
+	if (strcmp(own_map, caller_map))
 		return 0;
 
 	snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
-	if (read_proc_file(path, buf, sizeof(buf)))
-		return 0;
+	ret = read_proc_file(path, buf, sizeof(buf));
+	if (ret)
+		return caller_proc_err(ret);
 
 	return caller_status_cap_sys_admin(buf, fsuid);
+}
+
+int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	return caller_cap_sys_admin(pid, fsuid) > 0;
+}
+
+/* Whether the calling thread has these file system IDs */
+static bool thread_fsids_are(uid_t uid, gid_t gid)
+{
+	return (uid_t)setfsuid((uid_t)-1) == uid &&
+	       (gid_t)setfsgid((gid_t)-1) == gid;
+}
+
+int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
+{
+	struct __user_cap_header_struct hdr = { _LINUX_CAPABILITY_VERSION_3,
+						0 };
+	struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+	struct __user_cap_data_struct raised[_LINUX_CAPABILITY_U32S_3];
+	uid_t old_fsuid;
+	gid_t old_fsgid;
+	unsigned int i;
+	int ret = 0;
+
+	/*
+	 * Opening a /proc entry is decided on the file system IDs and the
+	 * effective capabilities of the opening thread. A transient raise to
+	 * root sets the former to 0 and the latter to the permitted ones, so
+	 * that is what this thread gets. Unlike that raise, which glibc applies
+	 * to every thread of the process, setfs[ug]id() and capset() only
+	 * change the calling thread.
+	 */
+	if (syscall(SYS_capget, &hdr, caps))
+		return 0;
+	memcpy(raised, caps, sizeof(raised));
+	for (i = 0; i < _LINUX_CAPABILITY_U32S_3; i++)
+		raised[i].effective = raised[i].permitted;
+
+	old_fsuid = (uid_t)setfsuid((uid_t)-1);
+	old_fsgid = (gid_t)setfsgid((gid_t)-1);
+
+	setfsgid(0);
+	setfsuid(0);
+	if (thread_fsids_are(0, 0) && !syscall(SYS_capset, &hdr, raised))
+		ret = caller_cap_sys_admin(pid, fsuid);
+
+	/* Leaving file system UID 0 drops the capabilities it raised, too */
+	setfsuid(old_fsuid);
+	setfsgid(old_fsgid);
+	if (syscall(SYS_capset, &hdr, caps) ||
+	    !thread_fsids_are(old_fsuid, old_fsgid)) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Cannot restore the file system IDs and capabilities\n");
+		return -ENOTRECOVERABLE;
+	}
+
+	return ret > 0;
 }
