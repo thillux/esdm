@@ -37,6 +37,15 @@
 #include "privileges.h"
 #include "visibility.h"
 
+/* Does LeakSanitizer check this process for leaks when it exits? */
+#if defined(__SANITIZE_ADDRESS__)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#endif
+#endif
+
 /*
  * Changing the effective or file system UID or GID makes the kernel reset the
  * dumpable attribute of the process to fs.suid_dumpable - which systemd sets
@@ -52,6 +61,22 @@ static int priv_dumpable_get(void)
 
 static int priv_dumpable_restore(int before)
 {
+#ifdef PRIV_LEAK_CHECK_AT_EXIT
+	/*
+	 * The leak check at exit stops all threads by ptrace()ing them from a
+	 * helper task running with the credentials of the process. Without
+	 * capabilities, that only works while the process is dumpable for its
+	 * user (1): the sanitizer runtime turns a non-dumpable process (0)
+	 * dumpable for the check, but leaves 2 alone - which is what a change
+	 * of the IDs leaves behind with fs.suid_dumpable = 2. A daemon exiting
+	 * with its privileges dropped then gets a "fatal error" instead of a
+	 * leak report and, as meson's ASAN_OPTIONS ask for, aborts. Turn 2
+	 * into 0 so the check runs; only sanitizer builds do this.
+	 */
+	if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 2)
+		before = 0;
+#endif
+
 	if (before == 0 && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 &&
 	    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
 		int errsv = errno;
