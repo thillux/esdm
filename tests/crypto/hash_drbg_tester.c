@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "esdm_hash_drbg_sha512.h"
 #include "selftest_kat.h"
@@ -287,9 +288,44 @@ out:
 	return ret;
 }
 
+/*
+ * mlock()/munlock() do not nest per page: every allocated state has to own
+ * its pages, so that freeing one cannot unlock the memory of another.
+ */
+static int hash_drbg_locked_mem_tester(void)
+{
+	static const uint8_t seed[64] = { 0x01 };
+	struct esdm_drbg_state *drbg1 = NULL, *drbg2 = NULL;
+	uintptr_t ps = (uintptr_t)sysconf(_SC_PAGESIZE);
+	uint8_t act[32];
+	int ret = 1;
+
+	if (esdm_drbg_hash_alloc(&drbg1) || esdm_drbg_hash_alloc(&drbg2))
+		goto out;
+
+	if ((uintptr_t)drbg1 % ps || (uintptr_t)drbg2 % ps) {
+		printf("DRBG state not page aligned\n");
+		goto out;
+	}
+
+	/* The surviving state stays usable after its neighbour is gone */
+	esdm_drbg_hash_zero_free(drbg1);
+	drbg1 = NULL;
+	if (esdm_drbg_seed(drbg2, seed, sizeof(seed), NULL, 0) ||
+	    esdm_drbg_generate(drbg2, act, sizeof(act), NULL, 0) < 0)
+		goto out;
+
+	ret = 0;
+
+out:
+	esdm_drbg_hash_zero_free(drbg1);
+	esdm_drbg_hash_zero_free(drbg2);
+	return ret;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
-	return hash_drbg_tester();
+	return hash_drbg_tester() + hash_drbg_locked_mem_tester();
 }
