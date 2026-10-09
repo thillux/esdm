@@ -64,46 +64,31 @@ static const size_t stress_sizes[] = { 16, 32, 64, 128, 256, 512, 1024, 4096 };
 static pid_t workers[MAX_WORKERS];
 static size_t worker_count = 0;
 
-static int read_complete(int fd, uint8_t *buf, size_t buflen)
+/*
+ * Diagnostics of a worker go to stderr, which is unbuffered: a worker leaves
+ * through _exit(), which would drop whatever stdio still buffered on a pipe.
+ */
+static int transfer_complete(int fd, uint8_t *buf, size_t buflen,
+			     int write_device)
 {
+	size_t left = buflen;
 	ssize_t ret;
 
 	if (buflen > INT_MAX)
-		return 1;
+		return -EINVAL;
 
 	do {
-		ret = read(fd, buf, buflen);
+		ret = write_device ? write(fd, buf, left) : read(fd, buf, left);
 		if (0 < ret) {
-			buflen -= (size_t)ret;
+			left -= (size_t)ret;
 			buf += ret;
+		} else if (0 == ret) {
+			/* Neither an error nor progress - do not spin */
+			return -ENODATA;
 		}
-	} while ((0 < ret || EINTR == errno) && buflen);
+	} while ((0 < ret || EINTR == errno) && left);
 
-	if (buflen)
-		printf("Error code from read system call: %d\n", errno);
-
-	return buflen ? 1 : 0;
-}
-
-static int write_complete(int fd, uint8_t *buf, size_t buflen)
-{
-	ssize_t ret;
-
-	if (buflen > INT_MAX)
-		return 1;
-
-	do {
-		ret = write(fd, buf, buflen);
-		if (0 < ret) {
-			buflen -= (size_t)ret;
-			buf += ret;
-		}
-	} while ((0 < ret || EINTR == errno) && buflen);
-
-	if (buflen)
-		printf("Error code from write system call: %d\n", errno);
-
-	return buflen ? 1 : 0;
+	return left ? -errno : 0;
 }
 
 /*
@@ -118,7 +103,8 @@ static int stress_device(const char *devfile, int write_device)
 
 	fd = open(devfile, (write_device ? O_WRONLY : O_RDONLY) | O_CLOEXEC);
 	if (0 > fd) {
-		printf("Cannot open file %s: %d\n", devfile, errno);
+		fprintf(stderr, "Worker PID %d: cannot open %s: %d (%s)\n",
+			getpid(), devfile, errno, strerror(errno));
 		return 1;
 	}
 
@@ -128,11 +114,17 @@ static int stress_device(const char *devfile, int write_device)
 		unsigned int round;
 
 		for (round = 0; round < STRESS_ROUNDS; round++) {
-			ret = write_device ?
-				      write_complete(fd, buf, stress_sizes[i]) :
-				      read_complete(fd, buf, stress_sizes[i]);
-			if (ret)
+			ret = transfer_complete(fd, buf, stress_sizes[i],
+						write_device);
+			if (ret) {
+				fprintf(stderr,
+					"Worker PID %d: %s of %zu bytes on %s failed in round %u: %d (%s)\n",
+					getpid(), write_device ? "write" : "read",
+					stress_sizes[i], devfile, round, -ret,
+					strerror(-ret));
+				ret = 1;
 				goto out;
+			}
 		}
 	}
 
@@ -183,7 +175,11 @@ static int wait_workers(void)
 			continue;
 		}
 
-		if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+		if (WIFSIGNALED(status)) {
+			printf("Worker PID %u killed by signal %d\n", workers[i],
+			       WTERMSIG(status));
+			ret = 1;
+		} else if (!WIFEXITED(status) || WEXITSTATUS(status)) {
 			printf("Worker PID %u failed\n", workers[i]);
 			ret = 1;
 		}
