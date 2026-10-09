@@ -158,7 +158,7 @@ reconnects transparently.
 .PP
 A connection beyond the limit of its UID is accepted and closed at once. The
 daemon logs a warning when a UID reaches its limit, and again only after the
-UID has closed all its connections in between. Apart from the scaling of the RPC bound, these limits are compile\-time
+UID has dropped below its limit in between. Apart from the scaling of the RPC bound, these limits are compile\-time
 constants.
 .SH FILES
 .TP

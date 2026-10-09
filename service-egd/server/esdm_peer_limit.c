@@ -106,6 +106,9 @@ void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t uid)
 		if (!entry->count) {
 			*slot = entry->next;
 			free(entry);
+		} else if (entry->count < limit->max_per_uid) {
+			/* Below the limit again: the episode is over. */
+			entry->warned = false;
 		}
 	}
 
