@@ -727,7 +727,17 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			goto out;
 		read_bytes += (size_t)ret;
 	}
-	ret = fuse_reply_buf(req, (const char *)tmpbuf_p, read_bytes);
+
+	/*
+	 * Every request is answered exactly once. libfuse frees the request
+	 * when it sends the reply, whether the sending succeeds or not: an
+	 * error reply after a failed fuse_reply_buf() would send and free the
+	 * request a second time. Nor would it reach anybody: the send fails
+	 * when the kernel no longer waits for the request, e.g. because the
+	 * reader was interrupted.
+	 */
+	fuse_reply_buf(req, (const char *)tmpbuf_p, read_bytes);
+	ret = 0;
 
 out:
 	if (tmpbuf) {

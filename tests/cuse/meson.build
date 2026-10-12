@@ -18,6 +18,23 @@ if get_option('linux-devfiles').enabled()
 
 	test('CUSE device handlers', cuse_device_test)
 
+	# How the handlers answer: each request exactly once, and none of them
+	# held up by another one. Compiled the same way as the test above.
+	cuse_requests_test = executable(
+			'cuse_requests_test',
+			[ 'cuse_requests_test.c' ],
+			include_directories: [
+				include_dirs_client,
+				include_dirs_server,
+				include_directories('../../frontends/cuse'),
+				include_directories('../common') ],
+			dependencies: [ dependencies_client, cuse_deps ],
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib ],
+		)
+
+	test('CUSE request replies', cuse_requests_test, timeout: 60)
+
 	cuse_tester_common = files([
 		'env.c'
 		])
