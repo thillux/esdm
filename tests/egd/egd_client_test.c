@@ -521,6 +521,7 @@ static int test_descriptor_identity(void)
 	struct esdm_egd_client *client = NULL;
 	struct sockaddr_un addr;
 	socklen_t addrlen = sizeof(addr);
+	struct stat st;
 	uint8_t buf[16];
 	size_t i;
 	int fd, zero_fd, ret = 0;
@@ -582,8 +583,72 @@ static int test_descriptor_identity(void)
 	      "%u connections, expected the client to have reconnected",
 	      egd_peer_connections(peer));
 
+	/*
+	 * The descriptor belongs to the application now: the client has to
+	 * leave it alone rather than close it on its way to a fresh connection,
+	 * which would also hand the number to that connection.
+	 */
+	CHECK(fstat(zero_fd, &st) == 0 && S_ISCHR(st.st_mode),
+	      "the descriptor the application reused is no longer its /dev/zero");
+
 	close(zero_fd);
 	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
+ * Releasing a client whose descriptor the application closed and reused in the
+ * meantime must not close what the application put there.
+ */
+static int test_free_foreign_descriptor(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct stat st;
+	int fd, zero_fd, ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("freeforeign"), EGD_PEER_NORMAL))
+		return 1;
+
+	/* The number the client's socket is about to get, as above. */
+	fd = dup(0);
+	if (fd < 0) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+	close(fd);
+
+	if (esdm_egd_client_alloc(&client, test_socket("freeforeign"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	if (fstat(fd, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+		printf("  SKIP: the client's descriptor could not be identified\n");
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 0;
+	}
+
+	close(fd);
+	zero_fd = open("/dev/zero", O_RDONLY);
+	if (zero_fd != fd) {
+		printf("  SKIP: the descriptor number was not reused\n");
+		if (zero_fd >= 0)
+			close(zero_fd);
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 0;
+	}
+
+	esdm_egd_client_free(client);
+	CHECK(fstat(zero_fd, &st) == 0 && S_ISCHR(st.st_mode),
+	      "releasing the client closed the application's descriptor");
+
+	close(zero_fd);
 	egd_peer_stop(peer);
 
 	return ret;
@@ -651,7 +716,7 @@ static int test_descriptor_identity_same_peer(void)
 	struct egd_peer *peer;
 	struct esdm_egd_client *client = NULL;
 	struct sockaddr_un addr;
-	uint64_t cookie;
+	uint64_t cookie, cookie2 = 0, other_cookie = 0;
 	socklen_t len = sizeof(cookie);
 	uint8_t buf[16];
 	int fd, other, ret = 0;
@@ -687,8 +752,10 @@ static int test_descriptor_identity_same_peer(void)
 	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
 		 test_socket("samepeer"));
+	len = sizeof(other_cookie);
 	if (other != fd ||
-	    connect(other, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+	    connect(other, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+	    getsockopt(other, SOL_SOCKET, SO_COOKIE, &other_cookie, &len) < 0) {
 		printf("  SKIP: the descriptor number was not reused\n");
 		if (other >= 0)
 			close(other);
@@ -702,6 +769,12 @@ static int test_descriptor_identity_same_peer(void)
 	CHECK(egd_peer_connections(peer) == 3,
 	      "%u connections, expected the client to have reconnected rather than use another's",
 	      egd_peer_connections(peer));
+
+	/* The other connection is not the client's to close. */
+	len = sizeof(cookie2);
+	CHECK(getsockopt(other, SOL_SOCKET, SO_COOKIE, &cookie2, &len) == 0 &&
+		      cookie2 == other_cookie,
+	      "the client closed the connection that took its number");
 
 	close(other);
 	esdm_egd_client_free(client);
@@ -829,6 +902,8 @@ int main(int argc, char *argv[])
 		{ "reconnect after a hangup", test_reconnect },
 		{ "buffer cleansing on failure", test_failure_wipes_buffer },
 		{ "descriptor identity", test_descriptor_identity },
+		{ "release with a foreign descriptor",
+		  test_free_foreign_descriptor },
 #ifdef SO_COOKIE
 		{ "descriptor identity, same peer",
 		  test_descriptor_identity_same_peer },

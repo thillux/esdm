@@ -153,13 +153,24 @@ static void esdm_egd_clients_lock_acquire(void)
  * Connection handling
  ****************************/
 
-/* Caller holds the lock. */
+static bool esdm_egd_client_fd_is_ours_locked(struct esdm_egd_client *client);
+
+/*
+ * Let go of the connection. Caller holds the lock.
+ *
+ * The descriptor is only closed while it still is the connection: one the
+ * application closed behind the client's back - see
+ * esdm_egd_client_fd_is_ours_locked() - may carry whatever it opened since
+ * under that number, and closing that would take it away from under the
+ * application, and hand its number to the next connection of this client.
+ */
 static void esdm_egd_client_disconnect_locked(struct esdm_egd_client *client)
 {
 	if (client->fd < 0)
 		return;
 
-	close(client->fd);
+	if (esdm_egd_client_fd_is_ours_locked(client))
+		close(client->fd);
 	client->fd = -1;
 }
 
@@ -231,10 +242,12 @@ static void esdm_egd_client_atfork_child(void)
 	struct esdm_egd_client *client;
 
 	TAILQ_FOREACH (client, &esdm_egd_clients, tailq) {
-		if (client->fd >= 0) {
-			close(client->fd);
-			client->fd = -1;
-		}
+		/*
+		 * Not under the client's lock, which a parent thread may have
+		 * held - the child is single threaded, and the lock is
+		 * recreated right below.
+		 */
+		esdm_egd_client_disconnect_locked(client);
 
 		esdm_egd_client_recreate_lock(&client->lock);
 	}
@@ -496,7 +509,9 @@ static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
 	 */
 	ret = esdm_egd_client_identify_locked(client);
 	if (ret) {
-		esdm_egd_client_disconnect_locked(client);
+		/* Ours for certain, if unrecognizable */
+		close(fd);
+		client->fd = -1;
 		return ret;
 	}
 
