@@ -8,6 +8,7 @@ if get_option('esdm-aux-client').enabled()
 			include_directories: [ include_dirs_client,
 					       include_dirs_aux_client,
 					       include_directories('../common') ],
+			dependencies: dependencies_client,
 			link_with: [ esdm_aux_client_lib.get_static_lib(),
 				     esdm_common_static_lib ],
 		)

@@ -28,6 +28,11 @@ extern "C" {
 
 /**
  * @brief Initialize the semaphore to be notified about inserting entropy
+ *
+ * The semaphore and the status shared memory segment are the ESDM server's,
+ * this creates neither. If the server is not running yet, the wait below
+ * attaches to them once it has created them, and does so again after the
+ * server replaced them, e.g. when it was restarted.
  */
 int esdm_aux_init_wait_for_need_entropy(void);
 
