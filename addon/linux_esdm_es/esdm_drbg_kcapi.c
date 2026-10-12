@@ -213,6 +213,16 @@ int esdm_drbg_selftest(void)
 	struct drbg_state *drbg_s;
 	int ret = 0;
 
+	/*
+	 * The module parameter indexes esdm_drbg_types. Module init runs this
+	 * before any other user of it and fails on an error, and the parameter
+	 * is read-only at runtime, so checking here once suffices.
+	 */
+	if (esdm_drbg_type >= ARRAY_SIZE(esdm_drbg_types)) {
+		pr_err("invalid esdm_drbg_type %u\n", esdm_drbg_type);
+		return -EINVAL;
+	}
+
 	/* Allocate the DRBG once to trigger the kernel crypto API self test */
 	drbg = crypto_alloc_rng(esdm_drbg_types[esdm_drbg_type].drbg_core, 0,
 				0);
