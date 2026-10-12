@@ -186,6 +186,13 @@ struct esdm_egd_conn {
 	uint8_t answer[ESDM_EGD_MAX_TRANSFER];
 	uint8_t answer_len;
 
+	/*
+	 * The client takes no more responses - it hung up, or shut down its
+	 * receiving side. What it sent before still counts, see
+	 * esdm_egd_peer_gone().
+	 */
+	bool peer_gone;
+
 	TAILQ_ENTRY(esdm_egd_conn) tailq;
 };
 TAILQ_HEAD(esdm_egd_conn_list, esdm_egd_conn);
@@ -505,6 +512,37 @@ static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
 	return (conn->out_off < conn->out_len);
 }
 
+/* Wipe the response in flight, delivered or not, and free its buffer. */
+static void esdm_egd_out_clear(struct esdm_egd_conn *conn)
+{
+	memset_secure(conn->out, 0, conn->out_len);
+	conn->out_len = 0;
+	conn->out_off = 0;
+}
+
+/*
+ * The client takes no more responses.
+ *
+ * A client that writes and then exits - a feeder handing over its entropy and
+ * closing right away is the textbook case - leaves its bytes readable behind
+ * the hangup. They are processed nevertheless, but whatever needs answering is
+ * dropped from here on: the response in flight and a deferred request, which
+ * would otherwise keep collecting entropy for nobody, and every reply command
+ * still in the stream, see esdm_egd_process(). The rest of the stream is thus
+ * reduced to the insertions, which cannot block, so draining it cannot tie up
+ * the worker.
+ */
+static void esdm_egd_peer_gone(struct esdm_egd_conn *conn)
+{
+	conn->peer_gone = true;
+
+	esdm_egd_out_clear(conn);
+
+	conn->deferred = 0;
+	memset_secure(conn->answer, 0, sizeof(conn->answer));
+	conn->answer_len = 0;
+}
+
 /*
  * Push out what is left of the response.
  *
@@ -512,6 +550,10 @@ static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
  * connection, the event loop arms EPOLLOUT and it goes out once the client has
  * made room. Waiting here would hand every other client's latency to whichever
  * one is slowest to read.
+ *
+ * A client that does not take responses any more is no reason to drop what it
+ * still sends - see esdm_egd_peer_gone() - so EPIPE leaves the connection open
+ * for the rest of its stream, which ends at its EOF.
  *
  * @return 0 when the connection remains usable, whether or not everything went
  *	   out, < 0 when it has to be closed
@@ -545,13 +587,16 @@ static int esdm_egd_flush(struct esdm_egd_conn *conn)
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
 			return 0;
 
+		if (ret < 0 && errno == EPIPE) {
+			esdm_egd_peer_gone(conn);
+			return 0;
+		}
+
 		return ret < 0 ? -errno : -EIO;
 	}
 
 	/* Delivered - and the buffer is free for the next response. */
-	memset_secure(conn->out, 0, conn->out_len);
-	conn->out_len = 0;
-	conn->out_off = 0;
+	esdm_egd_out_clear(conn);
 
 	return 0;
 }
@@ -916,6 +961,17 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		if (conn->in_len < cmd_len)
 			return 0;
 
+		/*
+		 * Nobody is left to take an answer, so a command that does
+		 * nothing but produce one is skipped - see
+		 * esdm_egd_peer_gone().
+		 */
+		if (conn->peer_gone &&
+		    conn->in[0] != ESDM_EGD_CMD_WRITE_ENTROPY) {
+			ret = 0;
+			goto consume;
+		}
+
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = esdm_egd_cmd_entropy_count(conn);
@@ -951,6 +1007,7 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			break;
 		}
 
+consume:
 		/* Do not leave client supplied entropy data in the buffer. */
 		memset_secure(conn->in, 0, cmd_len);
 		esdm_egd_consume(conn, cmd_len);
@@ -1361,9 +1418,25 @@ static int esdm_egd_handler(void *args)
 
 			conn = events[i].data.ptr;
 
-			if (events[i].events & (EPOLLERR | EPOLLHUP))
-				ret = -EPIPE;
-			else if (esdm_egd_out_pending(conn))
+			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+				/*
+				 * Gone for good - but on a stream socket what it
+				 * sent before it closed is still readable, and a
+				 * client writing and exiting right away raises
+				 * the hangup together with EPOLLIN. EPOLLERR is
+				 * no different: a Unix socket reports a client
+				 * that closed with a response of ours unread as
+				 * ECONNRESET, and still hands out the bytes it
+				 * sent before that error. Take what is there,
+				 * which ends at EOF or the error, and close.
+				 * Nothing is owed to the client any more, so the
+				 * RDHUP rule below does not hold this up.
+				 */
+				esdm_egd_peer_gone(conn);
+				ret = esdm_egd_read(conn);
+				if (!ret)
+					ret = -EPIPE;
+			} else if (esdm_egd_out_pending(conn))
 				/* Room was made - deliver the rest and go on. */
 				ret = esdm_egd_process(conn);
 			else

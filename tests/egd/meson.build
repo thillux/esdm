@@ -53,6 +53,24 @@ if get_option('esdm-server').enabled()
 
 	test('EGD server raw protocol', egd_server_raw_test, timeout: 300)
 
+	# The same setup for the end of a connection, the client's and the
+	# server's. The insertion command has no response, so the server's call
+	# into the auxiliary pool is renamed to a counting wrapper in the test.
+	egd_server_conn_test = executable(
+			'egd_server_conn_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_conn_test.c' ],
+			c_args: [
+				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+			],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server connection lifecycle', egd_server_conn_test,
+		timeout: 300)
+
 	# The per-UID connection accounting shared by the RPC and EGD servers,
 	# compiled into the test to inspect its table. Needs no server.
 	egd_peer_limit_test = executable(
