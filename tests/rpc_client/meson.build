@@ -52,6 +52,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_server_slow_reader_test = executable(
+			'rpc_server_slow_reader_test',
+			[ 'rpc_server_slow_reader_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	# This is just a helper for debugging - no real test
 	esdm_rpc_invoker = executable(
 			'esdm_rpc_invoker',
@@ -147,6 +155,11 @@ if get_option('esdm-server').enabled()
 	# Also a stand-in server on the unprivileged socket.
 	test('RPC client does not stall on calls waiting for the seeding',
 		rpc_client_blocking_test, is_parallel: false, timeout: 60)
+
+	# Times the server under load - not alongside other tests.
+	test('RPC server is not stalled by clients that do not read',
+		rpc_server_slow_reader_test, env: [ tester_esdm_env ],
+		is_parallel: false, timeout: 120)
 
 	test('RPC call get_seed_test', rpc_get_seed_test,
 		env: [ tester_esdm_env ])

@@ -24,7 +24,6 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <protobuf-c/protobuf-c.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -258,60 +257,42 @@ void esdm_server_remove_stale_socket(const char *path, int socktype)
  * Write data into an RPC connection.
  *
  * A write that cannot be completed closes the connection: the client would
- * otherwise wait for an answer that never comes. This includes a send buffer
- * that stays full - which with one request in flight at a time, as the clients
- * do it, only happens to a client that sends requests without reading the
- * answers. Waiting for such a client on every request would stall all other
- * connections served by the same worker thread.
+ * otherwise wait for an answer that never comes. This includes a full send
+ * buffer, which is not waited for at all. The clients have one request in
+ * flight at a time and read its answer before they send the next one, or drop
+ * the connection, so the answers of a connection never pile up beyond one - a
+ * full send buffer means a client that sends requests without reading the
+ * answers. Waiting for it, even briefly, would have the worker serve none of
+ * its other connections meanwhile, and a few hundred such connections of one
+ * unprivileged user would push everybody else on that worker past the
+ * client's timeouts. A client that does not read its answers loses them -
+ * SOCK_SEQPACKET hands out a message whole or not at all, so nothing is lost
+ * in the middle of one, and queueing the answer instead would only buy
+ * per-connection buffers for clients that do not want it.
  */
 static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 				const uint8_t *data, size_t len)
 {
-	const int TIMEOUT_MS = 5;
-	unsigned int retries = 0;
 	ssize_t ret;
 	int errsv;
 
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
 
-	for (;;) {
+	do {
 		ret = write(rpc_conn->child_fd, data, len);
-		if (ret >= 0)
-			break;
+	} while (ret < 0 && errno == EINTR);
 
+	if (ret < 0) {
 		errsv = errno;
-
-		/* we use non-blocking sockets */
-		if (errsv == EAGAIN && retries++ < ESDM_MAX_RX_TX_RETRIES) {
-			/* Wait a short moment for writeability, but not forever */
-			struct pollfd pfd = { .fd = rpc_conn->child_fd,
-					      .events = POLLOUT };
-			int poll_ret = poll(&pfd, 1, TIMEOUT_MS);
-
-			/* early check for writeable */
-			if (poll_ret > 0 && pfd.revents & POLLOUT)
-				continue;
-
-			/* signal? */
-			if (poll_ret < 0 && errno == EINTR)
-				continue;
-
-			if (poll_ret > 0) {
-				/* connection lost - POLLERR or POLLHUP */
-				errsv = EPIPE;
-			} else if (poll_ret == 0) {
-				/* the client does not read its answers */
-				errsv = ETIMEDOUT;
-			} else {
-				errsv = errno;
-			}
-		}
 
 		esdm_logger(
 			LOGGER_VERBOSE, LOGGER_C_RPC,
 			"Writing of data to file descriptor %d failed: %s\n",
-			rpc_conn->child_fd, strerror(errsv));
+			rpc_conn->child_fd,
+			(errsv == EAGAIN || errsv == EWOULDBLOCK) ?
+				"the client does not read its answers" :
+				strerror(errsv));
 
 		close(rpc_conn->child_fd);
 		rpc_conn->child_fd = -1;
