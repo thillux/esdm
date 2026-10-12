@@ -1468,6 +1468,32 @@ static void reinit_conns_after_fork(
 	}
 }
 
+/*
+ * Create esdm_rpcc_conn_lock anew with the kind its static initializer gives
+ * it. mutex_init() would create a default, reader-preferring rwlock, and from
+ * the first fork on the child's init and fini could then be starved by a
+ * steady stream of getters - see esdm_rpcc_conn_lock.
+ */
+static void esdm_rpcc_conn_lock_reinit(void)
+{
+#ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
+	pthread_rwlockattr_t attr;
+
+	if (!pthread_rwlockattr_init(&attr)) {
+		int ret = pthread_rwlockattr_setkind_np(
+			&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+
+		if (!ret)
+			ret = pthread_rwlock_init(&esdm_rpcc_conn_lock, &attr);
+		pthread_rwlockattr_destroy(&attr);
+		if (!ret)
+			return;
+	}
+#endif
+
+	mutex_init(&esdm_rpcc_conn_lock, 0);
+}
+
 static void cleanup_after_fork_child(void)
 {
 	reinit_conns_after_fork(&unpriv_rpc_conn, unpriv_rpc_conn_num);
@@ -1480,7 +1506,7 @@ static void cleanup_after_fork_child(void)
 	 * prepare_fork() ran: the sole surviving thread is the owner, so no
 	 * other thread in this process can be inside the lock.
 	 */
-	mutex_init(&esdm_rpcc_conn_lock, 0);
+	esdm_rpcc_conn_lock_reinit();
 }
 
 static void do_register_fork_handler(void)
