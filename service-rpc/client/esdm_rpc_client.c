@@ -150,6 +150,20 @@ static void esdm_fini_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 	mutex_w_destroy(&rpc_conn->ref_cnt);
 }
 
+/*
+ * Shall the request on @rpc_conn be abandoned? Either the caller's interrupt
+ * function says so for the data the connection was checked out with, or the
+ * deadline of that checkout passed.
+ */
+static bool esdm_rpcc_interrupted(const esdm_rpc_client_connection_t *rpc_conn)
+{
+	if (rpc_conn->interrupt_func &&
+	    rpc_conn->interrupt_func(rpc_conn->interrupt_data))
+		return true;
+
+	return esdm_rpcc_deadline_passed(rpc_conn->deadline);
+}
+
 static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 {
 	const char *socketname = rpc_conn->socketname;
@@ -219,9 +233,19 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 	}
 
 	do {
-		/* If we have another attempt, try to wait a bit */
-		if (attempts)
+		/*
+		 * If we have another attempt, try to wait a bit - unless the
+		 * caller wants us to stop. The attempts add up to seconds, e.g.
+		 * while a stale socket file refuses every connection, and the
+		 * deadline of a timed call as well as the interrupt function
+		 * would otherwise be ignored for as long. The error of the
+		 * last attempt is what is reported then.
+		 */
+		if (attempts) {
+			if (esdm_rpcc_interrupted(rpc_conn))
+				break;
 			nanosleep(&ts, NULL);
+		}
 
 		if (connect(rpc_conn->fd, (struct sockaddr *)&addr,
 			    sizeof(addr)) < 0) {
@@ -249,20 +273,6 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 	}
 
 	return -errsv;
-}
-
-/*
- * Shall the request on @rpc_conn be abandoned? Either the caller's interrupt
- * function says so for the data the connection was checked out with, or the
- * deadline of that checkout passed.
- */
-static bool esdm_rpcc_interrupted(const esdm_rpc_client_connection_t *rpc_conn)
-{
-	if (rpc_conn->interrupt_func &&
-	    rpc_conn->interrupt_func(rpc_conn->interrupt_data))
-		return true;
-
-	return esdm_rpcc_deadline_passed(rpc_conn->deadline);
 }
 
 static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
