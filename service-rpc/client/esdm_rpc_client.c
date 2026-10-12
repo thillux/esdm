@@ -929,12 +929,13 @@ static _Atomic uint32_t esdm_rpcc_max_nodes = UINT32_MAX;
 /*
  * Guards the pairing of a connection-array pointer and its count across
  * init/fini versus concurrent getters. A getter holds the reader side from
- * loading the array pointer until it owns a connection's ref_cnt, so a
- * concurrent fini (which takes the writer side for the pointer swap and only
- * then waits on each ref_cnt) can no longer destroy and free the array
- * between the getter's pointer load and its ref_cnt acquisition. The same
- * writer side serializes concurrent init calls against each other.
- * Writer-preferring so init/fini cannot be starved by a flood of getters.
+ * loading the array pointer until it owns a connection's ref_cnt or is counted
+ * as a waiter for it, so a concurrent fini (which takes the writer side for the
+ * pointer swap and only then waits for the waiters and each ref_cnt) can no
+ * longer destroy and free the array between the getter's pointer load and its
+ * ref_cnt acquisition. The same writer side serializes concurrent init calls
+ * against each other. Writer-preferring so init/fini cannot be starved by a
+ * flood of getters.
  */
 static mutex_t esdm_rpcc_conn_lock = MUTEX_UNLOCKED_PREFER_WRITER;
 
@@ -986,6 +987,8 @@ static uint32_t esdm_rpcc_curr_node(void)
 static void esdm_rpcc_release_conns(
 	esdm_rpc_client_connection_t *rpc_conn_array, uint32_t num_conn)
 {
+	static const struct timespec waiter_poll_ts = { .tv_sec = 0,
+							.tv_nsec = 1000000 };
 	struct timespec abstime;
 	esdm_rpc_client_connection_t *rpc_conn_p;
 	uint32_t i;
@@ -1012,12 +1015,27 @@ static void esdm_rpcc_release_conns(
 		 */
 		clock_gettime(CLOCK_MONOTONIC, &abstime);
 		abstime.tv_sec += 1;
-		if (mutex_w_timedlock(&rpc_conn_p->ref_cnt, &abstime)) {
+
+		/*
+		 * Getters queued for a busy connection wait on its ref_cnt
+		 * without the connection lock (see esdm_rpcc_get_service()), so
+		 * the mutex must not be destroyed while one of them is left.
+		 * All of them are known by now - none can join once the array
+		 * is unreachable - and each leaves soon after the owner put the
+		 * connection back, finding it in termination.
+		 */
+		while (atomic_load(&rpc_conn_p->waiters) &&
+		       !esdm_rpcc_deadline_passed(&abstime))
+			nanosleep(&waiter_poll_ts, NULL);
+
+		if (atomic_load(&rpc_conn_p->waiters) ||
+		    mutex_w_timedlock(&rpc_conn_p->ref_cnt, &abstime)) {
 			/*
-			 * A live caller still owns this connection and did not
-			 * return it in time. Neither the mutexes nor the socket
-			 * may be recycled while a running request can reach
-			 * them, so leak the whole array below rather than risk a
+			 * A live caller still owns this connection, or waits
+			 * for it, and did not return it in time. Neither the
+			 * mutexes nor the socket may be recycled while a
+			 * running request can reach them, so leak the whole
+			 * array below rather than risk a
 			 * use-after-free. A connection whose owner died is not
 			 * this case: ref_cnt is robust, so the timedlock takes
 			 * it over and the handle is torn down normally.
@@ -1058,11 +1076,11 @@ static void esdm_rpcc_fini_service(
 
 	/*
 	 * Swap the pointer/count pair under the writer side of the connection
-	 * lock: getters read both and take their ref_cnt under the reader side,
-	 * so afterwards every getter either sees NULL or owns a ref_cnt the
-	 * timedlock loop below waits for. The same lock guards the init
-	 * reference count, making the teardown decision and the swap atomic
-	 * against a concurrent init.
+	 * lock: getters read both and take their ref_cnt - or register as its
+	 * waiter - under the reader side, so afterwards every getter either
+	 * sees NULL or is accounted for in a connection the release below
+	 * waits for. The same lock guards the init reference count, making the
+	 * teardown decision and the swap atomic against a concurrent init.
 	 */
 	mutex_lock(&esdm_rpcc_conn_lock);
 
@@ -1231,11 +1249,13 @@ static int esdm_rpcc_get_service(
 
 	/*
 	 * Hold the reader side from the pointer load until the connection's
-	 * ref_cnt is owned: fini swaps the pointer under the writer side and
-	 * only then waits on each ref_cnt, so it cannot destroy and free the
-	 * array between our load and the ref_cnt acquisition. The lock also
-	 * makes the pointer and count a consistent pair (no transient
-	 * non-NULL pointer with count 0 and its modulo-by-zero SIGFPE).
+	 * ref_cnt is owned - or, if the connection is busy, until this getter
+	 * is registered as one of its waiters: fini swaps the pointer under the
+	 * writer side and only then waits for the waiters and each ref_cnt, so
+	 * it cannot destroy and free the array between our load and the
+	 * ref_cnt acquisition. The lock also makes the pointer and count a
+	 * consistent pair (no transient non-NULL pointer with count 0 and its
+	 * modulo-by-zero SIGFPE).
 	 */
 	mutex_reader_lock(&esdm_rpcc_conn_lock);
 
@@ -1277,29 +1297,69 @@ static int esdm_rpcc_get_service(
 	}
 
 	if (!found_unused_conn) {
+		int lock_ret;
+
 		rpc_conn_p = rpc_conn_array + node % num_conn;
 
 		/*
 		 * Wait until the previous call completed - each connection
 		 * handle has only one caller at one given time. Lock the
 		 * ref_cnt if we obtained the connection handle.
+		 *
+		 * Not under the connection lock: the wait lasts as long as the
+		 * owner's request, and meanwhile the writer-preferring lock
+		 * would hold off a fork in prepare_fork() and, behind it, every
+		 * new getter of the process - also those that would find an
+		 * idle connection. Being a waiter keeps the connection alive
+		 * instead: fini only destroys it once there are none left, and
+		 * none can join after fini removed the array, which it does
+		 * under the writer side. So the array outlives the wait and
+		 * the state check below - which, as fini marks the connections
+		 * before it waits, also tells whether it was torn down.
 		 */
-		mutex_w_lock(&rpc_conn_p->ref_cnt);
+		atomic_fetch_add(&rpc_conn_p->waiters, 1);
+		mutex_reader_unlock(&esdm_rpcc_conn_lock);
+
+		if (deadline) {
+			lock_ret = mutex_w_timedlock(&rpc_conn_p->ref_cnt,
+						     deadline);
+		} else {
+			mutex_w_lock(&rpc_conn_p->ref_cnt);
+			lock_ret = 0;
+		}
+
+		/*
+		 * The last access to the connection unless ref_cnt is owned -
+		 * fini may free it right after.
+		 */
+		atomic_fetch_sub(&rpc_conn_p->waiters, 1);
+
+		if (lock_ret) {
+			*ret_rpc_conn = NULL;
+			return -ETIMEDOUT;
+		}
+	} else {
+		mutex_reader_unlock(&esdm_rpcc_conn_lock);
 	}
 
+	/*
+	 * The connection lock is not held any more, ref_cnt is - fini waits
+	 * for it before it tears the connection down.
+	 */
 	if (atomic_load(&rpc_conn_p->state) != esdm_rpcc_initialized) {
 		mutex_w_unlock(&rpc_conn_p->ref_cnt);
 
 		/* Safety measure */
 		*ret_rpc_conn = NULL;
 
-		ret = -ESHUTDOWN;
-		goto out;
+		return -ESHUTDOWN;
 	}
 
 	*ret_rpc_conn = rpc_conn_p;
 	rpc_conn_p->interrupt_data = int_data;
 	rpc_conn_p->deadline = deadline;
+
+	return 0;
 
 out:
 	mutex_reader_unlock(&esdm_rpcc_conn_lock);
@@ -1335,6 +1395,40 @@ int esdm_rpcc_get_unpriv_service_deadline(
 	esdm_rpc_client_connection_t **rpc_conn, void *int_data,
 	const struct timespec *deadline)
 {
+	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				     rpc_conn, int_data, deadline);
+}
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
+				   void *int_data,
+				   const struct timespec *deadline)
+{
+	struct timespec sleep_ts = esdm_client_poll_ts;
+
+	esdm_rpcc_put_unpriv_service(*rpc_conn);
+	*rpc_conn = NULL;
+
+	if (deadline) {
+		struct timespec now;
+		int64_t left_ns;
+
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		left_ns = ((int64_t)deadline->tv_sec - (int64_t)now.tv_sec) *
+				  1000000000LL +
+			  ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec);
+		if (left_ns <= 0)
+			return -ETIMEDOUT;
+
+		if (left_ns < (int64_t)sleep_ts.tv_sec * 1000000000LL +
+				      sleep_ts.tv_nsec) {
+			sleep_ts.tv_sec = (time_t)(left_ns / 1000000000LL);
+			sleep_ts.tv_nsec = (long)(left_ns % 1000000000LL);
+		}
+	}
+
+	nanosleep(&sleep_ts, NULL);
+
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
 				     rpc_conn, int_data, deadline);
 }
@@ -1443,8 +1537,8 @@ static pthread_once_t fork_handler_once = PTHREAD_ONCE_INIT;
  * array the child considers empty forever (init). It also keeps the child from
  * inheriting the lock held by a thread that no longer exists, which would
  * deadlock its first esdm_rpcc_get_service(). The price is that a fork waits
- * for an in-flight getter, bounded by one RPC round trip and only when all
- * connections are busy.
+ * for the getters inside the lock, which only look for an idle connection
+ * there - one that has to wait for a busy connection does so outside of it.
  */
 static void prepare_fork(void)
 {
@@ -1488,6 +1582,7 @@ static void reinit_conns_after_fork(
 		 */
 		rpc_conn_array[i].interrupt_data = NULL;
 		rpc_conn_array[i].deadline = NULL;
+		atomic_store(&rpc_conn_array[i].waiters, 0);
 		mutex_w_destroy(&rpc_conn_array[i].ref_cnt);
 		mutex_w_destroy(&rpc_conn_array[i].lock);
 		mutex_w_init(&rpc_conn_array[i].ref_cnt, 0, 1);

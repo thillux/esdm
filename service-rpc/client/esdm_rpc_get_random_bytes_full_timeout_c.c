@@ -151,7 +151,12 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 			maxbuflen = new_max;
 			continue;
 		} else if (buffer.ret == -EAGAIN) {
-			nanosleep(&esdm_client_poll_ts, NULL);
+			/*
+			 * Not seeded yet - wait without holding the connection,
+			 * and not beyond the deadline.
+			 */
+			CKINT(esdm_rpcc_unpriv_service_pause(&rpc_conn, int_data,
+							     &timeout));
 			continue;
 		} else if (buffer.ret < 0) {
 			ret = buffer.ret;

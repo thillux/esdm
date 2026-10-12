@@ -127,7 +127,8 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 			 * spin.
 			 */
 			if (eagain++)
-				nanosleep(&esdm_client_poll_ts, NULL);
+				CKINT(esdm_rpcc_unpriv_service_pause(
+					&rpc_conn, int_data, NULL));
 			continue;
 		} else if (buffer.ret < 0) {
 			ret = buffer.ret;

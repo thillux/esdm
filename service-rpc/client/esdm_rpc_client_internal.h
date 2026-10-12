@@ -95,6 +95,13 @@ struct esdm_rpc_client_connection {
 	atomic_int state;
 
 	/*
+	 * Getters waiting for ref_cnt. They wait without the connection lock,
+	 * so this is what keeps the teardown from destroying the mutex under
+	 * them - see esdm_rpcc_get_service().
+	 */
+	atomic_uint waiters;
+
+	/*
 	 * The request/response and unpack scratch buffers are not stored per
 	 * connection but per calling thread (see esdm_rpcc_reqbuf /
 	 * esdm_rpcc_unpack_buf in esdm_rpc_client.c): they are only ever used
@@ -170,14 +177,16 @@ static inline bool esdm_rpcc_deadline_passed(const struct timespec *deadline)
  *
  * As esdm_rpcc_get_unpriv_service, but the requests sent on the connection
  * until it is put back are abandoned once @deadline passed, as if the interrupt
- * function had fired - in addition to whatever that function decides.
+ * function had fired - in addition to whatever that function decides. A
+ * checkout that has to wait for a busy connection gives up at @deadline.
  *
  * @param [out] rpc_conn Set to the connection handle to be used
  * @param [in] int_data Opaque data pointer for the interrupt function
  * @param [in] deadline Absolute CLOCK_MONOTONIC time, NULL for none. It must
  *			stay valid until the connection is put back.
  *
- * @return 0 on success, < 0 on error as esdm_rpcc_get_unpriv_service
+ * @return 0 on success, -ETIMEDOUT when @deadline passed while waiting for the
+ *	   connection, < 0 on other errors as esdm_rpcc_get_unpriv_service
  */
 int esdm_rpcc_get_unpriv_service_deadline(
 	esdm_rpc_client_connection_t **rpc_conn, void *int_data,
@@ -186,6 +195,30 @@ int esdm_rpcc_get_unpriv_service_deadline(
 /* Sleep time for poll operations */
 static const struct timespec esdm_client_poll_ts = { .tv_sec = 1,
 						     .tv_nsec = 0 };
+
+/**
+ * @brief Wait the poll interval before an unprivileged request is sent again
+ *
+ * The ESDM answers -EAGAIN as long as it cannot serve a request, which may last
+ * until it is seeded. The connection is put back for the wait and checked out
+ * anew afterwards - holding it would stall every other caller that needs it
+ * for as long, also those that must not block at all, such as a check whether
+ * the ESDM is seeded.
+ *
+ * @param [in,out] rpc_conn The checked out connection, which is put back. Set
+ *			    to the connection checked out after the wait, NULL
+ *			    when that failed.
+ * @param [in] int_data Opaque data pointer for the interrupt function
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time of the call, NULL for
+ *			none. The wait does not last beyond it, and the new
+ *			checkout carries it as well.
+ *
+ * @return 0 on success, -ETIMEDOUT when @deadline passed, < 0 on other errors
+ *	   of esdm_rpcc_get_unpriv_service
+ */
+int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
+				   void *int_data,
+				   const struct timespec *deadline);
 
 #ifdef __cplusplus
 }
