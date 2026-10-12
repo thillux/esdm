@@ -475,6 +475,55 @@ static void test_write_dispatch(void)
 	CHECK_EQ(esdm_proc_write(NULL, val, 2, 0, NULL), -ENOENT);
 }
 
+/* What the setter of a file was handed by the last write */
+static const char *test_written_buf;
+static size_t test_written_len;
+
+static int test_write_record(struct esdm_proc_file *file, const char *buf,
+			     size_t buflen)
+{
+	(void)file;
+	test_written_buf = buf;
+	test_written_len = buflen;
+
+	return 0;
+}
+
+/*
+ * FUSE hands the write handler the data at the file offset already: buf and
+ * size are what the caller wrote, the offset is where. The setter gets all of
+ * it, wherever the write landed - applying the offset to buf once more fed it
+ * the wrong bytes for every write at a non-zero offset.
+ */
+static void test_write_offset(void)
+{
+	static const char val[] = "42";
+	struct esdm_proc_file *thresh = file_by_name("write_wakeup_threshold");
+	int (*write_data)(struct esdm_proc_file *file, const char *buf,
+			  size_t buflen);
+	off_t off;
+
+	if (!thresh)
+		return;
+
+	write_data = thresh->write_data;
+	thresh->write_data = test_write_record;
+
+	for (off = 0; off <= 1; off++) {
+		test_written_buf = NULL;
+		test_written_len = 0;
+		CHECK_EQ(esdm_proc_write("/write_wakeup_threshold", val, 2,
+					 off, NULL),
+			 2);
+		CHECK(test_written_buf == val && test_written_len == 2,
+		      "a write at offset %lld handed the setter %zu bytes at %+td",
+		      (long long)off, test_written_len,
+		      test_written_buf ? test_written_buf - val : 0);
+	}
+
+	thresh->write_data = write_data;
+}
+
 /*
  * What a caller may put into the two writable files. All of it is rejected
  * before the value reaches the ESDM, which is the point: an unusable number
@@ -770,6 +819,7 @@ int main(int argc, char *argv[])
 	test_no_shared_content();
 	test_read_uuid();
 	test_write_dispatch();
+	test_write_offset();
 	test_write_values_rejected();
 	test_write_values_parsed();
 	test_fill_data_without_server();
