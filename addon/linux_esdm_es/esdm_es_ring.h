@@ -109,7 +109,11 @@ u32 esdm_es_ring_collect(struct esdm_es_ring *ring, u32 requested_events,
  */
 bool esdm_es_ring_release(struct esdm_es_ring *ring);
 
-/* Producer: append one event to the current CPU's ring (hot path). */
+/*
+ * Producer: append one event to the current CPU's ring (hot path). The caller
+ * must keep it from being reentered on the same CPU, e.g. by running with
+ * interrupts disabled.
+ */
 static inline void esdm_es_ring_add(struct esdm_es_ring *ring, u64 data)
 {
 	struct esdm_es_ring_cpu *rc = this_cpu_ptr(ring->cpu);

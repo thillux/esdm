@@ -120,9 +120,26 @@ static void esdm_sched_pool_extract(struct entropy_buf *eb, u32 requested_bits)
 
 static void esdm_sched_randomness(const struct task_struct *p, int cpu)
 {
+	unsigned long flags;
+
+	/*
+	 * The hook runs from try_to_wake_up() after it dropped p->pi_lock, i.e.
+	 * with only preemption disabled. An interrupt waking up a task nests
+	 * a second call on this CPU, but the per-CPU ring write pointer, the
+	 * last timestamp and the stuck test assume a single producer per CPU:
+	 * with the nested call between the outer call's load and store of wp,
+	 * the outer one moves wp back behind the events the nested one added.
+	 * If the consumer released those in the meantime, wp ends behind rp
+	 * and the ring presents almost ESDM_DATA_NUM_VALUES stale events as
+	 * new ones. Keep interrupts off for the update. The interrupt ES does
+	 * not need this, it runs in hard interrupt context with interrupts
+	 * disabled already.
+	 */
+	local_irq_save(flags);
 	esdm_time_process(&esdm_sched_ring, esdm_int_es_sched,
 			  esdm_raw_sched_hires_entropy_store,
 			  esdm_sched_perf_time);
+	local_irq_restore(flags);
 }
 
 static void esdm_sched_es_state(unsigned char *buf, size_t buflen)
