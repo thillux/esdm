@@ -96,7 +96,7 @@ static int es_sched_getdata(void)
 {
 	struct entropy_es eb_es;
 	uint8_t zero[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
-	uint32_t loops;
+	uint32_t loops, delivered = 0;
 
 	if (!esdm_es[esdm_int_es_sched]->get_ent) {
 		printf("ES Scheduler - fail: get_ent callback missing\n");
@@ -126,7 +126,18 @@ static int es_sched_getdata(void)
 				return 1;
 			}
 			printf("ES Scheduler - pass: buffer with entropy is not zero\n");
+			delivered++;
 		}
+	}
+
+	/*
+	 * Each iteration creates scheduler events before it asks, so a source
+	 * that never delivers any entropy is broken - not merely empty.
+	 */
+	if (!delivered) {
+		printf("ES Scheduler - fail: get_ent did not deliver entropy in any of %u iterations\n",
+		       loops);
+		return 1;
 	}
 
 	return 0;
@@ -328,7 +339,7 @@ int main(int argc, char *argv[])
 	ret = es_sched_getstate();
 	if (ret == -ENOENT) {
 		printf("ES Scheduler: disabled, skipping test\n");
-		return 0;
+		return 77;
 	}
 
 	ret += es_sched_name();
