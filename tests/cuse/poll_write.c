@@ -235,6 +235,55 @@ out:
 	return ret;
 }
 
+/**
+ * Test poll system call on /dev/urandom
+ *
+ * Expected: poll never waits. The kernel's /dev/urandom has no poll handler,
+ * so it is always readable and writable - also with the ESDM holding all the
+ * entropy it asks for, where /dev/random is not writable.
+ */
+static int test_poll_urandom(const char *path)
+{
+	struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
+	fd_set rfds, wfds;
+	int ret = 0, fd;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		ret = errno;
+		printf("Cannot open file %s: %d\n", path, ret);
+		return -ret;
+	}
+
+	ret = fill_aux_pool(fd);
+	if (ret)
+		goto out;
+
+	FD_ZERO(&rfds);
+	FD_SET(fd, &rfds);
+	FD_ZERO(&wfds);
+	FD_SET(fd, &wfds);
+
+	ret = select((fd + 1), &rfds, &wfds, NULL, &timeout);
+	if (ret == 2) {
+		printf("Poll - passed: /dev/urandom is readable and writable\n");
+		ret = 0;
+	} else if (ret == -1) {
+		printf("Poll - failed: select returns unexpected error code: %u\n",
+		       errno);
+		ret = 1;
+	} else {
+		printf("Poll - failed: /dev/urandom is %s%s\n",
+		       FD_ISSET(fd, &rfds) ? "" : "not readable ",
+		       FD_ISSET(fd, &wfds) ? "" : "not writable");
+		ret = 1;
+	}
+
+out:
+	close(fd);
+	return ret;
+}
+
 int main(int argc, char *argv[])
 {
 	char devfile[20];
@@ -256,7 +305,10 @@ int main(int argc, char *argv[])
 	if (ret)
 		return ret;
 
-	ret = test_poll_write(devfile);
+	if (!strcmp(argv[1], "urandom"))
+		ret = test_poll_urandom(devfile);
+	else
+		ret = test_poll_write(devfile);
 
 	env_fini();
 

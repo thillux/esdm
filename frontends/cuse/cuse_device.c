@@ -1283,6 +1283,24 @@ err:
 	fuse_reply_err(req, err_code);
 }
 
+/*
+ * poll() of /dev/urandom. The kernel's urandom_fops have no poll handler, so the
+ * device is always readable and writable: a read never waits for the seeding,
+ * and a write is always taken. A program that polls the device before reading
+ * from it must not wait for the ESDM here, during boot it may wait for good.
+ */
+void esdm_cuse_poll_urandom(fuse_req_t req, struct fuse_file_info *fi,
+			    struct fuse_pollhandle *ph)
+{
+	(void)fi;
+
+	fuse_reply_poll(req, ESDM_POLL_READER | ESDM_POLL_WRITER);
+
+	/* Nothing will change, so there is nothing to notify about */
+	if (ph)
+		fuse_pollhandle_destroy(ph);
+}
+
 /* Poll checker handler executed in separate thread */
 static int esdm_cuse_poll_checker(void __unused *unused)
 {

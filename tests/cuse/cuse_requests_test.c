@@ -293,6 +293,45 @@ static void test_read_reply_once(void)
 	CHECK_EQ(r.size, 4096);
 }
 
+/*
+ * /dev/urandom is always readable and writable, as the kernel's is, which has
+ * no poll handler. Without a status segment, nothing tells that the ESDM is
+ * seeded - which /dev/random waits for, but /dev/urandom does not.
+ */
+static void test_poll_urandom(void)
+{
+	static const unsigned int all =
+		POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+	struct fuse_file_info fi;
+	struct test_req r;
+
+	CHECK(esdm_cuse_shm_status == NULL,
+	      "the status segment is attached, which this test does not expect");
+
+	memset(&fi, 0, sizeof(fi));
+	fi.poll_events = POLLIN;
+	test_req_init(&r);
+	esdm_cuse_poll_urandom((fuse_req_t)&r, &fi, NULL);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.kind, REPLY_POLL);
+	CHECK_EQ(r.revents, all);
+
+	fi.poll_events = POLLOUT;
+	test_req_init(&r);
+	esdm_cuse_poll_urandom((fuse_req_t)&r, &fi, NULL);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.revents, all);
+
+	/* /dev/random has nothing to report then */
+	fi.fh = 1;
+	fi.poll_events = POLLIN;
+	test_req_init(&r);
+	esdm_cuse_poll((fuse_req_t)&r, &fi, NULL);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.revents, 0);
+	esdm_cuse_poll_remove_fh(1, false);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -306,6 +345,7 @@ int main(int argc, char *argv[])
 	atomic_store(&esdm_cuse_ready, true);
 
 	test_read_reply_once();
+	test_poll_urandom();
 
 	return common_test_result("cuse_requests");
 }
