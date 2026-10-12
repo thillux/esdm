@@ -73,8 +73,12 @@
 
 #if defined(ESDM_TESTMODE) && defined(ESDM_ES_JENT)
 
-/* Wait for the initial seeding at most this many 100ms slices */
-#define ESDM_SEC_SEED_SLICES 100
+/*
+ * Wait for the initial seeding at most this many 100ms slices. A working
+ * Jitter RNG seeds the ESDM within seconds, a sanitizer build within a few
+ * times that - running out of this is a failure, not a skip.
+ */
+#define ESDM_SEC_SEED_SLICES 900
 
 /*
  * Requests made before the output has to have stopped. Two would do: the
@@ -205,6 +209,20 @@ static int esdm_jent_only_security_test(void)
 	if (!TEST_CHECK(ret == 0, "%d", ret))
 		goto out;
 
+	/*
+	 * No working Jitter RNG on this machine - its startup health test
+	 * failed - so the source this test is about never delivers: there is
+	 * nothing to observe losing. That is known right after the
+	 * initialization, a seeding that does not happen with a working one is
+	 * a failure.
+	 */
+	TEST_REQUIRE("the Jitter RNG works on this machine (test skipped otherwise)");
+	if (!esdm_es_jent.active || !esdm_es_jent.active()) {
+		printf("the Jitter RNG is not usable on this machine, skipping test\n");
+		ret = 77;
+		goto out;
+	}
+
 	if (esdm_sec_needs_second_source()) {
 		TEST_RUNUNTIL(
 			"credit the auxiliary pool with %u bits whenever it is empty and wait 100 ms until the ESDM is fully seeded, at most %u times",
@@ -222,18 +240,12 @@ static int esdm_jent_only_security_test(void)
 		esdm_sec_sleep(0, 100 * 1000 * 1000);
 	}
 
-	TEST_REQUIRE(
-		"the ESDM is fully seeded with the Jitter RNG credited (test skipped otherwise)");
+	TEST_REQUIRE("the ESDM is fully seeded with the Jitter RNG credited");
 	if (!TEST_CHECK(esdm_state_fully_seeded(), "%d",
 			esdm_state_fully_seeded())) {
-		/*
-		 * No working Jitter RNG on this machine, so the source this
-		 * test is about never delivered - there is nothing to observe
-		 * losing.
-		 */
-		printf("the ESDM is not fully seeded with the Jitter RNG credited, skipping test\n");
-		ret = 77;
-		goto out;
+		printf("the ESDM is not fully seeded after %u ms with a working Jitter RNG credited\n",
+		       ESDM_SEC_SEED_SLICES * 100);
+		goto err;
 	}
 
 	/*

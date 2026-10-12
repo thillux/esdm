@@ -409,8 +409,11 @@ if get_option('esdm-server').enabled()
 	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
 		timeout: 120)
 
+	# Waits up to 90 seconds for the Jitter RNG to seed the ESDM before it
+	# counts that as a failure, which a slow sanitizer build may need.
 	test('ESDM security - Jitter RNG as the only credited source',
-		esdm_jent_only_security_test)
+		esdm_jent_only_security_test,
+		timeout: 180)
 
 	# Sits out two reseed intervals of five seconds and 2^11 requests.
 	test('ESDM security - reseed on interval and request threshold',
