@@ -61,29 +61,6 @@ static void esdm_rpcc_get_random_bytes_full_timeout_cb(
 	/* Zeroization of response is handled in esdm_rpc_client_read_handler */
 }
 
-static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
-{
-	if (curr == NULL || timeout == NULL)
-		return false;
-
-	if (curr->tv_sec > timeout->tv_sec)
-		return true;
-	if (curr->tv_sec == timeout->tv_sec && curr->tv_nsec > timeout->tv_nsec)
-		return true;
-
-	return false;
-}
-
-static int int_connection_after_timeout(void *time)
-{
-	struct timespec *timeout = (struct timespec *)time;
-	struct timespec cur_time;
-
-	clock_gettime(CLOCK_MONOTONIC, &cur_time);
-
-	return esdm_time_after(&cur_time, timeout);
-}
-
 DSO_PUBLIC
 ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 						    struct timespec *ts,
@@ -95,29 +72,28 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 	size_t maxbuflen = buflen, orig_buflen = buflen;
 	struct timespec timeout;
 	ssize_t ret = 0;
-	esdm_rpcc_interrupt_func_t old_interrupt_func = NULL;
-	bool interrupt_func_replaced = false;
 
 	CKNULL(ts, -EINVAL);
 
 	CKINT(clock_gettime(CLOCK_MONOTONIC, &timeout));
 	timeout.tv_sec += ts->tv_sec;
 	timeout.tv_nsec += ts->tv_nsec;
-	if (timeout.tv_nsec > 1000000000) {
+	if (timeout.tv_nsec >= 1000000000) {
 		timeout.tv_sec += timeout.tv_nsec / 1000000000;
 		timeout.tv_nsec = timeout.tv_nsec % 1000000000;
 	}
 
-	/* register default timeout handler if no one is already set */
-	if (int_data == NULL) {
-		int_data = &timeout;
-		CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
-		old_interrupt_func = rpc_conn->interrupt_func;
-		rpc_conn->interrupt_func = int_connection_after_timeout;
-		interrupt_func_replaced = true;
-	} else {
-		CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
-	}
+	/*
+	 * The deadline is a property of this checkout of the connection, not of
+	 * the connection: the interrupt function is shared by all users of the
+	 * service and inherited by a child forked meanwhile, so replacing it
+	 * for the duration of the call would take it away from everybody else
+	 * and, in such a child, for good - the int_data of its later calls
+	 * then taken for a struct timespec. Both the deadline and the
+	 * registered interrupt function, invoked with @int_data, apply.
+	 */
+	CKINT(esdm_rpcc_get_unpriv_service_deadline(&rpc_conn, int_data,
+						    &timeout));
 
 	while (buflen) {
 		buffer.ret = -ETIMEDOUT;
@@ -144,15 +120,15 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 			goto out;
 
 		/*
-		 * Our own interrupt handler firing means the deadline passed.
-		 * The write phase leaves the -ETIMEDOUT placeholder untouched
-		 * (no closure call), the read phase invokes the closure with
-		 * -EINTR. Report -ETIMEDOUT for both: propagating -EINTR would
-		 * make the caller's esdm_invoke() restart the request up to five
-		 * more times, each with a fresh deadline.
+		 * The deadline passing interrupts the request. The write phase
+		 * leaves the -ETIMEDOUT placeholder untouched (no closure
+		 * call), the read phase invokes the closure with -EINTR. Report
+		 * -ETIMEDOUT for both: propagating -EINTR would make the
+		 * caller's esdm_invoke() restart the request up to five more
+		 * times, each with a fresh deadline. An -EINTR before the
+		 * deadline came from the interrupt function and is passed on.
 		 */
-		if (interrupt_func_replaced && buffer.ret == -EINTR &&
-		    int_connection_after_timeout(&timeout)) {
+		if (buffer.ret == -EINTR && esdm_rpcc_deadline_passed(&timeout)) {
 			ret = -ETIMEDOUT;
 			goto out;
 		}
@@ -188,17 +164,6 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 	}
 
 out:
-	/*
-	 * Restore whatever was registered before - including NULL, which is
-	 * what a service initialized without an interrupt function has. Keying
-	 * this off old_interrupt_func being non-NULL would leave our handler
-	 * installed on the shared connection for good in exactly that case,
-	 * together with an interrupt_data pointing at this stack frame.
-	 */
-	if (interrupt_func_replaced) {
-		rpc_conn->interrupt_func = old_interrupt_func;
-	}
-
 	esdm_rpcc_put_unpriv_service(rpc_conn);
 	return (ret < 0) ? ret : (ssize_t)orig_buflen;
 }

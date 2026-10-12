@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include "mutex_w.h"
 #include "queue.h"
 
@@ -69,6 +70,15 @@ struct esdm_rpc_client_connection {
 	 */
 	esdm_rpcc_interrupt_func_t interrupt_func;
 	void *interrupt_data;
+
+	/*
+	 * Absolute CLOCK_MONOTONIC time after which the requests of the current
+	 * checkout are abandoned like an interrupted one, NULL for none. Set by
+	 * every checkout together with interrupt_data, so - unlike a swapped
+	 * interrupt_func - it never outlives the call that asked for it: not
+	 * when the call returns, and not in a child forked meanwhile.
+	 */
+	const struct timespec *deadline;
 
 	/*
 	 * Both are robust mutexes, so a caller killed while owning the
@@ -134,6 +144,44 @@ esdm_rpcc_last_error(const esdm_rpc_client_connection_t *rpc_conn)
 
 	return (ret < 0 && ret != -EAGAIN) ? ret : 0;
 }
+
+/**
+ * @brief Has the absolute CLOCK_MONOTONIC time @deadline passed?
+ *
+ * @return true once the clock reached @deadline, false before and for a NULL
+ *	   @deadline
+ */
+static inline bool esdm_rpcc_deadline_passed(const struct timespec *deadline)
+{
+	struct timespec now;
+
+	if (!deadline)
+		return false;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	return now.tv_sec > deadline->tv_sec ||
+	       (now.tv_sec == deadline->tv_sec &&
+		now.tv_nsec >= deadline->tv_nsec);
+}
+
+/**
+ * @brief Check out an unprivileged connection whose requests end at a deadline
+ *
+ * As esdm_rpcc_get_unpriv_service, but the requests sent on the connection
+ * until it is put back are abandoned once @deadline passed, as if the interrupt
+ * function had fired - in addition to whatever that function decides.
+ *
+ * @param [out] rpc_conn Set to the connection handle to be used
+ * @param [in] int_data Opaque data pointer for the interrupt function
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time, NULL for none. It must
+ *			stay valid until the connection is put back.
+ *
+ * @return 0 on success, < 0 on error as esdm_rpcc_get_unpriv_service
+ */
+int esdm_rpcc_get_unpriv_service_deadline(
+	esdm_rpc_client_connection_t **rpc_conn, void *int_data,
+	const struct timespec *deadline);
 
 /* Sleep time for poll operations */
 static const struct timespec esdm_client_poll_ts = { .tv_sec = 1,

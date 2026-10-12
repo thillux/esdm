@@ -251,6 +251,20 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 	return -errsv;
 }
 
+/*
+ * Shall the request on @rpc_conn be abandoned? Either the caller's interrupt
+ * function says so for the data the connection was checked out with, or the
+ * deadline of that checkout passed.
+ */
+static bool esdm_rpcc_interrupted(const esdm_rpc_client_connection_t *rpc_conn)
+{
+	if (rpc_conn->interrupt_func &&
+	    rpc_conn->interrupt_func(rpc_conn->interrupt_data))
+		return true;
+
+	return esdm_rpcc_deadline_passed(rpc_conn->deadline);
+}
+
 static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 					 const uint8_t *data, size_t len)
 {
@@ -265,10 +279,8 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 
 	do {
 		/* Does the caller wants us to interrupt? */
-		if (rpc_conn->interrupt_func &&
-		    rpc_conn->interrupt_func(rpc_conn->interrupt_data)) {
+		if (esdm_rpcc_interrupted(rpc_conn))
 			return -EAGAIN;
-		}
 
 		retries++;
 		/*
@@ -439,8 +451,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 	/* Read the data into the local buffer storage */
 	do {
 		/* Does the caller wants us to interrupt? */
-		if (rpc_conn->interrupt_func &&
-		    rpc_conn->interrupt_func(rpc_conn->interrupt_data)) {
+		if (esdm_rpcc_interrupted(rpc_conn)) {
 			interrupted = true;
 			break;
 		}
@@ -1207,7 +1218,7 @@ out:
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
 	uint32_t *num_conn_ptr, esdm_rpc_client_connection_t **ret_rpc_conn,
-	void *int_data)
+	void *int_data, const struct timespec *deadline)
 {
 	esdm_rpc_client_connection_t *rpc_conn_array, *rpc_conn_p;
 	uint32_t node, num_conn;
@@ -1288,6 +1299,7 @@ static int esdm_rpcc_get_service(
 
 	*ret_rpc_conn = rpc_conn_p;
 	rpc_conn_p->interrupt_data = int_data;
+	rpc_conn_p->deadline = deadline;
 
 out:
 	mutex_reader_unlock(&esdm_rpcc_conn_lock);
@@ -1315,7 +1327,16 @@ int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
 				 void *int_data)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data);
+				     rpc_conn, int_data, NULL);
+}
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+int esdm_rpcc_get_unpriv_service_deadline(
+	esdm_rpc_client_connection_t **rpc_conn, void *int_data,
+	const struct timespec *deadline)
+{
+	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				     rpc_conn, int_data, deadline);
 }
 
 DSO_PUBLIC
@@ -1362,7 +1383,7 @@ int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
 			       void *int_data)
 {
 	return esdm_rpcc_get_service(&priv_rpc_conn, &priv_rpc_conn_num,
-				     rpc_conn, int_data);
+				     rpc_conn, int_data, NULL);
 }
 
 DSO_PUBLIC
@@ -1461,6 +1482,12 @@ static void reinit_conns_after_fork(
 		 * such as RNDADDENTROPY would be credited twice.
 		 */
 		drop_conn_socket(&rpc_conn_array[i], false);
+		/*
+		 * Whatever a parent's thread checked the connection out with
+		 * belongs to a call that does not exist here.
+		 */
+		rpc_conn_array[i].interrupt_data = NULL;
+		rpc_conn_array[i].deadline = NULL;
 		mutex_w_destroy(&rpc_conn_array[i].ref_cnt);
 		mutex_w_destroy(&rpc_conn_array[i].lock);
 		mutex_w_init(&rpc_conn_array[i].ref_cnt, 0, 1);

@@ -406,8 +406,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
  * @param [in] buflen Size of the buffer to be filled.
  * @param [in] ts maximum timeout after which the waiting will be stopped
  *
- * @return: read data length on success, < 0 on error (-EINTR means connection
- *	    was interrupted and the caller may try again)
+ * @return: read data length on success, < 0 on error (-ETIMEDOUT once @ts
+ *	    elapsed, -EINTR means connection was interrupted and the caller may
+ *	    try again)
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
 						struct timespec *ts);
@@ -418,6 +419,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
  * The function allows specifying an interrupt callback data structure that
  * is used when invoking the interrupt check function registered with
  * esdm_rpcc_init_priv_service / esdm_rpcc_init_unpriv_service
+ *
+ * Both apply: the call ends with -ETIMEDOUT once @ts elapsed, and with -EINTR
+ * when the interrupt function, invoked with @int_data, asks for it before.
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 						    struct timespec *ts,
