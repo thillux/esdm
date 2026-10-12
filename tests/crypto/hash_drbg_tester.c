@@ -95,13 +95,13 @@ static int hash_drbg_tester(void)
 		return 1;
 
 	if (esdm_drbg_seed(drbg_stack, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	/* Checks the output and that an output off by a byte is rejected */
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
@@ -110,13 +110,13 @@ static int hash_drbg_tester(void)
 
 	/* Rerun to verify that drbg_zero works properly */
 	if (esdm_drbg_seed(drbg_stack, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
 
@@ -124,32 +124,32 @@ static int hash_drbg_tester(void)
 
 	/* Seed material off by its first byte must not produce that output */
 	if (esdm_kat_modify(mod, ent_nonce, sizeof(mod)))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_seed(drbg_stack, mod, sizeof(mod), pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	ret += esdm_kat_check_differs(act, exp, sizeof(exp)) ? 1 : 0;
 
 	esdm_drbg_zero(drbg_stack);
 
 	if (esdm_drbg_hash_alloc(&drbg))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_seed(drbg, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 #endif
 #if 0
 	static const uint8_t ent_nonce[] = {
@@ -286,6 +286,12 @@ static int hash_drbg_tester(void)
 out:
 	esdm_drbg_hash_zero_free(drbg);
 	return ret;
+
+	/* A DRBG that cannot be set up or asked for output fails the test */
+err:
+	printf("hash DRBG seed, generate or allocation failed\n");
+	ret = 1;
+	goto out;
 }
 
 /*
