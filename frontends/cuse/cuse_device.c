@@ -1111,7 +1111,13 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		break;
 
 	default:
-		fuse_reply_err(req, EINVAL);
+		/*
+		 * A command the device does not know, which the kernel's
+		 * random_ioctl() answers with ENOTTY, as every driver does.
+		 * EINVAL would tell the caller that the command is known but
+		 * its argument is not right.
+		 */
+		fuse_reply_err(req, ENOTTY);
 	}
 }
 

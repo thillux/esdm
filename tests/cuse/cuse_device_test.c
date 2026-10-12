@@ -741,9 +741,10 @@ static void test_ioctl_status_and_unknown(void)
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EAGAIN);
 
+	/* An unknown command is refused the way the kernel refuses it */
 	ioctl_call(0xdead, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(reply.err, ENOTTY);
 }
 
 /*
