@@ -24,8 +24,10 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "esdm.h"
@@ -271,23 +273,85 @@ void esdm_shm_status_cleanup_ipc(void)
 	esdm_shm_status_unlink_sem(ESDM_SEM_NEED_ENTROPY_LEVEL);
 }
 
+/*
+ * Whether the named semaphore belongs to our euid: 1 if so, 0 if it belongs to
+ * another user, < 0 if that cannot be told.
+ *
+ * glibc and musl keep a named semaphore in the file /dev/shm/sem.<name>, so
+ * that file's owner is the user that created the semaphore.
+ */
+static int esdm_shm_status_sem_owned(const char *semname)
+{
+	char path[128];
+	struct stat sb;
+	int len;
+
+	while (*semname == '/')
+		semname++;
+
+	len = snprintf(path, sizeof(path), "/dev/shm/sem.%s", semname);
+	if (len < 0 || (size_t)len >= sizeof(path))
+		return -ENAMETOOLONG;
+
+	if (lstat(path, &sb) < 0)
+		return -errno;
+
+	return sb.st_uid == geteuid();
+}
+
 static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
 {
+	unsigned int tries;
 	sem_t *tmp;
-	int errsv;
+	int errsv, owned;
 
-	tmp = sem_open(semname, O_CREAT | O_EXCL, 0644, 0);
-	if (tmp == SEM_FAILED) {
-		if (errno == EEXIST) {
-			tmp = sem_open(semname, O_CREAT, 0644, 0);
-			if (tmp == SEM_FAILED)
+	/*
+	 * The semaphores have well-known names as the status segment has a
+	 * well-known key, and the same holds for them: any other local user
+	 * could have created one, which then is theirs. They could take the
+	 * posts meant for the CUSE poll checker and the aux clients, or post
+	 * in our stead. So a semaphore of another user is removed and created
+	 * anew, as the segment is in esdm_shm_status_create_shm(). Ours - the
+	 * one a previous instance of this server or a CUSE daemon running as
+	 * the same user created - is kept, so their waiters keep working.
+	 *
+	 * The directory the file is in is sticky: a file found to be ours
+	 * cannot be removed and replaced by another user before it is opened,
+	 * while one that is gone by then may have been replaced, so the
+	 * creation is tried again. Should the owner not be found at all, the
+	 * semaphore is used as it was before this check.
+	 */
+	for (tries = 0;; tries++) {
+		tmp = sem_open(semname, O_CREAT | O_EXCL, 0644, 0);
+		if (tmp != SEM_FAILED)
+			break;
+		if (errno != EEXIST || tries >= 3)
+			goto err;
+
+		owned = esdm_shm_status_sem_owned(semname);
+		if (owned == -ENOENT)
+			continue;
+
+		if (!owned) {
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ANY,
+				"ESDM semaphore %s owned by a different uid - removing and recreating\n",
+				semname);
+			if (sem_unlink(semname) && errno != ENOENT)
 				goto err;
+			continue;
+		}
 
-			/* Re-synchronize */
-			sem_post(tmp);
-		} else {
+		tmp = sem_open(semname, 0);
+		if (tmp == SEM_FAILED) {
+			if (errno == ENOENT)
+				continue;
 			goto err;
 		}
+
+		/* Re-synchronize */
+		sem_post(tmp);
+		break;
 	}
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
