@@ -25,6 +25,7 @@
 #include "esdm_rpc_server.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
+#include "math_helper.h"
 #include "esdm_logger.h"
 #include "memset_secure.h"
 #include "threading_support.h"
@@ -37,14 +38,29 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 {
 	RandValResponse response = RAND_VAL_RESPONSE__INIT;
 	uint8_t rndval[ESDM_RPC_MAX_DATA];
+	size_t len;
 	(void)service;
 
-	if (request == NULL || request->len > ESDM_RPC_MAX_PR_REQUEST_SIZE) {
-		response.ret = -ESDM_RPC_MAX_PR_REQUEST_SIZE;
+	if (request == NULL) {
+		response.ret = -EINVAL;
 		closure(&response, closure_data);
 	} else {
-		response.ret = (int)esdm_get_random_bytes_pr_noblock(
-			rndval, request->len);
+		/*
+		 * Serve a larger request in part rather than refuse it. Its
+		 * refusal could not tell the size that is served: the clients
+		 * take a negative return code as such only below -255, as one
+		 * above is an errno - -ESDM_RPC_MAX_PR_REQUEST_SIZE is -EPIPE.
+		 * The answer to a request may be shorter than asked for anyway,
+		 * as prediction resistant bytes are given out only as far as
+		 * entropy is available, so every client asks again for the
+		 * rest: today's clients never ask for more than this size, and
+		 * those from before it was introduced, which ask for up to
+		 * ESDM_RPC_MAX_DATA, are served in parts of it.
+		 */
+		len = min_size(request->len, ESDM_RPC_MAX_PR_REQUEST_SIZE);
+
+		response.ret =
+			(int)esdm_get_random_bytes_pr_noblock(rndval, len);
 
 		if (response.ret > 0) {
 			esdm_test_shm_status_add_rpc_server_written(
@@ -55,11 +71,10 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 		closure(&response, closure_data);
 
 		/*
-		 * Only the first request->len bytes can ever hold generated
-		 * secret data (request->len is bounded by
-		 * ESDM_RPC_MAX_PR_REQUEST_SIZE above). Avoid wiping the whole
-		 * ~64KB buffer on every call.
+		 * Only the first len bytes can ever hold generated secret data
+		 * (len is bounded by ESDM_RPC_MAX_PR_REQUEST_SIZE above). Avoid
+		 * wiping the whole ~64KB buffer on every call.
 		 */
-		memset_secure(rndval, 0, (size_t)request->len);
+		memset_secure(rndval, 0, len);
 	}
 }

@@ -109,10 +109,9 @@ static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
 			goto out;
 
 		/*
-		 * maxbuflen is larger than ESDM_RPC_MAX_PR_REQUEST_SIZE in this case
-		 * and skipped in the check above. Keep this for compatibility with
-		 * server code or if ESDM_RPC_MAX_PR_REQUEST_SIZE is changed to a
-		 * larger value in the future.
+		 * Requests are not larger than ESDM_RPC_MAX_PR_REQUEST_SIZE, and
+		 * the server serves a larger one in part anyway. Keep honouring
+		 * the size hint for servers that send one.
 		 */
 		if (buffer.ret < -255) {
 			size_t new_max = (size_t)(-buffer.ret);
