@@ -281,19 +281,21 @@ jobs:
         # exactly the skipped ones as root; a test that still lacks something
         # it needs, such as a TPM, skips again.
         #
+        # The names come from meson's test log, mapped back to the names meson
+        # test takes by a script: the log holds the decorated name meson
+        # prints, which meson test does not accept. The command substitution
+        # rather than a process substitution, so that a failing script fails
+        # the step.
+        #
         # --no-rebuild, as a rebuild here would leave root owned objects in the
         # build tree.
         #
         # "sudo env VAR=..." rather than "sudo -E": the source built backends
         # live in prefixes of their own, and whether the server finds them must
         # not depend on the sudoers policy.
-        mapfile -t skipped < <(python3 -c '
-        import json, sys
-        for line in open(sys.argv[1]):
-            test = json.loads(line)
-            if test["result"] == "SKIP":
-                print(test["name"])
-        ' build/meson-logs/testlog.json)
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
         if [ "${#skipped[@]}" -eq 0 ]; then
           echo "::error::no test skipped unprivileged - is this run privileged already?"
           exit 1
@@ -360,13 +362,9 @@ jobs:
     - name: Meson test (privileged)
       run: |
         # See the build job: re-run what skipped unprivileged as root.
-        mapfile -t skipped < <(python3 -c '
-        import json, sys
-        for line in open(sys.argv[1]):
-            test = json.loads(line)
-            if test["result"] == "SKIP":
-                print(test["name"])
-        ' build/meson-logs/testlog.json)
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
         if [ "${#skipped[@]}" -eq 0 ]; then
           echo "::error::no test skipped unprivileged - is this run privileged already?"
           exit 1
