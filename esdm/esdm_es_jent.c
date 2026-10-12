@@ -47,6 +47,14 @@ static DEFINE_MUTEX_W_UNLOCKED(esdm_jent_lock);
 static atomic_int esdm_jent_initialized = 0;
 static struct rand_data *esdm_jent_state = NULL;
 
+/*
+ * Whether the last periodic health test failed. Until a later one passes, the
+ * Jitter RNG is credited with nothing, just as after a failed startup test -
+ * but it keeps its collectors, so that a run that passes again lets it pick up
+ * where it left off.
+ */
+static atomic_bool esdm_jent_health_failed = false;
+
 #if (ESDM_JENT_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf esdm_jent_buf;
 static struct rand_data *esdm_jent_state_thread = NULL;
@@ -101,7 +109,8 @@ bool esdm_jent_ntg1(void)
 static uint32_t esdm_jent_entropylevel(uint32_t requested_bits)
 {
 	return esdm_fast_noise_entropylevel(
-		atomic_load(&esdm_jent_initialized) ?
+		(atomic_load(&esdm_jent_initialized) &&
+		 !atomic_load(&esdm_jent_health_failed)) ?
 			esdm_config_es_jent_entropy_rate() :
 			0,
 		requested_bits);
@@ -502,6 +511,8 @@ static int esdm_jent_initialize(void)
 		goto out;
 	}
 
+	/* The startup health test above passed, which supersedes an old run */
+	atomic_store(&esdm_jent_health_failed, false);
 	atomic_store(&esdm_jent_initialized, 1);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "Jitter RNG working on current system\n");
@@ -592,17 +603,30 @@ static int esdm_jent_selftest(void)
 
 #if (ESDM_JENT_ENTROPY_BLOCKS != 0)
 	atomic_fetch_add(&esdm_jent_selftest_runs, 1);
-
-	/*
-	 * What the cache holds was collected before this run - not to be
-	 * handed out after a failed one. Under the lock, which keeps
-	 * esdm_jent_finalize() from freeing the cache meanwhile.
-	 */
-	if (ret)
-		esdm_es_buf_reset(&esdm_jent_buf);
 #endif
 #else
 	ret = jent_entropy_init_ex(ESDM_JENT_OSR, esdm_jent_flags());
+#endif
+
+	/*
+	 * A failed run takes the credit away until a later one passes, the
+	 * way a failed startup test does - for the synchronous collector as
+	 * well as for what the monitor fills into the cache from now on.
+	 * Collecting goes on uncredited: whatever the collectors deliver
+	 * meanwhile only stirs the DRNGs.
+	 */
+	atomic_store(&esdm_jent_health_failed, !!ret);
+
+#if (ESDM_JENT_ENTROPY_BLOCKS != 0)
+	/*
+	 * What the cache holds was collected and credited before this run -
+	 * not to be handed out after a failed one. Reset after the credit is
+	 * gone, so a block filled from now on is credited with nothing. Under
+	 * the lock, which keeps esdm_jent_finalize() from freeing the cache
+	 * meanwhile.
+	 */
+	if (ret)
+		esdm_es_buf_reset(&esdm_jent_buf);
 #endif
 
 	mutex_w_unlock(&esdm_jent_lock);
