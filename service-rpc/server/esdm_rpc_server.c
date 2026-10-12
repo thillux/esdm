@@ -146,10 +146,9 @@ static atomic_int server_exit = 0;
  * only admit a handful of busy processes of one user on a large machine. The
  * bound scales with the online nodes instead, admitting
  * ESDM_RPC_PROCESSES_PER_UID such processes, but never less than
- * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps the scaling: no
- * single UID can take more than half of RLIMIT_NOFILE, which leaves the other
- * half to the remaining users and the EGD interface (see
- * esdm_rpcs_peer_limit_init()).
+ * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps both: no single
+ * UID can take more than half of RLIMIT_NOFILE, which leaves the other half to
+ * the remaining users and the EGD interface (see esdm_rpcs_peer_limit_init()).
  */
 #define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
 #define ESDM_RPC_PROCESSES_PER_UID 16
@@ -163,14 +162,18 @@ static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
  */
 static void esdm_rpcs_peer_limit_init(void)
 {
-	uint64_t max = (uint64_t)esdm_online_nodes() *
-		       ESDM_RPC_PROCESSES_PER_UID;
+	uint64_t max = max_uint64((uint64_t)esdm_online_nodes() *
+					  ESDM_RPC_PROCESSES_PER_UID,
+				  ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 	struct rlimit rl;
 
+	/*
+	 * The cap comes last: it is what keeps a single UID from taking the
+	 * descriptors of everybody else, and the minimum must not lift it.
+	 */
 	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
 		max = min_uint64(max, rl.rlim_cur / 2);
 
-	max = max_uint64(max, ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 	esdm_rpcs_peer_limit.max_per_uid = (unsigned int)min_uint64(max,
 								  UINT_MAX);
 
