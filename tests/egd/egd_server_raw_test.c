@@ -978,6 +978,15 @@ static uint64_t test_now_ms(void)
 static void test_idle_close(void)
 {
 	const int scan_slack_ms = 1000 + 2000;
+	/*
+	 * The server starts the idle time once it has sent the last answer,
+	 * this test once it has read it - later, by however long the answer
+	 * took to arrive and be parsed, which a loaded or sanitizer build
+	 * stretches. So the close can come a little before the timeout as
+	 * measured here. A close that is early by a scan interval of a second
+	 * or more is still caught.
+	 */
+	const uint64_t clock_slack_ms = 250;
 	uint64_t last_answer, closed_after;
 	uint32_t bits = 0;
 	uint8_t byte;
@@ -1011,7 +1020,7 @@ static void test_idle_close(void)
 	closed_after = test_now_ms() - last_answer;
 	CHECK(rc == -EPIPE || rc == -ECONNRESET,
 	      "an idle connection was not closed: %d", rc);
-	CHECK(closed_after >= ESDM_EGD_IDLE_TIMEOUT_MS,
+	CHECK(closed_after + clock_slack_ms >= ESDM_EGD_IDLE_TIMEOUT_MS,
 	      "an idle connection was closed after %llu ms, its timeout is %u ms",
 	      (unsigned long long)closed_after,
 	      (unsigned int)ESDM_EGD_IDLE_TIMEOUT_MS);
