@@ -376,11 +376,8 @@ if get_option('esdm-server').enabled()
 	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
 		timeout: 120)
 
-	# Sits out a reseed interval, so it needs more than the default timeout
-	# of 30 seconds only if the machine is loaded - keep some headroom.
 	test('ESDM security - Jitter RNG as the only credited source',
-		esdm_jent_only_security_test,
-		timeout: 120)
+		esdm_jent_only_security_test)
 
 	# Sits out two reseed intervals of five seconds and 2^11 requests.
 	test('ESDM security - reseed on interval and request threshold',
