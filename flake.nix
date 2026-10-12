@@ -1354,6 +1354,8 @@
             #   nix build .#esdm-coverage-vm
             #   xdg-open result/coverage/index.html
             #
+            # That build fails when a test failed - see coverageVmResultOf.
+            #
             # As root the run binds fixed socket paths, creates CUSE device
             # files, writes to the kernel entropy interfaces and leaves daemons
             # behind on failure - in a VM all of that is free of consequence.
@@ -1444,12 +1446,12 @@
                   )
 
                   # A failed suite is recorded in the report rather than
-                  # asserted on. The report is what this package exists to
-                  # produce, and a failing run is the one whose numbers and test
+                  # asserted on. A failing run is the one whose numbers and test
                   # log are wanted most - asserting here would fail the
                   # derivation, and nix discards $out of a failed build, so
-                  # exactly those runs would come back empty. Which tests failed
-                  # is in coverage/testlog.txt.
+                  # exactly those runs would come back empty. coverageVmResultOf
+                  # turns the recorded status into the result instead. Which
+                  # tests failed is in coverage/testlog.txt.
                   machine.succeed(f"echo {status} >/var/coverage/status")
                   machine.copy_from_machine("/var/coverage")
 
@@ -1461,6 +1463,28 @@
                       )
                 '';
               };
+
+            # The VM run above succeeds whatever the suite did, so that the
+            # report of a failed suite is kept. This makes its status the
+            # result: it fails when the suite failed - naming the failed tests
+            # and the report of that run, which stays in the store - and links
+            # the report otherwise. The run itself, failed or not, is
+            #
+            #   nix build .#esdm-coverage-vm.run
+            coverageVmResultOf =
+              run:
+              pkgs.runCommand "${run.name}-result" { passthru = { inherit run; }; } ''
+                status="$(cat ${run}/coverage/status)"
+                if [ "$status" != 0 ]; then
+                  echo "The coverage run as root failed (exit $status) - failed tests:"
+                  grep -E '^ *[0-9]+/[0-9]+ .* (FAIL|TIMEOUT|ERROR) ' \
+                    ${run}/coverage/coverage-run.log || true
+                  echo "Report and test log of the run: ${run}/coverage"
+                  exit 1
+                fi
+                mkdir -p $out
+                ln -s ${run}/coverage $out/coverage
+              '';
           in
           {
           jitterentropy = pkgs.jitterentropy.overrideAttrs (_: {
@@ -1756,27 +1780,27 @@
           # Tracking the rolling kernel for the same reason liveIso does: a
           # specific versioned attribute is one nixpkgs bump away from being
           # dropped.
-          esdm-coverage-vm = coverageVmOf {
+          esdm-coverage-vm = coverageVmResultOf (coverageVmOf {
             name = "esdm coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-root;
             kernel = kernels.latest;
-          };
+          });
 
           # The AIS 20/31 build on the patched kernel: NTG.1 counts entropy
           # sources, so it wants the kernel ones present rather than disabling
           # themselves for want of /dev/esdm_es.
-          esdm-coverage-vm-ais2031 = coverageVmOf {
+          esdm-coverage-vm-ais2031 = coverageVmResultOf (coverageVmOf {
             name = "esdm AIS 20/31 coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-ais2031-root;
             kernel = kernels.latest;
-          };
+          });
 
           # Unlike the ebpf_* checks - where running on a stock kernel is the
           # point, as needing no kernel patches is what the eBPF sources are
           # for - this one takes the patched kernel as well. The eBPF sources
           # are only part of what it covers, and es_kernel next to them needs
           # the module like it does in the run above.
-          esdm-coverage-vm-ebpf = coverageVmOf {
+          esdm-coverage-vm-ebpf = coverageVmResultOf (coverageVmOf {
             name = "esdm eBPF coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-ebpf-root;
             kernel = kernels.latest;
@@ -1789,7 +1813,7 @@
                 # leaving the code this variant exists to cover unexecuted.
                 boot.kernelParams = lib.mkAfter [ "clocksource=tsc" ];
               };
-          };
+          });
 
           openssl-config =
             let
