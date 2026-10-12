@@ -472,6 +472,26 @@ static int esdm_cuse_drop_privileges(void)
  */
 static mutex_t esdm_cuse_priv = MUTEX_UNLOCKED_PREFER_WRITER;
 
+/*
+ * The privileged requests waiting for the write lock.
+ *
+ * A read of /dev/random waits in its RPC until the ESDM is seeded, holding the
+ * reader lock all along. A privileged request would wait for the write lock as
+ * long, and every read and write after it with it, queued behind the writer.
+ * The ESDM may well wait for exactly that request, e.g. for rngd to credit
+ * entropy with RNDADDENTROPY. Such a read gives way to the privileged request
+ * instead, see esdm_cuse_interrupt().
+ */
+static atomic_uint esdm_cuse_priv_waiting = 0;
+
+/*
+ * Whether the RPC this thread runs gives way to a privileged request, and
+ * whether it did. The RPC client calls esdm_cuse_interrupt() on the thread that
+ * runs the RPC.
+ */
+static __thread bool esdm_cuse_rpc_gives_way;
+static __thread bool esdm_cuse_rpc_gave_way;
+
 static void esdm_cuse_unpriv_call_start(void)
 {
 	mutex_reader_lock(&esdm_cuse_priv);
@@ -587,7 +607,9 @@ static int esdm_cuse_priv_call_start(fuse_req_t req)
 	if (!esdm_cuse_client_privileged(req))
 		return EPERM;
 
+	atomic_fetch_add(&esdm_cuse_priv_waiting, 1);
 	mutex_lock(&esdm_cuse_priv);
+	atomic_fetch_sub(&esdm_cuse_priv_waiting, 1);
 	if (esdm_cuse_dropped)
 		raise_privilege_transient(0, 0);
 
@@ -603,13 +625,48 @@ void esdm_cuse_open(fuse_req_t req, struct fuse_file_info *fi)
 	fuse_reply_open(req, fi);
 }
 
+/*
+ * Whether the RPC is to be abandoned. The RPC client asks before it sends a
+ * request and while it waits for the answer - so also between the requests of
+ * a call that asks the ESDM again and again until it is seeded.
+ */
 static int esdm_cuse_interrupt(void *data)
 {
 	fuse_req_t req = (fuse_req_t)data;
 
+	if (esdm_cuse_rpc_gives_way && atomic_load(&esdm_cuse_priv_waiting)) {
+		esdm_cuse_rpc_gave_way = true;
+		return 1;
+	}
+
 	if (!req)
 		return 0;
 	return !!fuse_req_interrupted(req);
+}
+
+/*
+ * A read gave way to a privileged request: wait without the reader lock until
+ * no privileged request waits for the write lock any more.
+ *
+ * With the writer-preferring lock, taking the reader lock again would wait for
+ * the writer on its own. A lock that prefers readers would let the read take it
+ * again right away, though, only to give way once more, so that the writer gets
+ * no chance between the two.
+ *
+ * Returns 0 when the read is to go on, -EINTR when the reader was interrupted
+ * meanwhile.
+ */
+static int esdm_cuse_read_after_giving_way(fuse_req_t req)
+{
+	static const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+	while (atomic_load(&esdm_cuse_priv_waiting)) {
+		if (fuse_req_interrupted(req))
+			return -EINTR;
+		nanosleep(&ts, NULL);
+	}
+
+	return fuse_req_interrupted(req) ? -EINTR : 0;
 }
 
 /*
@@ -683,9 +740,33 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 	while (read_bytes < size) {
 		size_t todo = min_size(ESDM_RPC_MAX_DATA, size - read_bytes);
 
+		/*
+		 * Waiting for the ESDM - to be seeded, or the prediction
+		 * resistant DRNG to be ready - the call holds the reader lock.
+		 * It gives way to a privileged request, which would wait for
+		 * the read otherwise, and every request after it as well.
+		 */
 		esdm_cuse_unpriv_call_start();
+		esdm_cuse_rpc_gives_way = true;
+		esdm_cuse_rpc_gave_way = false;
 		esdm_invoke(get(tmpbuf_p + read_bytes, todo, req));
+		esdm_cuse_rpc_gives_way = false;
 		esdm_cuse_unpriv_call_end();
+
+		/*
+		 * Whatever the abandoned call returned, it is no answer of the
+		 * ESDM, so it is neither covered by the fallback nor returned.
+		 * Ask again once the privileged request is through. A reader
+		 * interrupted meanwhile gets what was read, if anything.
+		 */
+		if (esdm_cuse_rpc_gave_way && ret < 0) {
+			ret = esdm_cuse_read_after_giving_way(req);
+			if (!ret)
+				continue;
+			if (read_bytes)
+				break;
+			goto out;
+		}
 
 		/*
 		 * The ESDM cannot serve without blocking: that is its answer,

@@ -294,6 +294,154 @@ static void test_read_reply_once(void)
 }
 
 /*
+ * An ESDM that is not seeded until the test says so. It is asked again and
+ * again meanwhile, and in between, it asks esdm_cuse_interrupt() whether to
+ * give up, as the RPC client does before every request it sends.
+ */
+static atomic_bool test_seeded;
+static atomic_uint test_get_calls;
+
+static ssize_t test_get_unseeded(uint8_t *buf, size_t buflen, void *int_data)
+{
+	static const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+	atomic_fetch_add(&test_get_calls, 1);
+
+	while (!atomic_load(&test_seeded)) {
+		if (esdm_cuse_interrupt(int_data))
+			return -EINTR;
+		nanosleep(&ts, NULL);
+	}
+
+	memset(buf, TEST_BYTE, buflen);
+
+	return (ssize_t)buflen;
+}
+
+struct test_thread {
+	pthread_t thread;
+	struct test_req r;
+	atomic_bool done;
+};
+
+/* A blocking read of /dev/random */
+static void *test_read_thread(void *arg)
+{
+	struct test_thread *t = arg;
+
+	read_call(&t->r, 0, 32, test_get_unseeded);
+	atomic_store(&t->done, true);
+
+	return NULL;
+}
+
+/* A privileged ioctl: the reseed of the kernel's CRNG, which needs no ESDM */
+static void *test_ioctl_thread(void *arg)
+{
+	struct test_thread *t = arg;
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	esdm_cuse_ioctl(-1, (fuse_req_t)&t->r, 44, NULL, &fi, 0, NULL, 0, 0);
+	atomic_store(&t->done, true);
+
+	return NULL;
+}
+
+/* Wait for up to 5 seconds for the flag to be set */
+static bool test_wait_for(atomic_bool *flag)
+{
+	static const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+	unsigned int i;
+
+	for (i = 0; i < 5000 && !atomic_load(flag); i++)
+		nanosleep(&ts, NULL);
+
+	return atomic_load(flag);
+}
+
+/*
+ * A read of /dev/random waits for the seeding of the ESDM, holding the reader
+ * lock. A privileged ioctl must not wait for it: the ESDM may wait for exactly
+ * that request, e.g. for rngd to credit entropy. With the writer-preferring
+ * lock, every read and write after it would wait as well.
+ */
+static void test_read_gives_way(void)
+{
+	static const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+	struct test_thread reader, priv;
+	unsigned int i;
+
+	memset(&reader, 0, sizeof(reader));
+	memset(&priv, 0, sizeof(priv));
+	atomic_store(&test_seeded, false);
+	atomic_store(&test_get_calls, 0);
+
+	if (pthread_create(&reader.thread, NULL, test_read_thread, &reader)) {
+		CHECK(0, "cannot start the reader");
+		return;
+	}
+
+	/* The read waits in the ESDM, holding the reader lock */
+	for (i = 0; i < 5000 && !atomic_load(&test_get_calls); i++)
+		nanosleep(&ts, NULL);
+	CHECK(atomic_load(&test_get_calls), "the read never asked the ESDM");
+
+	if (pthread_create(&priv.thread, NULL, test_ioctl_thread, &priv)) {
+		CHECK(0, "cannot start the privileged ioctl");
+		atomic_store(&test_seeded, true);
+		pthread_join(reader.thread, NULL);
+		return;
+	}
+
+	CHECK(test_wait_for(&priv.done),
+	      "the privileged ioctl waited for a read that waits for the seeding");
+	CHECK(!atomic_load(&reader.done),
+	      "the read was answered before the ESDM was seeded");
+
+	/* Let everything finish, which it does in either case */
+	atomic_store(&test_seeded, true);
+	pthread_join(priv.thread, NULL);
+	pthread_join(reader.thread, NULL);
+
+	CHECK_EQ(atomic_load(&priv.r.replies), 1);
+	CHECK_EQ(priv.r.kind, REPLY_IOCTL);
+	CHECK_EQ(priv.r.err, 0);
+
+	/* The read went on once the ioctl was through, and was served */
+	CHECK_EQ(atomic_load(&reader.r.replies), 1);
+	CHECK_EQ(reader.r.kind, REPLY_BUF);
+	CHECK_EQ(reader.r.size, 32);
+	CHECK(atomic_load(&test_get_calls) >= 2,
+	      "the read did not ask the ESDM again after giving way");
+
+	/* Nothing waits for the write lock any more */
+	CHECK_EQ(atomic_load(&esdm_cuse_priv_waiting), 0);
+}
+
+/*
+ * A reader interrupted while it gave way is answered with EINTR, rather than
+ * waiting for the ESDM it no longer waits for.
+ */
+static void test_read_interrupted_giving_way(void)
+{
+	struct test_req r;
+
+	test_req_init(&r);
+	atomic_store(&r.interrupted, true);
+
+	/* As if a privileged request waited all along */
+	atomic_store(&esdm_cuse_priv_waiting, 1);
+	atomic_store(&test_seeded, false);
+	read_call(&r, 0, 32, test_get_unseeded);
+	atomic_store(&esdm_cuse_priv_waiting, 0);
+
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.kind, REPLY_ERR);
+	CHECK_EQ(r.err, EINTR);
+}
+
+/*
  * /dev/urandom is always readable and writable, as the kernel's is, which has
  * no poll handler. Without a status segment, nothing tells that the ESDM is
  * seeded - which /dev/random waits for, but /dev/urandom does not.
@@ -345,6 +493,8 @@ int main(int argc, char *argv[])
 	atomic_store(&esdm_cuse_ready, true);
 
 	test_read_reply_once();
+	test_read_gives_way();
+	test_read_interrupted_giving_way();
 	test_poll_urandom();
 
 	return common_test_result("cuse_requests");
