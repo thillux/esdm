@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <linux/random.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -283,7 +284,10 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 		pfd.revents = 0;
 
 		/* Wake up every 2 minutes by default and every 2 sec if not initially seeded kernel */
-		ts.tv_sec = had_one_sucessful_seed ? seeding_interval_secs : 2;
+		/* parse_interval_arg() keeps it within a 32 bit time_t */
+		ts.tv_sec = had_one_sucessful_seed ?
+				    (time_t)seeding_interval_secs :
+				    2;
 		ts.tv_nsec = 0;
 
 		pret = ppoll(&pfd, 1, &ts, NULL);
@@ -474,7 +478,7 @@ int main(int argc, char **argv)
 	install_term();
 
 	esdm_logger(LOGGER_STATUS, LOGGER_C_SEEDER,
-		    "Start kernel (re-)seeding with %li s interval!\n",
+		    "Start kernel (re-)seeding with %" PRId64 " s interval!\n",
 		    seeding_interval_secs);
 	if (pr_mode()) {
 		esdm_logger(
