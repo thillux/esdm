@@ -30,8 +30,25 @@ hmac_sha2_512_tester = executable(
 		link_with: esdm_static_lib,
 	)
 
+# The built-in SHA-3 is only part of the library when it is the conditioning
+# hash (hash_sha3_512). It is tested in every build all the same, compiled into
+# the test where the library does not carry it.
+sha3_tester_src = [ 'sha3_tester.c' ]
+if not get_option('hash_sha3_512').enabled()
+	sha3_tester_src += files('../../crypto/sha3.c')
+endif
+
+sha3_tester = executable(
+		'sha3_tester',
+		sha3_tester_src,
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
 test('SHA256', sha256_tester)
 test('SHA512', sha512_tester)
+test('SHA3', sha3_tester)
 
 test('HMAC SHA256', hmac_sha2_256_tester)
 test('HMAC SHA512', hmac_sha2_512_tester)
