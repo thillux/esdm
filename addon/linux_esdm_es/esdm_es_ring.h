@@ -110,6 +110,13 @@ u32 esdm_es_ring_collect(struct esdm_es_ring *ring, u32 requested_events,
 bool esdm_es_ring_release(struct esdm_es_ring *ring);
 
 /*
+ * Drop the read pointers staged by the last esdm_es_ring_collect() without
+ * publishing them, the collected events stay in the ring. Only for a caller
+ * that did not use the collected events at all.
+ */
+void esdm_es_ring_discard(struct esdm_es_ring *ring);
+
+/*
  * Producer: append one event to the current CPU's ring (hot path). The caller
  * must keep it from being reentered on the same CPU, e.g. by running with
  * interrupts disabled.

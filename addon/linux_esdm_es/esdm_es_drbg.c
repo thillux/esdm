@@ -95,7 +95,9 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 	    returned_ent_bits) {
 		pr_warn("returned bits too small in %s-based noise source: %u\n",
 			drbg->name, returned_ent_bits);
-		goto out;
+		/* nothing reached the DRBG, leave the events in the ring */
+		esdm_es_ring_discard(drbg->ring);
+		return false;
 	}
 
 	/* insert gathered entropy as additional input, HMAC-DRBG will insert

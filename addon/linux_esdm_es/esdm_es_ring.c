@@ -229,3 +229,13 @@ bool esdm_es_ring_release(struct esdm_es_ring *ring)
 
 	return valid;
 }
+
+void esdm_es_ring_discard(struct esdm_es_ring *ring)
+{
+	/*
+	 * A CPU left in the mask would have the next release publish this
+	 * collection's rp_pending for it, which moves rp backwards over a
+	 * reset in between.
+	 */
+	cpumask_clear(&ring->rp_pending_mask);
+}
