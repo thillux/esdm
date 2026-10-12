@@ -218,6 +218,17 @@ if get_option('esdm-server').enabled()
 		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
 	endif
 
+	esdm_reset_seeding_test = executable(
+		'esdm_reset_seeding_test',
+		[ esdm_ipc_ns, 'esdm_reset_seeding_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM reset is not undone by a seeding in progress',
+		esdm_reset_seeding_test)
+
 	esdm_pr_seeded_state_test = executable(
 		'esdm_pr_seeded_state_test',
 		[ esdm_ipc_ns, 'esdm_pr_seeded_state_test.c' ],

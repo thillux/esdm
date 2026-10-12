@@ -2117,6 +2117,19 @@ void esdm_reset(void)
 {
 	struct esdm_drng **esdm_drng = esdm_drng_get_instances();
 
+	/*
+	 * Everything below under the pool lock, which every seeding holds from
+	 * the moment it looks at the DRNGs until it declares them all seeded in
+	 * __esdm_drng_seed_work(). Without it, a seeding that found the DRNGs
+	 * seeded before they were reset here declares them all seeded after
+	 * esdm_reset_state() cleared that state: the next initial seeding then
+	 * takes the reseed rules instead of the SP800-90C oversampling and the
+	 * NTG.1 two-source rule, and the bring-up and the reseed on entropy
+	 * arrival see nothing left to do. The node lock is taken first and
+	 * the DRNG locks under the pool lock, the order of every other path.
+	 */
+	esdm_pool_lock();
+
 	if (!esdm_drng) {
 		mutex_w_lock(&esdm_drng_init.lock);
 		esdm_drng_reset(&esdm_drng_init);
@@ -2135,8 +2148,6 @@ void esdm_reset(void)
 		}
 	}
 
-	esdm_drng_put_instances();
-
 	mutex_w_lock(&esdm_drng_pr.lock);
 	esdm_drng_reset(&esdm_drng_pr);
 	mutex_w_unlock(&esdm_drng_pr.lock);
@@ -2144,6 +2155,9 @@ void esdm_reset(void)
 	esdm_set_entropy_thresh(ESDM_FULL_SEED_ENTROPY_BITS);
 
 	esdm_reset_state();
+
+	esdm_pool_unlock();
+	esdm_drng_put_instances();
 }
 
 /******************* Generic ESDM kernel output interfaces ********************/
