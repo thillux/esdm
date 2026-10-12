@@ -101,6 +101,16 @@ struct esdm_egd_client {
 	 */
 	pid_t owner_pid;
 
+	/*
+	 * Identity of the connection behind @fd, taken right after it was
+	 * established - see esdm_egd_client_fd_is_ours_locked(). The socket
+	 * cookie when the kernel has one, otherwise the peer's address.
+	 */
+	bool have_cookie;
+	uint64_t cookie;
+	struct sockaddr_un peer;
+	socklen_t peer_len;
+
 	/* Registry entry, see esdm_egd_client_atfork_child(). */
 	TAILQ_ENTRY(esdm_egd_client) tailq;
 };
@@ -393,6 +403,60 @@ static int esdm_egd_client_connect_fd(int fd, const struct sockaddr_un *addr,
 	}
 }
 
+#ifdef SO_COOKIE
+/* The cookie of the socket @fd - never shared by two sockets until reboot. */
+static int esdm_egd_client_cookie(int fd, uint64_t *cookie)
+{
+	socklen_t len = sizeof(*cookie);
+
+	if (getsockopt(fd, SOL_SOCKET, SO_COOKIE, cookie, &len) < 0)
+		return -errno;
+
+	return (len == sizeof(*cookie)) ? 0 : -EINVAL;
+}
+#endif
+
+/* The address of the Unix domain socket @fd is connected to. */
+static int esdm_egd_client_peer(int fd, struct sockaddr_un *addr,
+				socklen_t *addrlen)
+{
+	memset(addr, 0, sizeof(*addr));
+	*addrlen = sizeof(*addr);
+
+	if (getpeername(fd, (struct sockaddr *)addr, addrlen) < 0)
+		return -errno;
+
+	if (addr->sun_family != AF_UNIX || *addrlen > sizeof(*addr))
+		return -EAFNOSUPPORT;
+
+	return 0;
+}
+
+/*
+ * Record the identity of the freshly established connection, for
+ * esdm_egd_client_fd_is_ours_locked(). Caller holds the lock.
+ *
+ * Taken from the connection itself rather than from the configured path: the
+ * server reports the address it bound, which need not be the path this client
+ * was given - a symlink such as /var/run, a bind mount or chroot, a relative
+ * path. Comparing against the configured path would take every one of those
+ * for a foreign descriptor and reconnect before each operation.
+ */
+static int esdm_egd_client_identify_locked(struct esdm_egd_client *client)
+{
+	client->have_cookie = false;
+
+#ifdef SO_COOKIE
+	if (!esdm_egd_client_cookie(client->fd, &client->cookie)) {
+		client->have_cookie = true;
+		return 0;
+	}
+#endif
+
+	return esdm_egd_client_peer(client->fd, &client->peer,
+				    &client->peer_len);
+}
+
 /* Caller holds the lock. */
 static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
 {
@@ -426,6 +490,16 @@ static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
 	client->fd = fd;
 	client->owner_pid = getpid();
 
+	/*
+	 * A connection that cannot be recognized again would be taken for a
+	 * foreign descriptor at its first use - it is no connection to keep.
+	 */
+	ret = esdm_egd_client_identify_locked(client);
+	if (ret) {
+		esdm_egd_client_disconnect_locked(client);
+		return ret;
+	}
+
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 		    "EGD client: connected to %s\n", client->socket_path);
 
@@ -439,26 +513,35 @@ static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
  * privilege separation runs closefrom() on its way into the pre-authentication
  * child. Landing after this client connected, that frees the descriptor number
  * for reuse, and reading "random" data out of whatever took its place would be
- * a silent and serious failure. getpeername(2) is permitted even inside
- * OpenSSH's pre-auth sandbox, so confirming costs one allowed syscall.
+ * a silent and serious failure.
+ *
+ * The descriptor is compared against what it was when the connection was set
+ * up, see esdm_egd_client_identify_locked(). The socket cookie is unique to
+ * that one socket, so it also tells apart another connection to the same
+ * server that took the number. Without one, the peer's address still tells
+ * apart anything but that. getsockopt(2) and getpeername(2) are permitted
+ * inside OpenSSH's pre-auth sandbox, so confirming costs one allowed syscall.
  */
 static bool esdm_egd_client_fd_is_ours_locked(struct esdm_egd_client *client)
 {
 	struct sockaddr_un addr;
-	socklen_t addrlen = sizeof(addr);
+	socklen_t addrlen;
 
-	memset(&addr, 0, sizeof(addr));
+#ifdef SO_COOKIE
+	if (client->have_cookie) {
+		uint64_t cookie;
 
-	/* Gone, or not a socket any more. */
-	if (getpeername(client->fd, (struct sockaddr *)&addr, &addrlen) < 0)
+		/* Gone, not a socket any more, or another one. */
+		return !esdm_egd_client_cookie(client->fd, &cookie) &&
+		       cookie == client->cookie;
+	}
+#endif
+
+	if (esdm_egd_client_peer(client->fd, &addr, &addrlen))
 		return false;
 
-	/* Some other socket took the number. */
-	if (addr.sun_family != AF_UNIX || addrlen > sizeof(addr))
-		return false;
-
-	return strncmp(addr.sun_path, client->socket_path,
-		       sizeof(addr.sun_path)) == 0;
+	return addrlen == client->peer_len &&
+	       !memcmp(&addr, &client->peer, addrlen);
 }
 
 /* Caller holds the lock. */

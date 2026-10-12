@@ -590,6 +590,128 @@ static int test_descriptor_identity(void)
 }
 
 /*
+ * The path a client is given need not be the one the server bound: a symlink
+ * such as /var/run, a bind mount, a relative path. The connection is still the
+ * same one from operation to operation, and reconnecting before each would
+ * cost a sandboxed consumer - which cannot connect - its life.
+ */
+static int test_path_alias(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	char alias[sizeof(((struct sockaddr_un *)0)->sun_path)];
+	uint32_t bits = 0;
+	uint8_t buf[16];
+	pid_t pid = 0;
+	int ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("aliased"), EGD_PEER_NORMAL))
+		return 1;
+
+	snprintf(alias, sizeof(alias), "%s", test_socket("alias"));
+	if (symlink(test_socket("aliased"), alias) < 0) {
+		printf("  SKIP: cannot create the symlink: %s\n",
+		       strerror(errno));
+		egd_peer_stop(peer);
+		return 0;
+	}
+
+	if (esdm_egd_client_alloc(&client, alias, TEST_TIMEOUT_MS)) {
+		unlink(alias);
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	CHECK(esdm_egd_client_get_random(client, buf, sizeof(buf)) == 0,
+	      "the blocking read through the symlink failed");
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0,
+	      "the entropy count through the symlink failed");
+	CHECK(esdm_egd_client_get_pid(client, &pid) == 0,
+	      "the PID request through the symlink failed");
+	CHECK(egd_peer_connections(peer) == 1,
+	      "%u connections, expected the one made at allocation",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	unlink(alias);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+#ifdef SO_COOKIE
+/*
+ * The descriptor number reused by another connection to the very same server -
+ * which answers like the client's own, but belongs to somebody else in this
+ * process, and two users of one stream desynchronize it. The peer's address
+ * cannot tell these apart, the socket cookie can.
+ */
+static int test_descriptor_identity_same_peer(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct sockaddr_un addr;
+	uint64_t cookie;
+	socklen_t len = sizeof(cookie);
+	uint8_t buf[16];
+	int fd, other, ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("samepeer"), EGD_PEER_NORMAL))
+		return 1;
+
+	/* The number the client's socket is about to get, as above. */
+	fd = dup(0);
+	if (fd < 0) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+	close(fd);
+
+	if (esdm_egd_client_alloc(&client, test_socket("samepeer"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	if (getsockopt(fd, SOL_SOCKET, SO_COOKIE, &cookie, &len) < 0) {
+		printf("  SKIP: no socket cookies, or not the client's descriptor\n");
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 0;
+	}
+
+	/* Close it behind the client's back and connect anew in its place. */
+	close(fd);
+	other = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+		 test_socket("samepeer"));
+	if (other != fd ||
+	    connect(other, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		printf("  SKIP: the descriptor number was not reused\n");
+		if (other >= 0)
+			close(other);
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 0;
+	}
+
+	CHECK(esdm_egd_client_get_random(client, buf, sizeof(buf)) == 0,
+	      "the blocking read failed");
+	CHECK(egd_peer_connections(peer) == 3,
+	      "%u connections, expected the client to have reconnected rather than use another's",
+	      egd_peer_connections(peer));
+
+	close(other);
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+#endif
+
+/*
  * Two processes issuing commands on one connection would desynchronize the
  * stream, so a child must not inherit the parent's. It gets one of its own,
  * and the parent's keeps working.
@@ -707,6 +829,11 @@ int main(int argc, char *argv[])
 		{ "reconnect after a hangup", test_reconnect },
 		{ "buffer cleansing on failure", test_failure_wipes_buffer },
 		{ "descriptor identity", test_descriptor_identity },
+#ifdef SO_COOKIE
+		{ "descriptor identity, same peer",
+		  test_descriptor_identity_same_peer },
+#endif
+		{ "socket path through a symlink", test_path_alias },
 		{ "fork", test_fork },
 		{ "peer arriving late", test_late_peer },
 	};

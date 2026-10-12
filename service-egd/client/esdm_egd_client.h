@@ -64,8 +64,10 @@ extern "C" {
  * Syscall discipline
  * ------------------
  * Once connected, the operations stay within read(2), write(2), poll(2),
- * close(2), getpid(2), clock_gettime(2), nanosleep(2) and getsockopt(2) - the
- * set a seccomp confined process is typically still allowed, OpenSSH's pre-auth
+ * close(2), getpid(2), clock_gettime(2), nanosleep(2), getsockopt(2) and - on a
+ * kernel without socket cookies - getpeername(2), the latter two to confirm
+ * that the descriptor is still the connection made earlier. That is the set a
+ * seccomp confined process is typically still allowed, OpenSSH's pre-auth
  * sandbox being the reference case. send(2)/recv(2) are avoided as they are
  * sendto(2)/recvfrom(2), which that filter answers with SECCOMP_RET_KILL, so
  * MSG_NOSIGNAL is unavailable and a write is preceded by a poll instead.
