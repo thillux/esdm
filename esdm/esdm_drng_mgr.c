@@ -396,6 +396,7 @@ void esdm_drng_mgr_finalize(void)
 	esdm_drng_dealloc_common(&esdm_drng_pr);
 }
 
+DSO_PUBLIC
 int esdm_es_oversampling(void)
 {
 #ifndef ESDM_OVERSAMPLE_ENTROPY_SOURCES
