@@ -234,5 +234,6 @@ int main(int argc, char *argv[])
 	ret += es_jent_getstate();
 	ret += es_jent_fini();
 
-	return ret;
+	/* A count of failures, which the exit status would take modulo 256 */
+	return ret ? 1 : 0;
 }
