@@ -1182,6 +1182,22 @@ static bool esdm_drng_reseed_per_request(void)
 }
 
 /*
+ * The reseed threshold in bits generated since the last full seeding. Those
+ * bits saturate at INT_MAX - see esdm_drng_get() - so a threshold above that,
+ * which the build option allows, would never be reached and the bit based
+ * reseed would be off without saying so. Clamped to INT_MAX like the maximum
+ * output without full reseed, see esdm_config_drng_max_wo_reseed_bits().
+ * UINT32_MAX stays: it disables the threshold on purpose.
+ */
+static uint32_t esdm_drng_reseed_thresh_bits(void)
+{
+	if (ESDM_DRNG_RESEED_THRESH_BITS == UINT32_MAX)
+		return UINT32_MAX;
+
+	return min_uint32(ESDM_DRNG_RESEED_THRESH_BITS, INT_MAX);
+}
+
+/*
  * Is a reseed of @drng due? The generate requests served from its seed are
  * counted by the caller once the answer is acted upon - see
  * esdm_drng_count_request() - so that the request a reseed is made for counts
@@ -1190,10 +1206,11 @@ static bool esdm_drng_reseed_per_request(void)
 static bool esdm_drng_must_reseed(struct esdm_drng *drng)
 {
 	time_t check_time = (time_t)atomic_load(&drng->last_seeded_time);
+	uint32_t thresh_bits = esdm_drng_reseed_thresh_bits();
 	bool request_bits_since_fully_seeded_reached =
-		(ESDM_DRNG_RESEED_THRESH_BITS != UINT32_MAX) &&
+		(thresh_bits != UINT32_MAX) &&
 		(atomic_read_u32(&drng->request_bits_since_fully_seeded) >=
-		 ESDM_DRNG_RESEED_THRESH_BITS);
+		 thresh_bits);
 	/* Negative once requests go on while a deferred reseed is pending */
 	bool requests_check =
 		esdm_drng_requests_left(atomic_load(&drng->requests)) <= 0;
