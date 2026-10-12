@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <linux/random.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -801,6 +802,73 @@ static void test_read_fallback(void)
 	close(fd);
 }
 
+static void read_fallback_eof_hung(int sig)
+{
+	static const char msg[] =
+		"FAIL: a read from a fallback at its end did not return\n";
+
+	(void)sig;
+	if (write(STDOUT_FILENO, msg, sizeof(msg) - 1) < 0) {
+		/* Nothing left to report it with */
+	}
+	_exit(1);
+}
+
+/*
+ * A fallback that has nothing more to give - a read of 0 bytes, the end of a
+ * regular file - fails the request. It used to add the 0 bytes to what it had
+ * and ask again, forever: the alarm turns that into a failure of this test.
+ */
+static void test_read_fallback_eof(void)
+{
+	char path[] = "/tmp/esdm-cuse-read-XXXXXX";
+	struct fuse_file_info fi;
+	int fd = mkstemp(path);
+
+	if (fd < 0) {
+		CHECK(0, "cannot create a temporary file: %s", strerror(errno));
+		return;
+	}
+	unlink(path);
+
+	signal(SIGALRM, read_fallback_eof_hung);
+
+	/* An empty fallback, for the on-stack and for the heap buffer */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 1024, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	/* One that runs out part way through the request fails it as well */
+	CHECK(write(fd, "0123456789abcdef", 16) == 16,
+	      "cannot fill the fallback file");
+	CHECK(lseek(fd, 0, SEEK_SET) == 0, "cannot rewind the fallback file");
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	signal(SIGALRM, SIG_DFL);
+	close(fd);
+}
+
 /*
  * Writing with no ESDM to take the data. It goes to the fallback whole or not
  * at all - a write split between the ESDM and the kernel would leave neither
@@ -1312,6 +1380,7 @@ int main(int argc, char *argv[])
 	test_ioctl_refused_without_write_lock();
 	test_ioctl_status_and_unknown();
 	test_read_fallback();
+	test_read_fallback_eof();
 	test_write_fallback();
 	test_poll_registration();
 	test_pollmask();
