@@ -9,6 +9,17 @@ openssl_provider_src = [
 	'common.c'
 ] + openssl_provider_shared_src
 
+# Every provider exports its entry point and nothing else - see version.lds,
+# and esdm/meson.build on the probe.
+openssl_provider_version_lds = meson.current_source_dir() / 'version.lds'
+openssl_provider_link_args = [
+	'-Wl,--version-script,' + openssl_provider_version_lds
+]
+if not cc.has_multi_link_arguments(openssl_provider_link_args)
+	warning('Linker does not support version scripts - the OpenSSL providers export every DSO_PUBLIC symbol')
+	openssl_provider_link_args = []
+endif
+
 esdm_openssl_rng_provider_lib = library(
 	'esdm-rng-provider',
 	[
@@ -20,6 +31,8 @@ esdm_openssl_rng_provider_lib = library(
 	include_directories: include_dirs_client,
 	dependencies: [ dependencies_client, openssl_dep ],
 	link_with: esdm_rpc_client_lib,
+	link_args: openssl_provider_link_args,
+	link_depends: files('version.lds'),
 	install: true
 )
 pkgconfig.generate(esdm_openssl_rng_provider_lib)
@@ -42,6 +55,8 @@ esdm_openssl_rng_provider_pr_lib = library(
 	include_directories: include_dirs_client,
 	dependencies: [ dependencies_client, openssl_dep ],
 	link_with: esdm_rpc_client_lib,
+	link_args: openssl_provider_link_args,
+	link_depends: files('version.lds'),
 	install: true
 )
 pkgconfig.generate(esdm_openssl_rng_provider_pr_lib)
@@ -62,6 +77,8 @@ esdm_openssl_egd_provider_lib = library(
 	dependencies: [ dependencies_client, openssl_dep ],
 	# The EGD client, not the RPC client the other providers pull in.
 	link_with: esdm_egd_client_lib.get_static_lib(),
+	link_args: openssl_provider_link_args,
+	link_depends: files('version.lds'),
 	install: true
 )
 pkgconfig.generate(esdm_openssl_egd_provider_lib)
@@ -84,6 +101,8 @@ esdm_openssl_egd_provider_pr_lib = library(
 	include_directories: include_dirs_client,
 	dependencies: [ dependencies_client, openssl_dep ],
 	link_with: esdm_egd_client_lib.get_static_lib(),
+	link_args: openssl_provider_link_args,
+	link_depends: files('version.lds'),
 	install: true
 )
 pkgconfig.generate(esdm_openssl_egd_provider_pr_lib)
@@ -99,6 +118,8 @@ esdm_openssl_seed_src_provider_lib = library(
 	include_directories: include_dirs_client,
 	dependencies: [ dependencies_client, openssl_dep ],
 	link_with: esdm_rpc_client_lib,
+	link_args: openssl_provider_link_args,
+	link_depends: files('version.lds'),
 	install: true
 )
 pkgconfig.generate(esdm_openssl_seed_src_provider_lib)
