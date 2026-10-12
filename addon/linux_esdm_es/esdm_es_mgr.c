@@ -128,6 +128,12 @@ static const struct file_operations esdm_cdev_fops = {
 	.open = esdm_cdev_open,
 	.release = esdm_cdev_release,
 	.unlocked_ioctl = esdm_cdev_ioctl,
+	/*
+	 * All IOCTL arguments point to u32 values, char arrays or struct
+	 * entropy_buf (u8 array and u32), which have the same layout for
+	 * 32-bit tasks, so only the pointer needs converting.
+	 */
+	.compat_ioctl = compat_ptr_ioctl,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek = no_llseek,
 #endif
