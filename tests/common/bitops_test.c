@@ -238,13 +238,15 @@ static void test_math_helper(void)
 
 	/* The macros must not evaluate their arguments twice */
 	{
-		int calls = 0;
-		int a = (calls++, 4);
-		int b = (calls++, 9);
+		int a = 4, b = 9;
 
-		CHECK_EQ(min(a, b), 4);
-		CHECK_EQ(max(a, b), 9);
-		CHECK_EQ(calls, 2);
+		CHECK_EQ(min(a++, b++), 4);
+		CHECK_EQ(a, 5);
+		CHECK_EQ(b, 10);
+
+		CHECK_EQ(max(a++, b++), 10);
+		CHECK_EQ(a, 6);
+		CHECK_EQ(b, 11);
 	}
 }
 
