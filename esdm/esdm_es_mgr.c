@@ -456,7 +456,8 @@ err:
  * Common service function to set the requested amount of bits with the kernel
  * entropy sources.
  *
- * @param [in/out] configured_bits Currently and newly configured bit size
+ * @param [in/out] configured_bits Last requested bit size, also if the kernel
+ *				  rejected it
  * @param [in] requested_bits Bit size to be configured
  * @param [in] fd file descriptor to the entropy source
  * @param [in] ioctl_cmd IOCTL command to be used with the FD
@@ -473,16 +474,24 @@ void esdm_kernel_set_requested_bits(uint32_t *configured_bits,
 		data[1] = 0;
 		ret = ioctl(fd, ioctl_cmd, data);
 		if (ret >= 0) {
-			*configured_bits = requested_bits;
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 				    "Set requested %u bits with kernel\n",
 				    requested_bits);
 		} else {
+			/*
+			 * E.g. a kernel without FIPS mode accepts only 256
+			 * bits, not the oversampled sizes. It keeps delivering
+			 * what it has configured, which the size handling of
+			 * esdm_kernel_read() copes with. Record the value all
+			 * the same, so the IOCTL is not sent again, and the
+			 * warning not logged again, for every read.
+			 */
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
-				"Failed to set requested %u bits with kernel\n",
+				"Failed to set requested %u bits with kernel, keeping its setting\n",
 				requested_bits);
 		}
+		*configured_bits = requested_bits;
 	}
 }
 
