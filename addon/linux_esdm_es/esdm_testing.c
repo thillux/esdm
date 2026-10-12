@@ -12,6 +12,7 @@
 #include <linux/debugfs.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/security.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
@@ -45,6 +46,13 @@ struct esdm_testing {
 	 */
 	raw_spinlock_t lock;
 	wait_queue_head_t read_wait;
+	/*
+	 * Serializes the readers: each one resets the ring and enables the
+	 * collection when it starts and disables it again when it ends, which
+	 * would otherwise pull the ring away under a concurrent reader and
+	 * leave it waiting for data that is no longer collected.
+	 */
+	struct mutex reader_lock;
 };
 
 /*************************** Generic Data Handling ****************************/
@@ -160,6 +168,9 @@ static int esdm_testing_reader(struct esdm_testing *data, u32 *boot, u8 *outbuf,
 	unsigned long flags;
 	int collected_data = 0;
 
+	if (mutex_lock_interruptible(&data->reader_lock))
+		return -ERESTARTSYS;
+
 	esdm_testing_init(data, *boot);
 
 	while (outbuflen) {
@@ -180,9 +191,22 @@ static int esdm_testing_reader(struct esdm_testing *data, u32 *boot, u8 *outbuf,
 				goto out;
 			}
 
+			/* not enabled under lockdown, nothing will arrive */
+			if (!atomic_read(&data->esdm_testing_enabled))
+				goto out;
+
 #ifdef ESDM_TESTING_USE_BUSYLOOP
-			while (!esdm_testing_have_data(data))
-				;
+			/*
+			 * The store does not wake up readers in this
+			 * configuration, so poll - but stay killable and give
+			 * the CPU away, the data may be long in coming, e.g.
+			 * before the hooks are registered.
+			 */
+			while (!esdm_testing_have_data(data) &&
+			       !signal_pending(current)) {
+				cond_resched();
+				cpu_relax();
+			}
 #else
 			wait_event_interruptible(data->read_wait,
 						 esdm_testing_have_data(data));
@@ -224,6 +248,7 @@ static int esdm_testing_reader(struct esdm_testing *data, u32 *boot, u8 *outbuf,
 
 out:
 	esdm_testing_fini(data, *boot);
+	mutex_unlock(&data->reader_lock);
 	return collected_data;
 }
 
@@ -301,7 +326,8 @@ static struct esdm_testing esdm_raw_hires = {
 	.rb_reader = 0,
 	.rb_writer = ATOMIC_INIT(0),
 	.lock = __RAW_SPIN_LOCK_UNLOCKED(esdm_raw_hires.lock),
-	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_raw_hires.read_wait)
+	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_raw_hires.read_wait),
+	.reader_lock = __MUTEX_INITIALIZER(esdm_raw_hires.reader_lock)
 };
 
 bool esdm_raw_hires_entropy_store(u64 value)
@@ -343,7 +369,8 @@ static struct esdm_testing esdm_irq_perf = {
 	.rb_reader = 0,
 	.rb_writer = ATOMIC_INIT(0),
 	.lock = __RAW_SPIN_LOCK_UNLOCKED(esdm_irq_perf.lock),
-	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_irq_perf.read_wait)
+	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_irq_perf.read_wait),
+	.reader_lock = __MUTEX_INITIALIZER(esdm_irq_perf.reader_lock)
 };
 
 bool esdm_irq_perf_time(u64 start)
@@ -387,7 +414,8 @@ static struct esdm_testing esdm_raw_sched_hires = {
 	.rb_writer = ATOMIC_INIT(0),
 	.lock = __RAW_SPIN_LOCK_UNLOCKED(esdm_raw_sched_hires.lock),
 	.read_wait =
-		__WAIT_QUEUE_HEAD_INITIALIZER(esdm_raw_sched_hires.read_wait)
+		__WAIT_QUEUE_HEAD_INITIALIZER(esdm_raw_sched_hires.read_wait),
+	.reader_lock = __MUTEX_INITIALIZER(esdm_raw_sched_hires.reader_lock)
 };
 
 bool esdm_raw_sched_hires_entropy_store(u64 value)
@@ -431,7 +459,8 @@ static struct esdm_testing esdm_sched_perf = {
 	.rb_reader = 0,
 	.rb_writer = ATOMIC_INIT(0),
 	.lock = __RAW_SPIN_LOCK_UNLOCKED(esdm_sched_perf.lock),
-	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_sched_perf.read_wait)
+	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(esdm_sched_perf.read_wait),
+	.reader_lock = __MUTEX_INITIALIZER(esdm_sched_perf.reader_lock)
 };
 
 bool esdm_sched_perf_time(u64 start)
