@@ -36,6 +36,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_fini_race_test = executable(
+			'rpc_fini_race_test',
+			[ 'rpc_fini_race_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	# This is just a helper for debugging - no real test
 	esdm_rpc_invoker = executable(
 			'esdm_rpc_invoker',
@@ -122,6 +130,11 @@ if get_option('esdm-server').enabled()
 	# nothing else may run alongside.
 	test('RPC call get_random_bytes retries on EAGAIN',
 		rpc_get_random_bytes_eagain_test, is_parallel: false)
+
+	# The same stand-in, answering calls while the client is set up and
+	# torn down under them.
+	test('RPC client torn down during calls', rpc_fini_race_test,
+		is_parallel: false)
 
 	test('RPC call get_seed_test', rpc_get_seed_test,
 		env: [ tester_esdm_env ])
