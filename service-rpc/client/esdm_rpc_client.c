@@ -983,8 +983,11 @@ static uint32_t esdm_rpcc_curr_node(void)
  * esdm_rpcc_conn_lock: waiting for the in-flight callers can take up to a
  * second per connection, which must not block getters of a meanwhile installed
  * array.
+ *
+ * @return true if the connections are released, false if they are leaked
+ *	   because a caller still uses one of them
  */
-static void esdm_rpcc_release_conns(
+static bool esdm_rpcc_release_conns(
 	esdm_rpc_client_connection_t *rpc_conn_array, uint32_t num_conn)
 {
 	static const struct timespec waiter_poll_ts = { .tv_sec = 0,
@@ -995,7 +998,7 @@ static void esdm_rpcc_release_conns(
 	bool still_in_use = false;
 
 	if (!rpc_conn_array)
-		return;
+		return true;
 
 	/* Tell everybody that the connection is about to terminate */
 	for (i = 0, rpc_conn_p = rpc_conn_array; i < num_conn; i++, rpc_conn_p++)
@@ -1053,10 +1056,12 @@ static void esdm_rpcc_release_conns(
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_RPC,
 			"Connection handles still in use on termination - leaking the connection memory\n");
-		return;
+		return false;
 	}
 
 	free(rpc_conn_array);
+
+	return true;
 }
 
 /*
@@ -1108,10 +1113,14 @@ static void esdm_rpcc_fini_service(
 	 * Counterpart of the one esdm_test_shm_status_init() that the initial
 	 * allocation of this service performed - a mere replacement of the
 	 * connections keeps the shared memory attached.
+	 *
+	 * Only once the calls in flight are done: they account the bytes they
+	 * obtained in the shared memory while they hold their connection, and
+	 * the last fini detaches it. Calls that are not done in time keep
+	 * their connections, and the shared memory, for good.
 	 */
-	esdm_test_shm_status_fini();
-
-	esdm_rpcc_release_conns(rpc_conn_array, num_conn);
+	if (esdm_rpcc_release_conns(rpc_conn_array, num_conn))
+		esdm_test_shm_status_fini();
 }
 
 /*
