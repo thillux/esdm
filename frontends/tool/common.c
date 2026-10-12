@@ -98,7 +98,7 @@ static void get_cpu_utilization(struct timespec *start)
 				       (double)total_diff;
 
 			char cpu[16];
-			snprintf(cpu, sizeof(cpu), "# CPU%3li", i);
+			snprintf(cpu, sizeof(cpu), "# CPU%3zu", i);
 			printf("%s Usage: %6.2lf%%\n",
 			       i == 0 ? "# CPU  A" : cpu, usage);
 		}
