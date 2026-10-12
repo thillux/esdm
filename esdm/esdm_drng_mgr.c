@@ -176,7 +176,7 @@ static void esdm_drng_set_seeded_now(struct esdm_drng *drng)
 #define ESDM_DRNG_RESEED_STAGGER_DIV 10
 
 /*
- * Seconds the seed time of a node DRNG is pushed out by: a number drawn from
+ * Seconds the seed time of a node DRNG is moved back by: a number drawn from
  * [0, a tenth of the reseed interval), so the DRNGs do not all fall due in the
  * same pass and collect their entropy at once.
  */
@@ -197,13 +197,18 @@ static long long esdm_drng_reseed_stagger(void)
 						    range);
 }
 
-/* Push the recorded seed time of a node DRNG out by the offset above. */
+/*
+ * Move the recorded seed time of a node DRNG back by the offset above. Back
+ * and not forward: the reseed interval is the maximum time a seed may serve,
+ * so the spread has to come out of it - a node DRNG falls due between nine
+ * tenths of the interval and the whole of it after its seeding, never later.
+ */
 static void esdm_drng_stagger_seed_time(struct esdm_drng *drng)
 {
 	if (drng == &esdm_drng_init || drng == &esdm_drng_pr)
 		return;
 
-	atomic_fetch_add(&drng->last_seeded_time, esdm_drng_reseed_stagger());
+	atomic_fetch_sub(&drng->last_seeded_time, esdm_drng_reseed_stagger());
 }
 
 /*
@@ -550,7 +555,7 @@ static void esdm_drng_stats_one(struct esdm_drng *drng, const char *type,
 	/*
 	 * Both reported times come from the wall clock stamp: the monotonic one
 	 * is staggered across the nodes to spread their reseeds, which would
-	 * show up here as an elapsed time reaching into the future.
+	 * show up here as a seeding further back than it happened.
 	 */
 	seeded = atomic_load(&drng->last_seeded_wtime);
 	stats.seeded_wtime = seeded;
