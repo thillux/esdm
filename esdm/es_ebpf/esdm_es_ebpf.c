@@ -680,6 +680,27 @@ static void esdm_ebpf_pool_dealloc(struct esdm_ebpf_es *es)
 	es->pool_initialized = false;
 }
 
+/*
+ * Make sure the conditioning pool is initialized, starting it over if a hash
+ * failure left it torn. What the torn states absorbed is gone, and the
+ * entropy credited for it with them - the extraction that failed cleared the
+ * credited events already. A pool that cannot be started now is tried again
+ * by the next caller, so a passing hash failure does not take the source out
+ * until a reset or a reinitialization.
+ */
+static int esdm_ebpf_pool_restart(struct esdm_ebpf_es *es,
+				  const struct esdm_hash_cb *hash_cb)
+{
+	if (es->pool_initialized)
+		return 0;
+
+	/* Never allocated or released already: nothing to start over */
+	if (!es->pool_state || !es->pool_out)
+		return -EOPNOTSUPP;
+
+	return esdm_ebpf_pool_init_states(es, hash_cb);
+}
+
 /* Insert collected event data into the conditioning pool. */
 static int esdm_ebpf_pool_insert(struct esdm_ebpf_es *es, const uint8_t *data,
 				 size_t len)
@@ -690,8 +711,7 @@ static int esdm_ebpf_pool_insert(struct esdm_ebpf_es *es, const uint8_t *data,
 	const struct esdm_hash_cb *hash_cb = drng->hash_cb;
 	int ret;
 
-	if (!es->pool_initialized)
-		return -EOPNOTSUPP;
+	CKINT(esdm_ebpf_pool_restart(es, hash_cb));
 
 	CKINT(hash_cb->hash_update(shash, data, len));
 	CKINT(hash_cb->hash_update(ohash, data, len));
@@ -827,7 +847,7 @@ void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
 
 	eb_es->e_bits = 0;
 
-	if (!es->pool_initialized)
+	if (esdm_ebpf_pool_restart(es, hash_cb))
 		return;
 
 	digestsize = hash_cb->hash_digestsize(shash);
@@ -879,7 +899,18 @@ void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
 	    hash_cb->hash_final(ohash, pool_out_digest) ||
 	    esdm_ebpf_pool_init_states(es, hash_cb) ||
 	    esdm_ebpf_pool_insert(es, pool_state_digest, digestsize)) {
+		/*
+		 * The hash states are torn and what they absorbed is lost, the
+		 * credited events cleared above with it: fail closed for those,
+		 * but start the pool over right away, so the source goes on
+		 * collecting and crediting the events still to come.
+		 */
 		es->pool_initialized = false;
+		if (esdm_ebpf_pool_restart(es, hash_cb))
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ES,
+				"%s ES: conditioning pool cannot be restarted after a hash failure\n",
+				es->name);
 	} else {
 		/*
 		 * Deliver the output digest even if no entropy is credited:
@@ -1233,7 +1264,10 @@ out:
  */
 int esdm_ebpf_refill(struct esdm_ebpf_es *es)
 {
-	if (!es->loaded || !es->pool_initialized)
+	struct esdm_drng *drng = esdm_drng_init_instance();
+
+	/* The monitor also retries a pool a hash failure left torn */
+	if (!es->loaded || esdm_ebpf_pool_restart(es, drng->hash_cb))
 		return 0;
 
 	/*
