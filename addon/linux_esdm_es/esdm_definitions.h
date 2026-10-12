@@ -48,10 +48,16 @@
  * product around to an arbitrary, possibly tiny, number of events.
  */
 
-/* Convert entropy in bits into nr. of events with the same entropy content. */
+/*
+ * Convert entropy in bits into nr. of events with at least that entropy
+ * content. Round up: esdm_data_to_entropy() rounds down, so converting the
+ * rounded-down number of events back yields less than entropy_bits whenever
+ * the rate is not a multiple of ESDM_DRNG_SECURITY_STRENGTH_BITS.
+ */
 static inline u32 esdm_entropy_to_data(u32 entropy_bits, u32 entropy_rate)
 {
-	u64 events = ((u64)entropy_bits * entropy_rate) /
+	u64 events = ((u64)entropy_bits * entropy_rate +
+		      ESDM_DRNG_SECURITY_STRENGTH_BITS - 1) /
 		     ESDM_DRNG_SECURITY_STRENGTH_BITS;
 
 	return (u32)min_t(u64, events, U32_MAX);
