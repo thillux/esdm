@@ -99,9 +99,10 @@ static int esdm_pfe_test(void)
 		esdm_pool_insert_aux(data, sizeof(data), sizeof(data) << 3);
 		esdm_force_fully_seeded_all_drbgs();
 	}
+	/* The aux pool was filled for it: not seeding is a failure */
 	if (!esdm_pfe_pr_seeded()) {
-		printf("PR DRNG cannot be seeded, skipping test\n");
-		ret = 77;
+		printf("PR DRNG cannot be seeded from a full aux pool\n");
+		ret = 1;
 		goto out;
 	}
 
