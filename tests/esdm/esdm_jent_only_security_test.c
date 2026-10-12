@@ -6,12 +6,27 @@
  * so the seed it hands out comes from this one source: with it, output is
  * produced. It then loses that source - the entropy rate is set to zero, which
  * is what a Jitter RNG failing its SP800-90B health tests amounts to for the
- * accounting - and after a reseed that collects nothing, no output is produced.
+ * accounting - and what each interface does about it is pinned down here.
  *
- * A reseed that collects nothing leaves the DRNG producing from the state it
- * has until it has spent the generate operations it is allowed without a full
- * reseed - see ESDM_DRNG_MAX_WITHOUT_RESEED in esdm_definitions.h. That budget
- * is set to its minimum here, so the reseed is what ends the output.
+ * The prediction resistance interface stops at once: the entropy behind each
+ * of its outputs is collected for that output, and there is none to collect.
+ * At most one output can come from a seed collected before - see
+ * ESDM_SEC_MAX_REQUESTS.
+ *
+ * The ordinary interface does not: a reseed that collects nothing leaves the
+ * DRNG producing from the state it has until it has spent the generate
+ * operations it is allowed without a full reseed - see
+ * ESDM_DRNG_MAX_WITHOUT_RESEED in esdm_definitions.h. That is checked with the
+ * budget the build configures. Then the budget is set to what the DRNG has
+ * spent plus one, so that the next reseed that collects nothing is what ends
+ * the output - and with it the operation of the ESDM, on every interface.
+ *
+ * Only the requests and the reseeds of this test move the counters the budget
+ * is checked against: the spent generate operations are added up when a
+ * reseed comes back without full entropy, and the reseeds are forced here
+ * rather than waited for. The reseed interval is left as configured, far
+ * longer than this test runs, so the reseed worker has no reseed of its own to
+ * interleave.
  *
  * The NTG.1 seeding strategy does not let a single entropy source seed the
  * ESDM initially, unless that source is a Jitter RNG in its own NTG.1 mode.
@@ -41,6 +56,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #include "config.h"
@@ -61,8 +77,10 @@
 #define ESDM_SEC_SEED_SLICES 100
 
 /*
- * Requests granted before the output has to stop, once the budget of generate
- * operations without a full reseed is set to its minimum.
+ * Requests made before the output has to have stopped. Two would do: the
+ * prediction resistance DRNG may hold one seed collected before the source
+ * was lost, and the ordinary DRNG stops at the first reseed after its budget
+ * is used up, which the second forced reseed is at the latest.
  */
 #define ESDM_SEC_MAX_REQUESTS 8
 
@@ -98,6 +116,38 @@ static void esdm_sec_feed_aux(void)
 				     esdm_compress_osr());
 }
 
+/*
+ * The counters of the DRNG serving ordinary requests, read back from the
+ * statistics.
+ */
+struct esdm_sec_counters {
+	unsigned int found;
+	uint32_t requests_since_fully_seeded;
+};
+
+static void esdm_sec_counters_cb(const struct esdm_drng_stats *stats,
+				 void *priv)
+{
+	struct esdm_sec_counters *counters = (struct esdm_sec_counters *)priv;
+
+	if (!strcmp(stats->type, "prediction resistance"))
+		return;
+
+	counters->found++;
+	counters->requests_since_fully_seeded =
+		stats->requests_since_fully_seeded;
+}
+
+static struct esdm_sec_counters esdm_sec_counters_get(void)
+{
+	struct esdm_sec_counters counters = { .found = 0,
+					      .requests_since_fully_seeded = 0 };
+
+	esdm_drng_stats_foreach(esdm_sec_counters_cb, &counters);
+
+	return counters;
+}
+
 static void esdm_sec_sleep(time_t sec, long nsec)
 {
 	struct timespec ts = { .tv_sec = sec, .tv_nsec = nsec };
@@ -105,11 +155,27 @@ static void esdm_sec_sleep(time_t sec, long nsec)
 	nanosleep(&ts, NULL);
 }
 
+static bool esdm_sec_buf_is_zero(const uint8_t *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (buf[i])
+			return false;
+	}
+
+	return true;
+}
+
 static int esdm_jent_only_security_test(void)
 {
+	struct esdm_sec_counters counters;
 	uint8_t buf[32];
 	unsigned int i;
-	ssize_t rc;
+	uint32_t budget;
+	ssize_t rc, max_rc = 0;
+	size_t max_rc_if = 0;
+	bool written = false;
 	int ret;
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
@@ -185,11 +251,19 @@ static int esdm_jent_only_security_test(void)
 	/* The Jitter RNG on its own carries the ESDM */
 	TEST_STEP("request %zu bytes from esdm_get_random_bytes_full_noblock",
 		  sizeof(buf));
+	memset(buf, 0, sizeof(buf));
 	rc = esdm_get_random_bytes_full_noblock(buf, sizeof(buf));
 	TEST_REQUIRE("%zu bytes are returned", sizeof(buf));
 	if (!TEST_CHECK(rc == (ssize_t)sizeof(buf), "%zd", rc)) {
 		printf("cannot obtain %zu bytes with the Jitter RNG credited: %zd\n",
 		       sizeof(buf), rc);
+		goto err;
+	}
+
+	TEST_REQUIRE("the returned buffer is not all zero");
+	if (!TEST_CHECK(!esdm_sec_buf_is_zero(buf, sizeof(buf)), "%d",
+			!esdm_sec_buf_is_zero(buf, sizeof(buf)))) {
+		printf("the ESDM handed out an all zero buffer\n");
 		goto err;
 	}
 
@@ -204,19 +278,125 @@ static int esdm_jent_only_security_test(void)
 	esdm_config_es_jent_entropy_rate_set(0);
 
 	/*
-	 * Without a budget of generate operations left, a reseed that collects
-	 * nothing cannot keep the DRNG going on the state it has.
+	 * The prediction resistance interface has nothing to collect for its
+	 * next output. A seed collected while the source still worked can
+	 * serve one more - the PR DRNG takes a fresh seed for each output -
+	 * but no more than that.
 	 */
-	TEST_STEP("limit the generate operations without a full reseed to 1");
-	esdm_config_drng_max_wo_reseed_set(1);
-
-	TEST_STEP("force a reseed of the DRNGs");
-	esdm_drng_force_reseed();
-
 	TEST_RUNUNTIL(
-		"request %zu bytes from esdm_get_random_bytes_full_noblock until it returns no bytes, at most %u times",
+		"request %zu bytes from esdm_get_random_bytes_pr_noblock until it returns no bytes, at most %u times",
 		sizeof(buf), ESDM_SEC_MAX_REQUESTS);
 	for (i = 0; i < ESDM_SEC_MAX_REQUESTS; i++) {
+		memset(buf, 0, sizeof(buf));
+		rc = esdm_get_random_bytes_pr_noblock(buf, sizeof(buf));
+		if (rc <= 0)
+			break;
+	}
+
+	TEST_REQUIRE(
+		"esdm_get_random_bytes_pr_noblock returns no bytes within %u requests",
+		ESDM_SEC_MAX_REQUESTS);
+	if (!TEST_CHECK(rc <= 0, "%zd", rc)) {
+		printf("the prediction resistance generator still hands out random bits after %u requests without a credited entropy source\n",
+		       ESDM_SEC_MAX_REQUESTS);
+		goto err;
+	}
+
+	TEST_REQUIRE("the buffer of the refused request is left all zero");
+	if (!TEST_CHECK(esdm_sec_buf_is_zero(buf, sizeof(buf)), "%d",
+			esdm_sec_buf_is_zero(buf, sizeof(buf)))) {
+		printf("the prediction resistance generator wrote into the buffer while reporting %zd\n",
+		       rc);
+		goto err;
+	}
+
+	printf("the prediction resistance generator hands out nothing after %u request(s) (%zd)\n",
+	       i + 1, rc);
+
+	/*
+	 * A reseed that collects nothing does not stop the ordinary interface
+	 * while the DRNG is within its budget of generate operations without
+	 * a full reseed - the one the build configures.
+	 */
+	TEST_STEP(
+		"force a reseed of the DRNGs and request %zu bytes from esdm_get_random_bytes_full_noblock",
+		sizeof(buf));
+	esdm_drng_force_reseed();
+	memset(buf, 0, sizeof(buf));
+	rc = esdm_get_random_bytes_full_noblock(buf, sizeof(buf));
+	TEST_REQUIRE("%zu bytes are returned", sizeof(buf));
+	if (!TEST_CHECK(rc == (ssize_t)sizeof(buf), "%zd", rc)) {
+		printf("the ESDM stopped on a reseed without a credited entropy source within its budget of %u: %zd\n",
+		       esdm_config_drng_max_wo_reseed(), rc);
+		goto err;
+	}
+
+	TEST_REQUIRE("the returned buffer is not all zero");
+	if (!TEST_CHECK(!esdm_sec_buf_is_zero(buf, sizeof(buf)), "%d",
+			!esdm_sec_buf_is_zero(buf, sizeof(buf)))) {
+		printf("the ESDM handed out an all zero buffer\n");
+		goto err;
+	}
+
+	TEST_REQUIRE("the ESDM is operational");
+	if (!TEST_CHECK(esdm_state_operational(), "%d",
+			esdm_state_operational())) {
+		printf("the ESDM left operational mode within its budget\n");
+		goto err;
+	}
+
+	/* Size the budget to what the DRNG has spent, plus one */
+	TEST_STEP(
+		"read the generate operations since the last full reseed from the DRNG statistics");
+	counters = esdm_sec_counters_get();
+	TEST_REQUIRE("exactly one DRNG instance serves ordinary requests");
+	if (!TEST_CHECK(counters.found == 1, "%u", counters.found)) {
+		printf("%u DRNG instances serve ordinary requests, expected 1\n",
+		       counters.found);
+		goto err;
+	}
+	budget = counters.requests_since_fully_seeded + 1;
+	TEST_STEP(
+		"limit the generate operations without a full reseed to %u (spent + 1)",
+		budget);
+	esdm_config_drng_max_wo_reseed_set(budget);
+
+	/*
+	 * The spent operations are added up by a reseed that comes back
+	 * without full entropy, so the budget by itself holds nothing back
+	 * until the next one. The request above is not counted yet.
+	 */
+	TEST_STEP("request %zu bytes from esdm_get_random_bytes_full_noblock",
+		  sizeof(buf));
+	memset(buf, 0, sizeof(buf));
+	rc = esdm_get_random_bytes_full_noblock(buf, sizeof(buf));
+	TEST_REQUIRE("%zu bytes are returned", sizeof(buf));
+	if (!TEST_CHECK(rc == (ssize_t)sizeof(buf), "%zd", rc)) {
+		printf("the ESDM stopped before the reseed that uses up its budget of %u: %zd\n",
+		       budget, rc);
+		goto err;
+	}
+
+	TEST_REQUIRE("the ESDM is operational");
+	if (!TEST_CHECK(esdm_state_operational(), "%d",
+			esdm_state_operational())) {
+		printf("the ESDM left operational mode before the reseed that uses up its budget of %u\n",
+		       budget);
+		goto err;
+	}
+
+	/*
+	 * Now move the DRNG into reseeds it cannot satisfy - the operator
+	 * action behind esdm-tool --reseed-crng, and what the ESDM does on its
+	 * own once the reseed interval elapses. One per request, so that
+	 * the requests made since the last one are always added up.
+	 */
+	TEST_RUNUNTIL(
+		"force a reseed of the DRNGs and request %zu bytes from esdm_get_random_bytes_full_noblock until it returns no bytes, at most %u times",
+		sizeof(buf), ESDM_SEC_MAX_REQUESTS);
+	for (i = 0; i < ESDM_SEC_MAX_REQUESTS; i++) {
+		esdm_drng_force_reseed();
+		memset(buf, 0, sizeof(buf));
 		rc = esdm_get_random_bytes_full_noblock(buf, sizeof(buf));
 		if (rc <= 0)
 			break;
@@ -226,13 +406,82 @@ static int esdm_jent_only_security_test(void)
 		"esdm_get_random_bytes_full_noblock returns no bytes within %u requests",
 		ESDM_SEC_MAX_REQUESTS);
 	if (!TEST_CHECK(rc <= 0, "%zd", rc)) {
-		printf("the ESDM still hands out random bits %u requests after a reseed without a credited entropy source\n",
+		printf("the ESDM still hands out random bits %u requests after reseeds without a credited entropy source\n",
 		       ESDM_SEC_MAX_REQUESTS);
 		goto err;
 	}
 
-	printf("no output %u request(s) after a reseed that collected nothing (%zd)\n",
-	       i + 1, rc);
+	TEST_REQUIRE("the buffer of the refused request is left all zero");
+	if (!TEST_CHECK(esdm_sec_buf_is_zero(buf, sizeof(buf)), "%d",
+			esdm_sec_buf_is_zero(buf, sizeof(buf)))) {
+		printf("the ESDM wrote into the buffer while reporting %zd\n",
+		       rc);
+		goto err;
+	}
+
+	TEST_REQUIRE("the ESDM is not operational");
+	if (!TEST_CHECK(!esdm_state_operational(), "%d",
+			!esdm_state_operational())) {
+		printf("the ESDM reports itself operational after refusing to hand out random bits\n");
+		goto err;
+	}
+
+	TEST_STEP(
+		"read the generate operations since the last full reseed from the DRNG statistics");
+	counters = esdm_sec_counters_get();
+	TEST_REQUIRE(
+		"exactly one DRNG instance has spent at least %u generate operations",
+		budget);
+	if (!TEST_CHECK(counters.found == 1, "%u", counters.found) ||
+	    !TEST_CHECK(counters.requests_since_fully_seeded >= budget, "%u",
+			counters.requests_since_fully_seeded)) {
+		printf("the DRNG is out of operation with %u of %u generate operations spent\n",
+		       counters.requests_since_fully_seeded, budget);
+		goto err;
+	}
+
+	printf("no output %u request(s) after reseeds that collected nothing (%zd), %u of %u spent\n",
+	       i + 1, rc, counters.requests_since_fully_seeded, budget);
+
+	/* And it stays that way, on every interface that produces output */
+	TEST_STEP(
+		"request %zu bytes from esdm_get_random_bytes_full_noblock, esdm_get_random_bytes_pr_noblock and esdm_get_random_bytes, %u times",
+		sizeof(buf), ESDM_SEC_MAX_REQUESTS);
+	for (i = 0; i < ESDM_SEC_MAX_REQUESTS; i++) {
+		ssize_t rcs[3];
+		size_t j;
+
+		memset(buf, 0, sizeof(buf));
+		rcs[0] = esdm_get_random_bytes_full_noblock(buf, sizeof(buf));
+		rcs[1] = esdm_get_random_bytes_pr_noblock(buf, sizeof(buf));
+		rcs[2] = esdm_get_random_bytes(buf, sizeof(buf));
+
+		/* The worst of all of them is what is checked below */
+		for (j = 0; j < 3; j++) {
+			if ((!i && !j) || rcs[j] > max_rc) {
+				max_rc = rcs[j];
+				max_rc_if = j;
+			}
+		}
+
+		if (!esdm_sec_buf_is_zero(buf, sizeof(buf)))
+			written = true;
+	}
+
+	TEST_REQUIRE("no interface returns any bytes");
+	if (!TEST_CHECK(max_rc <= 0, "%zd", max_rc)) {
+		printf("the ESDM resumed handing out random bits: interface %zu returned %zd\n",
+		       max_rc_if, max_rc);
+		goto err;
+	}
+
+	TEST_REQUIRE("the buffer is left all zero");
+	if (!TEST_CHECK(!written, "%d", written)) {
+		printf("the ESDM wrote into the buffer while refusing to hand out random bits\n");
+		goto err;
+	}
+
+	printf("nothing is handed out on any interface afterwards\n");
 
 out:
 	esdm_fini();
