@@ -114,3 +114,22 @@ void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t uid)
 
 	pthread_mutex_unlock(&limit->lock);
 }
+
+bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t uid)
+{
+	struct esdm_peer_limit_entry *entry;
+	bool exhausted;
+
+	if (!uid)
+		return false;
+
+	pthread_mutex_lock(&limit->lock);
+
+	/* A refusal starts the episode, see esdm_peer_limit_get(). */
+	entry = *esdm_peer_limit_slot(limit, uid);
+	exhausted = entry && entry->warned;
+
+	pthread_mutex_unlock(&limit->lock);
+
+	return exhausted;
+}

@@ -40,12 +40,17 @@ if get_option('esdm-server').enabled()
 	# which is the only way to observe what the blocking read command does
 	# while it is not. Its server closes idle connections after a few
 	# seconds rather than a minute, so that this can be tested as well -
-	# well above anything the other tests leave a connection unused for.
+	# well above anything the other tests leave a connection unused for -
+	# and does so whenever a single connection is open: the pressure it
+	# otherwise waits for is the connection lifecycle test's to cover.
 	egd_server_raw_test = executable(
 			'egd_server_raw_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_raw_test.c' ],
-			c_args: [ '-DESDM_EGD_IDLE_TIMEOUT_MS=3000' ],
+			c_args: [
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=1',
+			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
 			link_with: esdm_static_lib
@@ -56,12 +61,16 @@ if get_option('esdm-server').enabled()
 	# The same setup for the end of a connection, the client's and the
 	# server's. The insertion command has no response, so the server's call
 	# into the auxiliary pool is renamed to a counting wrapper in the test.
+	# Idle connections time out after a second, and the per-UID limit is
+	# small enough for the test to run into it.
 	egd_server_conn_test = executable(
 			'egd_server_conn_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_conn_test.c' ],
 			c_args: [
 				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=1000',
+				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=48',
 			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],

@@ -79,16 +79,38 @@
  * other EGD consumer out. A process that uses the EGD client library holds one
  * connection, so this leaves room for many such consumers per user.
  */
+#ifndef ESDM_EGD_MAX_CONNECTIONS_PER_UID
 #define ESDM_EGD_MAX_CONNECTIONS_PER_UID 256
+#endif
 
 /*
  * Time a connection may sit idle - no command received, no response owed -
- * before it is closed, so that abandoned clients do not hold their slot and
- * descriptor forever. The EGD client library reconnects transparently, as do
- * clients that open a connection per request.
+ * before it may be closed, so that abandoned clients do not hold their slot and
+ * descriptor forever while others need them.
+ *
+ * Only then, though: an idle connection is closed only under pressure, see
+ * esdm_egd_idle_reapable(). The consumers that hold a connection for their
+ * whole lifetime and use it rarely are the ones that cannot reconnect - a
+ * process confined by seccomp after connecting, OpenSSH's pre-authentication
+ * child being the reference case, is killed for the connect(2). Closing their
+ * connection after a minute of silence would trade an idle descriptor for a
+ * dead consumer. As long as slots and descriptors are plentiful, the
+ * connection costs nobody anything, and the protection against clients that
+ * hog them takes effect exactly when they become scarce.
  */
 #ifndef ESDM_EGD_IDLE_TIMEOUT_MS
 #define ESDM_EGD_IDLE_TIMEOUT_MS 60000
+#endif
+
+/*
+ * Connections in use from which on idle ones are closed: once fewer slots are
+ * left than a single unprivileged UID may hold. One local user can thus not
+ * make the server close the idle connections of everybody else on its own, and
+ * the slots are reclaimed before a peer can be turned away for want of them.
+ */
+#ifndef ESDM_EGD_IDLE_REAP_CONNECTIONS
+#define ESDM_EGD_IDLE_REAP_CONNECTIONS                                         \
+	(ESDM_EGD_MAX_CONNECTIONS - ESDM_EGD_MAX_CONNECTIONS_PER_UID)
 #endif
 
 /* Interval of the scan for idle connections */
@@ -260,6 +282,15 @@ static atomic_uint esdm_egd_workers_running = 0;
  * accepts, and ESDM_EGD_MAX_CONNECTIONS bounds them all.
  */
 static atomic_size_t esdm_egd_connections = 0;
+
+/*
+ * When an accept last failed for want of descriptors or memory, 0 once one
+ * succeeded again. The RLIMIT_NOFILE is shared with the RPC interfaces, so this
+ * can happen well below ESDM_EGD_MAX_CONNECTIONS. A time rather than a flag:
+ * a client that gave up waiting in the backlog leaves no accept behind to clear
+ * it, and the shortage must not be believed forever.
+ */
+static _Atomic uint64_t esdm_egd_starved_at = 0;
 
 static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
 				    const char *socket_path)
@@ -1174,9 +1205,12 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 					"EGD server: cannot accept connections: %s\n",
 					strerror(errno));
 			*out_of_resources = true;
+			atomic_store(&esdm_egd_starved_at, esdm_egd_now_ms());
 		}
 		return NULL;
 	}
+
+	atomic_store(&esdm_egd_starved_at, 0);
 
 	conn = calloc(1, sizeof(struct esdm_egd_conn));
 	if (!conn) {
@@ -1252,6 +1286,44 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 		fd, conn->peer_uid);
 
 	return conn;
+}
+
+/*
+ * Is the server short of connection slots or descriptors? See
+ * ESDM_EGD_IDLE_TIMEOUT_MS. A failed accept counts for as long as a connection
+ * may idle - long enough for the reclaimed descriptors to be taken.
+ */
+static bool esdm_egd_scarce(uint64_t now)
+{
+	uint64_t starved_at = atomic_load(&esdm_egd_starved_at);
+
+	if (atomic_load(&esdm_egd_connections) >= ESDM_EGD_IDLE_REAP_CONNECTIONS)
+		return true;
+
+	/* Another worker may have stored a time later than @now. */
+	return starved_at &&
+	       (now < starved_at ||
+		now - starved_at <= ESDM_EGD_IDLE_TIMEOUT_MS);
+}
+
+/*
+ * May the idle connection be closed? See ESDM_EGD_IDLE_TIMEOUT_MS.
+ *
+ * Only when nothing is owed to it, it was silent for the idle timeout, and its
+ * slot or descriptor is wanted: the server is short of them (@scarce), or the
+ * connection's own UID is being refused further connections - which reclaims
+ * the slots of a client that abandons its connections without closing them
+ * for that client's own UID, at no cost to anybody else's.
+ */
+static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
+				   uint64_t now, bool scarce)
+{
+	if (conn->deferred || esdm_egd_out_pending(conn) ||
+	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
+		return false;
+
+	return scarce ||
+	       esdm_peer_limit_exhausted(&esdm_egd_peer_limit, conn->peer_uid);
 }
 
 /*
@@ -1541,19 +1613,20 @@ static int esdm_egd_handler(void *args)
 		}
 
 		/*
-		 * Close the connections that sat idle for too long: nothing
-		 * owed to them, nothing heard from them. Without this, clients
-		 * that went away without closing - or never meant to send
-		 * anything - hold their slots and descriptors forever.
+		 * Close the connections that sat idle for too long while their
+		 * slots are wanted: nothing owed to them, nothing heard from
+		 * them. Without this, clients that went away without closing -
+		 * or never meant to send anything - hold their slots and
+		 * descriptors forever, and enough of them lock everybody else
+		 * out.
 		 */
 		if (esdm_egd_now_ms() - last_idle_scan >= ESDM_EGD_IDLE_SCAN_MS) {
 			uint64_t now = esdm_egd_now_ms();
+			bool scarce = esdm_egd_scarce(now);
 
 			last_idle_scan = now;
 			TAILQ_FOREACH_SAFE (conn, &conn_list, tailq, tmp) {
-				if (conn->deferred || esdm_egd_out_pending(conn) ||
-				    now - conn->last_active <=
-					    ESDM_EGD_IDLE_TIMEOUT_MS)
+				if (!esdm_egd_idle_reapable(conn, now, scarce))
 					continue;
 
 				esdm_logger(

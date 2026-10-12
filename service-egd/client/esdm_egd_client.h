@@ -76,6 +76,13 @@ extern "C" {
  * process for. A client serving a sandboxed process must therefore be connected
  * before the sandbox is entered - and a process that forks into one cannot be
  * served at all, since the fork forces a reconnect.
+ *
+ * The esdm-server keeps such a connection open for as long as it sits idle,
+ * unless it runs short of them: an idle connection is only closed once nearly
+ * all connection slots or descriptors of the server are taken, or the UID of
+ * the consumer is being refused further connections. A sandboxed consumer
+ * whose connection is closed nevertheless - that way, or by a restart of the
+ * daemon - is killed by its sandbox on the reconnect.
  */
 struct esdm_egd_client;
 

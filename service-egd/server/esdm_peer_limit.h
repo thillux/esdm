@@ -75,6 +75,15 @@ bool esdm_peer_limit_get(struct esdm_peer_limit *limit, uid_t uid);
  */
 void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t uid);
 
+/**
+ * @brief Is @uid being refused connections?
+ *
+ * @return true when a connection of @uid was refused for its limit and none of
+ *	   its connections has been released since - the UID wants more than
+ *	   its share right now. Never true for root.
+ */
+bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t uid);
+
 #ifdef __cplusplus
 }
 #endif

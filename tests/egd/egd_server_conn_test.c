@@ -24,6 +24,11 @@
  * own. Like egd_server_raw_test, the server runs in this process and is spoken
  * to in raw protocol bytes, so no daemon and no privileges are needed.
  *
+ * The end on the server's side is the closing of an idle connection, which is
+ * only to happen when its slot is wanted. This build lets idle connections
+ * time out after a second and puts the per-UID connection limit within the
+ * test's reach.
+ *
  * The insertion command has no response, so whether the server took what a
  * client sent cannot be seen on the socket. The build of this test renames the
  * server's call into the auxiliary pool to test_pool_insert_aux() below, which
@@ -444,6 +449,117 @@ static void test_hangup_deferred(void)
 	test_server_alive("a client with a waiting request left");
 }
 
+/*
+ * Long enough for the server to have scanned for idle connections twice after
+ * the timeout ran out - it scans once a second - plus room for a busy machine.
+ */
+#define TEST_IDLE_WAIT_MS (ESDM_EGD_IDLE_TIMEOUT_MS + 2 * 1000 + 1000)
+
+/*
+ * A connection idle for longer than the timeout is left alone while the server
+ * has slots and descriptors to spare: the consumers holding a connection for
+ * their whole lifetime and using it rarely are the sandboxed ones that cannot
+ * connect again.
+ */
+static void test_idle_kept(void)
+{
+	int fd;
+
+	printf("EGD conn: an idle connection is kept while nobody needs its slot\n");
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	CHECK(test_cmd_entropy_count(fd, TEST_RESPONSE_MS) == 0,
+	      "a new connection was not served");
+	CHECK(test_quiet(fd, TEST_IDLE_WAIT_MS),
+	      "an idle connection was closed with slots to spare");
+	CHECK(test_cmd_entropy_count(fd, TEST_RESPONSE_MS) == 0,
+	      "a connection that sat idle was not served any more");
+
+	close(fd);
+}
+
+/*
+ * A UID that wants more connections than its limit gets its idle ones closed -
+ * the slots of its own clients that abandoned them without closing - and only
+ * then, not merely because it is at its limit.
+ */
+static void test_idle_uid_exhausted(void)
+{
+#define TEST_UID_CONNECTIONS ESDM_EGD_MAX_CONNECTIONS_PER_UID
+	int fds[TEST_UID_CONNECTIONS];
+	unsigned int i, n = 0, closed = 0;
+	uint8_t byte;
+	int refused;
+
+	printf("EGD conn: idle connections of a UID at its limit\n");
+
+	if (geteuid() == 0) {
+		printf("  SKIPPED: root is not subject to the per-UID limit\n");
+		return;
+	}
+
+	/* Whatever the tests above closed has to be released by the server. */
+	test_sleep_ms(500);
+
+	for (n = 0; n < TEST_UID_CONNECTIONS; n++) {
+		fds[n] = test_connect();
+		if (fds[n] < 0 ||
+		    test_cmd_entropy_count(fds[n], TEST_RESPONSE_MS)) {
+			CHECK(0, "connection %u of %u was not served", n + 1,
+			      TEST_UID_CONNECTIONS);
+			if (fds[n] >= 0)
+				close(fds[n]);
+			goto out;
+		}
+	}
+
+	/* At the limit, but nobody was refused: no reason to close any. */
+	for (i = 0; i < n; i++) {
+		if (!test_quiet(fds[i], i ? 0 : TEST_IDLE_WAIT_MS)) {
+			CHECK(0,
+			      "an idle connection of a UID at its limit was closed before it was refused one");
+			break;
+		}
+	}
+
+	/* One more is refused - the server closes it right away. */
+	refused = test_connect();
+	if (refused >= 0) {
+		CHECK(test_recv(refused, &byte, sizeof(byte),
+				TEST_RESPONSE_MS) == -EPIPE,
+		      "a connection beyond the UID's limit was not refused");
+		close(refused);
+	}
+
+	/* And now the slots of its idle connections are wanted. */
+	test_sleep_ms(TEST_IDLE_WAIT_MS);
+	for (i = 0; i < n; i++) {
+		if (!test_quiet(fds[i], 0))
+			closed++;
+	}
+	CHECK(closed > 0,
+	      "no idle connection was closed for a UID refused at its limit");
+	printf("  %u of %u idle connections closed\n", closed, n);
+
+	/* The slot is the UID's again. */
+	refused = test_connect();
+	CHECK(refused >= 0 &&
+		      test_cmd_entropy_count(refused, TEST_RESPONSE_MS) == 0,
+	      "the UID was not served again after its idle connections were closed");
+	if (refused >= 0)
+		close(refused);
+
+out:
+	while (n--)
+		close(fds[n]);
+#undef TEST_UID_CONNECTIONS
+}
+
 /****************************
  * ESDM state
  ****************************/
@@ -523,6 +639,8 @@ int main(int argc, char *argv[])
 	test_hangup_deferred();
 	test_hangup_after_write();
 	test_hangup_after_pipelined_request();
+	test_idle_kept();
+	test_idle_uid_exhausted();
 
 	CHECK(!test_sigpipe, "the server raised SIGPIPE");
 
