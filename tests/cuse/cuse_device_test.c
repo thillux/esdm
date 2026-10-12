@@ -742,10 +742,13 @@ static void test_ioctl_status_and_unknown(void)
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EAGAIN);
 
-	/* An unknown command is refused the way the kernel refuses it */
+	/*
+	 * An unknown command is refused the way the kernel refuses it: its
+	 * random_ioctl() answers EINVAL, not the ENOTTY of other drivers.
+	 */
 	ioctl_call(0xdead, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, ENOTTY);
+	CHECK_EQ(reply.err, EINVAL);
 }
 
 /*
