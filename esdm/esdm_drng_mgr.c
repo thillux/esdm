@@ -1798,6 +1798,16 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		 * otherwise be generated after two seedings in a row.
 		 */
 		if (!pr && !reseeded && esdm_drng_must_reseed(drng)) {
+			/*
+			 * With a reseed interval of zero seconds every block
+			 * is generated from a seed collected for it, so the
+			 * reseed is neither handed to the worker nor skipped
+			 * for a busy pool: the request waits for the pool lock
+			 * instead. Read once, the lock below is taken by
+			 * exactly one of the two branches.
+			 */
+			bool per_request = esdm_drng_reseed_per_request();
+
 			if (esdm_drng_reseed_async_capable(drng) &&
 			    esdm_drng_reseed_async(drng)) {
 				/*
@@ -1814,7 +1824,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				 * Without a worker the DRNG is reseeded right
 				 * here, like one that cannot defer.
 				 */
-			} else if (!esdm_pool_trylock()) {
+			} else if (!per_request && !esdm_pool_trylock()) {
 				/*
 				 * Entropy pool cannot be locked, try to reseed
 				 * next time, but continue to generate random
@@ -1824,6 +1834,8 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 				atomic_store(&drng->force_reseed, true);
 				mutex_w_unlock(&drng->lock);
 			} else { /* Perform synchronous reseed */
+				if (per_request)
+					esdm_pool_lock();
 				mutex_w_lock(&drng->lock);
 				/* double check, as we did not lock the DRNG in the first check*/
 				if (esdm_drng_must_reseed(drng)) {

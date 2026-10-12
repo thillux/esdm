@@ -259,6 +259,8 @@ if get_option('esdm-server').enabled()
 	)
 
 	test('ESDM reseed per request', esdm_reseed_per_request_test)
+	test('ESDM reseed per request - 2 DRNG', esdm_reseed_per_request_test,
+		args : [ '2' ])
 
 	esdm_pr_full_entropy_test = executable(
 		'esdm_pr_full_entropy_test',
