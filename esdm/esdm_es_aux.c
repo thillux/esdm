@@ -599,16 +599,20 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	    hash_cb->hash_update(shash, aux_state, digestsize) ||
 	    hash_cb->hash_update(ohash, aux_state, digestsize)) {
 		/*
-		 * The hash chain failed after collected_ent_bits was already
-		 * drained from the pool by the atomic_exchange() above. As no output
-		 * is produced, return the consumed entropy to the pool instead
-		 * of losing it (the caller holds pool->lock, so this is the only
-		 * writer). Additionally drop the initialized flag: hash_final()
-		 * may already have finalized one or both hash states, so force a
-		 * clean re-initialization on the next insert rather than
-		 * continuing to hash into a torn state.
+		 * The hash chain failed part way: hash_final() may already have
+		 * finalized one or both hash states, so drop the initialized
+		 * flag to force a clean re-initialization on the next insert
+		 * rather than continuing to hash into a torn state.
+		 *
+		 * That re-initialization discards everything the pool has
+		 * absorbed, so the entropy it was credited with is gone with it
+		 * - the bits drained above as well as the overflow put back.
+		 * Clear the counter (the caller holds pool->lock, so this is the
+		 * only writer): giving the drained bits back would credit the
+		 * next extraction with entropy of data that never reaches it,
+		 * and the source would report it as available meanwhile.
 		 */
-		atomic_fetch_add(&pool->aux_entropy_bits, (int)collected_ent_bits);
+		esdm_pool_set_entropy_pool(pool, 0);
 		pool->initialized = false;
 		returned_ent_bits = 0;
 	} else {
