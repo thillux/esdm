@@ -229,6 +229,8 @@ addon/es_ebpf_testing
 
 * fix: RPC server: a worker thread failing while serving (epoll setup, epoll_wait() or registering a client) takes the server down with that error instead of silently leaving it with fewer workers; esdm_locked_mem_alloc() no longer reports success with a NULL pointer when mlock() fails without errno; the CUSE /proc reader refuses buffers too small for content and NUL; errno is only evaluated after calls that set it (found by the clang static analyzer)
 
+* hardening: zero all used registers on return (-fzero-call-used-regs=used instead of used-gpr); pass the code generation hardening flags to the link as well, as LTO builds silently dropped -fzero-call-used-regs
+
 * ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes) and esdm-plain builds the default configuration
 
 * fix: esdm.spec names the jitterentropy packages as openSUSE ships them
