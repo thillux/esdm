@@ -105,7 +105,11 @@ static int esdm_pfe_test(void)
 		goto out;
 	}
 
-	/* Spend the initial seed, after which every output reseeds */
+	/*
+	 * Every output collects its own seed, the first one after the
+	 * instantiation too: a full aux pool covers a full block.
+	 */
+	esdm_pool_insert_aux(data, sizeof(data), sizeof(data) << 3);
 	rc = esdm_get_random_bytes_pr(buf, sizeof(buf));
 	if (rc != (ssize_t)sizeof(buf)) {
 		printf("First PR request failed: %zd\n", rc);

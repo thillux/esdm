@@ -4,10 +4,10 @@
  * Its jobs are observed here, all without a single request being made: a DRNG
  * that never reached the fully seeded level is brought up - nothing else does
  * that for an instance no request lands on - the prediction resistance
- * instance, which sits on the seed of the request it last served, is reseeded
- * before that seed ages, once nothing is due the worker waits for the reseed
- * it knows is coming instead of looking again every second, and a reseed
- * interval set while it waits reaches it there. A reseed interval of zero
+ * instance is left alone, since each of its outputs collects the seed it is
+ * generated from in the request, once nothing is due the worker waits for the
+ * reseed it knows is coming instead of looking again every second, and a
+ * reseed interval set while it waits reaches it there. A reseed interval of zero
  * seconds sends the worker home, since the requests reseed themselves then,
  * and an interval that grows again brings one back.
  *
@@ -56,6 +56,12 @@
 /* Wait for the worker at most this many 100ms slices */
 #define ESDM_RSD_SLICES 200
 
+/*
+ * Slices the prediction resistance DRNG is watched over: several reseed
+ * intervals, any of which the worker would have reseeded it in.
+ */
+#define ESDM_RSD_PR_SLICES (5 * 10 * ESDM_RSD_INTERVAL)
+
 /* Reseed interval the worker's wait is observed with. */
 #define ESDM_RSD_LONG_INTERVAL 120
 
@@ -72,6 +78,7 @@ struct rsd_state {
 	unsigned int nodes_unseeded;
 	/* The prediction resistance instance */
 	bool pr_found;
+	bool pr_initiated;
 	long long pr_seed_generation;
 	/* The earliest reseed any of them reports */
 	long long soonest_reseed;
@@ -86,6 +93,7 @@ static void rsd_state_cb(const struct esdm_drng_stats *stats, void *priv)
 
 	if (!strcmp(stats->type, "prediction resistance")) {
 		state->pr_found = true;
+		state->pr_initiated = stats->initiated;
 		state->pr_seed_generation = stats->seed_generation;
 		return;
 	}
@@ -319,8 +327,7 @@ static int esdm_reseed_worker_test(void)
 	 */
 	for (i = 0; i < ESDM_RSD_SLICES; i++) {
 		after = rsd_state_get();
-		if (!after.nodes_unseeded &&
-		    after.pr_seed_generation > before.pr_seed_generation)
+		if (!after.nodes_unseeded && after.pr_initiated)
 			break;
 		rsd_sleep_slice();
 	}
@@ -334,6 +341,11 @@ static int esdm_reseed_worker_test(void)
 		goto err;
 	}
 
+	if (!after.pr_initiated) {
+		printf("the prediction resistance DRNG was never instantiated\n");
+		goto err;
+	}
+
 	if (before.nodes_unseeded) {
 		printf("the worker brought %u DRNG instance(s) up to the fully seeded level\n",
 		       before.nodes_unseeded);
@@ -341,15 +353,27 @@ static int esdm_reseed_worker_test(void)
 		printf("every DRNG instance was already seeded at start up\n");
 	}
 
-	/* And the prediction resistance instance is kept fresh */
-	if (after.pr_seed_generation <= before.pr_seed_generation) {
-		printf("the prediction resistance DRNG was not reseeded: seed generation %lld\n",
-		       after.pr_seed_generation);
+	/*
+	 * And the prediction resistance instance is left alone. Each of its
+	 * outputs is generated from a seed collected for it in the request, so
+	 * a seed the worker put in would either be replaced unused or - had
+	 * the request gone with it - be output from entropy collected for no
+	 * request at all. Over several intervals, its seed generation must not
+	 * move.
+	 */
+	before = after;
+	for (i = 0; i < ESDM_RSD_PR_SLICES; i++)
+		rsd_sleep_slice();
+	after = rsd_state_get();
+
+	if (after.pr_seed_generation != before.pr_seed_generation) {
+		printf("the prediction resistance DRNG was reseeded without a request: seed generation %lld -> %lld\n",
+		       before.pr_seed_generation, after.pr_seed_generation);
 		goto err;
 	}
 
-	printf("the prediction resistance DRNG was reseeded without a request: seed generation %lld -> %lld\n",
-	       before.pr_seed_generation, after.pr_seed_generation);
+	printf("the prediction resistance DRNG was not reseeded without a request over %u slices: seed generation %lld\n",
+	       ESDM_RSD_PR_SLICES, after.pr_seed_generation);
 
 	/* With every instance seeded, what does the worker do next? */
 	if (rsd_idle_check())

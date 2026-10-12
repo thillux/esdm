@@ -6,6 +6,10 @@
  * which esdm_get_seed(), the reseed on entropy arrival and the initial
  * oversampling go by - has to survive a PR request.
  *
+ * And every output is generated from a seed collected for it, the first one
+ * after the instantiation of the DRNG at start up too: each request of one
+ * block takes the DRNG one seed generation further.
+ *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
  * License: see LICENSE file in root directory
@@ -36,9 +40,27 @@
 /* Number of PR requests made */
 #define ESDM_PRS_REQUESTS 4
 
+static void esdm_prs_generation_cb(const struct esdm_drng_stats *stats,
+				   void *priv)
+{
+	long long *generation = priv;
+
+	*generation = stats->seed_generation;
+}
+
+static long long esdm_prs_generation(void)
+{
+	long long generation = 0;
+
+	esdm_drng_stats_pr(esdm_prs_generation_cb, &generation);
+	return generation;
+}
+
 int main(int argc, char *argv[])
 {
-	uint8_t buf[64];
+	/* One block of PR output: one seed */
+	uint8_t buf[ESDM_DRNG_SECURITY_STRENGTH_BYTES];
+	long long generation;
 	unsigned int i;
 	ssize_t rc;
 	int ret;
@@ -67,9 +89,17 @@ int main(int argc, char *argv[])
 	}
 
 	for (i = 0; i < ESDM_PRS_REQUESTS; i++) {
+		generation = esdm_prs_generation();
 		rc = esdm_get_random_bytes_pr(buf, sizeof(buf));
 		if (rc <= 0) {
 			printf("PR request %u failed: %zd\n", i, rc);
+			ret = 1;
+			goto out;
+		}
+
+		if (esdm_prs_generation() != generation + 1) {
+			printf("PR request %u was served from seed generation %lld, which it did not collect\n",
+			       i, generation);
 			ret = 1;
 			goto out;
 		}
