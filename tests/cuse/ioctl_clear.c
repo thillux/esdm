@@ -155,13 +155,13 @@ int main(int argc, char *argv[])
 
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret = test_ioctl(devfile, -1);
+	ret = !!test_ioctl(devfile, -1);
 	raise_privilege();
 	printf("============== Privileged Tests ============================\n");
-	ret += test_ioctl(devfile, 0);
+	ret += !!test_ioctl(devfile, 0);
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret += test_ioctl(devfile, -1);
+	ret += !!test_ioctl(devfile, -1);
 
 	env_fini();
 
