@@ -61,6 +61,16 @@ int main(int argc, char *argv[])
 	 */
 	esdm_config_max_nodes_set(4);
 
+	/*
+	 * Before esdm_init() there is no DRNG behind the status yet, which
+	 * the status has to say instead of crashing on it.
+	 */
+	if (esdm_status(buf, sizeof(buf)) ||
+	    esdm_status_json(buf, sizeof(buf))) {
+		printf("Status report before esdm_init() could not be created\n");
+		return 1;
+	}
+
 	ret = esdm_init();
 	if (ret)
 		return ret;

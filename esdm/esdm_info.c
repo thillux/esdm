@@ -168,8 +168,10 @@ int esdm_status(char *buf, size_t buflen)
 		 "Standards compliance: %s%s%s%s%s%s\n"
 		 "ESDM fully seeded: %s\n"
 		 "ESDM entropy level: %u\n",
-		 drng->drng_cb->drng_name(), esdm_security_strength(),
-		 esdm_nodes, esdm_config_fips_enabled() ? "FIPS 140 " : "",
+		 /* The callbacks are only installed by esdm_init() */
+		 drng->drng_cb ? drng->drng_cb->drng_name() : "N/A",
+		 esdm_security_strength(), esdm_nodes,
+		 esdm_config_fips_enabled() ? "FIPS 140 " : "",
 		 /* A DRG.4 build satisfies DRG.3 and reports both */
 		 esdm_drg3_compliant() ? "DRG.3 " : "",
 		 esdm_drg4_compliant() ? "DRG.4 " : "",
@@ -578,9 +580,12 @@ int esdm_status_json(char *buf, size_t buflen)
 	json_object_object_add(root, "test_mode",
 			       json_object_new_boolean(sizeof(TESTMODE_STR) >
 						       1));
+	/* The callbacks are only installed by esdm_init() */
 	json_object_object_add(
 		root, "drng_name",
-		json_object_new_string(drng->drng_cb->drng_name()));
+		drng->drng_cb ?
+			json_object_new_string(drng->drng_cb->drng_name()) :
+			NULL);
 	json_object_object_add(root, "security_strength_bits",
 			       json_object_new_int64(esdm_security_strength()));
 	json_object_object_add(root, "drng_instances",

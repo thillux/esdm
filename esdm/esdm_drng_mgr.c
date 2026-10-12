@@ -327,6 +327,15 @@ int esdm_drng_mgr_initialize(void)
 	 */
 	int expected = 0;
 
+	/*
+	 * There is no second life after esdm_drng_mgr_finalize(): the DRNGs are
+	 * freed, the terminate flags of this and the other managers stay set,
+	 * and the seeding state the ESDM goes by is the one of before. Say so
+	 * rather than report success for an ESDM that cannot hand out a byte.
+	 */
+	if (esdm_drng_mgr_terminating())
+		return -ESHUTDOWN;
+
 	if (!atomic_compare_exchange_strong(&esdm_avail, &expected, 1))
 		return 0;
 
