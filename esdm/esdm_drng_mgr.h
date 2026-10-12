@@ -242,6 +242,16 @@ void esdm_try_fully_seeded(void);
 void esdm_force_fully_seeded(void);
 void esdm_force_fully_seeded_all_drbgs(void);
 
+/**
+ * @brief Bring up the DRNGs that are not fully seeded, for a caller that wants
+ * 	data from them
+ *
+ * Seeds in the caller's thread only while the ESDM is not operational, or if
+ * there is no reseed worker and the entropy sources report enough for a seed.
+ * Otherwise the reseed worker is told and does it.
+ */
+void esdm_drng_bring_up_for_request(void);
+
 static inline uint32_t esdm_compress_osr(void)
 {
 	return esdm_es_oversampling() ? ESDM_OVERSAMPLE_ES_BITS : 0;

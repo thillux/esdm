@@ -670,8 +670,8 @@ void esdm_unset_fully_seeded(struct esdm_drng *drng)
 	 * Clear all_online_nodes_seeded under the pool lock so it stays ordered
 	 * with the pool-lock-guarded set-to-true in __esdm_drng_seed_work() and
 	 * with the readers in esdm_get_seed() that evaluate this flag under
-	 * the same lock. The lock is scoped narrowly here because
-	 * esdm_force_fully_seeded() below acquires the pool lock itself.
+	 * the same lock. The lock is scoped narrowly here because the bring-up
+	 * below may acquire the pool lock itself.
 	 */
 	esdm_pool_lock();
 	esdm_pool_all_nodes_seeded(false);
@@ -692,8 +692,15 @@ void esdm_unset_fully_seeded(struct esdm_drng *drng)
 		esdm_shm_status_set_operational(false);
 	}
 
-	/* If sufficient entropy is available, reseed now. */
-	esdm_force_fully_seeded();
+	/*
+	 * Bring the DRNGs up again - but not with a forced seeding right here
+	 * unless the ESDM is out of operation now: this runs in the thread of
+	 * the request that found the DRNG spent, which may be a non-blocking
+	 * one or the EGD server serving all its clients. While the ESDM is
+	 * operational, the request is served by another DRNG and the reseed
+	 * worker brings this one back.
+	 */
+	esdm_drng_bring_up_for_request();
 	esdm_es_mgr_monitor_wakeup();
 }
 

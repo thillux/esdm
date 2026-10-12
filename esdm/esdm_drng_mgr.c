@@ -1092,10 +1092,12 @@ static uint32_t esdm_drng_bytes_left(struct esdm_drng *drng)
 
 /*
  * May @drng generate output? If it reached its disable threshold, it reverts
- * to the unseeded state, which tries a forced seeding. Only a full reseed
- * resets the counters, so if the DRNG is still over the threshold afterwards,
- * it is spent: nothing may be generated from it. The same holds for the ESDM
- * as a whole if the initial DRNG could not be brought back.
+ * to the unseeded state and is brought up again - by a forced seeding right
+ * here only if the ESDM is not operational any more, that is for the initial
+ * DRNG, see esdm_drng_bring_up_for_request(). Only a full reseed resets the
+ * counters, so if the DRNG is still over the threshold afterwards, it is
+ * spent: nothing may be generated from it. The same holds for the ESDM as a
+ * whole if the initial DRNG could not be brought back.
  *
  * The PR DRNG takes a fresh seed for each of its outputs anyway: marking just
  * this instance unseeded is enough, clearing the state that all DRNGs are
@@ -1427,6 +1429,16 @@ static uint64_t esdm_drng_reseed_pass(void)
 			esdm_drng_reseed_next(drng, &next);
 		}
 	}
+
+	/*
+	 * The PR DRNG and - without the node array - the initial DRNG are not
+	 * part of the loop above, and neither is a state that all DRNGs are
+	 * seeded that went missing while each of them is: the requests and
+	 * esdm_get_seed() leave all of that to the worker as well, see
+	 * esdm_drng_bring_up_for_request().
+	 */
+	if (!esdm_pool_all_nodes_seeded_get())
+		unseeded = true;
 
 	/* Bring up a DRNG that is not seeded yet. */
 	if (unseeded && !esdm_drng_reseed_stop()) {
@@ -2180,21 +2192,10 @@ void esdm_force_fully_seeded_all_drbgs(void)
 	esdm_drng_put_instances();
 }
 
-static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
-{
-	esdm_force_fully_seeded_all_drbgs();
-	if (esdm_pool_all_nodes_seeded_get())
-		return 0;
-	if (nonblock)
-		return -EAGAIN;
-	thread_wait_event(&esdm_init_wait,
-			  esdm_pool_all_nodes_seeded_get() ||
-				  atomic_load(&esdm_drng_mgr_terminate));
-	return 0;
-}
-
 /*
- * Bring up the DRNGs that are not fully seeded on the way into a request.
+ * Bring up the DRNGs that are not fully seeded on the way into a request - or
+ * into esdm_get_seed(), or when a request found the DRNG it was served from
+ * spent, see esdm_unset_fully_seeded().
  *
  * An operational ESDM does not need them for the request: it is served by a
  * fully seeded node or by the initial DRNG. Their bring-up is then the reseed
@@ -2207,7 +2208,7 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
  * non-blocking request blocking on it, and a server serving all its clients
  * from one thread, like the EGD server, stalling every one of them.
  */
-static void esdm_drng_bring_up_for_request(void)
+void esdm_drng_bring_up_for_request(void)
 {
 	uint64_t wakeup;
 
@@ -2229,6 +2230,41 @@ static void esdm_drng_bring_up_for_request(void)
 	if (wakeup > (uint64_t)esdm_monotonic_now() +
 			     ESDM_DRNG_RESEED_PASS_BUSY_SEC)
 		esdm_drng_reseed_notify();
+}
+
+/*
+ * esdm_get_seed() hands out nothing before every DRNG is seeded, and it brings
+ * them up the way a request does: it is served on the unprivileged RPC
+ * interface, mostly without blocking, and seeding all of them right here with
+ * the emergency reseeding kept the caller - and every request needing the
+ * pool lock meanwhile - waiting on the collection.
+ *
+ * A caller that blocks is woken when the last DRNG is seeded, and looks again
+ * every second in case there is no worker to do it and the entropy for it
+ * arrives without anybody telling - see esdm_drng_bring_up_for_request().
+ */
+static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
+{
+	while (!esdm_pool_all_nodes_seeded_get() &&
+	       !atomic_load(&esdm_drng_mgr_terminate)) {
+		struct timespec recheck = { .tv_sec = 1, .tv_nsec = 0 };
+		/* Set by the wait below on a timeout */
+		int ret = 0;
+
+		esdm_drng_bring_up_for_request();
+		if (esdm_pool_all_nodes_seeded_get())
+			break;
+		if (nonblock)
+			return -EAGAIN;
+
+		thread_timedwait_event(
+			&esdm_init_wait,
+			esdm_pool_all_nodes_seeded_get() ||
+				atomic_load(&esdm_drng_mgr_terminate),
+			&recheck);
+	}
+
+	return 0;
 }
 
 static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
