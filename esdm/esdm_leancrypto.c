@@ -27,6 +27,7 @@
 #include "esdm_leancrypto.h"
 #include "esdm_logger.h"
 #include "memset_secure.h"
+#include "selftest_kat.h"
 
 #define ESDM_LEANCRYPTO_HASH lc_sha3_512
 
@@ -99,10 +100,65 @@ static void esdm_leancrypto_hash_desc_zero(void *hash)
 	(void)hash;
 }
 
+/* Hash @msg through the backend's own calls, as the entropy pools do */
+static int esdm_leancrypto_hash_kat(const uint8_t *msg, size_t msglen,
+				    uint8_t *digest)
+{
+	void *hash = NULL;
+	int ret = esdm_leancrypto_hash_alloc(&hash);
+
+	if (ret)
+		return ret;
+
+	ret = esdm_leancrypto_hash_init(hash);
+	if (!ret)
+		ret = esdm_leancrypto_hash_update(hash, msg, msglen);
+	if (!ret)
+		ret = esdm_leancrypto_hash_final(hash, digest);
+	esdm_leancrypto_hash_dealloc(hash);
+
+	return ret;
+}
+
 static int esdm_leancrypto_hash_selftest(void)
 {
-	/* leancrypto automatically self-tests the implementation */
-	return 0;
+	/*
+	 * leancrypto tests an algorithm once, before its first use. Its
+	 * lc_rerun_selftests() only re-arms that lazy test and is not allowed
+	 * in FIPS mode, while the periodic self tests are to catch a failure
+	 * later on - hence a known answer test of our own.
+	 */
+	static const uint8_t msg[] = { 'a', 'b', 'c' };
+	/* SHA3-512("abc"), FIPS 202 example */
+	static const uint8_t exp[] = {
+		0xb7, 0x51, 0x85, 0x0b, 0x1a, 0x57, 0x16, 0x8a, 0x56, 0x93,
+		0xcd, 0x92, 0x4b, 0x6b, 0x09, 0x6e, 0x08, 0xf6, 0x21, 0x82,
+		0x74, 0x44, 0xf7, 0x0d, 0x88, 0x4f, 0x5d, 0x02, 0x40, 0xd2,
+		0x71, 0x2e, 0x10, 0xe1, 0x16, 0xe9, 0x19, 0x2a, 0xf3, 0xc9,
+		0x1a, 0x7e, 0xc5, 0x76, 0x47, 0xe3, 0x93, 0x40, 0x57, 0x34,
+		0x0b, 0x4c, 0xf4, 0x08, 0xd5, 0xa5, 0x65, 0x92, 0xf8, 0x27,
+		0x4e, 0xec, 0x53, 0xf0,
+	};
+	uint8_t act[sizeof(exp)];
+	uint8_t mod[sizeof(msg)];
+	int ret;
+
+	ret = esdm_leancrypto_hash_kat(msg, sizeof(msg), act);
+	if (ret)
+		return ret;
+	ret = esdm_kat_check(act, exp, sizeof(exp));
+	if (ret)
+		return ret;
+
+	/* A message off by its first byte must not produce that digest */
+	ret = esdm_kat_modify(mod, msg, sizeof(mod));
+	if (ret)
+		return ret;
+	ret = esdm_leancrypto_hash_kat(mod, sizeof(mod), act);
+	if (ret)
+		return ret;
+
+	return esdm_kat_check_differs(act, exp, sizeof(exp));
 }
 
 const struct esdm_hash_cb esdm_leancrypto_hash_cb = {
@@ -195,10 +251,68 @@ static const char *esdm_leancrypto_drbg_name(void)
 	return "Leancrypto XDRBG with SHAKE256 core";
 }
 
+/* Instantiate a fresh XDRBG from @seed and generate @outlen bytes */
+static int esdm_leancrypto_drbg_kat(const uint8_t *seed, size_t seedlen,
+				    uint8_t *out, size_t outlen)
+{
+	void *drng = NULL;
+	int ret = esdm_leancrypto_drbg_alloc(&drng, 256);
+
+	if (ret)
+		return ret;
+
+	ret = esdm_leancrypto_drbg_seed(drng, seed, seedlen, NULL, 0);
+	if (!ret && esdm_leancrypto_drbg_generate(drng, out, outlen) !=
+			    (ssize_t)outlen)
+		ret = -EFAULT;
+	esdm_leancrypto_drbg_dealloc(drng);
+
+	return ret;
+}
+
 static int esdm_leancrypto_drbg_selftest(void)
 {
-	/* leancrypto automatically self-tests the implementation */
-	return 0;
+	/*
+	 * The known answer of leancrypto's own XDRBG-256 self test, cut to its
+	 * first 64 bytes: the output beyond differs between leancrypto
+	 * versions, which split the request differently. Run through the
+	 * backend's calls for the same reason as the hash test above.
+	 */
+	static const uint8_t seed[] = {
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+	};
+	static const uint8_t exp[] = {
+		0x1a, 0xd2, 0xcb, 0x76, 0x3c, 0x71, 0x6d, 0xf0, 0x79, 0x2c,
+		0xc0, 0x69, 0x7d, 0x56, 0x6a, 0x65, 0xb8, 0x36, 0xbe, 0x7d,
+		0x09, 0x12, 0x7c, 0x65, 0x47, 0xfc, 0x30, 0x58, 0xaa, 0x24,
+		0x39, 0x52, 0x29, 0xea, 0xce, 0x43, 0xdf, 0x16, 0x2c, 0x4f,
+		0x1a, 0xed, 0xbd, 0x3f, 0xf5, 0x8e, 0xe6, 0x4d, 0x93, 0x07,
+		0x3d, 0x7f, 0x3d, 0xd2, 0x50, 0x3c, 0xae, 0x04, 0x4a, 0x87,
+		0x2c, 0x90, 0x30, 0xd4,
+	};
+	uint8_t act[sizeof(exp)];
+	uint8_t mod[sizeof(seed)];
+	int ret;
+
+	ret = esdm_leancrypto_drbg_kat(seed, sizeof(seed), act, sizeof(act));
+	if (ret)
+		goto out;
+	ret = esdm_kat_check(act, exp, sizeof(exp));
+	if (ret)
+		goto out;
+
+	/* Seed material off by its first byte must not produce that output */
+	ret = esdm_kat_modify(mod, seed, sizeof(mod));
+	if (ret)
+		goto out;
+	ret = esdm_leancrypto_drbg_kat(mod, sizeof(mod), act, sizeof(act));
+	if (ret)
+		goto out;
+	ret = esdm_kat_check_differs(act, exp, sizeof(exp));
+
+out:
+	memset_secure(act, 0, sizeof(act));
+	return ret;
 }
 
 const struct esdm_drng_cb esdm_leancrypto_drbg_cb = {

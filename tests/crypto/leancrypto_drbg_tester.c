@@ -22,6 +22,9 @@
  * input - far more than the 84 bytes the XDRBG takes. Newer leancrypto
  * versions refuse such a seed, older ones use only its first 84 bytes. The
  * leancrypto backend has to accept it and mix in all of it.
+ *
+ * The backend's self tests are known answer tests run through these same
+ * calls, and have to pass against the leancrypto linked here.
  */
 
 #include <stdint.h>
@@ -93,6 +96,15 @@ int main(int argc, char *argv[])
 				 sizeof(out2));
 	if (!ret && !memcmp(out1, out2, sizeof(out1))) {
 		printf("FAIL: the tail of the additional input was ignored\n");
+		ret = 1;
+	}
+
+	if (esdm_leancrypto_drbg_cb.drng_selftest()) {
+		printf("FAIL: the XDRBG self test\n");
+		ret = 1;
+	}
+	if (esdm_leancrypto_hash_cb.hash_selftest()) {
+		printf("FAIL: the SHA3-512 self test\n");
 		ret = 1;
 	}
 
