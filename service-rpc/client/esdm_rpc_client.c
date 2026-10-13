@@ -18,6 +18,11 @@
  * DAMAGE.
  */
 
+/*
+ * Before any system header: MUTEX_UNLOCKED_PREFER_WRITER silently falls back
+ * to the reader-preferring lock without the glibc extensions.
+ */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
