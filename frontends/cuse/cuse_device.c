@@ -1292,6 +1292,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
  */
 struct esdm_cuse_poll {
 	uint64_t fh;
+	/* NULL once woken for a suspend, see esdm_cuse_poll_check() */
 	struct fuse_pollhandle *ph;
 	uint32_t poll_events;
 	struct esdm_cuse_poll *next;
@@ -1299,24 +1300,34 @@ struct esdm_cuse_poll {
 static struct esdm_cuse_poll *esdm_cuse_poll_list;
 static DEFINE_MUTEX_W_UNLOCKED(esdm_cuse_ph_lock);
 
-/* Unlink and free every registration for fh; caller holds esdm_cuse_ph_lock. */
-static void esdm_cuse_poll_remove_fh(uint64_t fh, bool notify)
+/*
+ * Unlink and free every registration for fh; caller holds esdm_cuse_ph_lock.
+ * Returns whether one was woken for a suspend.
+ */
+static bool esdm_cuse_poll_remove_fh(uint64_t fh, bool notify)
 {
 	struct esdm_cuse_poll **pp = &esdm_cuse_poll_list;
+	bool suspend_woken = false;
 
 	while (*pp) {
 		struct esdm_cuse_poll *node = *pp;
 
 		if (node->fh == fh) {
-			if (notify)
-				fuse_notify_poll(node->ph);
-			fuse_pollhandle_destroy(node->ph);
+			if (!node->ph) {
+				suspend_woken = true;
+			} else {
+				if (notify)
+					fuse_notify_poll(node->ph);
+				fuse_pollhandle_destroy(node->ph);
+			}
 			*pp = node->next;
 			free(node);
 		} else {
 			pp = &node->next;
 		}
 	}
+
+	return suspend_woken;
 }
 
 static void esdm_cuse_get_pollmask(unsigned int *outmask)
@@ -1346,8 +1357,8 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 
 	/*
 	 * Simply wake the poller no matter what it waits for, until the checker
-	 * has woken every registered poll handle for the event (see
-	 * esdm_cuse_poll_check()).
+	 * has woken every registered poll handle for the event - which their
+	 * next poll is told then, see esdm_cuse_poll_check().
 	 */
 	if (atomic_load(&status->suspend_gen) !=
 	    atomic_load(&esdm_cuse_suspend_seen))
@@ -1376,19 +1387,23 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 		goto err;
 	}
 
-	/*
-	 * Check current status and return it if it complies with requested
-	 * status.
-	 */
-	esdm_cuse_get_pollmask(&mask);
-	esdm_cuse_set_pollmask(fi->poll_events, &mask);
-	fuse_reply_poll(req, mask);
-
-	/* cleanup first, as we may have an interrupted poll/select */
 	mutex_w_lock(&esdm_cuse_ph_lock);
 	{
-		/* Drop any stale registration for this fh. */
-		esdm_cuse_poll_remove_fh(fi->fh, false);
+		/*
+		 * Drop any stale registration for this fh, as we may have an
+		 * interrupted poll/select.
+		 */
+		bool suspend_woken = esdm_cuse_poll_remove_fh(fi->fh, false);
+
+		/*
+		 * Check current status and return it if it complies with
+		 * requested status.
+		 */
+		esdm_cuse_get_pollmask(&mask);
+		if (suspend_woken)
+			mask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
+		esdm_cuse_set_pollmask(fi->poll_events, &mask);
+		fuse_reply_poll(req, mask);
 
 		if (mask) {
 			/* Event already available (replied above). */
@@ -1462,7 +1477,7 @@ static void esdm_cuse_poll_check(void)
 {
 	struct esdm_shm_status *status;
 	unsigned int sysmask, mask, gen = 0;
-	bool sysmask_set = false;
+	bool sysmask_set = false, suspend = false;
 	struct esdm_cuse_poll **pp;
 
 	mutex_w_lock(&esdm_cuse_ph_lock);
@@ -1473,12 +1488,20 @@ static void esdm_cuse_poll_check(void)
 	 * pass leaves the sample behind and is delivered on the next pass.
 	 */
 	status = esdm_cuse_shm_status;
-	if (status)
+	if (status) {
 		gen = atomic_load(&status->suspend_gen);
+		suspend = gen != atomic_load(&esdm_cuse_suspend_seen);
+	}
 
 	pp = &esdm_cuse_poll_list;
 	while (*pp) {
 		struct esdm_cuse_poll *node = *pp;
+
+		/* Woken already, waiting for its next poll */
+		if (!node->ph) {
+			pp = &node->next;
+			continue;
+		}
 
 		/* Get the mask once for this loop */
 		if (!sysmask_set) {
@@ -1496,6 +1519,19 @@ static void esdm_cuse_poll_check(void)
 
 		fuse_notify_poll(node->ph);
 		fuse_pollhandle_destroy(node->ph);
+
+		/*
+		 * The kernel answers the notification with another poll, which
+		 * finds the event marked seen below and would go back to sleep.
+		 * So the registration stays behind without its handle, to tell
+		 * that poll, see esdm_cuse_poll().
+		 */
+		if (suspend) {
+			node->ph = NULL;
+			pp = &node->next;
+			continue;
+		}
+
 		*pp = node->next;
 		free(node);
 	}

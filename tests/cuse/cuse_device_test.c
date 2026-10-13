@@ -1342,15 +1342,23 @@ static void test_suspend_event(void)
 	reply_reset();
 	esdm_cuse_poll_check();
 	CHECK_EQ(notify_calls, 1);
-	CHECK(esdm_cuse_poll_list == NULL,
-	      "the woken poll handle was left registered");
 
 	/* Left in the segment for the other daemon */
 	CHECK_EQ(atomic_load(&test_server_shm->suspend_gen), gen);
 
-	/* But no news to this one any more */
+	/*
+	 * No news to this daemon any more - but to the poll the kernel answers
+	 * the notification with, which used to go back to sleep.
+	 */
 	esdm_cuse_get_pollmask(&mask);
 	CHECK_EQ(mask, 0);
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, POLLIN);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "the woken poll handle was left registered");
+
+	/* Once */
 	reply_reset();
 	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
 	CHECK_EQ(reply.revents, 0);
@@ -1361,6 +1369,17 @@ static void test_suspend_event(void)
 	esdm_cuse_release(TEST_REQ, &fi);
 	CHECK(esdm_cuse_poll_list == NULL,
 	      "closing the descriptor left its poll registration behind");
+
+	/* A descriptor closed before its next poll takes the marker along */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	atomic_fetch_add(&test_server_shm->suspend_gen, 1);
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 1);
+	esdm_cuse_release(TEST_REQ, &fi);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "closing the descriptor left its suspend marker behind");
+	CHECK_EQ(notify_calls, 1);
 }
 
 static void test_shm_status(void)
