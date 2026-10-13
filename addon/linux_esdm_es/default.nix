@@ -4,6 +4,9 @@
   kernel,
   kmod,
   esdm,
+  # The debugfs raw entropy and performance interfaces (esdm_testing.c) are
+  # for entropy assessments, nothing a regular system should carry.
+  enableTesting ? false,
 }:
 
 stdenv.mkDerivation rec {
@@ -32,7 +35,7 @@ stdenv.mkDerivation rec {
     "KERNELRELEASE=${kernel.modDirVersion}"
     "KERNEL_DIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
     "INSTALL_MOD_PATH=${placeholder "out"}"
-    "BUILD_TESTING=1"
+    "BUILD_TESTING=${if enableTesting then "1" else "0"}"
     "BUILD_ES_IRQ=1"
     "BUILD_ES_SCHED=1"
   ];
