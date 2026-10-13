@@ -1018,6 +1018,18 @@ static bool __esdm_drng_seed_work(struct esdm_drng **esdm_drng, bool force)
 			goto out;
 	}
 
+	/*
+	 * All DRNGs of the array this went by, that is - which is not all of
+	 * them if the node array was published since it was taken. That array
+	 * comes with DRNGs of its own that nobody seeded, and the state is to
+	 * stay cleared for them, see esdm_drngs_node_alloc(). No progress: a
+	 * caller retrying with the same view would only get here again.
+	 */
+	if (!esdm_drng_instances_current(esdm_drng)) {
+		progress = false;
+		goto out;
+	}
+
 	esdm_pool_all_nodes_seeded(true);
 	progress = true;
 
