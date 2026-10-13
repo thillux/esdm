@@ -298,6 +298,7 @@ install_headers(include_user_files, subdir: 'esdm')
 ################################################################################
 
 testdirs = [
+	'tests/abi',
 	'tests/common',
 	'tests/crypto',
 	'tests/cuse',
