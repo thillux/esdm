@@ -37,7 +37,6 @@ After=systemd-modules-load.service
 
 [Service]
 @SERVICE_TYPE@
-@EBPF_UNIT_SNIPPET@
 AmbientCapabilities=CAP_SYS_ADMIN CAP_SETGID CAP_SETUID CAP_KILL CAP_SYS_RESOURCE
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETGID CAP_SETUID CAP_KILL CAP_SYS_RESOURCE
 DeviceAllow=/dev/esdm r
@@ -104,6 +103,9 @@ SystemCallArchitectures=native
 # privileged calls (bpf, kexec, init_module, ...).
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+# Last, as a later deny line would take back what this allows again (@debug
+# holds the perf_event_open the eBPF entropy sources need).
+@EBPF_UNIT_SNIPPET@
 UMask=0077
 
 [Install]
