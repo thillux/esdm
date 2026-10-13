@@ -67,6 +67,8 @@ if get_option('linux-getrandom').enabled()
 		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()])
 
 	test('System call getrandom get_seed', getrandom_get_seed_test,
-		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()])
+		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()],
+		# It waits up to a minute for the server to be fully seeded.
+		timeout: 120)
 
 endif
