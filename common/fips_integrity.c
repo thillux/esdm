@@ -339,8 +339,23 @@ int fips_create_checkfile(const char *checkfile, const char *targetfile)
 
 out:
 	esdm_hmac_zero(hmac_ctx);
-	if (file && file != stdout)
-		fclose(file);
+	if (file && file != stdout) {
+		/*
+		 * The HMAC only reaches the file with fclose() - a full disk
+		 * shows there. And the file was created here, exclusively: one
+		 * left behind without a valid HMAC would make every later check
+		 * fail, and a retry fail with -EEXIST, so remove it.
+		 */
+		if (fclose(file) && !ret) {
+			fprintf(stderr, FIPS_INTEGRITY_LOGGER_PREFIX
+				"Failed to write hash to HMAC control file\n");
+			ret = -EFAULT;
+		}
+		if (ret)
+			unlink(checkfile);
+	} else if (file == stdout && fflush(stdout) && !ret) {
+		ret = -EFAULT;
+	}
 	if (memblock)
 		munmap(memblock, size);
 
