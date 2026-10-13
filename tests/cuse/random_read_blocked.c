@@ -77,6 +77,26 @@ static void reader(const char *path)
 	_exit(0);
 }
 
+static int warm_up(const char *path)
+{
+	uint8_t buf[32];
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	ssize_t ret;
+
+	if (fd < 0) {
+		printf("Cannot open file %s: %s\n", path, strerror(errno));
+		return 1;
+	}
+	ret = read(fd, buf, sizeof(buf));
+	close(fd);
+	if (ret != (ssize_t)sizeof(buf)) {
+		printf("Cannot read from %s before the test\n", path);
+		return 1;
+	}
+
+	return 0;
+}
+
 static int probe(const char *path)
 {
 	char buf[ESDM_SHM_STATUS_INFO_SIZE];
@@ -126,7 +146,16 @@ int main(int argc, char *argv[])
 	if (ret)
 		return ret;
 
-	/* The status segment is attached by now, the server is up */
+	/*
+	 * One read the server answers first: the daemon is connected then, and
+	 * the readers below wait for the stopped server rather than fail at
+	 * once for a server that is not serving yet.
+	 */
+	if (warm_up(devfile)) {
+		env_fini();
+		return 1;
+	}
+
 	env_signal_server(SIGSTOP);
 
 	for (i = 0; i < READERS; i++) {
