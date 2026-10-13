@@ -35,10 +35,19 @@ if nm.found() and get_option('default_library') != 'static'
 		}
 	endif
 
+	# Not API, but every function of the thread pool has to be exported -
+	# see the threading section of esdm/version.lds.
+	abi_private_headers = {
+		'libesdm': files('../../common/threading_support.h'),
+	}
+
 	foreach name, lib_headers : abi_libs
 		args = [ check_exports, '--nm', nm.full_path(), '--lib', lib_headers[0] ]
 		foreach header : lib_headers[1]
 			args += [ '--header', header ]
+		endforeach
+		foreach header : abi_private_headers.get(name, [])
+			args += [ '--private-header', header ]
 		endforeach
 		test('Exported API of ' + name, python,
 			args: args,

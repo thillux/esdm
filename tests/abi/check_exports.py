@@ -11,10 +11,16 @@
 #    by one of the headers - a function exported by accident becomes ABI with
 #    the first program linking it.
 #
+# --private-header names a header of the static library the ESDM server links
+# next to libesdm, whose state must exist only once in the process: every
+# function it declares is exported, from whichever node, so that the server's
+# copy interposes all of them - see the threading section of esdm/version.lds.
+#
 # Without --header, --exactly names the complete list of exported functions,
 # for a module such as an OpenSSL provider that has no header of its own.
 #
-# usage: check_exports.py --nm NM --lib LIB [--header H ...] [--exactly SYM ...]
+# usage: check_exports.py --nm NM --lib LIB [--header H ...]
+#			  [--private-header H ...] [--exactly SYM ...]
 
 import argparse
 import re
@@ -99,6 +105,7 @@ def main():
 	parser.add_argument('--nm', required=True)
 	parser.add_argument('--lib', required=True)
 	parser.add_argument('--header', action='append', default=[])
+	parser.add_argument('--private-header', action='append', default=[])
 	parser.add_argument('--exactly', action='append', default=[])
 	args = parser.parse_args()
 
@@ -134,6 +141,15 @@ def main():
 					      ' but declared by no installed header')
 
 		print(f'{len(declared)} declared functions checked')
+
+	for header in args.private_header:
+		found = declared_functions(header)
+		if not found:
+			errors.append(f'{header}: no function declaration found')
+		for name in sorted(found - exported.keys()):
+			errors.append(f'{name} is declared by {header} but not'
+				      ' exported, so its state is not shared')
+		print(f'{len(found)} functions of {header} checked')
 
 	for error in errors:
 		print(f'{args.lib}: {error}')

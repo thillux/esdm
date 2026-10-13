@@ -160,18 +160,24 @@ LIBESDM_PRIVATE_1.0 {
 		/*
 		 * threading_support.h - the thread pool keeps its state in the
 		 * static library, so every module linking it holds a copy.
-		 * Everything the ESDM itself calls has to be named here: an
-		 * unexported one resolves to this library's copy while the rest
-		 * resolves to the copy of whoever links it next to us (the ESDM
-		 * server does), which would put a thread into one pool and wait
-		 * for it in another.
+		 * Every function of it has to be named here, so that the copy
+		 * of whoever links it next to us (the ESDM server does)
+		 * interposes all of them and only that copy is used. One left
+		 * out resolves to this library's copy: a thread is put into
+		 * one pool and waited for in another, or thread_fork_join()
+		 * misses the stack size and the shutdown the server set. The
+		 * test suite checks the list against the header.
 		 */
 		thread_available;
+		thread_fork_join;
 		thread_get_name;
 		thread_init;
 		thread_release;
+		thread_send_signal;
+		thread_set_default_stacksize;
 		thread_set_name;
 		thread_start;
+		thread_stop_spawning;
 		thread_wait;
 		thread_wait_all;
 } LIBESDM_1.0;
