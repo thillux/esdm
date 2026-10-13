@@ -85,8 +85,18 @@ void esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
 	while (inbuflen) {
 		size_t i, todo = min_size(inbuflen, ESDM_CC20_KEY_SIZE);
 
+		/*
+		 * The input bytes form the key as little-endian words, the way
+		 * cc20_setkey() reads a key (RFC 7539 section 2.3): XORing them
+		 * into the bytes of the key words in memory would give a
+		 * big-endian machine a different state, and thus different
+		 * random numbers, for the same seed. A trailing partial word
+		 * takes the low order bytes of its key word.
+		 */
 		for (i = 0; i < todo; i++)
-			chacha20_state->key.b[i] ^= inbuf[i];
+			chacha20_state->key.u[i / sizeof(uint32_t)] ^=
+				(uint32_t)inbuf[i]
+				<< ((i % sizeof(uint32_t)) << 3);
 
 		/* Break potential dependencies between the inbuf key blocks */
 		esdm_cc20_drng_update(cc20_ctx, NULL, ESDM_CC20_BLOCK_SIZE_WORDS);

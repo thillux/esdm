@@ -21,7 +21,6 @@
 
 #include <errno.h>
 
-#include "conv_be_le.h"
 #include "esdm_crypto.h"
 #include "esdm_chacha20_drng.h"
 #include "esdm_chacha20_private.h"
@@ -82,17 +81,6 @@ static void esdm_chacha20_dealloc(void *drng)
 static const char *esdm_chacha20_name(void)
 {
 	return "builtin ChaCha20 DRNG";
-}
-
-static inline void chacha20_bswap32(uint32_t *ptr, uint32_t words)
-{
-	uint32_t i;
-
-	/* Byte-swap data which is an LE representation */
-	for (i = 0; i < words; i++) {
-		*ptr = le_bswap32(*ptr);
-		ptr++;
-	}
 }
 
 static int esdm_chacha20_drng_selftest(void)
@@ -161,7 +149,7 @@ static int esdm_chacha20_drng_selftest(void)
 	 *	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 	 *	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
 	 *	0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-	 *	0x20
+	 *	0x20, 0x21, 0x22, 0x23
 	 * and pulling one ChaCha20 DRNG block plus four byte.
 	 */
 	static const uint8_t expected_block_nonaligned[ESDM_CC20_KEY_SIZE + 4] = {
@@ -170,8 +158,6 @@ static int esdm_chacha20_drng_selftest(void)
 		0xf6, 0x52, 0xf3, 0xa8, 0x37, 0x99, 0x38, 0x76, 0xa0,
 		0x66, 0xec, 0xbb, 0xce, 0xa9, 0x9c, 0x95, 0xa1, 0xfd
 	};
-
-	chacha20_bswap32((uint32_t *)seed, sizeof(seed) / sizeof(uint32_t));
 
 	/* Generate with zero state */
 	chacha20_state->counter = 0;

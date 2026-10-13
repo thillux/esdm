@@ -146,19 +146,25 @@ static void cc20_init(struct esdm_sym_state *ctx)
 	ctx->counter = 1;
 }
 
+/*
+ * RFC 7539 section 2.3 reads the key and the nonce as little-endian 32-bit
+ * words, just as the block function writes its output (le_bswap32() above).
+ * Loading them in host byte order would give a big-endian machine another
+ * keystream for the same key and nonce.
+ */
 static int cc20_setkey(struct esdm_sym_state *ctx, uint8_t *key, size_t keylen)
 {
 	if (keylen != 32)
 		return -EINVAL;
 
-	ctx->key.u[0] = ptr_to_32(key);
-	ctx->key.u[1] = ptr_to_32(key + sizeof(uint32_t));
-	ctx->key.u[2] = ptr_to_32(key + sizeof(uint32_t) * 2);
-	ctx->key.u[3] = ptr_to_32(key + sizeof(uint32_t) * 3);
-	ctx->key.u[4] = ptr_to_32(key + sizeof(uint32_t) * 4);
-	ctx->key.u[5] = ptr_to_32(key + sizeof(uint32_t) * 5);
-	ctx->key.u[6] = ptr_to_32(key + sizeof(uint32_t) * 6);
-	ctx->key.u[7] = ptr_to_32(key + sizeof(uint32_t) * 7);
+	ctx->key.u[0] = ptr_to_le32(key);
+	ctx->key.u[1] = ptr_to_le32(key + sizeof(uint32_t));
+	ctx->key.u[2] = ptr_to_le32(key + sizeof(uint32_t) * 2);
+	ctx->key.u[3] = ptr_to_le32(key + sizeof(uint32_t) * 3);
+	ctx->key.u[4] = ptr_to_le32(key + sizeof(uint32_t) * 4);
+	ctx->key.u[5] = ptr_to_le32(key + sizeof(uint32_t) * 5);
+	ctx->key.u[6] = ptr_to_le32(key + sizeof(uint32_t) * 6);
+	ctx->key.u[7] = ptr_to_le32(key + sizeof(uint32_t) * 7);
 
 	return 0;
 }
@@ -169,9 +175,9 @@ static int cc20_setiv(struct esdm_sym_state *ctx, uint8_t *iv, size_t ivlen)
 	if (ivlen != 12)
 		return -EINVAL;
 
-	ctx->nonce[0] = ptr_to_32(iv);
-	ctx->nonce[1] = ptr_to_32(iv + sizeof(uint32_t));
-	ctx->nonce[2] = ptr_to_32(iv + sizeof(uint32_t) * 2);
+	ctx->nonce[0] = ptr_to_le32(iv);
+	ctx->nonce[1] = ptr_to_le32(iv + sizeof(uint32_t));
+	ctx->nonce[2] = ptr_to_le32(iv + sizeof(uint32_t) * 2);
 
 	return 0;
 }

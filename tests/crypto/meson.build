@@ -46,9 +46,26 @@ sha3_tester = executable(
 		link_with: esdm_static_lib,
 	)
 
+# Likewise the built-in ChaCha20 and its DRNG, which the library only carries
+# with drng_chacha20.
+chacha20_tester_src = [ 'chacha20_tester.c' ]
+if not get_option('drng_chacha20').enabled()
+	chacha20_tester_src += files('../../crypto/chacha20.c',
+				     '../../crypto/chacha20_drng.c')
+endif
+
+chacha20_tester = executable(
+		'chacha20_tester',
+		chacha20_tester_src,
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
 test('SHA256', sha256_tester)
 test('SHA512', sha512_tester)
 test('SHA3', sha3_tester)
+test('ChaCha20', chacha20_tester)
 
 test('HMAC SHA256', hmac_sha2_256_tester)
 test('HMAC SHA512', hmac_sha2_512_tester)
