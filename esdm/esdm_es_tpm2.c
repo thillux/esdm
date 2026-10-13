@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bitshift.h"
@@ -40,6 +41,16 @@
 
 static int tpm2_fd = -1;
 static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
+
+/*
+ * A connection lost to an I/O error is reopened on demand, at most once per
+ * interval: a resource manager restart must not take the source out for good,
+ * nor a TPM that is gone cost an open() per request. A device absent at init
+ * stays disabled, as before. Monotonic seconds, written under tpm2_mutex.
+ */
+#define ESDM_TPM2_REOPEN_INTERVAL_SEC 5
+static bool tpm2_lost = false;
+static time_t tpm2_reopen_at = 0;
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf tpm2_buf;
@@ -80,6 +91,59 @@ struct TPM2ResponseHeader {
 	uint32_t responseSize;
 	TPM2_RC responseCode;
 } __attribute((__packed__));
+
+static time_t esdm_es_tpm2_now(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return 0;
+	return ts.tv_sec;
+}
+
+static void esdm_es_tpm2_finalize_locked(void)
+{
+	if (tpm2_fd < 0)
+		return;
+
+	close(tpm2_fd);
+	tpm2_fd = -1;
+}
+
+/* Caller must hold tpm2_mutex (write lock). */
+static void esdm_es_tpm2_lost_locked(void)
+{
+	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = true;
+	tpm2_reopen_at = esdm_es_tpm2_now() + ESDM_TPM2_REOPEN_INTERVAL_SEC;
+}
+
+/* Caller must hold tpm2_mutex (write lock). */
+static void esdm_es_tpm2_reopen_locked(void)
+{
+	time_t now;
+	int fd;
+
+	if (tpm2_fd >= 0 || !tpm2_lost)
+		return;
+
+	now = esdm_es_tpm2_now();
+	if (now < tpm2_reopen_at)
+		return;
+	tpm2_reopen_at = now + ESDM_TPM2_REOPEN_INTERVAL_SEC;
+
+	fd = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+			    "TPM 2.0 reopen failed: %s\n", strerror(errno));
+		return;
+	}
+
+	tpm2_fd = fd;
+	tpm2_lost = false;
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+		    "TPM 2.0 entropy source reopened its device\n");
+}
 
 /*
  * Send a TPM 2.0 command and receive the response.
@@ -132,8 +196,7 @@ static int esdm_es_tpm2_transceive(struct TPM2CommandHeader *cmd,
 					  cmd_buffer_len)) {
 			esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 				    "TPM 2.0 command write failed\n");
-			close(tpm2_fd);
-			tpm2_fd = -1;
+			esdm_es_tpm2_lost_locked();
 			goto out;
 		}
 
@@ -152,8 +215,7 @@ static int esdm_es_tpm2_transceive(struct TPM2CommandHeader *cmd,
 			esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 				    "TPM 2.0 response read failed: %zd\n",
 				    safe_ret);
-			close(tpm2_fd);
-			tpm2_fd = -1;
+			esdm_es_tpm2_lost_locked();
 			goto out;
 		}
 		/*
@@ -218,19 +280,11 @@ out:
 	return ret;
 }
 
-static void esdm_es_tpm2_finalize_locked(void)
-{
-	if (tpm2_fd < 0)
-		return;
-
-	close(tpm2_fd);
-	tpm2_fd = -1;
-}
-
 static void esdm_es_tpm2_finalize(void)
 {
 	mutex_lock(&tpm2_mutex);
 	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = false;
 	mutex_unlock(&tpm2_mutex);
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -249,6 +303,7 @@ static int esdm_es_tpm2_init(void)
 
 	/* Allow the init function to be called multiple times */
 	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = false;
 
 	ret = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
 	if (ret < 0) {
@@ -418,6 +473,7 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 	 */
 	mutex_lock(&tpm2_mutex);
 
+	esdm_es_tpm2_reopen_locked();
 	if (tpm2_fd < 0)
 		goto err;
 
@@ -459,6 +515,11 @@ static void esdm_es_tpm2_buf_fill(struct entropy_es *eb_es,
 static int esdm_es_tpm2_monitor(void)
 {
 	uint32_t requested_bits = esdm_get_seed_entropy_osr(false, true);
+
+	/* A cache hit never reaches the reopen in esdm_es_tpm2_get_sync() */
+	mutex_lock(&tpm2_mutex);
+	esdm_es_tpm2_reopen_locked();
+	mutex_unlock(&tpm2_mutex);
 
 	if (!esdm_es_tpm2_active())
 		return 0;

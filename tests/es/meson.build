@@ -192,6 +192,18 @@ if get_option('es_tpm2').enabled()
 	# full fill of the block cache - one command exchange per block, and a
 	# software TPM in an emulated machine is not quick about them.
 	test('ES TPM 2.0', es_tpm2_tester, timeout: 120)
+
+	# The source is compiled into the test, with a file standing in for
+	# the device - see the file header.
+	es_tpm2_reopen_tester = executable(
+		'es_tpm2_reopen_tester',
+		[ esdm_ipc_ns, 'es_tpm2_reopen_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES TPM 2.0 reopen', es_tpm2_reopen_tester)
 endif
 
 
