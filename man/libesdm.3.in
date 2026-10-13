@@ -38,7 +38,13 @@ node exist for the programs shipped with the ESDM and are not API.
 .BI "int esdm_init(void);"
 Initialize the library: configuration, DRNG manager, entropy sources and the
 status shared memory segment. Must be called before any other function.
-Returns 0 on success and a negative errno value on error.
+Returns 0 on success and a negative errno value on error. The ESDM is
+initialized once per process: after
+.BR esdm_fini (),
+or after an
+.BR esdm_init ()
+that failed and tore down what it had set up, the call fails with
+.BR \-ESHUTDOWN .
 .TP
 .BI "int esdm_reinit(void);"
 Reinitialize configuration, DRNG manager and entropy sources without losing
@@ -61,6 +67,7 @@ privileges has completed, which is the point at which a daemon may drop them.
 Terminate the entropy sources and the DRNG manager and release all resources.
 This also stops a monitor started with
 .BR esdm_init_monitor ().
+The ESDM cannot be initialized again afterwards.
 .SH OBTAINING RANDOM DATA
 .TP
 .BI "ssize_t esdm_get_random_bytes(uint8_t *" buf ", size_t " nbytes ");"

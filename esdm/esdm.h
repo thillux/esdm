@@ -27,7 +27,12 @@
 /**
  * @brief esdm_init() - initialize the ESDM library
  *
- * @return: 0 on success, < 0 on error
+ * The ESDM is initialized once per process. After esdm_fini() - or after an
+ * esdm_init() that failed past the DRNG manager, which tears down the same
+ * way - the DRNGs are freed and the managers are terminated for good, and a
+ * further esdm_init() fails with -ESHUTDOWN instead of bringing them back.
+ *
+ * @return: 0 on success, -ESHUTDOWN after esdm_fini(), < 0 on other errors
  */
 int esdm_init(void);
 
