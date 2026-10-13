@@ -26,7 +26,10 @@
  *
  *   - a connection is idle from its last answer on, not from its last
  *     request, so a call that takes longer than the idle timeout does not
- *     lose the connection right after its answer.
+ *     lose the connection right after its answer,
+ *   - the unprivileged interface keeps descriptors in reserve, and a new
+ *     connection beyond its bound makes room by closing an idle one rather
+ *     than waiting for a descriptor that does not come.
  */
 
 #include <errno.h>
@@ -36,9 +39,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -56,8 +61,18 @@
 
 #define TEST_IDLE_MS (ESDM_RPC_IDLE_TIMEOUT_USEC / 1000)
 
+/*
+ * The descriptor limit of the server, and the connections opened against it.
+ * The server holds at most half of the limit for the unprivileged connections
+ * then, and without making room it runs out of descriptors long before the
+ * last connection.
+ */
+#define TEST_NOFILE 256
+#define TEST_CONNS 600
+
 static char test_dir[] = "/tmp/esdm-rpc-conn-test.XXXXXX";
 static char test_priv_path[sizeof(test_dir) + 16];
+static char test_unpriv_path[sizeof(test_dir) + 16];
 
 /* How long the stand-in service takes for a call */
 static atomic_uint test_delay_ms;
@@ -95,6 +110,12 @@ static ProtobufCService test_priv_service = {
 	.destroy = NULL,
 };
 
+static ProtobufCService test_unpriv_service = {
+	.descriptor = &unpriv_access__descriptor,
+	.invoke = test_service_invoke,
+	.destroy = NULL,
+};
+
 static void *test_serve_priv(void *unused)
 {
 	int ret;
@@ -104,6 +125,23 @@ static void *test_serve_priv(void *unused)
 	ret = esdm_rpcs_fuzz_serve(test_priv_path, &test_priv_service, true);
 	if (ret) {
 		fprintf(stderr, "the privileged server did not run: %s\n",
+			strerror(-ret));
+		atomic_store(&test_serve_failed, true);
+	}
+
+	return NULL;
+}
+
+static void *test_serve_unpriv(void *unused)
+{
+	int ret;
+
+	(void)unused;
+
+	ret = esdm_rpcs_fuzz_serve(test_unpriv_path, &test_unpriv_service,
+				   false);
+	if (ret) {
+		fprintf(stderr, "the unprivileged server did not run: %s\n",
 			strerror(-ret));
 		atomic_store(&test_serve_failed, true);
 	}
@@ -212,9 +250,115 @@ static void test_long_call(void)
 	close(fd);
 }
 
+/*
+ * The clients of test_many_conns(), in a process of their own: they need more
+ * descriptors than the server is allowed. Returns the number of failures.
+ */
+static int test_many_conns_client(rlim_t nofile)
+{
+	struct rlimit rl = { .rlim_cur = nofile, .rlim_max = nofile };
+	static int fds[TEST_CONNS];
+	unsigned int i, closed = 0;
+	int fail = 0;
+
+	if (setrlimit(RLIMIT_NOFILE, &rl)) {
+		fprintf(stderr, "cannot raise the descriptor limit\n");
+		return 1;
+	}
+
+	for (i = 0; i < TEST_CONNS; i++) {
+		fds[i] = test_connect(test_unpriv_path);
+		if (fds[i] < 0) {
+			fprintf(stderr, "connection %u: %s\n", i,
+				strerror(-fds[i]));
+			return fail + 1;
+		}
+
+		if (!test_send(fds[i], i)) {
+			fprintf(stderr, "connection %u: cannot send\n", i);
+			return fail + 1;
+		}
+
+		/*
+		 * The answer of the first stays unread, which keeps it from
+		 * being closed, although it is the least recently used.
+		 */
+		if (!i)
+			continue;
+
+		/* Well within the idle timeout, which would make room too */
+		if (!test_answered(fds[i], i, 1000)) {
+			fprintf(stderr, "connection %u was not served\n", i);
+			return fail + 1;
+		}
+	}
+
+	if (!test_answered(fds[0], 0, 0) ||
+	    !test_send(fds[0], TEST_CONNS + 1) ||
+	    !test_answered(fds[0], TEST_CONNS + 1, 1000)) {
+		fprintf(stderr,
+			"the connection with an unread answer was closed\n");
+		fail++;
+	}
+
+	/* Those closed to make room tell by an end of file */
+	for (i = 1; i < TEST_CONNS - 1; i++) {
+		struct pollfd pfd = { .fd = fds[i], .events = POLLIN };
+		uint8_t b;
+
+		if (poll(&pfd, 1, 0) == 1 &&
+		    recv(fds[i], &b, sizeof(b), MSG_DONTWAIT) == 0)
+			closed++;
+	}
+	if (closed < TEST_CONNS - TEST_NOFILE / 2) {
+		fprintf(stderr, "only %u connections were closed\n", closed);
+		fail++;
+	}
+
+	/* The newest one is served on */
+	if (!test_send(fds[TEST_CONNS - 1], TEST_CONNS) ||
+	    !test_answered(fds[TEST_CONNS - 1], TEST_CONNS, 1000)) {
+		fprintf(stderr, "the newest connection was closed\n");
+		fail++;
+	}
+
+	for (i = 0; i < TEST_CONNS; i++)
+		close(fds[i]);
+
+	return fail;
+}
+
+/*
+ * Many more connections than the server has descriptors for, one after the
+ * other, each idle once served: every one is served, the oldest are closed -
+ * but not one whose answer the client has not read yet.
+ */
+static void test_many_conns(rlim_t nofile)
+{
+	pid_t pid;
+	int status;
+
+	printf("%u connections against a descriptor limit of %u\n",
+	       TEST_CONNS, TEST_NOFILE);
+
+	fflush(stdout);
+	pid = fork();
+	CHECK(pid >= 0, "cannot fork: %s", strerror(errno));
+	if (pid < 0)
+		return;
+	if (!pid)
+		_exit(test_many_conns_client(nofile));
+
+	CHECK(waitpid(pid, &status, 0) == pid, "cannot wait for the clients");
+	CHECK(WIFEXITED(status) && !WEXITSTATUS(status),
+	      "the clients failed");
+}
+
 int main(void)
 {
-	pthread_t priv_thread;
+	pthread_t priv_thread, unpriv_thread;
+	struct rlimit rl;
+	rlim_t client_nofile = 0;
 
 	esdm_logger_set_verbosity(getenv("ESDM_TEST_VERBOSE") ? LOGGER_DEBUG :
 								  LOGGER_NONE);
@@ -224,28 +368,51 @@ int main(void)
 		return 1;
 	}
 	snprintf(test_priv_path, sizeof(test_priv_path), "%s/priv", test_dir);
+	snprintf(test_unpriv_path, sizeof(test_unpriv_path), "%s/unpriv",
+		 test_dir);
+
+	/*
+	 * Before the server starts, which sizes its bound by the limit. The
+	 * clients take theirs back up to what the hard limit allows.
+	 */
+	if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_max >= 2 * TEST_CONNS) {
+		client_nofile = rl.rlim_max == RLIM_INFINITY ? 4 * TEST_CONNS :
+							       rl.rlim_max;
+		rl.rlim_cur = TEST_NOFILE;
+		if (setrlimit(RLIMIT_NOFILE, &rl))
+			client_nofile = 0;
+	}
 
 	if (thread_init(1)) {
 		fprintf(stderr, "cannot initialize threading support\n");
 		return 1;
 	}
 
-	if (pthread_create(&priv_thread, NULL, test_serve_priv, NULL)) {
+	if (pthread_create(&priv_thread, NULL, test_serve_priv, NULL) ||
+	    pthread_create(&unpriv_thread, NULL, test_serve_unpriv, NULL)) {
 		fprintf(stderr, "cannot start the server threads\n");
 		return 1;
 	}
 
-	if (!test_wait_for_socket(test_priv_path)) {
+	if (!test_wait_for_socket(test_priv_path) ||
+	    !test_wait_for_socket(test_unpriv_path)) {
 		fprintf(stderr, "the server did not come up\n");
 		return 1;
 	}
 
 	test_long_call();
 
+	if (client_nofile)
+		test_many_conns(client_nofile);
+	else
+		printf("hard descriptor limit too low - skipping the many connections\n");
+
 	esdm_rpc_server_signal_exit();
 	pthread_join(priv_thread, NULL);
+	pthread_join(unpriv_thread, NULL);
 
 	unlink(test_priv_path);
+	unlink(test_unpriv_path);
 	rmdir(test_dir);
 
 	if (!common_test_failures)

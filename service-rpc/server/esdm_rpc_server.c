@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <linux/sockios.h>
 #include <netinet/in.h>
 #include <protobuf-c/protobuf-c.h>
 #include <semaphore.h>
@@ -33,6 +34,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
@@ -101,6 +103,8 @@ struct esdm_rpc_thread {
 	struct esdm_rpcs *proto;
 	uint32_t id;
 	int eventfd;
+	/* Connection slots of this worker, see esdm_rpcs_worker_slots() */
+	size_t max_connections;
 };
 
 /*
@@ -153,6 +157,30 @@ static atomic_int server_exit = 0;
 #define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
 #define ESDM_RPC_PROCESSES_PER_UID 16
 
+/*
+ * The per-UID bound alone does not protect the descriptors: a user can map the
+ * UIDs of its /etc/subuid range in a user namespace, connect as each of them,
+ * and keep the connections from being reaped as idle with a cheap request
+ * every second. The unprivileged connections are therefore also bounded in
+ * total, leaving ESDM_RPC_RESERVED_FDS of RLIMIT_NOFILE - but at most half of
+ * it - to the EGD interface (up to 2048 connections), the privileged interface
+ * and the server itself. The bound is split evenly over the worker threads,
+ * each holding at most ESDM_RPCS_MAX_WORKER_CONNECTIONS.
+ *
+ * A worker whose slots are all taken does not turn a new connection away -
+ * whoever holds the slots would lock everybody else out - but closes one of
+ * its connections to make room: the least recently active one of the UID with
+ * the most connections in that worker. The clients reconnect transparently, so
+ * service goes on for everybody, at the price of churn under attack. Never
+ * closed are a connection with a request not read yet or an answer the client
+ * did not read yet, and any connection of the privileged interface. The
+ * choice is made within the accepting worker, as each worker owns its
+ * connections: closing one of another worker would race with that worker
+ * serving it.
+ */
+#define ESDM_RPC_RESERVED_FDS (2048 + 512)
+#define ESDM_RPCS_MAX_WORKER_CONNECTIONS 1024
+
 static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
 	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 
@@ -180,6 +208,25 @@ static void esdm_rpcs_peer_limit_init(void)
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
 		    "Admitting at most %u RPC connections per unprivileged UID\n",
 		    esdm_rpcs_peer_limit.max_per_uid);
+}
+
+/* Connection slots of each of @num_threads workers serving @proto */
+static size_t esdm_rpcs_worker_slots(const struct esdm_rpcs *proto,
+				     size_t num_threads)
+{
+	uint64_t total;
+	struct rlimit rl;
+
+	if (proto->privileged || getrlimit(RLIMIT_NOFILE, &rl) ||
+	    rl.rlim_cur == RLIM_INFINITY)
+		return ESDM_RPCS_MAX_WORKER_CONNECTIONS;
+
+	total = rl.rlim_cur -
+		min_uint64(rl.rlim_cur / 2, ESDM_RPC_RESERVED_FDS);
+
+	return (size_t)max_uint64(min_uint64(total / num_threads,
+					     ESDM_RPCS_MAX_WORKER_CONNECTIONS),
+				  1);
 }
 
 /*
@@ -743,6 +790,111 @@ static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 	return false;
 }
 
+/*
+ * Has @rpc_conn a request not read yet, or an answer its client did not read
+ * yet? Either way the client is in the middle of a call.
+ */
+static bool esdm_rpcs_conn_busy(const struct esdm_rpcs_connection *rpc_conn)
+{
+	int inq = 0, outq = 0;
+
+	/* In doubt, it is */
+	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) ||
+	    ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq))
+		return true;
+
+	return inq > 0 || outq > 0;
+}
+
+static int esdm_rpcs_uid_cmp(const void *a, const void *b)
+{
+	uid_t x = *(const uid_t *)a, y = *(const uid_t *)b;
+
+	return (x > y) - (x < y);
+}
+
+/*
+ * The connection of a full worker to close for a new one, see
+ * ESDM_RPC_RESERVED_FDS. @list is in the order of the last activity, the least
+ * recent first. NULL if every connection is busy.
+ */
+static struct esdm_rpcs_connection *
+esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
+{
+	uid_t uids[ESDM_RPCS_MAX_WORKER_CONNECTIONS];
+	struct esdm_rpcs_connection *rpc_conn, *fallback = NULL;
+	size_t i, n = 0, run = 0, best_run = 0;
+	uid_t best = 0;
+
+	TAILQ_FOREACH(rpc_conn, list, tailq)
+	{
+		if (n == ARRAY_SIZE(uids))
+			break;
+		uids[n++] = rpc_conn->peer_uid;
+	}
+
+	/* The UID with the most connections */
+	qsort(uids, n, sizeof(uids[0]), esdm_rpcs_uid_cmp);
+	for (i = 0; i < n; i++) {
+		run = (i && uids[i] == uids[i - 1]) ? run + 1 : 1;
+		if (run > best_run) {
+			best_run = run;
+			best = uids[i];
+		}
+	}
+
+	/*
+	 * The least recent idle one of that UID, else of any UID - which is
+	 * also the choice when no UID holds more than one.
+	 */
+	TAILQ_FOREACH(rpc_conn, list, tailq)
+	{
+		bool preferred = (best_run > 1 && rpc_conn->peer_uid == best);
+
+		if ((!preferred && fallback) || esdm_rpcs_conn_busy(rpc_conn))
+			continue;
+		if (preferred || best_run < 2)
+			return rpc_conn;
+		fallback = rpc_conn;
+	}
+
+	return fallback;
+}
+
+/* An event of a connection closed before the event was handled */
+#define ESDM_RPCS_EVENT_STALE 3
+
+/*
+ * Close a connection of the full worker owning @list for a new one. The
+ * events still to be handled in this round, @num of @pending, are voided for
+ * it. Returns false if every connection is busy.
+ */
+static bool esdm_rpcs_make_room(int epfd,
+				struct esdm_rpcs_connection_list *list,
+				struct epoll_event *pending, int num)
+{
+	struct esdm_rpcs_connection *victim = esdm_rpcs_evict_candidate(list);
+	int i;
+
+	if (!victim)
+		return false;
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Closing client FD %d of UID %u to make room\n",
+		    victim->child_fd, (unsigned int)victim->peer_uid);
+
+	for (i = 0; i < num; i++) {
+		if (pending[i].data.ptr == victim)
+			pending[i].data.u64 = ESDM_RPCS_EVENT_STALE;
+	}
+
+	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->child_fd, NULL);
+	TAILQ_REMOVE(list, victim, tailq);
+	esdm_rpcs_release_conn(victim);
+
+	return true;
+}
+
 /* Thread main for receiving new connections and processing them. */
 static int esdm_rpcs_handler(void *args)
 {
@@ -752,8 +904,9 @@ static int esdm_rpcs_handler(void *args)
 	struct esdm_rpcs_connection *tmp2;
 #define ESDM_RPCS_MAX_EVENTS 512
 	struct epoll_event events[ESDM_RPCS_MAX_EVENTS];
-	const size_t max_connections = 1024;
-	size_t num_connections = 0;
+	size_t max_connections = 0, num_connections = 0;
+	/* Close a connection for a new one, see ESDM_RPC_RESERVED_FDS */
+	bool evict = false;
 	/*
 	 * The listening socket is level-triggered: while it is armed and a
 	 * connection is pending, epoll_wait keeps reporting it readable. Once the
@@ -761,7 +914,8 @@ static int esdm_rpcs_handler(void *args)
 	 * accepting, so leaving it armed would spin the worker at 100% CPU. Track
 	 * the arm state and disarm/re-arm the listening FD as the cap is
 	 * crossed, which also gives real backpressure (pending clients stay
-	 * queued in the listen backlog instead of being dropped).
+	 * queued in the listen backlog instead of being dropped). A worker that
+	 * makes room by closing a connection keeps accepting instead.
 	 */
 	bool listen_armed = true;
 	/* accept() ran out of resources - see the accept path below */
@@ -781,6 +935,9 @@ static int esdm_rpcs_handler(void *args)
 	thread_set_name(thread->proto->privileged ? rpc_handler_priv :
 						    rpc_handler_unpriv,
 			thread->id);
+
+	max_connections = thread->max_connections;
+	evict = !thread->proto->privileged;
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
@@ -859,8 +1016,9 @@ static int esdm_rpcs_handler(void *args)
 		 * pending connection cannot busy-spin epoll_wait; re-arm once a
 		 * slot frees up so new connections are served again.
 		 */
-		bool want_armed = (num_connections < max_connections) &&
-				  !accept_paused;
+		bool want_armed =
+			(num_connections < max_connections || evict) &&
+			!accept_paused;
 		if (want_armed != listen_armed) {
 			struct epoll_event lev = {
 				.events = want_armed ? EPOLLIN : 0,
@@ -894,6 +1052,9 @@ static int esdm_rpcs_handler(void *args)
 			bool has_error = false;
 			struct esdm_rpcs_connection *rpc_conn = NULL;
 
+			if (events[i].data.u64 == ESDM_RPCS_EVENT_STALE)
+				continue;
+
 			/* timer fired */
 			if (events[i].data.u64 == 1) {
 				uint64_t expirations;
@@ -920,7 +1081,7 @@ static int esdm_rpcs_handler(void *args)
 
 			/* new connection? */
 			if (events[i].events & EPOLLIN && rpc_conn == NULL &&
-			    num_connections < max_connections) {
+			    (num_connections < max_connections || evict)) {
 				accepted_fd = accept4(
 					thread->proto->server_listening_fd,
 					NULL, NULL,
@@ -989,6 +1150,23 @@ static int esdm_rpcs_handler(void *args)
 					}
 					rpc_conn->peer_uid = cred.uid;
 					rpc_conn->peer_counted = true;
+				}
+
+				if (num_connections >= max_connections) {
+					if (!esdm_rpcs_make_room(
+						    epfd, &rpc_conn_list,
+						    events + i + 1,
+						    nfds - i - 1)) {
+						esdm_logger(
+							LOGGER_DEBUG,
+							LOGGER_C_RPC,
+							"Refusing client FD %d, all connections busy\n",
+							accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
+						continue;
+					}
+					--num_connections;
 				}
 				/*
 				 * Idle since now, not since the epoch - or the
@@ -1084,7 +1262,13 @@ static int esdm_rpcs_handler(void *args)
 				 * closed on the EPIPE path) linger in the list
 				 * until the idle timeout reaps it.
 				 */
-				if (read_ret && read_ret != -EAGAIN) {
+				if (!read_ret) {
+					/* Keep the list in the order of use */
+					TAILQ_REMOVE(&rpc_conn_list, rpc_conn,
+						     tailq);
+					TAILQ_INSERT_TAIL(&rpc_conn_list,
+							  rpc_conn, tailq);
+				} else if (read_ret != -EAGAIN) {
 					esdm_logger(
 						LOGGER_DEBUG, LOGGER_C_RPC,
 						"Closing incoming connection for FD %d\n",
@@ -1188,7 +1372,7 @@ out:
 static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 {
 	struct esdm_rpc_thread *threads = NULL;
-	size_t num_threads = 0;
+	size_t num_threads = 0, max_connections;
 	int ret = 0;
 	uint32_t t;
 
@@ -1212,9 +1396,12 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		goto out;
 	}
 
+	max_connections = esdm_rpcs_worker_slots(proto, num_threads);
+
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-		    "Using %zu %sprivileged RPC worker threads\n", num_threads,
-		    proto->privileged ? "" : "un");
+		    "Using %zu %sprivileged RPC worker threads, %zu connections each\n",
+		    num_threads, proto->privileged ? "" : "un",
+		    max_connections);
 
 	for (t = 0; t < num_threads; ++t) {
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
@@ -1222,6 +1409,7 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 			    proto->privileged ? "" : "un", t);
 		threads[t].proto = proto;
 		threads[t].id = t;
+		threads[t].max_connections = max_connections;
 		threads[t].eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 		if (threads[t].eventfd < 0) {
 			ret = -errno;
