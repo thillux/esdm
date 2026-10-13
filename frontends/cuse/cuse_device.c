@@ -863,7 +863,9 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			 * as read_bytes stops advancing. Fail the request
 			 * instead.
 			 */
-			if (ret == 0)
+			if (ret < 0)
+				ret = -errno;
+			else if (ret == 0)
 				ret = -EIO;
 		}
 
@@ -949,7 +951,9 @@ err:
 		 * A short fallback write (e.g. write() returning 0) must not be
 		 * reported to the caller as a successful full write.
 		 */
-		if (ret >= 0 && written < size)
+		if (ret < 0)
+			ret = -errno;
+		else if (written < size)
 			ret = -EIO;
 	}
 

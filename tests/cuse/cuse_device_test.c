@@ -920,6 +920,45 @@ static void test_write_fallback(void)
 }
 
 /*
+ * A fallback that fails passes its errno on. It used to be the -1 of read() or
+ * write() negated, which every caller saw as EPERM.
+ */
+static void test_fallback_errno(void)
+{
+	int wronly = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	int rdonly = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	uint8_t buf[32] = { 0 };
+	struct fuse_file_info fi;
+
+	if (wronly < 0 || rdonly < 0) {
+		CHECK(0, "cannot open /dev/null: %s", strerror(errno));
+		goto out;
+	}
+
+	/* Reading from a descriptor open for writing only */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, sizeof(buf), 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, wronly);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EBADF);
+
+	/* Writing to one open for reading only */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	esdm_cuse_write_internal(TEST_REQ, (const char *)buf, sizeof(buf), 0,
+				 &fi, rdonly);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EBADF);
+
+out:
+	if (wronly >= 0)
+		close(wronly);
+	if (rdonly >= 0)
+		close(rdonly);
+}
+
+/*
  * poll() with no status segment attached: nothing can be reported as ready, so
  * the handle is registered and the caller waits. Closing the descriptor has to
  * take the registration with it - a stale one would later be notified through
@@ -1460,6 +1499,7 @@ int main(int argc, char *argv[])
 	test_read_fallback();
 	test_read_fallback_eof();
 	test_write_fallback();
+	test_fallback_errno();
 	test_poll_registration();
 	test_pollmask();
 	test_privileged_ioctls();
