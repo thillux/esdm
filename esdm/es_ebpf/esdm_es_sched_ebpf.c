@@ -60,10 +60,16 @@ static struct esdm_ebpf_es esdm_sched_ebpf_es = {
  */
 static DEFINE_MUTEX_UNLOCKED(sched_ebpf_mutex);
 
+/* Loaded and credited - the kernel RNG entropy rate depends on it */
 bool esdm_sched_ebpf_enabled(void)
 {
-	return esdm_sched_ebpf_es.loaded &&
-	       esdm_config_es_sched_ebpf_entropy_rate() > 0;
+	bool loaded;
+
+	mutex_reader_lock(&sched_ebpf_mutex);
+	loaded = esdm_sched_ebpf_es.loaded;
+	mutex_reader_unlock(&sched_ebpf_mutex);
+
+	return loaded && esdm_config_es_sched_ebpf_entropy_rate() > 0;
 }
 
 /* Caller must hold sched_ebpf_mutex (write lock). */

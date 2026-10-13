@@ -31,9 +31,13 @@
 #include "esdm_es_krng.h"
 #include "memset_secure.h"
 #include "os_random.h"
+#include "esdm_es_irq.h"
 #include "esdm_es_sched.h"
+#include "es_ebpf/esdm_es_irq_ebpf.h"
+#include "es_ebpf/esdm_es_sched_ebpf.h"
 #include "helper.h"
 #include "esdm_logger.h"
+#include "math_helper.h"
 
 static uint32_t krng_entropy = ESDM_KERNEL_RNG_ENTROPY_RATE;
 
@@ -54,7 +58,11 @@ static int esdm_krng_init(void)
 }
 
 /*
- * This function adjusts the entropy level depending on system properties
+ * This function adjusts the entropy level depending on system properties.
+ *
+ * Evaluated on every call rather than set once by the timing entropy sources:
+ * they come and go with (re)initialization, and the eBPF variants have no
+ * hook that would adjust the kernel RNG rate when they load.
  */
 static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 {
@@ -62,16 +70,28 @@ static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 	 * If SP800-90C compliant mode is enabled, we cannot claim that the
 	 * kernel provides entropy as the kernel is not SP800-90B compliant.
 	 */
-	return esdm_es_oversampling() ||
-			       /*
-	 * If the scheduler-based entropy source is enabled, the kernel is
+	if (esdm_es_oversampling())
+		return 0;
+
+	/*
+	 * If a scheduler-based entropy source is credited, the kernel is
 	 * claimed to not return any entropy. This is due to the fact that
 	 * interrupts may trigger scheduling events. This implies that
 	 * interrupts are not independent of interrupts.
 	 */
-			       esdm_sched_enabled() ?
-		       0 :
-		       entropylevel;
+	if (esdm_sched_enabled() || esdm_sched_ebpf_enabled())
+		return 0;
+
+	/*
+	 * A credited interrupt entropy source either takes the interrupts away
+	 * from the kernel RNG (kernel add-on) or credits the same events the
+	 * kernel RNG processes (eBPF) - either way only a remainder is left.
+	 */
+	if (esdm_irq_enabled() || esdm_irq_ebpf_enabled())
+		return min_uint32(entropylevel,
+				  ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
+
+	return entropylevel;
 }
 
 static uint32_t esdm_krng_entropylevel(uint32_t requested_bits)
