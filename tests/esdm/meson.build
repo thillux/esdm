@@ -339,8 +339,15 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
-	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test)
-	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test)
+	# Both draw some 16 MiB in requests of up to 1 MiB. With the reseeding
+	# caps of an sp80090c, fips140 or ais2031_drg4 build, the DRNG reseeds
+	# every 12 KiB, and each reseed waits for a synchronous Jitter RNG
+	# collection - well over a thousand of them, which on a loaded machine
+	# takes minutes rather than the default 30 seconds.
+	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test,
+		timeout: 300)
+	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test,
+		timeout: 300)
 	test('ESDM DRNG manager max w/o reseed - 1 DRNG', esdm_drng_mgr_max_wo_reseed_test,
 		args : [ '1' ])
 	# The DRNG of a node keeps the ESDM operational once the initial one is
