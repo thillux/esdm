@@ -37,7 +37,6 @@
 #include "esdm_crypto.h"
 #include "esdm_drng_mgr.h"
 #include "esdm_es_aux.h"
-#include "esdm_es_jent.h"
 #include "esdm_es_mgr.h"
 #include "esdm_botan.h"
 #include "esdm_gnutls.h"
@@ -766,9 +765,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 			   addtl __aligned(ESDM_KCAPI_ALIGN),
 		collected_seedbuf;
 	uint32_t requested_bits, collected_entropy = 0, pass_entropy;
-	unsigned int i, num_es_delivered = 0;
-	bool seeded = false, injected;
-	unsigned int es_delivered_threshold = 1;
+	unsigned int i;
+	bool seeded = false, injected, reachable;
 	bool do_full_init =
 		(drng == &esdm_drng_pr && !atomic_load(&drng->initiated)) ||
 		(drng != &esdm_drng_pr && !atomic_load(&drng->fully_seeded));
@@ -786,20 +784,7 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 	memset(&seedbuf, 0, sizeof(seedbuf));
 	memset(&addtl, 0, sizeof(addtl));
 
-	/*
-	 * NTG.1 needs two entropy sources to deliver, so keep the emergency
-	 * reseeding loop below going as long as that many contribute. An NTG.1
-	 * conformant jitter RNG is a sufficient source on its own, in which
-	 * case one delivering source keeps the loop alive - whether the
-	 * collected entropy is acceptable remains esdm_fully_seeded()'s call.
-	 */
-	if (esdm_ntg1_2024_compliant() && do_full_init && !esdm_jent_ntg1())
-		es_delivered_threshold = 2;
-
 	do {
-		/* Count the number of ES which delivered entropy */
-		num_es_delivered = 0;
-
 		if (collected_entropy) {
 			esdm_logger(
 				LOGGER_VERBOSE, LOGGER_C_DRNG,
@@ -827,8 +812,8 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 		for_each_esdm_es (i) {
 			collected_seedbuf.entropy_es[i].e_bits +=
 				seedbuf.entropy_es[i].e_bits;
-			num_es_delivered += !!seedbuf.entropy_es[i].e_bits;
 		}
+		reachable = esdm_fully_seeded_reachable(do_full_init, &seedbuf);
 
 		/*
 		 * Inject seed data into DRNG
@@ -886,7 +871,7 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 	 * entropy, keep doing it until we reached fully seeded level for
 	 * at least one DRNG. This operation is not continued if the
 	 * ES do not deliver entropy such that we cannot reach the fully seeded
-	 * level.
+	 * level, see esdm_fully_seeded_reachable().
 	 *
 	 * The emergency reseeding implies that the consecutively injected
 	 * entropy can be added up. This is applicable due to the fact that
@@ -894,7 +879,7 @@ static uint32_t esdm_drng_seed_es_nolock(struct esdm_drng *drng,
 	 * producing data while this is ongoing.
 	 */
 	} while (forced && !atomic_load(&drng->fully_seeded) &&
-		 num_es_delivered >= es_delivered_threshold &&
+		 reachable &&
 		 !atomic_load(&esdm_drng_mgr_terminate));
 
 	/*

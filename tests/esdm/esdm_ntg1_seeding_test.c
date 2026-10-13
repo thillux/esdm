@@ -63,6 +63,30 @@ static int check(const char *desc, const uint32_t *e_bits_per_es, bool expected)
 	return (seeded == expected) ? 0 : 1;
 }
 
+/*
+ * Whether the emergency reseeding goes on after a pass that gathered
+ * @e_bits_per_es - it must stop once the sources delivering cannot reach the
+ * verdict above any more, as it holds the pool and DRNG locks.
+ */
+static int check_reachable(const char *desc, bool do_full_init,
+			   const uint32_t *e_bits_per_es, bool expected)
+{
+	struct entropy_buf eb;
+	bool reachable;
+	uint32_t i;
+
+	memset(&eb, 0, sizeof(eb));
+	for_each_esdm_es (i)
+		eb.entropy_es[i].e_bits = e_bits_per_es[i];
+
+	reachable = esdm_fully_seeded_reachable(do_full_init, &eb);
+
+	printf("%s: emergency reseeding goes on %s, expected %s\n", desc,
+	       reachable ? "true" : "false", expected ? "true" : "false");
+
+	return (reachable == expected) ? 0 : 1;
+}
+
 int main(void)
 {
 	uint32_t e_bits[esdm_ext_es_last];
@@ -114,6 +138,35 @@ int main(void)
 	e_bits[other] = ESDM_AIS2031_NPTRNG_MIN_ENTROPY;
 	e_bits[second] = ESDM_AIS2031_NPTRNG_MIN_ENTROPY;
 	ret += check("two other entropy sources", e_bits, true);
+
+	/*
+	 * One pass of the emergency reseeding: the jitter RNG adds up to its
+	 * own verdict over the passes, any other single source never does.
+	 */
+	memset(e_bits, 0, sizeof(e_bits));
+	e_bits[esdm_ext_es_jitter] = 1;
+	ret += check_reachable("pass with the jitter RNG alone", true, e_bits,
+			       esdm_jent_ntg1());
+
+	memset(e_bits, 0, sizeof(e_bits));
+	e_bits[other] = 1;
+	ret += check_reachable("pass with another entropy source alone", true,
+			       e_bits, false);
+
+	memset(e_bits, 0, sizeof(e_bits));
+	e_bits[other] = 1;
+	e_bits[second] = 1;
+	ret += check_reachable("pass with two other entropy sources", true,
+			       e_bits, true);
+
+	/* Past the initial seeding one source is enough again. */
+	memset(e_bits, 0, sizeof(e_bits));
+	e_bits[other] = 1;
+	ret += check_reachable("reseed pass with another entropy source alone",
+			       false, e_bits, true);
+
+	memset(e_bits, 0, sizeof(e_bits));
+	ret += check_reachable("pass without any entropy", true, e_bits, false);
 
 	return ret ? 1 : 0;
 }

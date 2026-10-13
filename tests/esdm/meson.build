@@ -205,6 +205,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_ntg1_single_source_test = executable(
+		'esdm_ntg1_single_source_test',
+		[ esdm_ipc_ns, 'esdm_ntg1_single_source_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	# The per-node DRNG array only exists with the node support
 	if get_option('node').enabled()
 		esdm_node_bound_test = executable(
@@ -425,6 +433,10 @@ if get_option('esdm-server').enabled()
 		esdm_get_seed_nonblock_test)
 
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
+	# Reports a hang itself after 60 seconds.
+	test('ESDM NTG.1 initial seeding gives up on a single source',
+		esdm_ntg1_single_source_test,
+		timeout: 120)
 
 	# Skips without ea_non_iid in PATH; its estimators take a while on 1 MiB.
 	test('ESDM security - output min-entropy',

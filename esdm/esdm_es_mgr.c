@@ -662,6 +662,33 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		esdm_get_seed_entropy_osr(do_full_init, false));
 }
 
+/*
+ * May the emergency reseeding go on after a pass that gathered @eb? Only while
+ * the sources that delivered can still add up to what esdm_fully_seeded()
+ * asks for: any one of them in general, but for the NTG.1 initial seeding two,
+ * or the NTG.1 conformant jitter RNG itself. Any other single source keeps
+ * delivering entropy that never meets the two-source rule, and the loop,
+ * holding the pool and DRNG locks, would never end.
+ */
+bool esdm_fully_seeded_reachable(bool do_full_init, struct entropy_buf *eb)
+{
+	uint32_t i, delivered = 0;
+
+	for_each_esdm_es (i)
+		delivered += !!eb->entropy_es[i].e_bits;
+
+	if (do_full_init && esdm_ntg1_2024_compliant()) {
+#ifdef ESDM_ES_JENT
+		if (esdm_jent_ntg1() &&
+		    eb->entropy_es[esdm_ext_es_jitter].e_bits)
+			return true;
+#endif
+		return delivered >= 2;
+	}
+
+	return delivered >= 1;
+}
+
 uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb)
 {
 	uint32_t i, collected_entropy = 0;
