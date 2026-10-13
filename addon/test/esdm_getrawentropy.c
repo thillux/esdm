@@ -78,6 +78,19 @@ static int getrawentropy(struct opts *opts)
 			goto out;
 		}
 
+		/*
+		 * The interface returns 0 when no data will arrive, e.g. with
+		 * the collection disabled under lockdown or once the boot
+		 * time data is drained - do not spin on it.
+		 */
+		if (!ret) {
+			fprintf(stderr,
+				"No more data from %s, still %lu events missing\n",
+				opts->debugfs_file, requested / sizeof(uint64_t));
+			ret = -ENODATA;
+			goto out;
+		}
+
 		for (i = 0; i < (uint32_t)ret / (sizeof(uint64_t)); i++) {
 			uint64_t val;
 
