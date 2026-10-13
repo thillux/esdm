@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -110,6 +111,9 @@ struct esdm_egd_client {
 	uint64_t cookie;
 	struct sockaddr_un peer;
 	socklen_t peer_len;
+
+	/* SIGPIPE was ignored at connect time, see esdm_egd_client_write(). */
+	bool sigpipe_ignored;
 
 	/* Registry entry, see esdm_egd_client_atfork_child(). */
 	TAILQ_ENTRY(esdm_egd_client) tailq;
@@ -474,6 +478,7 @@ static int esdm_egd_client_identify_locked(struct esdm_egd_client *client)
 static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
 {
 	struct sockaddr_un addr;
+	struct sigaction sa;
 	int errsv, fd, ret;
 
 	/*
@@ -502,6 +507,13 @@ static int esdm_egd_client_connect_locked(struct esdm_egd_client *client)
 
 	client->fd = fd;
 	client->owner_pid = getpid();
+
+	/*
+	 * Asked here because a sandboxed process may no longer ask, just as it
+	 * may no longer connect - see esdm_egd_client_write().
+	 */
+	client->sigpipe_ignored = !sigaction(SIGPIPE, NULL, &sa) &&
+				  sa.sa_handler == SIG_IGN;
 
 	/*
 	 * A connection that cannot be recognized again would be taken for a
@@ -579,6 +591,52 @@ static int esdm_egd_client_ensure_connected_locked(struct esdm_egd_client *clien
  * Raw transfers
  ****************************/
 
+/*
+ * write(2) without letting a peer that went away raise SIGPIPE, which would
+ * kill the application this library is linked into.
+ *
+ * send(2) with MSG_NOSIGNAL is deliberately not used - it is sendto(2), which
+ * OpenSSH's pre-auth sandbox answers with SECCOMP_RET_KILL (see the header).
+ * SIGPIPE is blocked around the write instead, which takes rt_sigprocmask(2)
+ * only, and one the write raised is taken off before the mask is restored.
+ * That takes sigtimedwait(2), which the sandbox kills for as well - but
+ * OpenSSH ignores SIGPIPE, and an ignored signal is discarded on delivery, so
+ * it is not needed then. A signal the caller blocked itself is left alone: a
+ * pending one may be the caller's, and ours merged into it.
+ */
+static ssize_t esdm_egd_client_write(struct esdm_egd_client *client,
+				     const uint8_t *buf, size_t len)
+{
+	const struct timespec nowait = { 0, 0 };
+	sigset_t sigpipe, old;
+	ssize_t ret;
+	int errsv;
+
+	sigemptyset(&sigpipe);
+	sigaddset(&sigpipe, SIGPIPE);
+	errsv = pthread_sigmask(SIG_BLOCK, &sigpipe, &old);
+	if (errsv) {
+		errno = errsv;
+		return -1;
+	}
+
+	ret = write(client->fd, buf, len);
+	errsv = errno;
+
+	/* Raised for this thread, which is where sigtimedwait looks first. */
+	if (ret < 0 && errsv == EPIPE && !sigismember(&old, SIGPIPE) &&
+	    !client->sigpipe_ignored) {
+		while (sigtimedwait(&sigpipe, NULL, &nowait) < 0 &&
+		       errno == EINTR)
+			;
+	}
+
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+	errno = errsv;
+
+	return ret;
+}
+
 /* Caller holds the lock. */
 static int esdm_egd_client_write_all_locked(struct esdm_egd_client *client,
 					    const uint8_t *buf, size_t len)
@@ -594,11 +652,8 @@ static int esdm_egd_client_write_all_locked(struct esdm_egd_client *client,
 		/*
 		 * Establish writability before writing rather than after an
 		 * EAGAIN: poll reports the hangup of a peer that went away, so
-		 * the write never happens and cannot raise a SIGPIPE that would
-		 * kill the application this library is linked into. send(2)
-		 * with MSG_NOSIGNAL is deliberately not used - it is sendto(2),
-		 * which OpenSSH's pre-auth sandbox answers with
-		 * SECCOMP_RET_KILL (see the header).
+		 * the write is not even tried. The peer may still close right
+		 * after the poll, see esdm_egd_client_write().
 		 */
 		wret = esdm_egd_client_wait(client->fd, POLLOUT, timeout_ms,
 					    &revents);
@@ -607,7 +662,8 @@ static int esdm_egd_client_write_all_locked(struct esdm_egd_client *client,
 		if (revents & (POLLERR | POLLHUP | POLLNVAL))
 			return -EPIPE;
 
-		ret = write(client->fd, buf + written, len - written);
+		ret = esdm_egd_client_write(client, buf + written,
+					    len - written);
 
 		if (ret > 0) {
 			written += (size_t)ret;

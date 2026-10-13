@@ -33,6 +33,19 @@ test('EGD client library', egd_client_test, timeout: 120)
 
 test('EGD client robustness', egd_robust_test, timeout: 120)
 
+# The client's write(2) and sigtimedwait(2) are wrapped, to close the peer
+# right before the write and count the calls - see the test.
+egd_client_sigpipe_test = executable(
+		'egd_client_sigpipe_test',
+		[ 'egd_client_sigpipe_test.c' ],
+		include_directories: include_dirs_egd_client,
+		dependencies: egd_test_deps,
+		link_args: [ '-Wl,--wrap=write', '-Wl,--wrap=sigtimedwait' ],
+		link_with: [ esdm_egd_client_lib.get_static_lib() ]
+	)
+
+test('EGD client SIGPIPE', egd_client_sigpipe_test)
+
 if get_option('esdm-server').enabled()
 	# The server side driven in-process and spoken to in raw protocol
 	# bytes. Unlike the test below it needs no daemon and therefore no
