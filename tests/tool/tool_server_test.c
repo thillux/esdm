@@ -480,10 +480,17 @@ static void test_privileged_commands(void)
 
 /*
  * The PKCS#11 credentials are set through the privileged RPC interface. A
- * build without that entropy source refuses the call, which is a legitimate
- * answer - what is checked is that the tool passes the request on and reports
- * the outcome either way, rather than that the source exists.
+ * build without that entropy source refuses the call, and the tool has to
+ * report that refusal. With the source, the outcome depends on the module and
+ * the tokens the machine has, so either answer counts - what is checked is
+ * that the tool passes the request on and reports the outcome.
  */
+#ifdef ESDM_ES_PKCS11
+#define PKCS11_OUTCOME_FIXED 0
+#else
+#define PKCS11_OUTCOME_FIXED 1
+#endif
+
 static void test_pkcs11_config(void)
 {
 	const char *const literal[] = { "--pkcs11-token-label", "esdm-test",
@@ -508,6 +515,11 @@ static void test_pkcs11_config(void)
 			      NULL,
 	      "setting the PKCS#11 configuration said nothing about the outcome (output: %.300s)",
 	      r.err);
+	CHECK(!PKCS11_OUTCOME_FIXED ||
+		      (rc == EXIT_FAILURE &&
+		       strstr(r.err, "failed to update PKCS#11 configuration")),
+	      "a build without the PKCS#11 source accepted its configuration (status %d, output: %.300s)",
+	      rc, r.err);
 
 	/* "-" reads the PIN instead of putting it in the process listing */
 	announce(from_stdin);
@@ -517,6 +529,11 @@ static void test_pkcs11_config(void)
 	CHECK(strstr(r.err, "PKCS#11") != NULL,
 	      "a PIN read from stdin was not passed on (output: %.300s)",
 	      r.err);
+	CHECK(!PKCS11_OUTCOME_FIXED ||
+		      (rc == EXIT_FAILURE &&
+		       strstr(r.err, "failed to update PKCS#11 configuration")),
+	      "a build without the PKCS#11 source accepted a PIN from stdin (status %d, output: %.300s)",
+	      rc, r.err);
 }
 
 /*
