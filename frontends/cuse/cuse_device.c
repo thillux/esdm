@@ -77,6 +77,13 @@ static char *mount_dst = NULL;
  */
 static struct esdm_shm_status *_Atomic esdm_cuse_shm_status = NULL;
 static int esdm_cuse_shmid = -1;
+
+/*
+ * The suspend_gen of the attached segment the pollers were last woken for. Kept
+ * here rather than cleared in the segment: the /dev/random and the /dev/urandom
+ * daemon share it, and the one done first would take the event from the other.
+ */
+static atomic_uint esdm_cuse_suspend_seen = 0;
 static atomic_llong next_fh = 1;
 
 static int esdm_cuse_shm_status_avail(void)
@@ -130,9 +137,8 @@ static int esdm_cuse_shm_status_new_shmid(void)
 }
 
 /*
- * Attach to the server's segment @shmid. It is attached for writing, as the
- * poll checker clears the suspend trigger in it, which the server grants its
- * own user only.
+ * Attach to the server's segment @shmid. Events the server signalled on it
+ * before are no news to the pollers, which are evaluated against it anew.
  *
  * The server creates the semaphores before it publishes the segment's version,
  * so a segment without the version is not taken yet: the semaphore may not be
@@ -156,6 +162,8 @@ static int esdm_cuse_shm_status_attach_shm(int shmid)
 		return -EAGAIN;
 	}
 
+	atomic_store(&esdm_cuse_suspend_seen,
+		     atomic_load(&status->suspend_gen));
 	atomic_store(&esdm_cuse_shm_status, status);
 	esdm_cuse_shmid = shmid;
 
@@ -1337,14 +1345,12 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 		*outmask |= ESDM_POLL_WRITER;
 
 	/*
-	 * Simply wake the poller no matter what it waits for. This one-shot
-	 * trigger is NOT cleared here: clearing it as a side effect of reading
-	 * the mask would let whichever caller reads it first consume the event,
-	 * so pollers already parked in the checker's list would never be woken.
-	 * The checker clears it once, after it has evaluated every registered
-	 * poll handle against it (see esdm_cuse_poll_checker()).
+	 * Simply wake the poller no matter what it waits for, until the checker
+	 * has woken every registered poll handle for the event (see
+	 * esdm_cuse_poll_check()).
 	 */
-	if (atomic_load(&status->suspend_trigger))
+	if (atomic_load(&status->suspend_gen) !=
+	    atomic_load(&esdm_cuse_suspend_seen))
 		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
 }
 
@@ -1451,6 +1457,56 @@ void esdm_cuse_poll_urandom(fuse_req_t req, struct fuse_file_info *fi,
 		fuse_pollhandle_destroy(ph);
 }
 
+/* Wake the registered pollers whose event came */
+static void esdm_cuse_poll_check(void)
+{
+	struct esdm_shm_status *status;
+	unsigned int sysmask, mask, gen = 0;
+	bool sysmask_set = false;
+	struct esdm_cuse_poll **pp;
+
+	mutex_w_lock(&esdm_cuse_ph_lock);
+
+	/*
+	 * Only this thread attaches to another segment. The suspend event is
+	 * sampled before the handles are evaluated: one that comes during the
+	 * pass leaves the sample behind and is delivered on the next pass.
+	 */
+	status = esdm_cuse_shm_status;
+	if (status)
+		gen = atomic_load(&status->suspend_gen);
+
+	pp = &esdm_cuse_poll_list;
+	while (*pp) {
+		struct esdm_cuse_poll *node = *pp;
+
+		/* Get the mask once for this loop */
+		if (!sysmask_set) {
+			esdm_cuse_get_pollmask(&sysmask);
+			sysmask_set = true;
+		}
+
+		mask = sysmask;
+		esdm_cuse_set_pollmask(node->poll_events, &mask);
+
+		if (!mask) {
+			pp = &node->next;
+			continue;
+		}
+
+		fuse_notify_poll(node->ph);
+		fuse_pollhandle_destroy(node->ph);
+		*pp = node->next;
+		free(node);
+	}
+
+	/* Every poll handle in the list has just been woken for it */
+	if (status)
+		atomic_store(&esdm_cuse_suspend_seen, gen);
+
+	mutex_w_unlock(&esdm_cuse_ph_lock);
+}
+
 /* Poll checker handler executed in separate thread */
 static int esdm_cuse_poll_checker(void __unused *unused)
 {
@@ -1460,55 +1516,7 @@ static int esdm_cuse_poll_checker(void __unused *unused)
 	thread_wake_all(&esdm_cuse_poll_checker_wait);
 
 	while (!atomic_load(&esdm_cuse_poll_thread_shutdown)) {
-		unsigned int sysmask, mask;
-		bool sysmask_set = false, suspend_seen = false;
-		struct esdm_cuse_poll **pp;
-
-		mutex_w_lock(&esdm_cuse_ph_lock);
-
-		/*
-		 * Capture the one-shot suspend trigger for this pass so it can
-		 * be cleared exactly once below, after every registered handle
-		 * has been evaluated against it.
-		 */
-		if (esdm_cuse_shm_status)
-			suspend_seen = atomic_load(
-				&esdm_cuse_shm_status->suspend_trigger);
-
-		pp = &esdm_cuse_poll_list;
-		while (*pp) {
-			struct esdm_cuse_poll *node = *pp;
-
-			/* Get the mask once for this loop */
-			if (!sysmask_set) {
-				esdm_cuse_get_pollmask(&sysmask);
-				sysmask_set = true;
-			}
-
-			mask = sysmask;
-			esdm_cuse_set_pollmask(node->poll_events, &mask);
-
-			if (!mask) {
-				pp = &node->next;
-				continue;
-			}
-
-			fuse_notify_poll(node->ph);
-			fuse_pollhandle_destroy(node->ph);
-			*pp = node->next;
-			free(node);
-		}
-
-		/*
-		 * Clear the one-shot trigger only now - every poll handle in the
-		 * list has just been woken by it. A trigger that arrives after
-		 * this point re-posts the status semaphore, so it is not lost.
-		 */
-		if (suspend_seen && esdm_cuse_shm_status)
-			atomic_store(&esdm_cuse_shm_status->suspend_trigger,
-					false);
-
-		mutex_w_unlock(&esdm_cuse_ph_lock);
+		esdm_cuse_poll_check();
 		esdm_cuse_shm_status_down();
 	}
 

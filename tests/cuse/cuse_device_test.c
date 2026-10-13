@@ -1310,6 +1310,59 @@ static bool test_attach(void)
 	return attached;
 }
 
+/*
+ * A suspend trigger, or the server going away, as the server signals it: every
+ * poller is woken, whatever it waits for. Both CUSE daemons watch the one
+ * segment, so neither may consume the event in it - the /dev/urandom daemon,
+ * which has no pollers, used to clear it before the /dev/random daemon woke its
+ * own.
+ */
+static void test_suspend_event(void)
+{
+	static const unsigned int all =
+		POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+	struct fuse_file_info fi;
+	unsigned int mask, gen;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.fh = 4712;
+	fi.poll_events = POLLIN;
+
+	/* Nothing ready, so the poller waits */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, 0);
+	CHECK(esdm_cuse_poll_list != NULL,
+	      "the poll handle was not registered");
+
+	gen = atomic_fetch_add(&test_server_shm->suspend_gen, 1) + 1;
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, all);
+
+	reply_reset();
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 1);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "the woken poll handle was left registered");
+
+	/* Left in the segment for the other daemon */
+	CHECK_EQ(atomic_load(&test_server_shm->suspend_gen), gen);
+
+	/* But no news to this one any more */
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, 0);
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, 0);
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 0);
+
+	reply_reset();
+	esdm_cuse_release(TEST_REQ, &fi);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "closing the descriptor left its poll registration behind");
+}
+
 static void test_shm_status(void)
 {
 	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
@@ -1412,10 +1465,7 @@ static void test_shm_status(void)
 	CHECK_EQ(mask, POLLOUT | POLLWRNORM);
 
 	atomic_store(&esdm_cuse_shm_status->need_entropy, false);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, true);
-	esdm_cuse_get_pollmask(&mask);
-	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, false);
+	test_suspend_event();
 
 	test_read_nonblock();
 

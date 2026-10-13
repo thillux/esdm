@@ -157,7 +157,7 @@ static void esdm_shm_status_set_suspend(void)
 	if (!status)
 		return;
 
-	atomic_store(&status->suspend_trigger, true);
+	atomic_fetch_add(&status->suspend_gen, 1);
 
 	/* Wake up all waiters */
 	esdm_shm_wake_all();
@@ -531,8 +531,11 @@ int esdm_shm_status_init(void)
 
 	esdm_shm_status_set_operational(esdm_state_operational());
 	esdm_shm_status_set_need_entropy();
+	/*
+	 * suspend_gen is not reset: a CUSE daemon takes the value it finds when
+	 * it attaches, to which a reset would look like a new event.
+	 */
 	esdm_shm_status_install_signal_suspend();
-	atomic_store(&esdm_shm_status->suspend_trigger, false);
 
 	return 0;
 }
