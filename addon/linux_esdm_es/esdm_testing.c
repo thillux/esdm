@@ -211,8 +211,10 @@ static int esdm_testing_reader(struct esdm_testing *data, u32 *boot, u8 *outbuf,
 			wait_event_interruptible(data->read_wait,
 						 esdm_testing_have_data(data));
 #endif
+			/* hand out what was read before the signal */
 			if (signal_pending(current)) {
-				collected_data = -ERESTARTSYS;
+				if (!collected_data)
+					collected_data = -ERESTARTSYS;
 				goto out;
 			}
 
@@ -290,7 +292,8 @@ static int esdm_testing_extract_user(struct file *file, char __user *buf,
 		i = min_t(int, nbytes, ESDM_TESTING_RINGBUFFER_SIZE);
 		i = reader(tmp_aligned, i);
 		if (i <= 0) {
-			if (i < 0)
+			/* earlier chunks are already in the user buffer */
+			if (i < 0 && !ret)
 				ret = i;
 			break;
 		}
