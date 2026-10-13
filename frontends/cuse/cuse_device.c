@@ -1715,6 +1715,36 @@ static int esdm_cuse_session_loop(struct fuse_session *se,
 #endif
 }
 
+/*
+ * Daemonize unless -f or -d asks otherwise, and have cuse_lowlevel_setup() run
+ * in the foreground from then on.
+ *
+ * For --pid_namespace: daemonizing there would leave the namespace's PID 1 to
+ * exit, which kills the namespace and the daemon in it, while the supervisor
+ * reports success. So the process is daemonized before the fork into the
+ * namespace, as esdm-server does, and the supervisor is what stays behind.
+ */
+static int esdm_cuse_daemonize(struct fuse_args *args)
+{
+	/* A copy, cuse_lowlevel_setup() parses the arguments as well */
+	struct fuse_args tmp = FUSE_ARGS_INIT(args->argc, args->argv);
+	struct fuse_cmdline_opts opts;
+	int foreground;
+
+	if (fuse_parse_cmdline(&tmp, &opts)) {
+		fuse_opt_free_args(&tmp);
+		return -EINVAL;
+	}
+	foreground = opts.foreground;
+	free(opts.mountpoint);
+	fuse_opt_free_args(&tmp);
+
+	if (!foreground && fuse_daemonize(0))
+		return -EFAULT;
+
+	return fuse_opt_add_arg(args, "-f") ? -ENOMEM : 0;
+}
+
 int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
@@ -1807,10 +1837,11 @@ int main_common(const char *_devname, const char *target, const char *semname,
 	 * of it has no PID there, so none can be checked for CAP_SYS_ADMIN and
 	 * the privileged ioctls are refused to every caller.
 	 */
-	if (param.pid_namespace) {
+	if (param.pid_namespace && !param.is_help) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_CUSE,
 			"PID namespace requested: the privileged ioctls (RNDADDTOENTCNT, RNDADDENTROPY, RNDCLEARPOOL, RNDZAPENTCNT, RNDRESEEDCRNG) are refused to every caller\n");
+		CKINT(esdm_cuse_daemonize(&args));
 		CKINT(linux_isolate_namespace_prefork(NULL));
 	}
 
