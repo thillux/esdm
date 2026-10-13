@@ -18,6 +18,11 @@
  * DAMAGE.
  */
 
+/*
+ * Before any system header: MUTEX_UNLOCKED_PREFER_WRITER silently falls back
+ * to the reader-preferring lock without the glibc extensions.
+ */
+#define _GNU_SOURCE
 #define FUSE_USE_VERSION 31
 
 #include <ctype.h>
@@ -111,8 +116,13 @@ static void esdm_proc_drop_privileges(void)
  * design: privileged operations take the write lock, unprivileged operations
  * take the read lock, so the elevated-credential window is never concurrent
  * with another request.
+ *
+ * Writer-preferring, as in CUSE: open and getattr hold the read lock across an
+ * RPC, so with a reader-preferring lock a steady stream of unprivileged readers
+ * could keep root's writes waiting for good. Readers never nest, which the
+ * non-recursive kind requires.
  */
-static mutex_t esdm_proc_priv = MUTEX_UNLOCKED;
+static mutex_t esdm_proc_priv = MUTEX_UNLOCKED_PREFER_WRITER;
 
 static bool esdm_proc_client_privileged(void)
 {

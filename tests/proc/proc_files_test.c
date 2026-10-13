@@ -41,11 +41,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -806,6 +808,51 @@ static void test_privileged_transitions(void)
 	      "the privileged transitions failed (status %d)", status);
 }
 
+static void *writer_thread(void *arg)
+{
+	(void)arg;
+
+	mutex_lock(&esdm_proc_priv);
+	mutex_unlock(&esdm_proc_priv);
+
+	return NULL;
+}
+
+/*
+ * A root write waiting for the lock holds off the readers that come after it.
+ * With a lock that prefers readers, those kept coming in and the write could
+ * wait for good.
+ */
+static void test_writer_preferred(void)
+{
+	static const struct timespec ms = { .tv_nsec = 1000 * 1000 };
+	bool held_off = false;
+	pthread_t writer;
+	unsigned int i;
+
+	mutex_reader_lock(&esdm_proc_priv);
+	if (pthread_create(&writer, NULL, writer_thread, NULL)) {
+		mutex_reader_unlock(&esdm_proc_priv);
+		CHECK(0, "cannot start the writer thread");
+		return;
+	}
+
+	/* Until the writer waits, a new reader still gets in */
+	for (i = 0; i < 5000 && !held_off; i++) {
+		if (pthread_rwlock_tryrdlock(&esdm_proc_priv) == EBUSY) {
+			held_off = true;
+		} else {
+			mutex_reader_unlock(&esdm_proc_priv);
+			nanosleep(&ms, NULL);
+		}
+	}
+
+	mutex_reader_unlock(&esdm_proc_priv);
+	pthread_join(writer, NULL);
+
+	CHECK(held_off, "a reader overtook the waiting writer");
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -826,6 +873,7 @@ int main(int argc, char *argv[])
 	test_pre_init();
 	test_caller_cap_sys_admin();
 	test_privileged_transitions();
+	test_writer_preferred();
 
 	/* The usage, which is all main() prints before it hands over to FUSE */
 	show_help("esdm-proc");
