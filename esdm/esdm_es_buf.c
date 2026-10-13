@@ -125,6 +125,13 @@ void esdm_es_buf_reset(struct esdm_es_buf *buf)
 int esdm_es_buf_monitor(struct esdm_es_buf *buf, uint32_t requested_bits,
 			esdm_es_buf_fill_t fill, void *ctx)
 {
+	return esdm_es_buf_monitor_ready(buf, requested_bits, fill, NULL, ctx);
+}
+
+int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
+			      esdm_es_buf_fill_t fill,
+			      esdm_es_buf_ready_t ready, void *ctx)
+{
 	unsigned int i;
 
 	if (!buf || !buf->blocks || !fill)
@@ -147,6 +154,12 @@ int esdm_es_buf_monitor(struct esdm_es_buf *buf, uint32_t requested_bits,
 		if (!atomic_compare_exchange_strong(&buf->states[i], &expected,
 						    esdm_es_buf_filling))
 			continue;
+
+		/* Asked for empty slots only, as it may cost a kernel call */
+		if (ready && !ready(ctx)) {
+			atomic_store(&buf->states[i], esdm_es_buf_empty);
+			break;
+		}
 
 		gen = atomic_load(&buf->gen);
 		fill(&buf->blocks[i], requested_bits, ctx);
