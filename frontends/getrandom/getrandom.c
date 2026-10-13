@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -239,34 +240,54 @@ ssize_t getrandom(void *buffer, size_t length, unsigned int flags)
 	return getrandom_common(buffer, length, flags);
 }
 
+/*
+ * getentropy(3) from the kernel, filling the buffer or failing as the glibc and
+ * musl implementations do: an interrupted system call is retried - a caller of
+ * getentropy has no reason to expect EINTR - and a partial read continued.
+ */
+static int esdm_getentropy_kernel(void *buffer, size_t length)
+{
+	uint8_t *p = buffer;
+
+	while (length) {
+		ssize_t ret = syscall(__NR_getrandom, p, length, 0);
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			/* the syscall already set errno */
+			return -1;
+		}
+
+		/* No progress at all - fail the way getentropy(3) documents */
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+
+		p += ret;
+		length -= (size_t)ret;
+	}
+
+	return 0;
+}
+
 int __real_getentropy(void *__buffer, size_t __length);
 DSO_PUBLIC
 int __real_getentropy(void *__buffer, size_t __length)
 {
-	ssize_t ret;
-
 	/* getentropy(3) semantics: 0 on success, -1 with errno on error. */
 	if (__length > 256) {
 		errno = EIO;
 		return -1;
 	}
 
-	ret = syscall(__NR_getrandom, __buffer, __length, 0);
-	if (ret < 0)
-		/* the syscall already set errno */
-		return -1;
-	if ((size_t)ret != __length) {
-		/* getentropy must fill the whole buffer or fail */
-		errno = EIO;
-		return -1;
-	}
-
-	return 0;
+	return esdm_getentropy_kernel(__buffer, __length);
 }
 
 static int getentropy_common(void *buffer, size_t length)
 {
-	ssize_t ret = -EFAULT;
+	ssize_t ret;
 
 	/* getentropy(3) semantics: 0 on success, -1 with errno on error. */
 	if (length > 256) {
@@ -279,21 +300,9 @@ static int getentropy_common(void *buffer, size_t length)
 	}
 
 	esdm_invoke(esdm_rpcc_get_random_bytes_full(buffer, length));
-	if (ret < 0) {
-		ssize_t rc = syscall(__NR_getrandom, buffer, length, 0);
+	if (ret < 0)
+		return esdm_getentropy_kernel(buffer, length);
 
-		/* Kernel returned an error */
-		if (rc < 0) {
-			/* errno is already set properly */
-			return (int)rc;
-		}
-
-		/* We received insufficient data */
-		if ((size_t)rc != length) {
-			errno = EFAULT;
-			return -1;
-		}
-	}
 	return 0;
 }
 

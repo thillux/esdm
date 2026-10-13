@@ -33,10 +33,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "common_test.h"
+
+/*
+ * The kernel's getrandom(2), scripted: each entry is the outcome of one call,
+ * a negative errno or the number of bytes delivered. Past the script, the real
+ * system call answers.
+ */
+static ssize_t stub_kernel[4];
+static unsigned int stub_kernel_len, stub_kernel_calls;
+
+static long test_syscall(long nr, void *buf, size_t len, unsigned int flags)
+{
+	ssize_t rc;
+
+	if (nr != __NR_getrandom || stub_kernel_calls >= stub_kernel_len)
+		return syscall(nr, buf, len, flags);
+
+	rc = stub_kernel[stub_kernel_calls++];
+	if (rc < 0) {
+		errno = (int)-rc;
+		return -1;
+	}
+	if ((size_t)rc > len)
+		rc = (ssize_t)len;
+	memset(buf, 0x17, (size_t)rc);
+
+	return rc;
+}
+
+/* Only the unit under test is redirected - <unistd.h> came before. */
+#define syscall(nr, buf, len, flags) test_syscall(nr, buf, len, flags)
 
 /* The unit under test */
 #include "getrandom.c"
@@ -47,6 +78,7 @@
 
 static bool stub_fully_seeded;
 static int stub_seeded_ret;
+static ssize_t stub_full_ret;
 static ssize_t stub_pr_nonblock_ret;
 static unsigned int stub_full_calls, stub_pr_calls, stub_pr_nonblock_calls,
 	stub_init_calls;
@@ -93,6 +125,9 @@ static ssize_t stub_fill(uint8_t *buf, size_t buflen)
 ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *buf, size_t buflen)
 {
 	stub_full_calls++;
+
+	if (stub_full_ret)
+		return stub_full_ret;
 
 	return stub_fill(buf, buflen);
 }
@@ -234,6 +269,45 @@ static void test_nonblock_no_esdm(void)
 }
 
 /*
+ * getentropy(3) from the kernel, once the ESDM did not answer: its caller has
+ * no reason to expect EINTR, so an interrupted call is retried and a partial
+ * one continued, as glibc and musl do. A call delivering nothing fails with
+ * EIO.
+ */
+static void test_getentropy_kernel(void)
+{
+	int (*const fns[])(void *, size_t) = { getentropy, __real_getentropy };
+	uint8_t buf[32];
+	unsigned int i;
+
+	stub_full_ret = -ECONNREFUSED;
+
+	for (i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+		stub_kernel[0] = -EINTR;
+		stub_kernel[1] = 8;
+		stub_kernel[2] = -EINTR;
+		stub_kernel[3] = 24;
+		stub_kernel_len = 4;
+		stub_kernel_calls = 0;
+		memset(buf, 0, sizeof(buf));
+		CHECK_EQ(fns[i](buf, sizeof(buf)), 0);
+		CHECK_EQ(stub_kernel_calls, 4);
+		CHECK(buf[0] == 0x17 && buf[sizeof(buf) - 1] == 0x17,
+		      "the buffer was not filled");
+
+		stub_kernel[0] = 0;
+		stub_kernel_len = 1;
+		stub_kernel_calls = 0;
+		errno = 0;
+		CHECK_EQ(fns[i](buf, sizeof(buf)), -1);
+		CHECK_EQ(errno, EIO);
+	}
+
+	stub_kernel_len = 0;
+	stub_full_ret = 0;
+}
+
+/*
  * The RPC client is reference counted and shared with everybody else in the
  * process, so the library may only drop the reference it took itself. Each case
  * runs in a child, the destructor being what is under test.
@@ -285,6 +359,7 @@ int main(int argc, char *argv[])
 	test_nonblock_seeded();
 	test_nonblock_pr_busy();
 	test_nonblock_no_esdm();
+	test_getentropy_kernel();
 
 	ret = common_test_result("getrandom_shim");
 
