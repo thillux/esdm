@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/gcd.h>
+#include <linux/irq_work.h>
 #include <linux/module.h>
 #include <linux/random.h>
 
@@ -45,6 +46,22 @@ void esdm_gcd_set(u64 running_gcd)
 	/* Ensure that update to global variable esdm_gcd_timer is visible */
 	mb();
 }
+
+/*
+ * The GCD is calculated in the hot path, i.e. from the scheduler hook which may
+ * run with the workqueue pool->lock held. A printk there risks the deadlock
+ * described for the health-test messages, so defer the warning about a capped
+ * GCD to an irq_work as well.
+ */
+static u64 esdm_gcd_capped;
+
+static void esdm_gcd_warn_func(struct irq_work *work)
+{
+	pr_warn("calculated GCD is larger than expected: %llu\n",
+		READ_ONCE(esdm_gcd_capped));
+}
+
+static struct irq_work esdm_gcd_warn_work = IRQ_WORK_INIT(esdm_gcd_warn_func);
 
 static void esdm_gcd_set_check(u64 running_gcd)
 {
@@ -103,8 +120,8 @@ void esdm_gcd_add_value(u64 time)
 		 * becoming too large.
 		 */
 		if (gcd >= 1000) {
-			pr_warn("calculated GCD is larger than expected: %llu\n",
-				gcd);
+			WRITE_ONCE(esdm_gcd_capped, gcd);
+			irq_work_queue(&esdm_gcd_warn_work);
 			gcd = 1000;
 		}
 
@@ -169,6 +186,12 @@ void esdm_time_process(struct esdm_es_ring *ring, enum esdm_internal_es es,
 	}
 
 	perf_time(now_time);
+}
+
+/* Drain a pending GCD warning, called once the hooks are unregistered. */
+void esdm_time_source_exit(void)
+{
+	irq_work_sync(&esdm_gcd_warn_work);
 }
 
 /* Return boolean whether ESDM identified presence of high-resolution timer */

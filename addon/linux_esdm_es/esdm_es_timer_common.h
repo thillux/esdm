@@ -106,5 +106,6 @@ void esdm_time_process(struct esdm_es_ring *ring, enum esdm_internal_es es,
 #define ESDM_DATA_NUM_VALUES_MASK (ESDM_DATA_NUM_VALUES - 1)
 
 int __init esdm_init_time_source(void);
+void esdm_time_source_exit(void);
 
 #endif /* _ESDM_ES_TIMER_COMMON_H */

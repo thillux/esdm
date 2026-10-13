@@ -319,8 +319,9 @@ out_test:
 out:
 	esdm_es_mgr_sched_exit();
 	esdm_es_mgr_irq_exit();
-	/* as in esdm_es_mgr_exit(), drain health messages the hooks queued */
+	/* as in esdm_es_mgr_exit(), drain messages the hooks queued */
 	esdm_health_exit();
+	esdm_time_source_exit();
 	return ret;
 }
 
@@ -339,10 +340,11 @@ static void __exit esdm_es_mgr_exit(void)
 
 	/*
 	 * The scheduler and IRQ hooks are unregistered above, so no further
-	 * deferred health-test messages can be queued. Drain any still pending
-	 * before the module text is freed.
+	 * deferred health-test or GCD messages can be queued. Drain any still
+	 * pending before the module text is freed.
 	 */
 	esdm_health_exit();
+	esdm_time_source_exit();
 }
 
 module_init(esdm_es_mgr_init);
