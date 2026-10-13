@@ -78,9 +78,14 @@ struct esdm_ebpf_es {
 
 	bool loaded;
 
-	/* Events the running fetch inserted into the pool, and its bound */
+	/*
+	 * Events the running fetch inserted into the pool, and its bound: on
+	 * the credited events, or on the ingested ones for an uncredited
+	 * source, whose events credit nothing that could bound it.
+	 */
 	uint32_t ingested;
 	uint64_t fetch_target;
+	bool fetch_uncredited;
 
 	/*
 	 * Events fetched from the ring buffer, one tally per CPU kept the way

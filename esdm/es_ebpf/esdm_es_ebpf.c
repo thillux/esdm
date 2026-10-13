@@ -823,7 +823,13 @@ uint32_t esdm_ebpf_avail_entropy(struct esdm_ebpf_es *es)
 
 uint32_t esdm_ebpf_max_entropy(struct esdm_ebpf_es *es)
 {
-	if (!es->loaded || !es->pool_initialized)
+	/*
+	 * An uncredited source reports none, like every other source at an
+	 * entropy rate of 0: the seeding takes a source reporting any for a
+	 * validated one and puts its data into the seed buffer instead of the
+	 * additional input.
+	 */
+	if (!es->loaded || !es->pool_initialized || !es->entropy_rate())
 		return 0;
 
 	/*
@@ -1050,7 +1056,9 @@ static int esdm_ebpf_handle_record(void *ctx, void *data, size_t size)
 		 * cannot credit. The record keeps its place in the ring buffer
 		 * and the next fetch takes it.
 		 */
-		if (es->credited_events >= es->fetch_target)
+		if (es->fetch_uncredited ?
+			    es->ingested >= es->fetch_target :
+			    es->credited_events >= es->fetch_target)
 			return ESDM_EBPF_FETCH_DONE;
 		if (size >= ESDM_EBPF_EVENT_REC_LEN(0))
 			esdm_ebpf_handle_events(es, data, size);
@@ -1304,6 +1312,36 @@ int esdm_ebpf_refill(struct esdm_ebpf_es *es)
 	return esdm_ebpf_consume(es);
 }
 
+/*
+ * Set the bound of the fetch about to run, false if there is nothing to fetch.
+ *
+ * Take only the events the pool still has room to credit. Draining the whole
+ * ring buffer would hash every record into a pool that stops crediting at one
+ * output block, costing a hash update each and buying nothing - the surplus is
+ * better off waiting where the next fetch finds it.
+ */
+static bool esdm_ebpf_fetch_bound(struct esdm_ebpf_es *es)
+{
+	es->ingested = 0;
+	es->fetch_uncredited = !es->entropy_rate();
+	if (es->fetch_uncredited) {
+		/*
+		 * Uncredited, the events are bonus data the extraction stirs
+		 * in: no crediting bounds the fetch, so take what one block
+		 * would cost at the assessed min-entropy of 1 / OSR, which
+		 * keeps a single extraction from hashing a full ring buffer.
+		 */
+		es->fetch_target =
+			(uint64_t)esdm_ebpf_osr(es) *
+			(esdm_get_digestsize() + esdm_compress_osr());
+		return true;
+	}
+
+	es->fetch_target = esdm_ebpf_events_per_block(es);
+
+	return es->credited_events < es->fetch_target;
+}
+
 int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 {
 	int ret;
@@ -1311,15 +1349,7 @@ int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 	if (!es->loaded)
 		return 0;
 
-	/*
-	 * Take only the events the pool still has room to credit. Draining the
-	 * whole ring buffer would hash every record into a pool that stops
-	 * crediting at one output block, costing a hash update each and buying
-	 * nothing - the surplus is better off waiting where the next fetch
-	 * finds it.
-	 */
-	es->fetch_target = esdm_ebpf_events_per_block(es);
-	if (es->credited_events >= es->fetch_target) {
+	if (!esdm_ebpf_fetch_bound(es)) {
 		/*
 		 * Nothing to fetch, but the caller is about to rely on the
 		 * credited events: a health test failure since the last status
@@ -1329,7 +1359,6 @@ int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 		return 0;
 	}
 
-	es->ingested = 0;
 	ret = ring_buffer__consume(es->rb);
 	if (ret == ESDM_EBPF_FETCH_DONE)
 		ret = 0;

@@ -19,7 +19,7 @@
 
 /*
  * Test of the conditioning pool of the eBPF entropy sources across a hash
- * failure.
+ * failure, and of the fetch and the reported maximum of an uncredited source.
  *
  * An extraction whose hash chain fails loses what the pool absorbed, and the
  * entropy credited for it. It must not lose the source: the pool once stayed
@@ -63,9 +63,11 @@ static int ebpf_pool_hash_final(void *hash, uint8_t *digest)
 	return ebpf_pool_hash_real->hash_final(hash, digest);
 }
 
+static uint32_t ebpf_pool_rate_bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+
 static uint32_t ebpf_pool_rate(void)
 {
-	return ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	return ebpf_pool_rate_bits;
 }
 
 /* Credit the pool with more than one output block costs */
@@ -82,6 +84,62 @@ static uint32_t ebpf_pool_extract(struct esdm_ebpf_es *es)
 	esdm_ebpf_get_ent(es, &eb_es, ESDM_DRNG_SECURITY_STRENGTH_BITS);
 
 	return eb_es.e_bits;
+}
+
+/*
+ * An uncredited source (entropy rate of 0) once fetched nothing at all: its
+ * fetch bound was the events one block costs to credit, which is none. The
+ * bonus data it promises was never stirred in and the programs dropped every
+ * event. It also reported a full digest as its maximum entropy, which made the
+ * seeding treat it as validated and put its data into the seed buffer.
+ *
+ * The records are handed to the ring buffer callback directly, as
+ * ring_buffer__consume() would until the callback stops it.
+ */
+static void ebpf_pool_uncredited(struct esdm_ebpf_es *es)
+{
+	struct esdm_ebpf_event_rec rec;
+	uint64_t fed = 0;
+	unsigned int i;
+	int ret = 0;
+
+	memset(&rec, 0, sizeof(rec));
+	rec.type = esdm_ebpf_rec_event;
+	rec.cpu = UINT32_MAX;
+	rec.events = ESDM_EBPF_BATCH_EVENTS;
+	rec.reset_gen = es->reset_gen;
+	rec.health_epoch = es->health_epoch;
+	for (i = 0; i < ESDM_EBPF_BATCH_EVENTS; i++)
+		rec.delta[i] = i * 7919 + 13;
+
+	es->loaded = true;
+	CHECK(esdm_ebpf_max_entropy(es),
+	      "a credited source reports no maximum entropy");
+	ebpf_pool_rate_bits = 0;
+	CHECK_EQ(esdm_ebpf_max_entropy(es), 0);
+	es->loaded = false;
+
+	es->credited_events = 0;
+	CHECK(esdm_ebpf_fetch_bound(es),
+	      "an uncredited source fetches nothing");
+	CHECK(es->fetch_target, "an uncredited fetch has no bound");
+
+	/* Twice the bound is on offer: the fetch must stop at the bound */
+	for (i = 0; fed < es->fetch_target * 2; i++) {
+		ret = esdm_ebpf_handle_record(es, &rec, sizeof(rec));
+		if (ret)
+			break;
+		fed += rec.events;
+	}
+	CHECK_EQ(ret, ESDM_EBPF_FETCH_DONE);
+	CHECK(es->ingested >= es->fetch_target,
+	      "the uncredited fetch stopped short of its bound");
+	CHECK(es->ingested < es->fetch_target + ESDM_EBPF_BATCH_EVENTS,
+	      "the uncredited fetch ran past its bound");
+	CHECK_EQ(es->credited_events, 0);
+	CHECK_EQ(ebpf_pool_extract(es), 0);
+
+	ebpf_pool_rate_bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 }
 
 int main(void)
@@ -143,6 +201,8 @@ int main(void)
 	ebpf_pool_fail = ebpf_pool_fail_none;
 	CHECK_EQ(esdm_ebpf_pool_insert(&es, data, sizeof(data)), 0);
 	CHECK(es.pool_initialized, "an insert did not start the pool over");
+
+	ebpf_pool_uncredited(&es);
 
 	esdm_ebpf_pool_dealloc(&es);
 	drng->hash_cb = ebpf_pool_hash_real;
