@@ -34,6 +34,9 @@
  * per source, TEST_ES_SCHED selecting the scheduler one.
  */
 
+/* O_PATH */
+#define _GNU_SOURCE
+
 #include "config.h"
 
 #ifdef TEST_ES_SCHED
@@ -41,6 +44,8 @@
 #define TEST_ES esdm_es_sched
 #define TEST_BUF sched_buf
 #define TEST_BUF_ALLOCED sched_buf_alloced
+#define TEST_FD esdm_sched_entropy_fd
+#define TEST_MUTEX sched_mutex
 #define TEST_BLOCKS ESDM_SCHED_ENTROPY_BLOCKS
 #define TEST_NAME "ES scheduler cache reset"
 #else
@@ -48,6 +53,8 @@
 #define TEST_ES esdm_es_irq
 #define TEST_BUF irq_buf
 #define TEST_BUF_ALLOCED irq_buf_alloced
+#define TEST_FD esdm_irq_entropy_fd
+#define TEST_MUTEX irq_mutex
 #define TEST_BLOCKS ESDM_IRQ_ENTROPY_BLOCKS
 #define TEST_NAME "ES interrupt cache reset"
 #endif
@@ -115,12 +122,54 @@ static void check_reset_discards_cache(void)
 	TEST_ES.fini();
 }
 
+/*
+ * A reinit keeps the open descriptor and asks the kernel about it again. If
+ * that fails, the descriptor is closed - and the global once kept pointing at
+ * the closed number, so the source went on issuing ioctls on it, or on what
+ * the number was reused for. The cache it filled is discarded with it.
+ *
+ * An O_PATH descriptor fails every ioctl with EBADF, /dev/null with ENOTTY:
+ * the two failure paths a descriptor gets closed on without a kernel add-on.
+ */
+static void check_init_failure_drops_fd(const char *path, int flags, int expect)
+{
+	unsigned int i;
+	int fd = open(path, flags | O_CLOEXEC);
+
+	CHECK(fd >= 0, "cannot open %s", path);
+	if (fd < 0)
+		return;
+
+	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name), 0);
+	TEST_BUF_ALLOCED = true;
+	fill_cache();
+
+	mutex_lock(&TEST_MUTEX);
+	TEST_FD = fd;
+	mutex_unlock(&TEST_MUTEX);
+
+	CHECK_EQ(TEST_ES.init(), expect);
+	CHECK_EQ(TEST_FD, -1);
+	CHECK(fcntl(fd, F_GETFD) < 0, "the descriptor was left open");
+
+	for (i = 0; i < TEST_BUF.num_blocks; i++) {
+		if (atomic_load(&TEST_BUF.states[i]) != esdm_es_buf_empty) {
+			CHECK(0, "slot %u survived the failed init", i);
+			break;
+		}
+	}
+
+	TEST_ES.fini();
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
 
 	check_reset_discards_cache();
+	check_init_failure_drops_fd("/", O_PATH, -EAGAIN);
+	check_init_failure_drops_fd("/dev/null", O_RDONLY, 0);
 
 	return common_test_result(TEST_NAME);
 }

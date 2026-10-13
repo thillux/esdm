@@ -77,6 +77,18 @@ static void esdm_sched_finalize(void)
 #endif
 }
 
+/*
+ * Discard the cached blocks along with a descriptor an init failure dropped:
+ * a successful reinit discards them as well.
+ */
+static void esdm_sched_buf_discard(void)
+{
+#if (ESDM_SCHED_ENTROPY_BLOCKS != 0)
+	if (sched_buf_alloced)
+		esdm_es_buf_reset(&sched_buf);
+#endif
+}
+
 bool esdm_sched_enabled(void)
 {
 	bool ret;
@@ -199,6 +211,7 @@ static int esdm_sched_initialize(void)
 		esdm_sched_entropy_fd = fd;
 		esdm_sched_finalize_locked();
 		mutex_unlock(&sched_mutex);
+		esdm_sched_buf_discard();
 		esdm_logger(
 			esdm_config_es_sched_retry() ? LOGGER_VERBOSE :
 						       LOGGER_WARN,
@@ -207,12 +220,20 @@ static int esdm_sched_initialize(void)
 		return 0;
 	}
 	if (ret < 0) {
-		close(fd);
+		int err = errno;
+
+		/*
+		 * On a reinit fd is the live descriptor: the global must not
+		 * keep pointing at the closed number.
+		 */
+		esdm_sched_entropy_fd = fd;
+		esdm_sched_finalize_locked();
 		mutex_unlock(&sched_mutex);
+		esdm_sched_buf_discard();
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"Failure to obtain scheduler entropy source status from kernel, errno: %i, error: %s\n",
-			errno, strerror(errno));
+			err, strerror(err));
 		return -EAGAIN;
 	}
 
@@ -230,8 +251,11 @@ static int esdm_sched_initialize(void)
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
 			    "Kernel entropy buffer has larger size as ESDM\n");
 	} else {
-		close(fd);
+		/* As above, fd may be the live descriptor */
+		esdm_sched_entropy_fd = fd;
+		esdm_sched_finalize_locked();
 		mutex_unlock(&sched_mutex);
+		esdm_sched_buf_discard();
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "Kernel entropy buffer has different size\n");
 		return -EFAULT;
