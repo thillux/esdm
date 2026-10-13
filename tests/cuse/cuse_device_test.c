@@ -38,10 +38,15 @@
  *
  * The one exception is the non-blocking prediction resistant read, whose
  * EAGAIN is an answer of the ESDM rather than a failure. It is replaced by
- * test_pr_nonblock() below, which answers as scripted.
+ * test_pr_nonblock() below, which answers as scripted. So are the privileged
+ * calls, whose -EINPROGRESS is no failure to cover for either.
  */
 
 #define esdm_rpcc_get_random_bytes_pr_nonblock_int test_pr_nonblock
+#define esdm_rpcc_rnd_add_to_ent_cnt_int test_add_to_ent_cnt
+#define esdm_rpcc_rnd_add_entropy_int test_add_entropy
+#define esdm_rpcc_rnd_clear_pool_int test_clear_pool
+#define esdm_rpcc_rnd_reseed_crng_int test_reseed_crng
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -1022,6 +1027,91 @@ static void test_pollmask(void)
 	CHECK_EQ(mask, POLLIN);
 }
 
+/* What the privileged calls answer: by default, that there is no ESDM */
+static int priv_rpc_ret = -ECONNREFUSED;
+
+int test_add_to_ent_cnt(unsigned int entcnt, void *int_data)
+{
+	(void)entcnt;
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_add_entropy(const uint8_t *entropy_buf, size_t entropy_buf_len,
+		     uint32_t entropy_cnt, void *int_data)
+{
+	(void)entropy_buf;
+	(void)entropy_buf_len;
+	(void)entropy_cnt;
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_clear_pool(void *int_data)
+{
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_reseed_crng(void *int_data)
+{
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+/*
+ * A privileged call interrupted after its request went out may be applied by
+ * the ESDM all the same. The kernel fallback must not credit the entropy a
+ * second time then, and the caller is told EINTR as for an interrupted ioctl.
+ *
+ * The fallback goes to /dev/null, whose ENOTTY tells that it ran.
+ */
+static void test_privileged_in_progress(void)
+{
+	uint8_t raw[sizeof(struct rand_pool_info) + 32] = { 0 };
+	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
+	uint32_t bits = 8;
+	int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/null: %s", strerror(errno));
+		return;
+	}
+
+	caller_is_root(true);
+	rpi->buf_size = 32;
+	rpi->entropy_count = 8;
+
+	/* Without an ESDM, the fallback runs */
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, ENOTTY);
+
+	priv_rpc_ret = -EINPROGRESS;
+
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+	CHECK_EQ(raise_calls, drop_calls);
+
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+	CHECK_EQ(raise_calls, drop_calls);
+
+	priv_rpc_ret = -ECONNREFUSED;
+	caller_is_root(false);
+	close(fd);
+}
+
 /*
  * The privileged half of the ioctl handler. With no ESDM answering, each of
  * these falls back to the kernel device, which is the path a privileged ioctl
@@ -1572,6 +1662,7 @@ int main(int argc, char *argv[])
 	test_poll_registration();
 	test_pollmask();
 	test_privileged_ioctls();
+	test_privileged_in_progress();
 	test_shm_status();
 
 	return common_test_result("cuse_device");
