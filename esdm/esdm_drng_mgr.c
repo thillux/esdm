@@ -1117,6 +1117,12 @@ static uint32_t esdm_drng_bytes_left(struct esdm_drng *drng)
 	return (max_bits - bits) >> 3;
 }
 
+/* Has @drng reached its disable threshold? */
+static bool esdm_drng_spent(struct esdm_drng *drng)
+{
+	return !esdm_drng_bytes_left(drng);
+}
+
 /*
  * May @drng generate output? If it reached its disable threshold, it reverts
  * to the unseeded state and is brought up again - by a forced seeding right
@@ -1140,7 +1146,14 @@ static bool esdm_drng_may_generate(struct esdm_drng *drng, bool pr)
 		return true;
 	}
 
-	esdm_unset_fully_seeded(drng);
+	/*
+	 * Spent - unless a seeding brought it back while this request generated
+	 * up to the limit: the reseed worker's of this very DRNG, say, which
+	 * kept the request from the pool lock it needed for its own reseed.
+	 * Looked at again under that lock, see esdm_unset_fully_seeded_if().
+	 */
+	if (!esdm_unset_fully_seeded_if(drng, esdm_drng_spent))
+		return true;
 
 	return esdm_drng_bytes_left(drng) &&
 	       atomic_load(&drng->fully_seeded) && esdm_state_operational();

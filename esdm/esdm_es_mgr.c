@@ -674,21 +674,40 @@ uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb)
 	return collected_entropy;
 }
 
-/* Mark one DRNG as not fully seeded */
-void esdm_unset_fully_seeded(struct esdm_drng *drng)
+/*
+ * Mark one DRNG as not fully seeded - if @spent, called under the pool lock,
+ * says it still is to be, or unconditionally without @spent. Returns whether
+ * the DRNG was marked.
+ *
+ * The decision and the change of state are taken under the pool lock, which
+ * every seeding holds: a seeding can neither be half-way through the DRNG
+ * meanwhile - and take it for one to be instantiated anew - nor bring it back
+ * between the two. A caller that found the DRNG spent while a seeding of it
+ * kept the pool lock, the reseed worker's say, otherwise took the ESDM out of
+ * operation after that seeding was done: its initial DRNG fully seeded, and
+ * nothing left to make the ESDM operational again but the next seeding of that
+ * DRNG, every request refused with -EOPNOTSUPP until then.
+ *
+ * Clearing all_online_nodes_seeded under the pool lock also keeps it ordered
+ * with the pool-lock-guarded set-to-true in __esdm_drng_seed_work() and with
+ * the readers in esdm_get_seed() that evaluate this flag under the same lock.
+ */
+bool esdm_unset_fully_seeded_if(struct esdm_drng *drng,
+				bool (*spent)(struct esdm_drng *drng))
 {
-	atomic_store(&drng->fully_seeded, false);
-
 	/*
-	 * Clear all_online_nodes_seeded under the pool lock so it stays ordered
-	 * with the pool-lock-guarded set-to-true in __esdm_drng_seed_work() and
-	 * with the readers in esdm_get_seed() that evaluate this flag under
-	 * the same lock. The lock is scoped narrowly here because the bring-up
-	 * below may acquire the pool lock itself.
+	 * The lock is scoped narrowly here because the bring-up below may
+	 * acquire the pool lock itself.
 	 */
 	esdm_pool_lock();
+
+	if (spent && !spent(drng)) {
+		esdm_pool_unlock();
+		return false;
+	}
+
+	atomic_store(&drng->fully_seeded, false);
 	esdm_pool_all_nodes_seeded(false);
-	esdm_pool_unlock();
 
 	/*
 	 * The init DRNG instance must always be fully seeded as this instance
@@ -705,6 +724,8 @@ void esdm_unset_fully_seeded(struct esdm_drng *drng)
 		esdm_shm_status_set_operational(false);
 	}
 
+	esdm_pool_unlock();
+
 	/*
 	 * Bring the DRNGs up again - but not with a forced seeding right here
 	 * unless the ESDM is out of operation now: this runs in the thread of
@@ -715,6 +736,14 @@ void esdm_unset_fully_seeded(struct esdm_drng *drng)
 	 */
 	esdm_drng_bring_up_for_request();
 	esdm_es_mgr_monitor_wakeup();
+
+	return true;
+}
+
+/* Mark one DRNG as not fully seeded */
+void esdm_unset_fully_seeded(struct esdm_drng *drng)
+{
+	esdm_unset_fully_seeded_if(drng, NULL);
 }
 
 /* Policy to enable ESDM operational mode */
