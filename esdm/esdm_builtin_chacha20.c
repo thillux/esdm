@@ -32,19 +32,23 @@ static int esdm_chacha20_seed(void *drng, const uint8_t *inbuf, size_t inbuflen,
 			      const uint8_t *addtl, size_t addtllen)
 {
 	struct esdm_chacha20_drng_ctx *cc20 = (struct esdm_chacha20_drng_ctx *)drng;
+	int ret = esdm_cc20_drng_seed(cc20, inbuf, inbuflen);
 
-	esdm_cc20_drng_seed(cc20, inbuf, inbuflen);
-	if (addtl)
-		esdm_cc20_drng_seed(cc20, addtl, addtllen);
-	return 0;
+	if (ret)
+		return ret;
+	if (addtl && addtllen)
+		ret = esdm_cc20_drng_seed(cc20, addtl, addtllen);
+	return ret;
 }
 
 static ssize_t esdm_chacha20_generate(void *drng, uint8_t *outbuf,
 				      size_t outbuflen)
 {
 	struct esdm_chacha20_drng_ctx *cc20 = (struct esdm_chacha20_drng_ctx *)drng;
+	int ret = esdm_cc20_drng_generate(cc20, outbuf, outbuflen);
 
-	esdm_cc20_drng_generate(cc20, outbuf, outbuflen);
+	if (ret)
+		return ret;
 	return (ssize_t)outbuflen;
 }
 
@@ -159,10 +163,22 @@ static int esdm_chacha20_drng_selftest(void)
 		0x66, 0xec, 0xbb, 0xce, 0xa9, 0x9c, 0x95, 0xa1, 0xfd
 	};
 
-	/* Generate with zero state */
-	chacha20_state->counter = 0;
+	/* An unseeded DRNG must refuse to generate from its zero key */
+	if (esdm_cc20_drng_generate(cc20_ctx, outbuf, sizeof(outbuf)) !=
+	    -EINVAL)
+		return -EFAULT;
 
-	esdm_cc20_drng_generate(cc20_ctx, outbuf, sizeof(expected_block));
+	/*
+	 * Generate with zero state: the zero key is this vector's known input,
+	 * so the test overrides the refusal checked above.
+	 */
+	chacha20_state->counter = 0;
+	cc20_ctx->seeded = 1;
+
+	ret = esdm_cc20_drng_generate(cc20_ctx, outbuf,
+				      sizeof(expected_block));
+	if (ret)
+		return ret;
 	ret = esdm_kat_check(outbuf, expected_block, sizeof(expected_block));
 	if (ret)
 		return ret;
@@ -177,8 +193,10 @@ static int esdm_chacha20_drng_selftest(void)
 
 	/* Reseed with 2 blocks */
 	chacha20_state->counter = 0;
-	esdm_cc20_drng_seed(cc20_ctx, seed, sizeof(expected_twoblocks));
-	esdm_cc20_drng_generate(cc20_ctx, outbuf, sizeof(expected_twoblocks));
+	if (esdm_cc20_drng_seed(cc20_ctx, seed, sizeof(expected_twoblocks)) ||
+	    esdm_cc20_drng_generate(cc20_ctx, outbuf,
+				    sizeof(expected_twoblocks)))
+		return -EFAULT;
 	ret = esdm_kat_check(outbuf, expected_twoblocks,
 			     sizeof(expected_twoblocks));
 	if (ret)
@@ -189,9 +207,11 @@ static int esdm_chacha20_drng_selftest(void)
 
 	/* Reseed with 1 block and one byte */
 	chacha20_state->counter = 0;
-	esdm_cc20_drng_seed(cc20_ctx, seed, sizeof(expected_block_nonaligned));
-	esdm_cc20_drng_generate(cc20_ctx, outbuf,
-			      sizeof(expected_block_nonaligned));
+	if (esdm_cc20_drng_seed(cc20_ctx, seed,
+				sizeof(expected_block_nonaligned)) ||
+	    esdm_cc20_drng_generate(cc20_ctx, outbuf,
+				    sizeof(expected_block_nonaligned)))
+		return -EFAULT;
 	ret = esdm_kat_check(outbuf, expected_block_nonaligned,
 			     sizeof(expected_block_nonaligned));
 	if (ret)
@@ -206,8 +226,10 @@ static int esdm_chacha20_drng_selftest(void)
 		return ret;
 
 	chacha20_state->counter = 0;
-	esdm_cc20_drng_seed(cc20_ctx, mod, sizeof(expected_twoblocks));
-	esdm_cc20_drng_generate(cc20_ctx, outbuf, sizeof(expected_twoblocks));
+	if (esdm_cc20_drng_seed(cc20_ctx, mod, sizeof(expected_twoblocks)) ||
+	    esdm_cc20_drng_generate(cc20_ctx, outbuf,
+				    sizeof(expected_twoblocks)))
+		return -EFAULT;
 
 	return esdm_kat_check_differs(outbuf, expected_twoblocks,
 				      sizeof(expected_twoblocks));

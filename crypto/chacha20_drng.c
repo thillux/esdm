@@ -76,11 +76,15 @@ static inline void esdm_cc20_drng_update(struct esdm_chacha20_drng_ctx *cc20_ctx
  * ChaCha20 CBC-MAC of the seed data is injected into the DRNG state.
  */
 DSO_PUBLIC
-void esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
-		       const uint8_t *inbuf, size_t inbuflen)
+int esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
+			const uint8_t *inbuf, size_t inbuflen)
 {
 	struct esdm_sym_ctx *sym_ctx = &cc20_ctx->cc20;
 	struct esdm_sym_state *chacha20_state = sym_ctx->sym_state;
+
+	/* Nothing to seed with would mark the zero key seeded */
+	if (!inbuf || !inbuflen)
+		return -EINVAL;
 
 	while (inbuflen) {
 		size_t i, todo = min_size(inbuflen, ESDM_CC20_KEY_SIZE);
@@ -103,6 +107,9 @@ void esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
 		inbuf += todo;
 		inbuflen -= todo;
 	}
+
+	cc20_ctx->seeded = 1;
+	return 0;
 }
 
 /*
@@ -167,9 +174,13 @@ esdm_cc20_drng_generate_chunk(struct esdm_chacha20_drng_ctx *cc20_ctx,
 }
 
 DSO_PUBLIC
-void esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
-			   uint8_t *outbuf, size_t outbuflen)
+int esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
+			    uint8_t *outbuf, size_t outbuflen)
 {
+	/* As esdm_drbg_generate(): no output from an uninstantiated DRNG */
+	if (!cc20_ctx->seeded)
+		return -EINVAL;
+
 	do {
 		size_t todo = min_size(outbuflen, ESDM_CC20_DRNG_MAX_CHUNK);
 
@@ -177,6 +188,8 @@ void esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
 		outbuf += todo;
 		outbuflen -= todo;
 	} while (outbuflen);
+
+	return 0;
 }
 
 DSO_PUBLIC

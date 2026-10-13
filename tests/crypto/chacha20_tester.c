@@ -34,6 +34,7 @@
  * DAMAGE.
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -206,12 +207,66 @@ static int cc20_drng_check(const char *name, size_t seedlen,
 	/* The self test starts at block counter 0 rather than at 1 */
 	state->counter = 0;
 
-	if (seedlen)
-		esdm_cc20_drng_seed(cc20_ctx, drng_seed, seedlen);
-	esdm_cc20_drng_generate(cc20_ctx, act, explen);
+	if (seedlen) {
+		if (esdm_cc20_drng_seed(cc20_ctx, drng_seed, seedlen)) {
+			printf("%s: seeding failed\n", name);
+			return 1;
+		}
+	} else {
+		/* The zero key is the known input, as in the self test */
+		cc20_ctx->seeded = 1;
+	}
+	if (esdm_cc20_drng_generate(cc20_ctx, act, explen)) {
+		printf("%s: generating failed\n", name);
+		return 1;
+	}
 
 	if (esdm_kat_check(act, exp, explen)) {
 		printf("%s: wrong output\n", name);
+		ret = 1;
+	}
+
+	esdm_cc20_drng_zero(cc20_ctx);
+	return ret;
+}
+
+/*
+ * An unseeded DRNG would generate from its all-zero key, predictable output.
+ * It must refuse - fresh, after an empty seed and after zeroization - and
+ * leave the output buffer alone.
+ */
+static int cc20_drng_unseeded_check(void)
+{
+	ESDM_CC20_DRNG_CTX_ON_STACK(cc20_ctx);
+	static const uint8_t untouched[16] = { 0 };
+	uint8_t act[sizeof(untouched)] = { 0 };
+	int ret = 0;
+
+	if (esdm_cc20_drng_generate(cc20_ctx, act, sizeof(act)) != -EINVAL) {
+		printf("DRNG generates unseeded\n");
+		ret = 1;
+	}
+
+	if (esdm_cc20_drng_seed(cc20_ctx, drng_seed, 0) != -EINVAL ||
+	    esdm_cc20_drng_generate(cc20_ctx, act, sizeof(act)) != -EINVAL) {
+		printf("DRNG takes an empty seed as a seeding\n");
+		ret = 1;
+	}
+
+	if (memcmp(act, untouched, sizeof(act))) {
+		printf("DRNG writes output while refusing to generate\n");
+		ret = 1;
+	}
+
+	if (esdm_cc20_drng_seed(cc20_ctx, drng_seed, sizeof(drng_seed)) ||
+	    esdm_cc20_drng_generate(cc20_ctx, act, sizeof(act))) {
+		printf("DRNG does not generate once seeded\n");
+		ret = 1;
+	}
+
+	esdm_cc20_drng_zero(cc20_ctx);
+	if (esdm_cc20_drng_generate(cc20_ctx, act, sizeof(act)) != -EINVAL) {
+		printf("DRNG generates after zeroization\n");
 		ret = 1;
 	}
 
@@ -245,6 +300,7 @@ int main(int argc, char *argv[])
 	ret += cc20_drng_check("DRNG seeded with a key size and three bytes",
 			       35, drng_exp_partial_word,
 			       sizeof(drng_exp_partial_word));
+	ret += cc20_drng_unseeded_check();
 
 	if (!ret)
 		printf("ChaCha20: passed\n");
