@@ -146,8 +146,14 @@ if get_option('esdm-server').enabled()
 		'ESDM_SERVER=' + esdm_server.full_path(),
 		]
 
+	# This and get_random_bytes_test below draw some 16 MiB each, in
+	# requests of up to 64 KiB. With the reseeding caps of an sp80090c,
+	# fips140 or ais2031_drg4 build, the DRNG reseeds every few KiB, each
+	# time waiting for a synchronous Jitter RNG collection - 20 to 30
+	# seconds on a lightly loaded machine, which leaves the default 30
+	# seconds no room for a busier one.
 	test('RPC call get_random_bytes_full_test', rpc_get_random_bytes_full_test,
-		env: [ tester_esdm_env ])
+		env: [ tester_esdm_env ], timeout: 300)
 
 	test('RPC call get_random_bytes_pr_test', rpc_get_random_bytes_pr_test,
 		env: [ tester_esdm_env ])
@@ -156,7 +162,7 @@ if get_option('esdm-server').enabled()
 		rpc_get_random_bytes_pr_nonblock_test, env: [ tester_esdm_env ])
 
 	test('RPC call get_random_bytes_test', rpc_get_random_bytes_test,
-		env: [ tester_esdm_env ])
+		env: [ tester_esdm_env ], timeout: 300)
 
 	# A stand-in server on the unprivileged socket every RPC test uses, so
 	# nothing else may run alongside.
