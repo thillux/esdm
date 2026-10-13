@@ -887,6 +887,10 @@
 
             # The test suite in a build without fips140 - see esdm-plain.
             plain = self.packages.${system}.esdm-plain;
+          }
+          # The test suite on a 32-bit system - see esdm-i686.
+          // lib.optionalAttrs (system == "x86_64-linux") {
+            i686 = self.packages.${system}.esdm-i686;
           };
 
         packages =
@@ -1882,7 +1886,62 @@
               inherit (kernel) kernel;
             }
           )
-        ) kernels;
+        ) kernels
+        # The ESDM on a 32-bit system, running the meson test suite as its
+        # check phase: size_t and long are 32 bits wide there, which none of
+        # the packages above sees. The builtin backend, as the Hash DRBG and
+        # the other builtin primitives are where the tree computes limits and
+        # alignments itself.
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          esdm-i686 =
+            let
+              p32 = pkgs.pkgsi686Linux;
+              jitterentropy = p32.jitterentropy.overrideAttrs (_: {
+                inherit (self.packages.${system}.jitterentropy)
+                  version
+                  src
+                  patches
+                  cmakeFlags
+                  ;
+              });
+            in
+            (p32.esdm.override {
+              inherit jitterentropy;
+              selinux = false;
+              openSSLRandProvider = false;
+              ais2031 = false;
+              sp80090c = false;
+            }).overrideAttrs
+              (prev: {
+                pname = "esdm-i686";
+                inherit (self.packages.${system}.esdm) src version;
+                # botan3 is the backend nixpkgs builds with, not needed here
+                buildInputs = [
+                  jitterentropy
+                  p32.fuse3
+                  p32.json_c
+                ];
+                mesonFlags =
+                  (builtins.filter (
+                    x:
+                    (!lib.hasInfix "crypto_backend" x)
+                    && (!lib.hasInfix "max_threads" x)
+                    && (!lib.hasInfix "term-on-signal" x)
+                    && (!lib.hasInfix "ais2031" x)
+                  ) prev.mesonFlags)
+                  ++ [
+                    "-Dcrypto_backend=builtin"
+                    "-Dais2031_ntg1=false"
+                    "-Dais2031_drg4=false"
+                    # Compiles in the test hooks the suite needs.
+                    "-Dtestmode=enabled"
+                  ];
+                doCheck = true;
+                meta = prev.meta // {
+                  description = "ESDM built for i686, running the meson test suite";
+                };
+              });
+        };
 
         # One live system per defined kernel version, e.g. live_6_18. Only
         # collected here: nixosConfigurations is not a per system output, see
