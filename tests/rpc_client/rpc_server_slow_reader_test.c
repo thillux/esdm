@@ -83,9 +83,11 @@
 /*
  * How long the ordinary client may take, and the server to drop all of the
  * connections once their send buffers are full. A server that waits for each
- * of them only a few milliseconds before it drops it takes seconds.
+ * of them only a few milliseconds before it drops it takes 3.3 s and more on
+ * an idle machine, one that drops them at once a few hundred ms - but up to
+ * 2 s on a loaded one, which is what the bound leaves room for.
  */
-#define TEST_MAX_MS 1500
+#define TEST_MAX_MS 2500
 /* How long the server may take to drop the connections that do not read */
 #define TEST_DROP_MS 60000
 
