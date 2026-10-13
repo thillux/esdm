@@ -110,11 +110,13 @@ suffices instead of the initial seeding rate).
 All of these return the number of bytes written, or a negative errno value.
 .SH STATUS
 .TP
-.BI "void esdm_status(char *" buf ", size_t " buflen ");"
+.BI "int esdm_status(char *" buf ", size_t " buflen ");"
 Status of the ESDM and its entropy sources as human readable text.
 .TP
-.BI "void esdm_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document.
+.BI "int esdm_status_json(char *" buf ", size_t " buflen ");"
+The same information as a JSON document. Both return 0 on success and
+.B \-EMSGSIZE
+if the report does not fit into the buffer; what fits is left in it.
 .TP
 .BI "void esdm_status_machine(struct esdm_status_st *" status ");"
 The same information in a structure meant for programmatic use.
@@ -136,6 +138,17 @@ Whether it meets AIS 20/31 NTG.1.
 .TP
 .BI "int esdm_ntg1_2024_compliant(void);"
 Whether it meets NTG.1 as of the 2024 revision.
+.TP
+.BI "int esdm_es_oversampling(void);"
+Whether the SP800\-90C oversampling of the entropy sources is applied. A
+build to the AIS 20/31 DRG.3 class applies it without claiming SP800\-90C.
+.TP
+.BI "int esdm_drg3_compliant(void);"
+Whether the build satisfies the AIS 20/31 (2024) DRG.3 class, which a DRG.4
+build does as well.
+.TP
+.BI "int esdm_drg4_compliant(void);"
+Whether the build is configured to the AIS 20/31 (2024) DRG.4 class.
 .SH ENTROPY POOL
 .TP
 .BI "int esdm_pool_insert_aux(const uint8_t *" inbuf ", size_t " inbuflen ", uint32_t " entropy_bits ");"
