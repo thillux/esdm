@@ -242,9 +242,9 @@ void esdm_shm_status_cleanup_ipc(void)
 
 		/*
 		 * Skip the removal while other processes are still attached:
-		 * the CUSE daemons and aux clients only attach at startup, so
-		 * removing the segment under them and recreating it later
-		 * strands them on the orphaned mapping forever. The caller of
+		 * the CUSE daemons and aux clients attach to a segment created
+		 * anew only once they notice it, and are told nothing on the
+		 * orphaned mapping until then. The caller of
 		 * this cleanup is never attached itself at this point (the
 		 * server detaches first, the PID namespace supervisor never
 		 * attaches), so a non-zero count is always someone else.
@@ -312,8 +312,9 @@ static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
 	 * posts meant for the CUSE poll checker and the aux clients, or post
 	 * in our stead. So a semaphore of another user is removed and created
 	 * anew, as the segment is in esdm_shm_status_create_shm(). Ours - the
-	 * one a previous instance of this server or a CUSE daemon running as
-	 * the same user created - is kept, so their waiters keep working.
+	 * one a previous instance of this server created; the CUSE daemons and
+	 * the aux clients never create one - is kept, so their waiters keep
+	 * working.
 	 *
 	 * The directory the file is in is sticky: a file found to be ours
 	 * cannot be removed and replaced by another user before it is opened,

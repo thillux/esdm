@@ -60,7 +60,23 @@ static char *mount_dst = NULL;
  * Shared memory segment
  ******************************************************************************/
 
-static struct esdm_shm_status *esdm_cuse_shm_status = NULL;
+/*
+ * The status segment and the semaphore belong to the ESDM server: it creates
+ * them, and it removes a segment or a semaphore another user created, which is
+ * how a planted one is kept from steering the poll path. So the daemon never
+ * creates either - one it created before the server started would be the
+ * server's to remove, and removing a segment nobody was attached to yet could
+ * take one away that the server had just created. It attaches to what the
+ * server created instead, see esdm_cuse_shm_status_attach().
+ *
+ * A segment attached before stays mapped when the server replaced it, and so
+ * does its semaphore stay open: the request handlers on the other threads read
+ * the segment without a lock, and the termination posts the semaphore. That
+ * only happens when somebody removed the server's segment while the daemon was
+ * attached to it, which the server itself does not do.
+ */
+static struct esdm_shm_status *_Atomic esdm_cuse_shm_status = NULL;
+static int esdm_cuse_shmid = -1;
 static atomic_llong next_fh = 1;
 
 static int esdm_cuse_shm_status_avail(void)
@@ -77,84 +93,71 @@ static int esdm_cuse_shm_status_avail(void)
 
 static void esdm_cuse_shm_status_close_shm(void)
 {
-	if (esdm_cuse_shm_status) {
-		shmdt(esdm_cuse_shm_status);
-		esdm_cuse_shm_status = NULL;
-	}
+	struct esdm_shm_status *status =
+		atomic_exchange(&esdm_cuse_shm_status, NULL);
+
+	if (status)
+		shmdt(status);
+	esdm_cuse_shmid = -1;
 }
 
-static int esdm_cuse_shm_status_create_shm(void)
+/*
+ * The identifier of a segment of the server that is not the one attached to,
+ * -1 if there is none. Needs no privileges: the server's segment is readable to
+ * everybody, and nothing is attached here.
+ */
+static int esdm_cuse_shm_status_new_shmid(void)
 {
-	int esdm_cuse_shmid = -1;
-	int errsv, create_shm;
-	void *tmp;
-
 	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	struct shmid_ds buf;
+	int shmid;
 
-	esdm_cuse_shmid = shmget(key, sizeof(struct esdm_shm_status),
-				 S_IRUSR | S_IRGRP | S_IROTH);
-	create_shm = (errno == ENOENT) ? 1 : 0;
+	/* No IPC_CREAT: there is no segment until the server created it */
+	shmid = shmget(key, sizeof(struct esdm_shm_status), 0);
+	if (shmid < 0 || shmid == esdm_cuse_shmid)
+		return -1;
 
-	/* Check whether the SHM segment is stale */
-	if (esdm_cuse_shmid >= 0) {
-		struct shmid_ds buf;
+	/*
+	 * Nobody is attached to it, so no server writes it: it is what a server
+	 * that died left behind, and its contents tell nothing about the
+	 * current state. Removing it is up to the next server, which attaches
+	 * to it or replaces it.
+	 */
+	if (shmctl(shmid, IPC_STAT, &buf) < 0 || buf.shm_nattch == 0)
+		return -1;
 
-		if (shmctl(esdm_cuse_shmid, IPC_STAT, &buf) < 0) {
-			errsv = errno;
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-			}
-			return -errsv;
-		}
+	return shmid;
+}
 
-		/*
-		 * Ownership is not enforced here: a client cannot know the
-		 * server's uid (it may run unprivileged), so rejecting on owner
-		 * would break legitimate cross-uid deployments and could strand
-		 * a client whose segment the server later re-creates. The server
-		 * evicts any foreign-owned segment on startup, which is the
-		 * authoritative defense against a planted status segment.
-		 */
+/*
+ * Attach to the server's segment @shmid. It is attached for writing, as the
+ * poll checker clears the suspend trigger in it, which the server grants its
+ * own user only.
+ *
+ * The server creates the semaphores before it publishes the segment's version,
+ * so a segment without the version is not taken yet: the semaphore may not be
+ * there either. It is tried again on the next round.
+ */
+static int esdm_cuse_shm_status_attach_shm(int shmid)
+{
+	struct esdm_shm_status *status = shmat(shmid, NULL, 0);
+	int errsv;
 
-		/* SHM exists, but has no attachments -> stale */
-		if (buf.shm_nattch == 0) {
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-				esdm_cuse_shmid = -1;
-				create_shm = 1;
-			}
-		}
-	}
-
-	if (esdm_cuse_shmid < 0) {
-		if (create_shm) {
-			esdm_cuse_shmid =
-				shmget(key, sizeof(struct esdm_shm_status),
-				       IPC_CREAT | S_IRUSR | S_IWUSR | S_IRGRP |
-					       S_IROTH);
-			if (esdm_cuse_shmid < 0) {
-				errsv = errno;
-				esdm_logger(
-					LOGGER_ERR, LOGGER_C_ANY,
-					"ESDM shared memory segment creation failed: %s\n",
-					strerror(errsv));
-				return -errsv;
-			}
-		}
-	}
-
-	tmp = shmat(esdm_cuse_shmid, NULL, 0);
-	if (tmp == (void *)-1) {
+	if (status == (void *)-1) {
 		errsv = errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 			    "Attaching to shared memory segment failed: %s\n",
 			    strerror(errsv));
-		esdm_cuse_shm_status_close_shm();
 		return -errsv;
 	}
-	esdm_cuse_shm_status = tmp;
+
+	if (status->version != ESDM_SHM_STATUS_VERSION) {
+		shmdt(status);
+		return -EAGAIN;
+	}
+
+	atomic_store(&esdm_cuse_shm_status, status);
+	esdm_cuse_shmid = shmid;
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 		    "ESDM shared memory segment successfully attached to\n");
@@ -181,72 +184,49 @@ static atomic_bool esdm_cuse_poll_checker_ready = false;
  * current value; pointer-sized loads/stores are atomic on supported platforms.
  */
 static struct fuse_session *volatile esdm_cuse_session;
-static sem_t *esdm_cuse_semid = SEM_FAILED;
+static sem_t *_Atomic esdm_cuse_semid = SEM_FAILED;
 static const char *esdm_sem_name = NULL;
-
-static void esdm_cuse_shm_status_down(void)
-{
-	struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-
-	if (esdm_cuse_semid == SEM_FAILED) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
-			    "Cannot use semaphore\n");
-		return;
-	}
-
-	/* Wait and block until the SHM-Segment becomes available */
-	while (!esdm_cuse_shm_status_avail())
-		nanosleep(&ts, NULL);
-
-	/* The server is terminating, do not block any more */
-	if (atomic_load(&esdm_cuse_poll_thread_shutdown))
-		return;
-
-	if (sem_wait(esdm_cuse_semid))
-		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
-			    "Cannot use semaphore\n");
-}
 
 static void esdm_cuse_shm_status_close_sem(void)
 {
-	if (esdm_cuse_semid != SEM_FAILED) {
-		sem_t *tmp = esdm_cuse_semid;
+	sem_t *tmp = atomic_exchange(&esdm_cuse_semid, SEM_FAILED);
 
-		esdm_cuse_semid = SEM_FAILED;
+	if (tmp != SEM_FAILED)
 		sem_close(tmp);
-	}
 }
 
-static int esdm_cuse_shm_status_create_sem(void)
+/*
+ * Open the semaphore the server created with the segment just attached to.
+ * Opening it takes write access, which the server grants its own user only.
+ * Without it, the poll checker watches the segment instead.
+ */
+static int esdm_cuse_shm_status_open_sem(void)
 {
+	sem_t *tmp;
 	int errsv;
 
 	if (!esdm_sem_name)
 		return -EFAULT;
 
-	esdm_cuse_semid = sem_open(esdm_sem_name, O_CREAT | O_EXCL, 0644, 0);
-	if (esdm_cuse_semid == SEM_FAILED) {
-		if (errno == EEXIST) {
-			esdm_cuse_semid =
-				sem_open(esdm_sem_name, O_CREAT, 0644, 0);
-			if (esdm_cuse_semid == SEM_FAILED)
-				goto err;
-		} else {
-			goto err;
-		}
+	/* No O_CREAT, for the same reason as for the segment */
+	tmp = sem_open(esdm_sem_name, 0);
+	if (tmp == SEM_FAILED) {
+		errsv = errno;
+		esdm_logger(LOGGER_WARN, LOGGER_C_CUSE,
+			    "ESDM change indicator semaphore not usable: %s\n",
+			    strerror(errsv));
+		/* One of a previous segment stays open, see above */
+		atomic_store(&esdm_cuse_semid, SEM_FAILED);
+		return -errsv;
 	}
+
+	/* The previous one stays open, see above */
+	atomic_store(&esdm_cuse_semid, tmp);
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 		    "ESDM change indicator semaphore initialized\n");
 
 	return 0;
-
-err:
-	errsv = errno;
-	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-		    "ESDM change indicator semaphore creation failed: %s\n",
-		    strerror(errsv));
-	return -errsv;
 }
 
 /******************************************************************************
@@ -257,10 +237,13 @@ static DECLARE_WAIT_QUEUE(esdm_cuse_poll_checker_wait);
 
 static void esdm_cuse_term(void)
 {
+	sem_t *sem;
+
 	atomic_store(&esdm_cuse_poll_thread_shutdown, true);
 	thread_wake_all(&esdm_cuse_poll_checker_wait);
-	if (esdm_cuse_semid != SEM_FAILED)
-		sem_post(esdm_cuse_semid);
+	sem = atomic_load(&esdm_cuse_semid);
+	if (sem != SEM_FAILED)
+		sem_post(sem);
 
 	thread_stop_spawning();
 
@@ -582,6 +565,20 @@ static void esdm_cuse_drop_privilege_transient(void)
 }
 
 /*
+ * Take the write lock and raise the privileges a daemon that dropped them had,
+ * both undone by esdm_cuse_drop_privilege_transient(). A read waiting for the
+ * ESDM with the reader lock held gives way meanwhile, see esdm_cuse_interrupt().
+ */
+static void esdm_cuse_raise_privilege_transient(void)
+{
+	atomic_fetch_add(&esdm_cuse_priv_waiting, 1);
+	mutex_lock(&esdm_cuse_priv);
+	atomic_fetch_sub(&esdm_cuse_priv_waiting, 1);
+	if (esdm_cuse_dropped)
+		raise_privilege_transient(0, 0);
+}
+
+/*
  * Start a privileged request: check the caller, then raise the privileges with
  * the write lock held so that no other request runs while they are raised.
  *
@@ -607,13 +604,79 @@ static int esdm_cuse_priv_call_start(fuse_req_t req)
 	if (!esdm_cuse_client_privileged(req))
 		return EPERM;
 
-	atomic_fetch_add(&esdm_cuse_priv_waiting, 1);
-	mutex_lock(&esdm_cuse_priv);
-	atomic_fetch_sub(&esdm_cuse_priv_waiting, 1);
-	if (esdm_cuse_dropped)
-		raise_privilege_transient(0, 0);
+	esdm_cuse_raise_privilege_transient();
 
 	return 0;
+}
+
+/*
+ * Attach to the status segment and the semaphore of the server, unless they
+ * are the ones attached to already. See esdm_cuse_shm_status for why the
+ * daemon never creates them.
+ *
+ * At startup the daemon is still root. Later on, the poll checker does this
+ * with the privileges raised the way a privileged request has them, as the
+ * server grants write access to both to its own user only. They are only
+ * raised once a new segment of a running server is there, so not on every
+ * round of the checker while there is no server.
+ *
+ * Returns true when a new segment was attached to.
+ */
+static bool esdm_cuse_shm_status_attach(void)
+{
+	int ret, shmid = esdm_cuse_shm_status_new_shmid();
+
+	if (shmid < 0)
+		return false;
+
+	esdm_cuse_raise_privilege_transient();
+	ret = esdm_cuse_shm_status_attach_shm(shmid);
+	if (!ret)
+		esdm_cuse_shm_status_open_sem();
+	esdm_cuse_drop_privilege_transient();
+
+	return !ret;
+}
+
+static void esdm_cuse_shm_status_down(void)
+{
+	/*
+	 * How long one wait lasts at most before the segment is checked again:
+	 * waiting for a server that is not there yet, watching a segment
+	 * without its semaphore, and on the semaphore, which a replaced segment
+	 * would never post again.
+	 */
+	static const struct timespec no_server = { .tv_sec = 1 };
+	static const struct timespec no_sem = { .tv_nsec = 100 * 1000 * 1000 };
+	static const time_t sem_sec = 5;
+	struct timespec ts;
+	sem_t *sem;
+
+	/* The server is terminating, do not block any more */
+	if (atomic_load(&esdm_cuse_poll_thread_shutdown))
+		return;
+
+	/* A new segment: the pollers are evaluated against it right away */
+	if (esdm_cuse_shm_status_attach())
+		return;
+
+	if (!esdm_cuse_shm_status) {
+		nanosleep(&no_server, NULL);
+		return;
+	}
+
+	sem = atomic_load(&esdm_cuse_semid);
+	if (sem == SEM_FAILED) {
+		nanosleep(&no_sem, NULL);
+		return;
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_sec += sem_sec;
+	if (sem_clockwait(sem, CLOCK_MONOTONIC, &ts) && errno != ETIMEDOUT &&
+	    errno != EINTR)
+		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+			    "Cannot use semaphore: %s\n", strerror(errno));
 }
 
 /******************************************************************************
@@ -1249,19 +1312,24 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 #define ESDM_POLL_READER (POLLIN | POLLRDNORM)
 #define ESDM_POLL_WRITER (POLLOUT | POLLWRNORM)
 
+	struct esdm_shm_status *status = esdm_cuse_shm_status;
+
 	*outmask = 0;
 
+	/* Simply wake the poller no matter what it waits for. */
+	if (atomic_load(&esdm_cuse_poll_thread_shutdown))
+		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
+
 	/*
-	 * Guard against a not-yet-attached status segment, mirroring the other
-	 * consumers (e.g. ioctl case 42). Init failure exits the process, so
-	 * this is normally unreachable, but keep the access symmetric and safe.
+	 * Until the server created its status segment, there is nothing to
+	 * tell, see esdm_cuse_shm_status_attach().
 	 */
-	if (!esdm_cuse_shm_status)
+	if (!status)
 		return;
 
-	if (atomic_load(&esdm_cuse_shm_status->operational))
+	if (atomic_load(&status->operational))
 		*outmask |= ESDM_POLL_READER;
-	if (atomic_load(&esdm_cuse_shm_status->need_entropy))
+	if (atomic_load(&status->need_entropy))
 		*outmask |= ESDM_POLL_WRITER;
 
 	/*
@@ -1272,11 +1340,7 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 	 * The checker clears it once, after it has evaluated every registered
 	 * poll handle against it (see esdm_cuse_poll_checker()).
 	 */
-	if (atomic_load(&esdm_cuse_shm_status->suspend_trigger))
-		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
-
-	/* Simply wake the poller no matter what it waits for. */
-	if (atomic_load(&esdm_cuse_poll_thread_shutdown))
+	if (atomic_load(&status->suspend_trigger))
 		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
 }
 
@@ -1478,8 +1542,11 @@ void esdm_cuse_init_done(void *userdata)
 
 	CKINT(esdm_cuse_bind_mount(mount_src, mount_dst));
 
-	CKINT(esdm_cuse_shm_status_create_sem());
-	CKINT(esdm_cuse_shm_status_create_shm());
+	/*
+	 * The server's, if it runs already - otherwise the poll checker
+	 * attaches to them once it created them.
+	 */
+	esdm_cuse_shm_status_attach();
 
 	CKINT(esdm_cuse_drop_privileges());
 

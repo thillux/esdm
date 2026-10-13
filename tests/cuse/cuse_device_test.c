@@ -1237,40 +1237,126 @@ static void test_read_nonblock(void)
  * The status segment and the semaphore that go with it.
  *
  * Both are machine-global names, so this test creates them in an IPC namespace
- * of its own (see tests/test_ipc_ns.c). What matters is that a segment nobody
- * is attached to any more is treated as a leftover and replaced rather than
- * trusted - it is what a crashed server leaves behind, and its contents would
- * otherwise be reported as the current state.
+ * of its own (see tests/test_ipc_ns.c), playing the server's part: they are the
+ * server's, and the daemon only ever attaches to them. It must not create
+ * either, nor take a segment nobody is attached to - what a crashed server
+ * leaves behind, whose contents would be reported as the current state - nor
+ * one the server has not published yet.
  */
+static int test_server_shmid = -1;
+static struct esdm_shm_status *test_server_shm = (void *)-1;
+
+static void test_server_shm_create(void)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+
+	test_server_shmid = shmget(key, sizeof(struct esdm_shm_status),
+				   IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR |
+					   S_IRGRP | S_IROTH);
+	CHECK(test_server_shmid >= 0, "cannot create the segment: %s",
+	      strerror(errno));
+	test_server_shm = shmat(test_server_shmid, NULL, 0);
+	CHECK(test_server_shm != (void *)-1, "cannot attach the segment: %s",
+	      strerror(errno));
+}
+
+/* Attach as the daemon does, checking that the privileges are put back */
+static bool test_attach(void)
+{
+	unsigned int raised = raise_calls, dropped = drop_calls;
+	bool attached = esdm_cuse_shm_status_attach();
+
+	CHECK_EQ(raise_calls - raised, drop_calls - dropped);
+
+	return attached;
+}
+
 static void test_shm_status(void)
 {
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	static char sem_name[64];
+	struct esdm_shm_status *first;
 	unsigned int mask;
+	sem_t *sem;
+	int shmid;
 
-	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
+	/* No server, nothing to attach to - and nothing is created */
+	CHECK(!test_attach(), "attached to a segment nobody created");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+	CHECK(shmget(key, sizeof(struct esdm_shm_status), 0) < 0,
+	      "the daemon created the status segment");
+
+	/* The poll checker waits for the server meanwhile */
+	esdm_cuse_shm_status_down();
+	CHECK(shmget(key, sizeof(struct esdm_shm_status), 0) < 0,
+	      "the poll checker created the status segment");
+
+	test_server_shm_create();
+	if (test_server_shm == (void *)-1)
+		return;
+
+	/* Not published by the server yet */
+	CHECK(!test_attach(), "attached to a segment not published yet");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+
+	/* A segment nobody is attached to is a leftover */
+	test_server_shm->version = ESDM_SHM_STATUS_VERSION;
+	shmdt(test_server_shm);
+	CHECK(!test_attach(), "attached to the leftover of a died server");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+
+	/*
+	 * The server is back. The semaphore is not there, which leaves the
+	 * segment usable nevertheless.
+	 */
+	test_server_shm = shmat(test_server_shmid, NULL, 0);
+	/* /dev/shm is no part of the IPC namespace, so the name is our own */
+	snprintf(sem_name, sizeof(sem_name), "/esdm-cuse-device-test-%d",
+		 (int)getpid());
+	esdm_sem_name = sem_name;
+	sem_unlink(esdm_sem_name);
+	CHECK(test_attach(), "the server's segment was not attached");
 	if (!esdm_cuse_shm_status) {
 		CHECK(0, "the status segment was not attached");
 		return;
 	}
-
-	/* A segment without the version this build speaks is not usable */
-	CHECK_EQ(esdm_cuse_shm_status_avail(), 0);
-	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
 	CHECK(esdm_cuse_shm_status_avail() != 0,
 	      "an attached status segment is not reported as available");
+	CHECK(esdm_cuse_semid == SEM_FAILED, "a semaphore is open");
+	CHECK(sem_open(esdm_sem_name, 0) == SEM_FAILED,
+	      "the daemon created the semaphore");
 
-	/* Detaching and attaching again finds it as the leftover it now is */
-	esdm_cuse_shm_status_close_shm();
-	CHECK(esdm_cuse_shm_status == NULL,
-	      "the status segment was not detached");
-	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
-	if (!esdm_cuse_shm_status) {
-		CHECK(0, "the status segment was not attached again");
+	/* Without a semaphore, the poll checker watches the segment */
+	esdm_cuse_shm_status_down();
+
+	/* The one attached to is not attached again */
+	CHECK(!test_attach(), "the same segment was attached again");
+
+	/* A segment the server replaced is attached to anew, semaphore and all */
+	sem = sem_open(esdm_sem_name, O_CREAT | O_EXCL, 0600, 0);
+	CHECK(sem != SEM_FAILED, "cannot create the semaphore: %s",
+	      strerror(errno));
+	first = esdm_cuse_shm_status;
+	shmctl(test_server_shmid, IPC_RMID, NULL);
+	shmdt(test_server_shm);
+	test_server_shm_create();
+	if (test_server_shm == (void *)-1 || sem == SEM_FAILED)
 		return;
-	}
-	CHECK_EQ(esdm_cuse_shm_status->version, 0);
+	test_server_shm->version = ESDM_SHM_STATUS_VERSION;
+	shmid = test_server_shmid;
+	CHECK(test_attach(), "the replaced segment was not attached");
+	CHECK_EQ(esdm_cuse_shmid, shmid);
+	CHECK(esdm_cuse_semid != SEM_FAILED, "the semaphore was not opened");
 
-	/* A fresh segment, so the version has to be put back into it */
-	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
+	/* The previous one stays readable for the threads that still use it */
+	CHECK_EQ(first->version, ESDM_SHM_STATUS_VERSION);
+
+	/* A post of the server wakes the poll checker */
+	sem_post(sem);
+	esdm_cuse_shm_status_down();
+	CHECK(sem_trywait(sem) < 0 && errno == EAGAIN,
+	      "the poll checker did not take the post");
+	sem_close(sem);
 
 	/*
 	 * With a segment in place the poll mask follows what it says. Each
@@ -1328,22 +1414,6 @@ static void test_shm_status(void)
 		      reply.size == ESDM_SHM_STATUS_INFO_SIZE,
 	      "an oversized info length was not clamped to the segment");
 
-	/* Waiting on a semaphore that was never created says so and returns */
-	CHECK_EQ(esdm_cuse_semid, SEM_FAILED);
-	esdm_cuse_shm_status_down();
-
-	/* The name is what the frontend passes in; without one there is none */
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), -EFAULT);
-
-	esdm_sem_name = "/esdm-cuse-device-test";
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), 0);
-	CHECK(esdm_cuse_semid != SEM_FAILED,
-	      "the semaphore was not created");
-
-	/* Opening the one that is already there is the other startup order */
-	esdm_cuse_shm_status_close_sem();
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), 0);
-
 	/*
 	 * The wait returns without blocking once the shutdown flag is set,
 	 * which is how the poll checker is let go when the device stops.
@@ -1354,10 +1424,15 @@ static void test_shm_status(void)
 
 	esdm_cuse_shm_status_close_sem();
 	sem_unlink(esdm_sem_name);
-	CHECK_EQ(esdm_cuse_semid, SEM_FAILED);
+	CHECK(esdm_cuse_semid == SEM_FAILED, "the semaphore was not closed");
 	esdm_cuse_shm_status_close_sem();
 
 	esdm_cuse_shm_status_close_shm();
+	CHECK(esdm_cuse_shm_status == NULL,
+	      "the status segment was not detached");
+
+	shmdt(test_server_shm);
+	shmctl(test_server_shmid, IPC_RMID, NULL);
 }
 
 int main(int argc, char *argv[])
