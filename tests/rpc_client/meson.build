@@ -52,6 +52,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_priv_interrupt_test = executable(
+			'rpc_priv_interrupt_test',
+			[ 'rpc_priv_interrupt_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	rpc_connect_deadline_test = executable(
 			'rpc_connect_deadline_test',
 			[ 'rpc_connect_deadline_test.c' ],
@@ -177,6 +185,10 @@ if get_option('esdm-server').enabled()
 	# Also a stand-in server on the unprivileged socket.
 	test('RPC client does not stall on calls waiting for the seeding',
 		rpc_client_blocking_test, is_parallel: false, timeout: 60)
+
+	# A stand-in server on the privileged socket.
+	test('RPC client does not resend an interrupted privileged call',
+		rpc_priv_interrupt_test, is_parallel: false)
 
 	# Binds the unprivileged socket every RPC test uses without listening.
 	test('RPC client gives up connecting at its deadline',

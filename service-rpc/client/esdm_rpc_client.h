@@ -604,8 +604,9 @@ int esdm_rpcc_rnd_get_ent_cnt_int(unsigned int *entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_add_to_ent_cnt(unsigned int entcnt);
 
@@ -626,8 +627,9 @@ int esdm_rpcc_rnd_add_to_ent_cnt_int(unsigned int entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_add_entropy(const uint8_t *entropy_buf,
 			      size_t entropy_buf_len, uint32_t entropy_cnt);
@@ -651,8 +653,9 @@ int esdm_rpcc_rnd_add_entropy_int(const uint8_t *entropy_buf,
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_clear_pool(void);
 
@@ -677,8 +680,9 @@ int esdm_rpcc_rnd_clear_pool_int(void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_reseed_crng(void);
 
@@ -745,8 +749,9 @@ int esdm_rpcc_get_write_wakeup_thresh_int(unsigned int *write_wakeup_thresh,
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_set_write_wakeup_thresh(unsigned int write_wakeup_thresh);
 
@@ -789,8 +794,9 @@ int esdm_rpcc_get_min_reseed_secs_int(unsigned int *seconds, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_set_min_reseed_secs(unsigned int seconds);
 
@@ -832,9 +838,10 @@ int esdm_rpcc_set_min_reseed_secs_int(unsigned int seconds, void *int_data);
  *		   unchanged.
  *
  * @return: 0 on success, -EINVAL if both arguments are NULL, < 0 on error
- *	    (-EINTR means the connection was interrupted and the caller may
- *	    try again; -ENOENT if the PKCS#11 entropy source is not compiled
- *	    in or no matching token was found).
+ *	    (-EINPROGRESS means the call was interrupted after the request
+ *	    was sent and must not be repeated, see esdm_invoke; -ENOENT if
+ *	    the PKCS#11 entropy source is not compiled in or no matching
+ *	    token was found).
  */
 int esdm_rpcc_set_pkcs11_config(const char *token_label, const char *pin);
 
@@ -881,8 +888,8 @@ struct esdm_rpcc_selftest_result {
  * 	reported or with the undone states if nothing was received.
  * @return: 0 if every self test passed and the ESDM hands out random bits, < 0
  * 	otherwise - the error of the failing test, -EOPNOTSUPP where an earlier self
- * 	test failed and still holds the output back, -EINTR where the connection was
- * 	interrupted and the caller may try again
+ * 	test failed and still holds the output back, -EINPROGRESS where the call
+ * 	was interrupted after the request was sent, see esdm_invoke
  */
 int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *result);
 
@@ -920,7 +927,14 @@ int esdm_rpcc_jent_status_int(char *buf, size_t buflen, void *int_data);
  * @brief Invoke a function up to 5 times if EINTR was returned
  *
  * This macro is intended to be used with the RPC calls above to repeat a call
- * when the connection cannot be initially established.
+ * that was interrupted through the interrupt function.
+ *
+ * Only calls of the unprivileged endpoint return -EINTR, as only they may be
+ * sent again. A call of the privileged endpoint that is interrupted after its
+ * request went out returns -EINPROGRESS instead: the server may apply the
+ * request all the same, and applying it twice - such as crediting entropy
+ * twice - is worse than reporting the interruption. It is not repeated here
+ * and should not be repeated by the caller either.
  */
 #define esdm_invoke(x)                                                         \
 	do {                                                                   \

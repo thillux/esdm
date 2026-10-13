@@ -659,6 +659,8 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		}
 		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
 	} else if (interrupted) {
+		const bool privileged = (rpc_conn->service.descriptor ==
+					 &priv_access__descriptor);
 		ProtobufCMessage *msg;
 
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
@@ -671,7 +673,12 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		 */
 		reset_conn_socket(rpc_conn);
 
-		msg = ERR_PTR(-EINTR);
+		/*
+		 * And the server may well apply it. -EINTR invites the caller
+		 * to send it again, as esdm_invoke() does, which a privileged
+		 * request must never be - see esdm_client_invoke().
+		 */
+		msg = ERR_PTR(privileged ? -EINPROGRESS : -EINTR);
 		closure(msg, closure_data);
 	} else {
 		ProtobufCMessage *msg;

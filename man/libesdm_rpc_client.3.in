@@ -201,9 +201,15 @@ return 0 on success, functions returning
 return the number of bytes produced. Both return a negative errno value on
 error.
 .B \-EINTR
-means the connection was interrupted and the call may simply be repeated; the
+means the call was interrupted through the interrupt function and may simply be
+repeated; the
 .B esdm_invoke()
-macro declared in the header does that up to five times.
+macro declared in the header does that up to five times. A call of the
+privileged endpoint interrupted after its request was sent returns
+.B \-EINPROGRESS
+instead, as the server may still apply the request; neither
+.B esdm_invoke()
+nor the caller should repeat it.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
