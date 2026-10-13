@@ -23,6 +23,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_logger.h"
@@ -130,8 +131,16 @@ int main(int argc, char *argv[])
 
 	printf("JSON status information:\n%s\n", buf);
 
-	/* The node instances are reported one at a time instead */
+	/*
+	 * The node instances are reported one at a time instead - one per
+	 * node, which without node support is the initial DRNG alone, whatever
+	 * number of nodes is configured.
+	 */
+#ifdef ESDM_NODE
 	nodes = esdm_config_online_nodes();
+#else
+	nodes = 1;
+#endif
 	for (node = 0; node < nodes; node++) {
 		ret = esdm_status_drng_json(node, buf, sizeof(buf));
 		if (ret) {

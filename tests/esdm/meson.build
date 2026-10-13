@@ -343,22 +343,31 @@ if get_option('esdm-server').enabled()
 	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test)
 	test('ESDM DRNG manager max w/o reseed - 1 DRNG', esdm_drng_mgr_max_wo_reseed_test,
 		args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed - 2 DRNG', esdm_drng_mgr_max_wo_reseed_test,
-		args : [ '2' ])
+	# The DRNG of a node keeps the ESDM operational once the initial one is
+	# spent - with node support, that is: without it, there is only the
+	# initial DRNG however many nodes are configured.
+	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed - 2 DRNG', esdm_drng_mgr_max_wo_reseed_test,
+			args : [ '2' ])
+	endif
 
 	test('ESDM DRNG manager node reseed without worker',
 		esdm_drng_mgr_no_worker_reseed_test)
 
 	test('ESDM DRNG manager max w/o reseed bits - 1 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
 		args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed bits - 2 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
-		args : [ '2' ])
+	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed bits - 2 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
+			args : [ '2' ])
+	endif
 	test('ESDM DRNG manager max w/o reseed bits large request - 1 DRNG',
 		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '1' ])
 	test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
 		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
-	test('ESDM DRNG manager spent node DRNG falls back to the initial DRNG',
-		esdm_drng_mgr_spent_node_fallback_test)
+	if get_option('node').enabled()
+		test('ESDM DRNG manager spent node DRNG falls back to the initial DRNG',
+			esdm_drng_mgr_spent_node_fallback_test)
+	endif
 
 	# Serial: it reports a rate, and a rate measured while the rest of the
 	# suite has the machine says more about the suite than about the ESDM.
