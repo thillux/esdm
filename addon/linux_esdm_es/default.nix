@@ -9,7 +9,16 @@
 stdenv.mkDerivation rec {
   pname = "esdm_es";
 
-  version = "1.2.1";
+  # The release of the tree, parsed from meson.build like the flake's esdm
+  # package does, so the two cannot drift apart again.
+  version =
+    let
+      lines = lib.splitString "\n" (builtins.readFile ../../meson.build);
+      matches = builtins.filter (m: m != null) (
+        map (l: builtins.match "[[:space:]]*version: '([0-9.]+)',?[[:space:]]*" l) lines
+      );
+    in
+    builtins.head (builtins.head matches);
   src = ./.;
 
   preBuild = ''
