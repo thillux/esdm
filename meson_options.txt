@@ -326,7 +326,7 @@ may have an entropy rate greater than zero.
 
 The BPF programs are loaded during the privileged
 initialization phase of the ESDM server (root or
-CAP_BPF + CAP_PERF_MON required).
+CAP_BPF + CAP_PERFMON required).
 ''')
 
 # Option for: ESDM_SCHED_EBPF_ENTROPY_RATE
