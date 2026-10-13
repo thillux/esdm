@@ -9,7 +9,7 @@ BUILD_ES_IRQ?=1
 BUILD_TESTING?=0
 
 #
-# config switch for OSR
+# config switch for OSR, 1 to 25 - the per-CPU event rings grow with it
 #
 ESDM_ES_OSR?=3
 

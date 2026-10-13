@@ -58,12 +58,9 @@ static struct esdm_es_drbg esdm_irq_drbg = {
 
 void __init esdm_irq_es_init(bool highres_timer)
 {
-	/* 25 is arbitrary, but will never the less be far to
-	 * large for the current event array size */
-	BUG_ON(ESDM_ES_OSR <= 0 || ESDM_ES_OSR > 25);
-
 	/* reseeding possible with current array size? */
-	BUG_ON(ESDM_ES_OSR * (256 + 64) * 2 > ESDM_DATA_NUM_VALUES);
+	BUILD_BUG_ON(ESDM_ES_MAX_REQUEST_EVENTS >= ESDM_DATA_NUM_VALUES);
+	BUILD_BUG_ON(ESDM_DATA_NUM_VALUES & ESDM_DATA_NUM_VALUES_MASK);
 
 	/* Set a minimum number of interrupts that must be collected */
 	irq_entropy = max_t(u32, ESDM_IRQ_ENTROPY_BITS, irq_entropy);

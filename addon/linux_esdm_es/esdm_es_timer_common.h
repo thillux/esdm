@@ -68,7 +68,39 @@ config ESDM_COLLECTION_SIZE
 	default 8192 if ESDM_COLLECTION_SIZE_8192
 
  */
-#define CONFIG_ESDM_COLLECTION_SIZE 4096
+
+/*
+ * The oversampling rate is the default number of events per bit of entropy.
+ * The health test cutoffs scale with it and saturate at 15 (esdm_health.h),
+ * so the ring size derived from it below is the only bound.
+ */
+#if !defined(ESDM_ES_OSR) || ESDM_ES_OSR < 1 || ESDM_ES_OSR > 25
+#error "ESDM_ES_OSR must be within 1 to 25"
+#endif
+
+/*
+ * Events the largest request takes at the default rate: the DRBG blocks of an
+ * initial seed with the oversampling of each, plus the oversampling
+ * esdm_es_drbg_avail_entropy() deducts twice. One CPU's ring must hold them,
+ * or the source of a single CPU system never serves that request.
+ */
+#define ESDM_ES_OSR_BITS (ESDM_OVERSAMPLE_ES_BITS + 1)
+#define ESDM_ES_MAX_REQUEST_EVENTS                                             \
+	(ESDM_ES_OSR *                                                         \
+	 (((ESDM_DRNG_INIT_SEED_SIZE_BITS + ESDM_DRNG_SECURITY_STRENGTH_BITS - \
+	    1) / ESDM_DRNG_SECURITY_STRENGTH_BITS) *                           \
+		  (ESDM_DRNG_SECURITY_STRENGTH_BITS + ESDM_ES_OSR_BITS) +      \
+	  2 * ESDM_ES_OSR_BITS))
+
+/*
+ * A power of two for the index mask, holding one event less than its slots.
+ * 4096 slots for the default OSR of 3, more only as a higher OSR requires.
+ */
+#define CONFIG_ESDM_COLLECTION_SIZE                                            \
+	(ESDM_ES_MAX_REQUEST_EVENTS < 4096  ? 4096 :                           \
+	 ESDM_ES_MAX_REQUEST_EVENTS < 8192  ? 8192 :                           \
+	 ESDM_ES_MAX_REQUEST_EVENTS < 16384 ? 16384 :                          \
+					      32768)
 
 /******************************************************************************/
 
