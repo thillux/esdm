@@ -76,10 +76,17 @@
  */
 #define TEST_ANSWER_LEN 1024
 /*
- * Method index of RpcGetRandomBytes - the order of service UnprivAccess in
- * unpriv_access.proto.
+ * Method index of RpcStatus - the order of service UnprivAccess in
+ * unpriv_access.proto. The connections that do not read ask for the status
+ * report, cut to TEST_ANSWER_LEN, rather than for random bytes: they ask for
+ * some 90 MiB in all, and a build with the reseeding caps of sp80090c, fips140
+ * or ais2031_drg4 reseeds the DRNG every few KiB, each time waiting for the
+ * Jitter RNG. The server then takes minutes for the first answers alone, and
+ * its idle timeout reaps the connections it answered first long before it is
+ * done - which the test cannot tell from being dropped for a full send buffer.
+ * The report is the same size every time and costs no DRNG output.
  */
-#define TEST_METHOD_GET_RANDOM_BYTES 5
+#define TEST_METHOD_STATUS 0
 /*
  * How long the ordinary client may take, and the server to drop all of the
  * connections once their send buffers are full. A server that waits for each
@@ -210,12 +217,12 @@ static int test_connect(void)
 	return fd;
 }
 
-/* Send @num requests for @len bytes each, as far as they go */
+/* Send @num requests for status reports of @len bytes, as far as they go */
 static void test_send_requests(int fd, unsigned int num, uint32_t len)
 {
 	uint8_t req[sizeof(struct esdm_rpc_proto_cs_header) + 8];
 	struct esdm_rpc_proto_cs_header cs = {
-		.method_index = TEST_METHOD_GET_RANDOM_BYTES,
+		.method_index = TEST_METHOD_STATUS,
 		.request_id = 0,
 	};
 	uint8_t *msg = req + sizeof(cs);
@@ -223,7 +230,7 @@ static void test_send_requests(int fd, unsigned int num, uint32_t len)
 	uint32_t val = len;
 	unsigned int i;
 
-	/* GetRandomBytesRequest: len (field 1, varint) */
+	/* StatusRequest: maxlen (field 1, varint) */
 	msg[msglen++] = 0x08;
 	do {
 		msg[msglen] = (uint8_t)(val & 0x7f);
@@ -381,7 +388,7 @@ int main(void)
 		goto out;
 	}
 
-	/* Seeded, so that the requests below get answers with the bytes */
+	/* Seeded, so that the ordinary calls below get their random bytes */
 	rc = esdm_rpcc_get_random_bytes_full(buf, sizeof(buf));
 	if (rc != (ssize_t)sizeof(buf)) {
 		printf("FAIL: the ESDM does not answer: %zd\n", rc);
