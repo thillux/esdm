@@ -436,8 +436,30 @@
             '';
           };
 
+        # The esdm package credits the interrupt and scheduler ES with nothing,
+        # so it seeds fully whatever esdm_es delivers. These credit one of
+        # them each (only one may be), for mkCheck to show the module's
+        # entropy is credited.
+        esdmCreditingKernelEs =
+          source:
+          self.packages.${system}.esdm.overrideAttrs (prev: {
+            pname = "esdm-credit-${source}";
+            mesonFlags =
+              (builtins.filter (
+                x: !(lib.hasInfix "es_irq_entropy_rate" x || lib.hasInfix "es_sched_entropy_rate" x)
+              ) prev.mesonFlags)
+              ++ [
+                "-Des_irq_entropy_rate=${if source == "irq" then "256" else "0"}"
+                "-Des_sched_entropy_rate=${if source == "sched" then "256" else "0"}"
+              ];
+          });
+
         mkCheck =
           kernel:
+          let
+            esdm-irq = esdmCreditingKernelEs "irq";
+            esdm-sched = esdmCreditingKernelEs "sched";
+          in
           pkgs.testers.nixosTest {
             name = "basic test with esdm-tool";
 
@@ -464,7 +486,10 @@
                       # Make the startup-hang regression harness (and a Python
                       # to run it) available inside the VM so the check can
                       # execute it instead of letting it rot.
-                      environment.systemPackages = [ pkgs.python3 ];
+                      environment.systemPackages = [
+                        pkgs.python3
+                        pkgs.jq
+                      ];
                       environment.etc."esdm-startup-loop.py".source = ./tests/startup/esdm_startup_loop.py;
 
                       boot.kernelParams = [
@@ -517,6 +542,36 @@
 
               # A clean shutdown must not deadlock or leak (kmemleak is on).
               machine.succeed("systemctl stop esdm-server.service")
+
+              # The service credits the kernel ES with nothing, so it seeds
+              # whether esdm_es delivers or not. A server crediting one of
+              # them in turn has to see that source report credited entropy.
+              # 128 bits net of the FIPS oversampling are some 800 events at
+              # the module's OSR of 3, after the 1024 of its startup health
+              # test - little even for an idle VM, so the timeout is only
+              # generous. The socket units go too, so the server binds the
+              # paths itself.
+              machine.succeed(
+                  "systemctl stop esdm-server-priv.socket esdm-server-unpriv.socket"
+              )
+              for source, esdm in [
+                  ("Interrupt", "${esdm-irq}"),
+                  ("Scheduler", "${esdm-sched}"),
+              ]:
+                  machine.succeed(
+                      f"{esdm}/bin/esdm-server -f >/tmp/esdm-{source}.log 2>&1 "
+                      f"& echo $! >/tmp/esdm-{source}.pid"
+                  )
+                  machine.wait_until_succeeds(
+                      f"{esdm}/bin/esdm-tool --status-json | jq -e "
+                      f"'.entropy_sources[] | select(.name == \"{source}\") "
+                      "| .available_entropy >= 128'",
+                      timeout=600,
+                  )
+                  machine.succeed(f"kill $(cat /tmp/esdm-{source}.pid)")
+                  machine.wait_until_fails(
+                      f"kill -0 $(cat /tmp/esdm-{source}.pid)", timeout=30
+                  )
 
               # Now exercise the dedicated startup-hang regression harness
               # against the same binary. It repeatedly starts esdm-server in the
