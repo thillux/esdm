@@ -55,10 +55,10 @@ void esdm_aux_fini_wait_for_need_entropy(void);
  * This function allows the caller to specify a timeout when this function shall
  * return even though the semaphore did not fire.
  *
- * The API is a wrapper around sem_clockwait([1]) including the purpose of the
- * @param ts as well as the return code and the errno.
+ * The API follows sem_clockwait([1]) in the purpose of the @param ts as well as
+ * the return code and the errno, with CLOCK_MONOTONIC as its clock.
  *
- * @param [in] ts See [1]
+ * @param [in] ts Absolute deadline on CLOCK_MONOTONIC - not CLOCK_REALTIME
  *
  * @return See [1]
  *
