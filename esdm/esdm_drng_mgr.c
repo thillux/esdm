@@ -2321,9 +2321,15 @@ void esdm_drng_bring_up_for_request(void)
  * the emergency reseeding kept the caller - and every request needing the
  * pool lock meanwhile - waiting on the collection.
  *
- * A caller that blocks is woken when the last DRNG is seeded, and looks again
- * every second in case there is no worker to do it and the entropy for it
- * arrives without anybody telling - see esdm_drng_bring_up_for_request().
+ * A caller that blocks is woken when the last DRNG is seeded. Without a worker
+ * there is nobody to seed it, and the entropy sources reporting enough for a
+ * seed - what a request waits for then - is no promise that they ever will:
+ * under the NTG.1 seeding strategy a DRNG is instantiated from two sources of
+ * 240 bits each, which the emergency reseeding collects over several passes,
+ * while the sources together may never report that much at one time. Waiting
+ * for the report, a blocking caller waits forever. It is the one prepared to
+ * wait for the collection, so without a worker it brings the DRNGs up itself,
+ * as the worker would, and looks again every second until they are.
  */
 static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 {
@@ -2333,7 +2339,10 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 		/* Set by the wait below on a timeout */
 		int ret = 0;
 
-		esdm_drng_bring_up_for_request();
+		if (!nonblock && !esdm_drng_mgr_reseed_worker_running())
+			esdm_force_fully_seeded_all_drbgs();
+		else
+			esdm_drng_bring_up_for_request();
 		if (esdm_pool_all_nodes_seeded_get())
 			break;
 		if (nonblock)

@@ -27,7 +27,6 @@
 
 #include "esdm.h"
 #include "esdm_config.h"
-#include "esdm_node.h"
 #include "esdm_logger.h"
 #include "test_pertubation.h"
 
@@ -44,7 +43,6 @@ int main(int argc, char *argv[])
 	size_t buflen = 0;
 	uint64_t buf2;
 	uint64_t size;
-	uint32_t cpu;
 	int ret;
 	ssize_t rc;
 	unsigned long val;
@@ -100,14 +98,17 @@ int main(int argc, char *argv[])
 	}
 
 	/*
-	 * get_seed only returns data after all DRNGs are seeded, but each
-	 * request only seeds one DRNG - thus allow requests up to the allowed
-	 * number of DRNGs.
+	 * get_seed only returns data after all DRNGs are seeded. There is no
+	 * reseed worker here, and a non-blocking call leaves the bring-up to
+	 * one - it seeds a DRNG itself only once the entropy sources report
+	 * enough for a seed at once, which under the NTG.1 seeding strategy
+	 * they never do. A blocking call brings them up.
 	 */
-	for_each_online_node (cpu) {
-		rc = esdm_get_seed(buf, buflen, ESDM_GET_SEED_NONBLOCK);
-		if (rc != -EAGAIN)
-			break;
+	rc = esdm_get_seed(buf, buflen, 0);
+	if (rc < 0) {
+		printf("blocking esdm_get_seed returned an error %zd\n", rc);
+		ret = 1;
+		goto out;
 	}
 
 	/*
