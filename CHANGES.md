@@ -191,7 +191,7 @@ addon/es_ebpf_testing
 
 * fix: esdm-server exits with an error when the RPC or EGD interfaces cannot be set up, instead of 0, and no longer waits forever for an unprivileged interface that failed to start; the idle timeout is honored to the microsecond
 
-* esdm-server: an unprivileged peer is limited to max(512, min(16 per online CPU, half the RLIMIT_NOFILE)) RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server
+* esdm-server: an unprivileged peer is limited to max(512, min(16 per online CPU, half the RLIMIT_NOFILE)) RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server; the unprivileged RPC connections are bounded in total as well, leaving descriptors for the EGD interface, and a full worker closes the least recently active idle connection, preferring the UID holding the most, to make room for a new one - many UIDs of one user (subordinate UIDs) no longer lock out other users
 
 * fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a privileged request is not sent again after the server closed the connection, as it may already have been applied; a status report truncated to the maximum message size is delivered with -EMSGSIZE, and the JSON status calls leave the buffer empty on any server error
 
@@ -238,6 +238,32 @@ addon/es_ebpf_testing
 * fix: esdm.spec requires the protobuf-c runtime instead of protobuf
 
 * flake: provide the FIPS integrity reference values of the ESDM, the jitter RNG and Botan, and of the build tree in the coverage VMs; update nixpkgs; build against the jitterentropy master (3.8.0) and libkcapi master, whose RNG tests are adjusted to Linux 7.2+; support Linux 7.2 and 7.3 in the kernel addon; hook patches for every vanilla kernel nixpkgs packages - 6.1, 6.6, 6.12, 6.18, 7.2 and 7.3 - each applying without fuzz; the kernels are enumerated from nixpkgs like jitterentropy-library does, linux_testing included; the ESDM kernels keep nixpkgs' own kernel patches instead of replacing them; CI builds the module and boots its VM test for every one of them
+
+* fix: NTG.1 seeding strategy: the emergency seeding no longer loops forever under the pool lock when the only delivering source cannot fully seed the DRNG alone (e.g. the CPU ES with a failed jitter RNG)
+
+* fix: the prediction resistance DRNG gives out nothing until its instantiation succeeded, instead of generating from a DRNG instantiated with too little entropy
+
+* fix: library requests over 4 GiB no longer fail with -EFAULT; esdm-server and libesdm share one thread pool state, so the stack size and the teardown state the server sets reach the parallel entropy source fetch
+
+* fix: the kernel RNG's entropy rate is reduced while an eBPF interrupt or scheduler ES is active, as it is for the kernel-based ones, instead of crediting the same interrupt timings twice; an eBPF ES with entropy rate 0 stirs in its events uncredited instead of never reading them, and is no longer treated as an SP800-90B source
+
+* fix: the PKCS#11 and TPM2 entropy sources recover from a transient failure, retrying at most every 5 seconds, instead of staying disabled until the ESDM is reinitialized
+
+* fix: the asynchronous block cache serves no entropy from an uncredited source and is discarded on a failed reinitialization; the interrupt and scheduler ES stop filling the cache once the kernel is drained and keep no closed descriptor after a failed reinitialization
+
+* fix: Hash DRBG: the maximum additional input length is selected by SIZE_MAX, as the kernel macro used before made every seeding fail on 32-bit systems; the builtin ChaCha20 DRNG refuses to generate before it is seeded; SHA-3 accepts an empty update without calling memcpy with NULL; the leancrypto self tests run known answer tests instead of reporting success
+
+* fix: EGD server: a worker reads a bounded amount per round from one connection, so a client streaming entropy insertions no longer holds up every other client of that worker and the shutdown; EGD client: a write to a server that closed the connection no longer raises SIGPIPE in the calling process; getentropy() wrapper: the kernel fallback retries on EINTR and fails with EIO instead of EFAULT
+
+* RPC client: a privileged call interrupted after its request was sent returns -EINPROGRESS instead of -EINTR, as the request may have been applied, and esdm_invoke() does not send it again; fix: an invalid timeout of esdm_rpcc_get_random_bytes_full_timeout() returns -EINVAL instead of aborting; a failing read of an answer is reported as the error it is; the writer-preferring connection lock is used in the real build; RPC server: a connection is idle from its last answer, not its last request
+
+* fix: CUSE: with libfuse >= 3.12 up to 1024 worker threads (-o max_threads) serve the devices instead of libfuse's default of 10, which waiting readers could exhaust and stall every other request including the privileged ioctls; an interrupted privileged ioctl is not run against the kernel again, crediting no entropy twice; a suspend or server exit wakes the pollers of every CUSE daemon (status segment version 3); --pid_namespace without -f no longer kills the daemon at startup; a failing fallback read or write reports its errno instead of EPERM; esdm-proc lets root's writes overtake the unprivileged readers
+
+* fix: Linux kernel addon: the VM fork notifier is registered with CONFIG_VMGENID=m as well, as nixpkgs kernels have it, so cloned VMs no longer keep identical entropy state; the event rings are sized from the OSR, which made module load hit BUG() from OSR 7 on; flake: the testing interfaces are built only on request and the package version is taken from meson.build
+
+* fix: the eBPF unit snippet names CAP_PERFMON and comes after the system call deny list, so bpf and perf_event_open are allowed as intended
+
+* flake: build and test the ESDM on i686; the VM checks verify that the kernel interrupt and scheduler ES deliver credited entropy
 
 * tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the RPC random bytes tests no longer pass on a failed request; the kernel seeder test requires a clean server exit; a failing worker of the parallel CUSE stress test reports device, size, round and errno
 
