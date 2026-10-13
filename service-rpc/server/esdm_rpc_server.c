@@ -638,6 +638,7 @@ out:
 static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 {
 	ssize_t received;
+	int ret;
 
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
@@ -651,11 +652,19 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 	if (received < 0)
 		return -errno;
 
-	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
-
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n", received);
 
-	return esdm_rpcs_process(rpc_conn, received);
+	ret = esdm_rpcs_process(rpc_conn, received);
+
+	/*
+	 * Idle from the answer on, not from the request: a call that takes
+	 * longer than the idle timeout - a privileged one such as the self
+	 * test - would otherwise have its connection reaped right after its
+	 * answer, failing the next request the client sends on it.
+	 */
+	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+
+	return ret;
 }
 
 #ifdef ESDM_FUZZING

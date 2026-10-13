@@ -246,6 +246,20 @@ rpc_server_test = executable(
 
 test('RPC server failure answers', rpc_server_test)
 
+# How the server's accept loop and workers handle their connections, serving a
+# stand-in service on sockets of the test's own.
+rpc_server_conn_test = executable(
+		'rpc_server_conn_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_conn_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_c_args,
+	)
+
+test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
+
 foreach fuzz_target : fuzz_targets
 	target_c_args = fuzz_c_args + fuzz_target.get('c_args', [ ])
 
