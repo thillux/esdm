@@ -449,7 +449,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 	ssize_t received = 0;
 	unsigned int retries = 0;
 	int ret = 0;
-	int pret;
+	int pret, errsv;
 	bool interrupted = false;
 
 	if (rpc_conn->fd < 0)
@@ -476,8 +476,14 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		received = read(rpc_conn->fd, esdm_rpcc_reqbuf,
 				sizeof(esdm_rpcc_reqbuf));
 
-		pret = 0;
-		if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+		/*
+		 * Only a poll timeout of this very read keeps the wait going -
+		 * any other read error is reported as it is, not as a timeout
+		 * once the retry budget is spent.
+		 */
+		pret = -1;
+		errsv = errno;
+		if (received < 0 && (errsv == EAGAIN || errsv == EWOULDBLOCK)) {
 			struct pollfd pfd = { .fd = rpc_conn->fd,
 					      .events = POLLIN };
 
@@ -486,9 +492,13 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			if (pret > 0) {
 				continue;
 			}
-			if (pret < 0 && errno == EINTR) {
-				continue;
+			if (pret < 0) {
+				errsv = errno;
+				if (errsv == EINTR)
+					continue;
 			}
+		} else if (received < 0 && errsv == EINTR) {
+			continue;
 		}
 
 		/* Handle a read timeout */
@@ -509,9 +519,9 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 				continue;
 			}
 
-			ret = -errno;
+			ret = -errsv;
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
-				    "Read failed: %s\n", strerror(errno));
+				    "Read failed: %s\n", strerror(errsv));
 			break;
 		}
 
