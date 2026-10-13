@@ -99,6 +99,17 @@ static const uint8_t exp_512_abc[] = {
 	0x4e, 0xec, 0x53, 0xf0,
 };
 
+/* SHA3-512 of the empty message */
+static const uint8_t exp_512_empty[] = {
+	0xa6, 0x9f, 0x73, 0xcc, 0xa2, 0x3a, 0x9a, 0xc5, 0xc8, 0xb5,
+	0x67, 0xdc, 0x18, 0x5a, 0x75, 0x6e, 0x97, 0xc9, 0x82, 0x16,
+	0x4f, 0xe2, 0x58, 0x59, 0xe0, 0xd1, 0xdc, 0xc1, 0x47, 0x5c,
+	0x80, 0xa6, 0x15, 0xb2, 0x12, 0x3a, 0xf1, 0xf5, 0xf9, 0x4c,
+	0x11, 0xe3, 0xe9, 0x40, 0x2c, 0x3a, 0xc5, 0x58, 0xf5, 0x00,
+	0x19, 0x9d, 0x95, 0xb6, 0xd3, 0xe3, 0x01, 0x75, 0x85, 0x86,
+	0x28, 0x1d, 0xcd, 0x26,
+};
+
 /*
  * Hash @msg of @msglen bytes in updates of the sizes in @chunks (0 ends the
  * list, the rest of the message goes in one last update) and compare against
@@ -187,6 +198,47 @@ static int sha3_tester(const char *name, const struct esdm_hash *hash,
 	return ret ? 1 : 0;
 }
 
+/*
+ * Callers pair a zero length with a NULL buffer, both with nothing absorbed
+ * yet and with a partial block pending. That has to be a no-op, without
+ * handing the NULL to memcpy() - which the undefined behavior sanitizer
+ * reports.
+ */
+static int sha3_null_check(void)
+{
+	static const uint8_t abc[] = { 'a', 'b', 'c' };
+	struct esdm_hash_ctx *ctx = NULL;
+	uint8_t act[SHA3_TEST_MAX_DIGEST];
+	int ret = 0;
+
+	if (esdm_hash_alloc(esdm_sha3_512, &ctx)) {
+		printf("SHA3-512: cannot allocate the hash context\n");
+		return 1;
+	}
+
+	esdm_hash_init(ctx);
+	esdm_hash_update(ctx, NULL, 0);
+	esdm_hash_final(ctx, act);
+	if (esdm_kat_check(act, exp_512_empty, sizeof(exp_512_empty))) {
+		printf("SHA3-512: wrong digest for an empty NULL update\n");
+		ret++;
+	}
+
+	esdm_hash_init(ctx);
+	esdm_hash_update(ctx, abc, 1);
+	esdm_hash_update(ctx, NULL, 0);
+	esdm_hash_update(ctx, abc + 1, sizeof(abc) - 1);
+	esdm_hash_final(ctx, act);
+	if (esdm_kat_check(act, exp_512_abc, sizeof(exp_512_abc))) {
+		printf("SHA3-512: wrong digest with an empty NULL update "
+		       "between partial blocks\n");
+		ret++;
+	}
+
+	esdm_hash_zero_free(ctx);
+	return ret ? 1 : 0;
+}
+
 int main(int argc, char *argv[])
 {
 	static const uint8_t abc[] = { 'a', 'b', 'c' };
@@ -207,6 +259,7 @@ int main(int argc, char *argv[])
 			   sizeof(exp_shake256));
 	ret += sha3_check("SHA3-512", esdm_sha3_512, "\"abc\"", abc,
 			  sizeof(abc), NULL, exp_512_abc, sizeof(exp_512_abc));
+	ret += sha3_null_check();
 
 	return ret ? 1 : 0;
 }

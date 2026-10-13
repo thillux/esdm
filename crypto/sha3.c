@@ -295,6 +295,15 @@ static void keccak_absorb(struct esdm_hash_state *ctx, const uint8_t *in,
 	size_t partial = ctx->msg_len % ctx->r;
 
 	ctx->squeeze_more = 0;
+
+	/*
+	 * Callers pair a length of zero with a NULL buffer, and memcpy() is
+	 * undefined for a NULL argument even when it copies nothing - see
+	 * sha256_update().
+	 */
+	if (!inlen)
+		return;
+
 	ctx->msg_len += inlen;
 
 	/* Sponge absorbing phase */
