@@ -62,6 +62,15 @@
 #define ESDM_EGD_BUFSIZE (2 * ESDM_EGD_MAX_CMD_SIZE)
 
 /*
+ * Input taken from one connection per round of the event loop. Insertions have
+ * no response, so a client streaming them never fills its socket and never
+ * stops being readable: without a bound, one sending faster than they are
+ * inserted would keep the worker - and every other client on it - to itself.
+ * Client sockets are level-triggered, so the rest is taken in the next round.
+ */
+#define ESDM_EGD_READ_BUDGET (4 * ESDM_EGD_BUFSIZE)
+
+/*
  * Upper bound of concurrently served clients. EGD clients may hold their
  * connection open for their entire lifetime, so this limits clients, not
  * requests; beyond it, connections stay queued in the listen backlog. Generous
@@ -1116,14 +1125,19 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 #endif /* ESDM_FUZZING */
 
 /*
- * Read from the connection and process what became complete.
+ * Read from the connection and process what became complete, up to
+ * ESDM_EGD_READ_BUDGET bytes.
  *
- * @return 0 when the connection remains usable, < 0 when it has to be closed
+ * @return 0 when the connection remains usable, 1 when it does and the budget
+ *	   ran out with input possibly left, < 0 when it has to be closed
  */
 static int esdm_egd_read(struct esdm_egd_conn *conn)
 {
+	size_t budget = ESDM_EGD_READ_BUDGET;
+
 	while (1) {
 		ssize_t received;
+		size_t room;
 		int ret;
 
 		/*
@@ -1136,9 +1150,17 @@ static int esdm_egd_read(struct esdm_egd_conn *conn)
 		    conn->in_len >= sizeof(conn->in))
 			return 0;
 
+		/* Leave the rest to the next round, or to nobody at shutdown. */
+		if (!budget)
+			return 1;
+		if (atomic_load(&esdm_egd_exit))
+			return 0;
+
 		/* recv() for symmetry with the send() of the response. */
-		received = recv(conn->fd, conn->in + conn->in_len,
-				sizeof(conn->in) - conn->in_len, 0);
+		room = sizeof(conn->in) - conn->in_len;
+		if (room > budget)
+			room = budget;
+		received = recv(conn->fd, conn->in + conn->in_len, room, 0);
 		if (received == 0) {
 			/* Orderly shutdown by the client. */
 			return -EPIPE;
@@ -1152,6 +1174,7 @@ static int esdm_egd_read(struct esdm_egd_conn *conn)
 		}
 
 		conn->in_len += (size_t)received;
+		budget -= (size_t)received;
 		conn->last_active = esdm_egd_now_ms();
 
 		ret = esdm_egd_process(conn);
@@ -1466,6 +1489,8 @@ static int esdm_egd_handler(void *args)
 			accept_paused = false;
 
 		for (i = 0; i < nfds; i++) {
+			bool more_input;
+
 			/*
 			 * Tell the two apart by the pointer itself: the
 			 * listeners live in a static array of their own, so a
@@ -1500,9 +1525,10 @@ static int esdm_egd_handler(void *args)
 				 * that closed with a response of ours unread as
 				 * ECONNRESET, and still hands out the bytes it
 				 * sent before that error. Take what is there,
-				 * which ends at EOF or the error, and close.
-				 * Nothing is owed to the client any more, so the
-				 * RDHUP rule below does not hold this up.
+				 * a read budget per round, and close once it
+				 * ends at EOF or the error. Nothing is owed to
+				 * the client any more, so the RDHUP rule below
+				 * does not hold this up.
 				 */
 				esdm_egd_peer_gone(conn);
 				ret = esdm_egd_read(conn);
@@ -1515,14 +1541,24 @@ static int esdm_egd_handler(void *args)
 				ret = esdm_egd_read(conn);
 
 			/*
+			 * The read budget ran out with input left. Both the
+			 * hangup and the input behind EPOLLRDHUP are reported
+			 * again next round, so the rest is not lost by waiting.
+			 */
+			more_input = (ret > 0);
+			if (more_input)
+				ret = 0;
+
+			/*
 			 * EPOLLRDHUP only signals that the client will not send
 			 * any more data - it may still be waiting for what it
 			 * asked for before, be that a response on its way out or
 			 * a request that has yet to find its entropy. Close only
 			 * once nothing is owed to it any more.
 			 */
-			if (!ret && (events[i].events & EPOLLRDHUP) &&
-			    !conn->deferred && !esdm_egd_out_pending(conn))
+			if (!ret && !more_input &&
+			    (events[i].events & EPOLLRDHUP) && !conn->deferred &&
+			    !esdm_egd_out_pending(conn))
 				ret = -EPIPE;
 
 			if (ret) {
@@ -1734,7 +1770,9 @@ void esdm_egd_server_fini(void)
 	 * finalized - none may be inside esdm_get_random_bytes_full_noblock or
 	 * esdm_pool_insert_aux by then. They are special threads and thus not
 	 * covered by the RPC server's thread_wait_all(). The bound is generous
-	 * against the poll interval, but shutdown must not hang either.
+	 * against the poll interval - and against a round of reading, which
+	 * ESDM_EGD_READ_BUDGET bounds and the exit request cuts short - but
+	 * shutdown must not hang either.
 	 */
 	for (i = 0; i < 100 && atomic_load(&esdm_egd_workers_running); i++) {
 		struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };

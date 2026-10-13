@@ -32,13 +32,15 @@
  * The insertion command has no response, so whether the server took what a
  * client sent cannot be seen on the socket. The build of this test renames the
  * server's call into the auxiliary pool to test_pool_insert_aux() below, which
- * counts the bytes on their way through.
+ * counts the bytes on their way through - and can slow the pool down, so that
+ * clients flooding it are sure to outpace it, see test_flood().
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -89,12 +91,23 @@ int set_fd_nonblocking(int fd)
 /* Bytes the server handed to the auxiliary pool. */
 static atomic_size_t test_inserted;
 
+/* Time each insertion takes on top, in microseconds. */
+static atomic_uint test_insert_delay_us;
+
 int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 			 uint32_t entropy_bits);
 int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 			 uint32_t entropy_bits)
 {
+	unsigned int delay_us = atomic_load(&test_insert_delay_us);
 	int rc = esdm_pool_insert_aux(inbuf, inbuflen, entropy_bits);
+
+	if (delay_us) {
+		struct timespec ts = { .tv_sec = 0,
+				       .tv_nsec = (long)delay_us * 1000 };
+
+		nanosleep(&ts, NULL);
+	}
 
 	atomic_fetch_add(&test_inserted, inbuflen);
 
@@ -560,6 +573,119 @@ out:
 #undef TEST_UID_CONNECTIONS
 }
 
+struct test_flooder {
+	int fd;
+	pthread_t thread;
+};
+
+/* Insertions without a pause, until the socket is shut down under it. */
+static void *test_flood_thread(void *arg)
+{
+#define TEST_FLOOD_CMD 5
+	struct test_flooder *flooder = arg;
+	uint8_t cmds[1024 * TEST_FLOOD_CMD];
+	size_t i;
+
+	/* One byte each, without a claim - see test_send_write_entropy(). */
+	for (i = 0; i < sizeof(cmds); i += TEST_FLOOD_CMD) {
+		cmds[i] = ESDM_EGD_CMD_WRITE_ENTROPY;
+		cmds[i + 1] = 0;
+		cmds[i + 2] = 0;
+		cmds[i + 3] = 1;
+		cmds[i + 4] = (uint8_t)i;
+	}
+
+	while (!test_send(flooder->fd, cmds, sizeof(cmds)))
+		;
+
+	return NULL;
+#undef TEST_FLOOD_CMD
+}
+
+/*
+ * Clients streaming insertions faster than the server inserts them.
+ *
+ * An insertion has no response, so such a client never fills its own socket
+ * and never stops being readable: a worker reading it until it runs dry is held
+ * by it for good, and so is every other client of that worker. More flooders
+ * than workers - a held worker accepts nobody, so each would end up held and
+ * the next client never be accepted. It has to be served all the same.
+ */
+static void test_flood(void)
+{
+#define TEST_FLOODERS (2 * ESDM_THREAD_EGD_SLOTS)
+	struct test_flooder flooders[TEST_FLOODERS];
+	unsigned int i, started = 0;
+	uint64_t start, deadline;
+	size_t inserted;
+	int other;
+
+	printf("EGD conn: clients flooding the server with insertions\n");
+
+	/*
+	 * A pool slower than any client on any machine. The sleep comes on
+	 * top of the insertion, and rounds up to the timer slack.
+	 */
+	atomic_store(&test_insert_delay_us, 20);
+
+	for (i = 0; i < TEST_FLOODERS; i++) {
+		flooders[i].fd = test_connect();
+		if (flooders[i].fd < 0) {
+			CHECK(0, "cannot connect to %s: %s", sockpath,
+			      strerror(errno));
+			break;
+		}
+
+		if (pthread_create(&flooders[i].thread, NULL,
+				   test_flood_thread, &flooders[i])) {
+			CHECK(0, "cannot start a flooding client");
+			close(flooders[i].fd);
+			break;
+		}
+		started++;
+	}
+
+	/* Accepted, and well under way. */
+	test_sleep_ms(500);
+
+	other = test_connect();
+	CHECK(other >= 0, "cannot connect to %s: %s", sockpath,
+	      strerror(errno));
+	if (other >= 0) {
+		start = test_now_ms();
+		CHECK(test_cmd_entropy_count(other, TEST_RESPONSE_MS) == 0,
+		      "a client was not served while others flood the server");
+		printf("  served within %llu ms\n",
+		       (unsigned long long)(test_now_ms() - start));
+		close(other);
+	}
+
+	/* A send blocked on a full socket returns EPIPE on the shutdown. */
+	atomic_store(&test_insert_delay_us, 0);
+	for (i = 0; i < started; i++)
+		shutdown(flooders[i].fd, SHUT_RDWR);
+	for (i = 0; i < started; i++) {
+		pthread_join(flooders[i].thread, NULL);
+		close(flooders[i].fd);
+	}
+
+	/*
+	 * The server drains what the flooders left in their sockets. Wait for
+	 * it, so the tests after this one count only their own insertions.
+	 */
+	deadline = test_now_ms() + TEST_RESPONSE_MS;
+	do {
+		inserted = atomic_load(&test_inserted);
+		test_sleep_ms(200);
+	} while (atomic_load(&test_inserted) != inserted &&
+		 test_now_ms() < deadline);
+	CHECK(atomic_load(&test_inserted) == inserted,
+	      "the server did not finish the flooders' insertions");
+
+	test_server_alive("clients flooded it");
+#undef TEST_FLOODERS
+}
+
 /****************************
  * ESDM state
  ****************************/
@@ -639,6 +765,7 @@ int main(int argc, char *argv[])
 	test_hangup_deferred();
 	test_hangup_after_write();
 	test_hangup_after_pipelined_request();
+	test_flood();
 	test_idle_kept();
 	test_idle_uid_exhausted();
 
