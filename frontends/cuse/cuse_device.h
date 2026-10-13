@@ -20,7 +20,12 @@
 #ifndef CUSE_DEVICE_H
 #define CUSE_DEVICE_H
 
+/* The loop configuration needs the 3.12 API, see frontends/cuse/meson.build */
+#ifdef ESDM_FUSE_LOOP_CONFIG
+#define FUSE_USE_VERSION 312
+#else
 #define FUSE_USE_VERSION 31
+#endif
 #define _FILE_OFFSET_BITS 64
 #include <fuse3/fuse.h>
 #include <fuse3/cuse_lowlevel.h>

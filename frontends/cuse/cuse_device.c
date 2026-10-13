@@ -1592,9 +1592,27 @@ struct esdm_cuse_param {
 	int disable_fallback;
 	int syslog;
 	int pid_namespace;
+	unsigned int max_threads;
 };
 
 #define ESDM_CUSE_OPT(t, p) { t, offsetof(struct esdm_cuse_param, p), 1 }
+
+/*
+ * How many worker threads libfuse may start to serve the device. A request
+ * waiting for the ESDM - a /dev/random read before the seeding, an O_SYNC read
+ * - holds its worker for the whole RPC, and every other request, a privileged
+ * ioctl included, waits for a free one. The default of libfuse 3.12, 10, let a
+ * handful of such readers stall the device, at boot possibly with the ESDM
+ * waiting for the RNDADDENTROPY of rngd stuck behind them. Workers are started
+ * on demand, so the limit only bounds what a flood of such readers costs.
+ *
+ * Workers beyond ESDM_CUSE_IDLE_THREADS idle ones end again, as before libfuse
+ * 3.12, rather than keeping the memory of such a flood for good.
+ */
+#define ESDM_CUSE_MAX_THREADS 1024
+#define ESDM_CUSE_IDLE_THREADS 10
+#define _ESDM_CUSE_STR(x) #x
+#define ESDM_CUSE_STR(x) _ESDM_CUSE_STR(x)
 
 static const char *usage =
 	"usage: esdm_cuse [options]\n"
@@ -1611,6 +1629,8 @@ static const char *usage =
 	"    -d   -o debug           enable debug output (implies -f)\n"
 	"    -f                      foreground operation\n"
 	"    -s                      disable multi-threaded operation\n"
+	"    -o max_threads=NUM      maximum number of worker threads (default: "
+	ESDM_CUSE_STR(ESDM_CUSE_MAX_THREADS) ")\n"
 	"    -S                      log via syslog\n"
 	"\n";
 
@@ -1631,6 +1651,8 @@ static const struct fuse_opt esdm_cuse_opts[] = {
 	ESDM_CUSE_OPT("-u %s", username),
 	ESDM_CUSE_OPT("--username %s", username),
 	ESDM_CUSE_OPT("--pid_namespace", pid_namespace),
+	/* cuse_lowlevel_setup() ignores it, see esdm_cuse_session_loop() */
+	ESDM_CUSE_OPT("max_threads=%u", max_threads),
 #ifdef ESDM_TESTMODE
 	ESDM_CUSE_OPT("--disable_fallback=%d", disable_fallback),
 #endif
@@ -1663,11 +1685,41 @@ static int esdm_cuse_process_arg(void *data, const char *arg, int key,
 	}
 }
 
+static int esdm_cuse_session_loop(struct fuse_session *se,
+				  unsigned int max_threads)
+{
+#ifdef ESDM_FUSE_LOOP_CONFIG
+	struct fuse_loop_config *cfg = fuse_loop_cfg_create();
+	int ret;
+
+	if (!cfg)
+		return -ENOMEM;
+
+	fuse_loop_cfg_set_max_threads(cfg, max_threads ? max_threads :
+							ESDM_CUSE_MAX_THREADS);
+	fuse_loop_cfg_set_idle_threads(cfg, ESDM_CUSE_IDLE_THREADS);
+	ret = fuse_session_loop_mt(se, cfg);
+	fuse_loop_cfg_destroy(cfg);
+
+	return ret;
+#else
+	/*
+	 * Before 3.12, libfuse starts a worker whenever none is idle, there is
+	 * no limit to set.
+	 */
+	if (max_threads)
+		esdm_logger(LOGGER_WARN, LOGGER_C_CUSE,
+			    "max_threads needs libfuse 3.12, ignored\n");
+
+	return fuse_session_loop_mt(se, 0);
+#endif
+}
+
 int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct esdm_cuse_param param = { 0, 0, NULL, NULL, 1, 0, 0, 0, 0 };
+	struct esdm_cuse_param param = { 0, 0, NULL, NULL, 1, 0, 0, 0, 0, 0 };
 	char dev_name[128] = "DEVNAME=";
 	char devname[20];
 	const char *dev_info_argv[] = { dev_name };
@@ -1794,7 +1846,8 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			esdm_cuse_session = se;
 
 			if (multithreaded)
-				ret = fuse_session_loop_mt(se, 0);
+				ret = esdm_cuse_session_loop(se,
+							     param.max_threads);
 			else
 				ret = fuse_session_loop(se);
 

@@ -130,6 +130,13 @@ if get_option('linux-devfiles').enabled()
 		link_with: esdm_common_static_lib,
 		)
 
+	random_read_blocked_tester = executable(
+		'random_read_blocked_tester',
+		[ cuse_tester_common, 'random_read_blocked.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_common_static_lib,
+		)
+
 	# Available test targets:
 	#	esdm-server: esdm_server
 	#	esdm-cuse-random: esdm_cuse_random
@@ -301,6 +308,22 @@ if get_option('linux-devfiles').enabled()
 	test('Write /dev/urandom - w/o ESDM server', random_write_no_server_tester,
 		env: [ tester_cuse_env ],
 		args : ['urandom' ],
+		is_parallel: false,
+		priority: -10,
+		suite: 'cuse')
+
+	# The readers wait for the RPC timeout once the server is let go again
+	test('Read /dev/random - many blocked readers', random_read_blocked_tester,
+		env: [ tester_cuse_env ],
+		args : ['random' ],
+		timeout: 300,
+		is_parallel: false,
+		priority: -10,
+		suite: 'cuse')
+	test('Read /dev/urandom - many blocked readers', random_read_blocked_tester,
+		env: [ tester_cuse_env ],
+		args : ['urandom' ],
+		timeout: 300,
 		is_parallel: false,
 		priority: -10,
 		suite: 'cuse')
