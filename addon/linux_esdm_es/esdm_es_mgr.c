@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
+#include <linux/random.h>
 #include <linux/suspend.h>
 #include <linux/reboot.h>
 #include <linux/version.h>
@@ -235,7 +236,12 @@ static struct notifier_block esdm_es_mgr_notifier_reboot = {
 	.priority = 0,
 };
 
-#ifdef CONFIG_VMGENID
+/*
+ * IS_ENABLED(), as the =m of distribution kernels leaves CONFIG_VMGENID
+ * undefined: the notifier chain belongs to the built-in random.c, which
+ * declares and exports it for VMGENID=m as well.
+ */
+#if IS_ENABLED(CONFIG_VMGENID)
 static int esdm_es_mgr_vmgenid_notifier(struct notifier_block *nb,
 					unsigned long action, void *data)
 {
@@ -308,7 +314,7 @@ static int __init esdm_es_mgr_init(void)
 	}
 
 	register_reboot_notifier(&esdm_es_mgr_notifier_reboot);
-#ifdef CONFIG_VMGENID
+#if IS_ENABLED(CONFIG_VMGENID)
 	register_random_vmfork_notifier(&esdm_es_mgr_notifier_vmgenid);
 #endif
 	register_pm_notifier(&esdm_es_mgr_notifier_power);
@@ -328,7 +334,7 @@ out:
 static void __exit esdm_es_mgr_exit(void)
 {
 	unregister_reboot_notifier(&esdm_es_mgr_notifier_reboot);
-#ifdef CONFIG_VMGENID
+#if IS_ENABLED(CONFIG_VMGENID)
 	unregister_random_vmfork_notifier(&esdm_es_mgr_notifier_vmgenid);
 #endif
 	unregister_pm_notifier(&esdm_es_mgr_notifier_power);
