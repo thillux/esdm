@@ -259,6 +259,17 @@ if get_option('esdm-server').enabled()
 	test('ESDM PR DRNG keeps the seeding state',
 		esdm_pr_seeded_state_test)
 
+	esdm_pr_uninstantiated_test = executable(
+		'esdm_pr_uninstantiated_test',
+		[ esdm_ipc_ns, 'esdm_pr_uninstantiated_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM PR DRNG gives out nothing before its instantiation',
+		esdm_pr_uninstantiated_test)
+
 	esdm_aux_digestsize_test = executable(
 		'esdm_aux_digestsize_test',
 		[ esdm_ipc_ns, 'esdm_aux_digestsize_test.c' ],

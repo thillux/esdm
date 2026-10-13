@@ -1992,6 +1992,18 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			esdm_pool_unlock();
 
 			/*
+			 * Not instantiated yet, the seeding above was the
+			 * instantiation, and it fell short of the initial
+			 * seeding policy: whatever entropy it collected, the
+			 * DRNG has not got the initial seed its output rests
+			 * on. Nothing from it, as with too little entropy below.
+			 */
+			if (!atomic_load(&drng->initiated)) {
+				mutex_w_unlock(&drng->lock);
+				goto out;
+			}
+
+			/*
 			 * Cap output to the freshly collected entropy, less
 			 * the 64 bits RBG3(RS) keeps back for full entropy
 			 * output, see SP800-90C sec. 6.5.1.2.
