@@ -145,6 +145,25 @@ if get_option('es_irq').enabled()
 	test('ES Interrupt', es_irq_tester, timeout: 300)
 endif
 
+# The interrupt and the scheduler source compiled into the test, which fills
+# their block cache by hand - see the file header. No kernel support needed.
+foreach es_reset : [ [ 'es_irq', 'interrupt', [] ],
+		     [ 'es_sched', 'scheduler', [ '-DTEST_ES_SCHED' ] ] ]
+	if get_option(es_reset[0]).enabled()
+		es_reset_tester = executable(
+			es_reset[0] + '_cache_reset_tester',
+			[ 'es_kernel_cache_reset_test.c' ],
+			c_args: es_reset[2],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			dependencies: dependencies_server,
+			link_with: esdm_static_lib,
+		)
+
+		test('ES ' + es_reset[1] + ' cache reset', es_reset_tester)
+	endif
+endforeach
+
 # The following hardware/service-backed sources may be absent on the test
 # machine; their tests are structural / graceful-absence checks (see the file
 # headers) and pass whether or not the device is present.
