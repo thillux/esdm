@@ -28,6 +28,14 @@
 
 #ifdef ESDM_ES_PKCS11
 
+/*
+ * A token lost to a failed C_GenerateRandom, or not there yet, is looked for
+ * again on demand, at most once per this many seconds: a pulled smartcard must
+ * not take the source out for good, nor a broken token cost a slot
+ * enumeration per request.
+ */
+#define ESDM_PKCS11_RETRY_INTERVAL_SEC 5
+
 extern struct esdm_es_cb esdm_es_pkcs11;
 
 /**

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <libp11.h>
 
@@ -62,6 +63,12 @@ static char *pkcs11_runtime_pin = NULL;
  */
 static char *pkcs11_runtime_token_label = NULL;
 static DEFINE_MUTEX_UNLOCKED(pkcs11_mutex);
+
+/*
+ * Earliest time to look for a token again (ESDM_PKCS11_RETRY_INTERVAL_SEC),
+ * monotonic seconds, written under pkcs11_mutex.
+ */
+static time_t pkcs11_retry_at = 0;
 
 /* Caller must hold pkcs11_mutex (write lock). */
 static const char *esdm_es_pkcs11_pin_locked(void)
@@ -316,63 +323,6 @@ static uint32_t esdm_es_pkcs11_poolsize(void)
 	return ret;
 }
 
-static void esdm_es_pkcs11_get_sync(struct entropy_es *eb_es,
-				    uint32_t requested_bits)
-{
-	uint8_t buffer[ESDM_PKCS11_CHUNK_BYTES];
-	uint32_t done_bits = 0;
-
-	/*
-	 * Take an exclusive lock: PKCS11_generate_random touches per-slot
-	 * state and on errors we tear the connection down (write to shared
-	 * state).
-	 */
-	mutex_lock(&pkcs11_mutex);
-
-	if (!pkcs11_slot)
-		goto err;
-
-	while (done_bits < requested_bits) {
-		uint32_t chunk_bits = min_uint32(
-			ESDM_PKCS11_CHUNK_BYTES << 3, requested_bits - done_bits);
-		uint32_t chunk_bytes = chunk_bits >> 3;
-
-		if (PKCS11_generate_random(pkcs11_slot, buffer,
-					   ESDM_PKCS11_CHUNK_BYTES) != 0) {
-			/*
-			 * Don't tear the module down — a transient error (e.g.
-			 * smartcard removed) just drops the slot binding and
-			 * the monitor will try to re-acquire a token on the
-			 * next round.
-			 */
-			esdm_logger(
-				LOGGER_WARN, LOGGER_C_ES,
-				"PKCS#11 C_GenerateRandom failed, dropping slot for re-discovery\n");
-			esdm_es_pkcs11_drop_slot_locked();
-			goto err;
-		}
-
-		memcpy(eb_es->e + (done_bits >> 3), buffer, chunk_bytes);
-		done_bits += chunk_bits;
-	}
-
-	eb_es->e_bits = esdm_es_pkcs11_entropylevel_locked(requested_bits);
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-		    "obtained %u bits of entropy from PKCS#11 entropy source\n",
-		    eb_es->e_bits);
-
-	mutex_unlock(&pkcs11_mutex);
-	memset_secure(buffer, 0, sizeof(buffer));
-	return;
-
-err:
-	mutex_unlock(&pkcs11_mutex);
-	memset_secure(buffer, 0, sizeof(buffer));
-	eb_es->e_bits = 0;
-}
-
-#if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
-
 /*
  * Caller must hold pkcs11_mutex (write lock).
  * Try to (re-)bind to a usable token without unloading the module. Used after
@@ -434,6 +384,83 @@ static int esdm_es_pkcs11_refresh_slot_locked(void)
 	return 0;
 }
 
+/*
+ * Caller must hold pkcs11_mutex (write lock).
+ * Look for a token again if none is bound, rate limited.
+ */
+static void esdm_es_pkcs11_reacquire_locked(void)
+{
+	struct timespec now;
+
+	if (pkcs11_slot || ESDM_PKCS11_MODULE_PATH[0] == '\0')
+		return;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) ||
+	    now.tv_sec < pkcs11_retry_at)
+		return;
+
+	pkcs11_retry_at = now.tv_sec + ESDM_PKCS11_RETRY_INTERVAL_SEC;
+	(void)esdm_es_pkcs11_refresh_slot_locked();
+}
+
+static void esdm_es_pkcs11_get_sync(struct entropy_es *eb_es,
+				    uint32_t requested_bits)
+{
+	uint8_t buffer[ESDM_PKCS11_CHUNK_BYTES];
+	uint32_t done_bits = 0;
+
+	/*
+	 * Take an exclusive lock: PKCS11_generate_random touches per-slot
+	 * state and on errors we tear the connection down (write to shared
+	 * state).
+	 */
+	mutex_lock(&pkcs11_mutex);
+
+	esdm_es_pkcs11_reacquire_locked();
+	if (!pkcs11_slot)
+		goto err;
+
+	while (done_bits < requested_bits) {
+		uint32_t chunk_bits = min_uint32(ESDM_PKCS11_CHUNK_BYTES << 3,
+						 requested_bits - done_bits);
+		uint32_t chunk_bytes = chunk_bits >> 3;
+
+		if (PKCS11_generate_random(pkcs11_slot, buffer,
+					   ESDM_PKCS11_CHUNK_BYTES) != 0) {
+			/*
+			 * Don't tear the module down — a transient error (e.g.
+			 * smartcard removed) just drops the slot binding, and
+			 * the next request or monitor round re-acquires a
+			 * token. This pass credits nothing.
+			 */
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ES,
+				"PKCS#11 C_GenerateRandom failed, dropping slot for re-discovery\n");
+			esdm_es_pkcs11_drop_slot_locked();
+			goto err;
+		}
+
+		memcpy(eb_es->e + (done_bits >> 3), buffer, chunk_bytes);
+		done_bits += chunk_bits;
+	}
+
+	eb_es->e_bits = esdm_es_pkcs11_entropylevel_locked(requested_bits);
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+		    "obtained %u bits of entropy from PKCS#11 entropy source\n",
+		    eb_es->e_bits);
+
+	mutex_unlock(&pkcs11_mutex);
+	memset_secure(buffer, 0, sizeof(buffer));
+	return;
+
+err:
+	mutex_unlock(&pkcs11_mutex);
+	memset_secure(buffer, 0, sizeof(buffer));
+	eb_es->e_bits = 0;
+}
+
+#if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
+
 static void esdm_es_pkcs11_buf_fill(struct entropy_es *eb_es,
 				    uint32_t requested_bits, void *ctx)
 {
@@ -461,8 +488,7 @@ static int esdm_es_pkcs11_monitor(void)
 	 */
 	if (!slot_present) {
 		mutex_lock(&pkcs11_mutex);
-		if (!pkcs11_slot)
-			(void)esdm_es_pkcs11_refresh_slot_locked();
+		esdm_es_pkcs11_reacquire_locked();
 		slot_present = pkcs11_slot != NULL;
 		mutex_unlock(&pkcs11_mutex);
 	}

@@ -54,6 +54,8 @@
 #define TOKEN_LABEL "esdm-test-token"
 #define TOKEN_PIN "648219"
 #define TOKEN_SO_PIN "1234567890"
+/* Label of a token created only after the source looked for it */
+#define LATE_TOKEN_LABEL "esdm-late-token"
 
 static unsigned int failures;
 /* confpath holds tokendir plus a filename, so keep room for it */
@@ -350,6 +352,54 @@ static void test_clear_overrides(void)
 	      "state string malformed after clearing the overrides: %s", buf);
 }
 
+/*
+ * A token that is not there - pulled, or not inserted yet - has to be picked
+ * up once it is, without a reinitialization. Only the monitor of a build with
+ * the block cache once looked for it again, and an SP800-90C build compiles
+ * that out. Here the token turns up as a second one created in SoftHSM.
+ */
+static void test_token_appears(void)
+{
+	char *argv[] = { (char *)"softhsm2-util",  (char *)"--init-token",
+			 (char *)"--free",	   (char *)"--label",
+			 (char *)LATE_TOKEN_LABEL, (char *)"--so-pin",
+			 (char *)TOKEN_SO_PIN,	   (char *)"--pin",
+			 (char *)TOKEN_PIN,	   NULL };
+	struct entropy_es eb_es;
+	char buf[512];
+
+	CHECK(esdm_es_pkcs11_set_token_label(LATE_TOKEN_LABEL) != 0,
+	      "a token label nobody carries yet was accepted");
+
+	/* Spends the first retry, which finds nothing */
+	memset(&eb_es, 0, sizeof(eb_es));
+	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
+	CHECK(eb_es.e_bits == 0, "%u bits credited without a token",
+	      eb_es.e_bits);
+
+	CHECK(run_softhsm_util(argv) == 0, "cannot create the second token");
+
+	/* Within the retry interval it is not looked for */
+	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
+	memset(buf, 0, sizeof(buf));
+	esdm_es[ES_IDX]->state(buf, sizeof(buf));
+	CHECK(strstr(buf, LATE_TOKEN_LABEL) == NULL,
+	      "the token was looked for again within the retry interval: %s",
+	      buf);
+
+	sleep(ESDM_PKCS11_RETRY_INTERVAL_SEC + 1);
+
+	memset(&eb_es, 0, sizeof(eb_es));
+	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
+	memset(buf, 0, sizeof(buf));
+	esdm_es[ES_IDX]->state(buf, sizeof(buf));
+	CHECK(strstr(buf, LATE_TOKEN_LABEL) != NULL,
+	      "the token that turned up was not picked up: %s", buf);
+	if (esdm_config_es_pkcs11_entropy_rate())
+		CHECK(eb_es.e_bits > 0,
+		      "the token that turned up delivered no entropy");
+}
+
 static void test_reject_null(void)
 {
 	CHECK(esdm_es_pkcs11_set_pin(NULL) == -EINVAL,
@@ -385,6 +435,7 @@ int main(int argc, char *argv[])
 	test_get_entropy_differs();
 	test_state();
 	test_reject_null();
+	test_token_appears();
 	/* Last: it drops the overrides the tests above rely on */
 	test_clear_overrides();
 
