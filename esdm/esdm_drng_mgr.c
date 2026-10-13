@@ -1836,8 +1836,9 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 
 	/* Loop to collect random bits for the caller. */
 	while (outbuflen) {
+		/* Compared as size_t, a cast first wraps requests of 4 GiB */
 		uint32_t todo =
-			min_uint32((uint32_t)outbuflen, ESDM_DRNG_MAX_REQSIZE);
+			(uint32_t)min_size(outbuflen, ESDM_DRNG_MAX_REQSIZE);
 		ssize_t ret;
 
 		/*
