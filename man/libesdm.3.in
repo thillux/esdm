@@ -51,6 +51,11 @@ Reinitialize configuration, DRNG manager and entropy sources without losing
 state or entropy \- for instance after a configuration change. Must not run
 concurrently with
 .BR esdm_init ().
+Like
+.BR esdm_init (),
+it fails with
+.B \-ESHUTDOWN
+once the ESDM was torn down.
 .TP
 .BI "int esdm_init_monitor(void (*" priv_init_completion ")(void));"
 Run the entropy source monitor. The monitor watches the entropy sources for

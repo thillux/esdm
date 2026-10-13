@@ -94,6 +94,14 @@ int esdm_reinit(void)
 	int ret;
 
 	/*
+	 * After esdm_fini() the DRNGs are freed and the managers stay
+	 * terminated - re-initializing the entropy sources would set them up
+	 * against DRNGs that are gone. As esdm_init(), refuse.
+	 */
+	if (esdm_drng_mgr_terminating())
+		return -ESHUTDOWN;
+
+	/*
 	 * Stop the ES monitor first: quiesce any in-flight monitor pass and
 	 * prevent new ones for the duration of the reinitialization. Otherwise
 	 * the monitor could run a per-ES collection pass (e.g. resetting/filling

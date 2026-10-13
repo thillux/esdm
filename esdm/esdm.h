@@ -45,9 +45,10 @@ int esdm_init(void);
  * It is intended to re-initialize the ESDM after configuration changes or
  * entropy source changes, i.e. after esdm_init() was run.
  *
- * It MUST NOT be run concurrently with esdm_init().
+ * It MUST NOT be run concurrently with esdm_init(). After esdm_fini() it fails
+ * with -ESHUTDOWN, as esdm_init() does.
  *
- * @return: 0 on success, < 0 on error
+ * @return: 0 on success, -ESHUTDOWN after esdm_fini(), < 0 on other errors
  */
 int esdm_reinit(void);
 

@@ -89,5 +89,18 @@ int main(int argc, char *argv[])
 	}
 
 	printf("esdm_init() after the torn down one failed with %d\n", ret);
+
+	/*
+	 * Neither may esdm_reinit() set the entropy sources up again against
+	 * the DRNGs that are gone.
+	 */
+	ret = esdm_reinit();
+	if (ret != -ESHUTDOWN) {
+		printf("esdm_reinit() after the torn down one returned %d\n",
+		       ret);
+		return 1;
+	}
+
+	printf("esdm_reinit() after the torn down one failed with %d\n", ret);
 	return 0;
 }
