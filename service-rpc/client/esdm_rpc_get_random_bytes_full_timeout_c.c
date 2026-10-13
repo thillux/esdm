@@ -18,9 +18,11 @@
  */
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 
 #include "esdm_rpc_client_helper.h"
 #include "esdm_rpc_client_internal.h"
@@ -75,8 +77,21 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 
 	CKNULL(ts, -EINVAL);
 
+	/*
+	 * A relative time, normalized as POSIX has it. Anything else makes a
+	 * deadline that pthread_mutex_clocklock() refuses with EINVAL, on
+	 * which the lock wrapper aborts the process.
+	 */
+	if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	CKINT(clock_gettime(CLOCK_MONOTONIC, &timeout));
-	timeout.tv_sec += ts->tv_sec;
+
+	/* Capped at some 34 years, forever here, so the sum cannot overflow */
+	timeout.tv_sec +=
+		(time_t)min_uint64((uint64_t)ts->tv_sec, INT32_MAX / 2);
 	timeout.tv_nsec += ts->tv_nsec;
 	if (timeout.tv_nsec >= 1000000000) {
 		timeout.tv_sec += timeout.tv_nsec / 1000000000;

@@ -77,7 +77,16 @@ sent again, at once and, should that be answered the same way, after a second.
 Random data, blocking until the ESDM is fully seeded.
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *" buf ", size_t " buflen ", struct timespec *" ts ");"
-The same, bounded by a timeout.
+The same, bounded by the relative timeout
+.IR ts ,
+after which it returns
+.BR \-ETIMEDOUT .
+A
+.I ts
+with a negative field or a
+.I tv_nsec
+of a second or more is refused with
+.BR \-EINVAL .
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *" buf ", size_t " buflen ");"
 Random data with prediction resistance.

@@ -404,11 +404,12 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
  *
  * @param [out] buf Buffer to be filled with random bits.
  * @param [in] buflen Size of the buffer to be filled.
- * @param [in] ts maximum timeout after which the waiting will be stopped
+ * @param [in] ts maximum timeout after which the waiting will be stopped, a
+ *		  relative time with tv_sec >= 0 and tv_nsec in [0, 999999999]
  *
  * @return: read data length on success, < 0 on error (-ETIMEDOUT once @ts
- *	    elapsed, -EINTR means connection was interrupted and the caller may
- *	    try again)
+ *	    elapsed, -EINVAL for an invalid @ts, -EINTR means connection was
+ *	    interrupted and the caller may try again)
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
 						struct timespec *ts);

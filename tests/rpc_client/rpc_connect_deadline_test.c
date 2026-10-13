@@ -7,6 +7,8 @@
  * the timeout of esdm_rpcc_get_random_bytes_full_timeout() nor the registered
  * interrupt function may be ignored for that long.
  *
+ * A timeout that is no valid relative time is refused instead.
+ *
  * The test binds the unprivileged socket without listening on it.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
@@ -134,6 +136,49 @@ static int test_timed_call(void)
 	return 0;
 }
 
+/*
+ * A timeout that is no valid relative time is refused before it becomes a
+ * deadline. The only connection is held meanwhile, so the call has to wait for
+ * it until that deadline - which pthread_mutex_clocklock() refuses with EINVAL
+ * for a negative tv_nsec, aborting the process.
+ */
+static int test_invalid_timeout(void)
+{
+	static const struct timespec invalid[] = {
+		{ .tv_sec = 0, .tv_nsec = -999999999 },
+		{ .tv_sec = 0, .tv_nsec = 1000000000 },
+		{ .tv_sec = -1, .tv_nsec = 0 },
+	};
+	esdm_rpc_client_connection_t *held = NULL;
+	uint8_t buf[TEST_LEN];
+	unsigned int i;
+	int fail = 0;
+
+	printf("A timed call refuses an invalid timeout\n");
+
+	if (esdm_rpcc_get_unpriv_service(&held, NULL)) {
+		printf("FAIL: cannot take the connection\n");
+		return 1;
+	}
+
+	for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		struct timespec ts = invalid[i];
+		ssize_t ret = esdm_rpcc_get_random_bytes_full_timeout(
+			buf, sizeof(buf), &ts);
+
+		if (ret != -EINVAL) {
+			printf("FAIL: { %lld, %ld } gave %zd, not -EINVAL\n",
+			       (long long)invalid[i].tv_sec,
+			       invalid[i].tv_nsec, ret);
+			fail = 1;
+		}
+	}
+
+	esdm_rpcc_put_unpriv_service(held);
+
+	return fail;
+}
+
 static int test_interrupted_call(void)
 {
 	uint8_t buf[TEST_LEN];
@@ -172,6 +217,9 @@ int main(void)
 	if (fd < 0)
 		return 77;
 
+	/* One connection, which test_invalid_timeout() holds */
+	esdm_rpcc_set_max_online_nodes(1);
+
 	ret = esdm_rpcc_init_unpriv_service(test_interrupt);
 	if (ret) {
 		printf("Cannot initialize the RPC client: %d\n", ret);
@@ -180,6 +228,7 @@ int main(void)
 	}
 
 	ret = test_timed_call();
+	ret |= test_invalid_timeout();
 	ret |= test_interrupted_call();
 
 	esdm_rpcc_fini_unpriv_service();
