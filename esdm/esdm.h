@@ -404,11 +404,13 @@ int esdm_ntg1_2024_compliant(void);
  * class answers here.
  *
  * A build to DRG.3 applies the entropy source oversampling without the request
- * size based reseeding limits, and so answers esdm_sp80090c_compliant() too.
- * The status reports the class rather than SP800-90C for it. A DRG.4 build
- * applies no oversampling of its own, so there esdm_sp80090c_compliant()
- * answers only where SP800-90C was configured separately, and both are
- * reported.
+ * size based reseeding limits. It answers esdm_es_oversampling() but not
+ * esdm_sp80090c_compliant(), which returns 0 for it even where 'sp80090c' was
+ * configured alongside: without those limits the build does not meet
+ * SP800-90C, and the status reports the class rather than SP800-90C for it. A
+ * DRG.4 build applies no oversampling of its own, so there
+ * esdm_sp80090c_compliant() answers only where SP800-90C was configured
+ * separately, and both are reported.
  *
  * @return 1 if DRG.3 is satisfied, 0 if not
  */
