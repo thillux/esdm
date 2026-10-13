@@ -71,8 +71,15 @@ int main(void)
 		goto out;
 	}
 
-	/* The first request brings the node DRNG up */
+	/*
+	 * The first request allocates the node DRNG. Bring it up as the worker
+	 * would: without one, a request seeds it only once the entropy sources
+	 * report enough for a seed at once, which under the NTG.1 seeding
+	 * strategy they never do - its two sources of 240 bits each are
+	 * collected over several passes.
+	 */
 	esdm_get_random_bytes(buf, sizeof(buf));
+	esdm_force_fully_seeded_all_drbgs();
 
 	/*
 	 * The instance stays valid until esdm_fini() below; the reference is
@@ -83,6 +90,13 @@ int main(void)
 	if (drng == esdm_drng_init_instance()) {
 		printf("No node DRNG in use\n");
 		ret = 77;
+		goto out;
+	}
+
+	/* Not seeded, it serves no request, and the request below misses it */
+	if (!atomic_load(&drng->fully_seeded)) {
+		printf("FAIL: the node DRNG cannot be seeded\n");
+		ret = 1;
 		goto out;
 	}
 
