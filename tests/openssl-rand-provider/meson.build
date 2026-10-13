@@ -70,13 +70,11 @@ test('OpenSSL 3.x EGD Provider - instance full', openssl_rng_tester,
 	env: tester_esdm_env,
 )
 
-# Expected to fail: the EGD protocol has no way to ask for prediction
-# resistance, so this provider refuses rather than quietly handing back data
-# that does not have the property the caller asked for. A server that does not
-# come up or a provider that does not load exits with 99, which meson reports
-# as an error even here, so only the refusal itself counts as the failure.
+# The EGD protocol has no way to ask for prediction resistance, so this
+# provider refuses rather than quietly handing back data that does not have the
+# property the caller asked for. The tester checks for the refusal itself,
+# rather than taking any failure for it.
 test('OpenSSL 3.x EGD Provider - instance pr is refused', openssl_rng_tester,
-	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'egd'],
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr_refused', 'egd'],
 	env: tester_esdm_env,
-	should_fail: true,
 )
