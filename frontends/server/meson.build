@@ -75,6 +75,19 @@ else
 	server_conf_data.set('EBPF_UNIT_SNIPPET', '')
 endif
 
+if get_option('es_jent_kernel').enabled()
+	# The Kernel Jitter RNG is read through libkcapi, i.e. an AF_ALG socket.
+	# Additional RestrictAddressFamilies= lines are merged with the unit's.
+	server_conf_data.set('JENT_KERNEL_UNIT_SNIPPET', '''
+# KERNEL JITTER RNG ENTROPY SOURCE BEGIN
+RestrictAddressFamilies=AF_ALG
+# KERNEL JITTER RNG ENTROPY SOURCE END
+'''
+	)
+else
+	server_conf_data.set('JENT_KERNEL_UNIT_SNIPPET', '')
+endif
+
 esdm_server_service = configure_file(
 	input : 'esdm-server.service.in',
 	output : 'esdm-server.service',

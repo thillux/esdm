@@ -107,6 +107,7 @@ SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io 
 # Last, as a later deny line would take back what this allows again (@debug
 # holds the perf_event_open the eBPF entropy sources need).
 @EBPF_UNIT_SNIPPET@
+@JENT_KERNEL_UNIT_SNIPPET@
 UMask=0077
 
 [Install]
