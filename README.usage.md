@@ -139,8 +139,9 @@ same amount of entropy does not replace it.
 
 The compile time option of `ais2031_drg4` is independent of it and caps the
 request size based reseeding limits to the values required by DRG.4.10 of the
-same standard, i.e. a reseed is attempted after 2**16 output bits and the fully
-seeded state is lost after 2**17 output bits without a successful reseed.
+same standard, i.e. the fully seeded state is lost after 2**17 output bits
+without a successful reseed, and a reseed is attempted after three quarters of
+that, 98304 output bits. The option `ais2031_drg3` skips these caps.
 
 ## AIS 20/31 (2011) Compliance
 

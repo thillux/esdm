@@ -812,13 +812,14 @@ option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
        Therefore 'drng_max_reseed_bits' always has to be larger than
        'drng_reseed_threshold_bits'.
 
-       Set this setting to anything lower than 131072 (2**17) to enforce
-       DRG.4.10 of AIS 20/31 Version 3.0. E.g. 65536 (2**16) and
-       'drng_max_reseed_bits' to 131072 (2**17).
+       Set 'drng_max_reseed_bits' to 131072 (2**17) or lower to enforce
+       DRG.4.10 of AIS 20/31 Version 3.0.
 
-       Both specified limits of 2**17 and 2**16 are applied unless smaller
-       values are configured when the options sp80090c, fips140 and/or
-       ais2031_drg4 are defined.
+       When the options sp80090c, fips140 and/or ais2031_drg4 are defined,
+       'drng_max_reseed_bits' is capped at 131072 (2**17) and this option
+       at three quarters of the resulting maximum, i.e. 98304 bits, unless
+       smaller values are configured. The option ais2031_drg3 skips both
+       caps.
        ''')
 
 option('drng_max_reseed_bits', type: 'integer', value: 0xffffffff,
