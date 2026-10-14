@@ -18,8 +18,8 @@ documented in `random(4)` or using `select(2)` / `poll(2)` on the device files.
 
 In addition to the Linux interface support, the ESDM provides a daemon managing
 the entropy sources and DRNG instances that can be accessed with a wrapper
-library. The ESDM requires only POSIX support along with `protobuf-c` and thus
-is intended to be executable on different operating systems.
+library. The ESDM requires only POSIX support along with `protobuf-c` and
+`json-c` and thus is intended to be executable on different operating systems.
 
 It is extensible as follows:
 
@@ -71,6 +71,8 @@ The following dependencies are required:
   support is needed. Either the package of your favorite distribution must be
   installed or obtain the sources from the
   [Protobuf-C Github website](https://github.com/protobuf-c/protobuf-c).
+
+* json-c: The ESDM library renders its JSON status documents with it.
 
 The following dependencies are required provided the respective functionality
 is enabled during compile time:
@@ -216,8 +218,8 @@ non-zero entropy rate.
 
 The default entropy rate of both sources is 0 (uncredited): determine the
 appropriate rate for a deployment environment with the measurement tooling
-in `addon/es_ebpf_testing/` before crediting the sources. See
-`doc/esdm_es_ebpf.md` for the design description.
+in `addon/es_ebpf_testing/` before crediting the sources, see its
+`README.md`.
 
 ## Testing
 
@@ -302,9 +304,9 @@ The ESDM consists of the following components:
 
   NOTE: If you run the `esdm-proc` tool on a system with SELinux in enforcing
   mode using the targeted policy, you need to create a new policy. A template
-  is provided in the `addons/esdm-proc-selinux` directory. Compile the policy
+  is provided in the `addon/esdm-proc-selinux` directory. Compile the policy
   with the provided `esdm_proc.sh` script. For details, see
-  `addons/esdm-proc-selinux/README.md`.
+  `addon/esdm-proc-selinux/README.md`.
 
 * `libesdm-getrandom.so`: The library provides a wrapper to the `getrandom` and
   `getentropy` libc library calls. To use the library for other consumers, use
@@ -326,7 +328,7 @@ The ESDM consists of the following components:
 
 * `openssl-provider`: A random provider for OpenSSL 3.0 and greater is included.
   Load `libesdm-rng-provider.so` if all random numbers should originate in ESDM
-  or `esdm-seed-src-provider.so` if ESDM should only be used as a source of seeds.
+  or `libesdm-seed-src-provider.so` if ESDM should only be used as a source of seeds.
   Both reach the ESDM over its RPC interface and tag their algorithms with the
   property `provider=esdm`.
 
