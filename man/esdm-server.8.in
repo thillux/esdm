@@ -164,9 +164,13 @@ client still reads that answer.
 Served by one worker thread per online CPU, at most four, each serving the
 clients it accepted. At most 2048 concurrent connections in total and 256 per
 UID. A connection
-that has received no command and owes no response for 60 seconds is closed;
+that has received no command and owes no response for 60 seconds is closed
+only when its slot is wanted: at most 256 slots are left, an accept ran out of
+descriptors within that time, or its UID was refused a connection and is still
+at its limit.
 .BR libesdm_egd_client (3)
-reconnects transparently.
+reconnects transparently, which a client confined by seccomp after it connected
+may not survive.
 .PP
 A connection beyond the limit of its UID is accepted and closed at once. The
 daemon logs a warning when a UID reaches its limit, and again only after the
