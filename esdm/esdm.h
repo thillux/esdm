@@ -352,17 +352,20 @@ void esdm_pool_set_entropy(uint32_t entropy_bits);
 /**
  * @brief Force a reseed of all DRNGs in the ESDM
  *
- * The call only sets a flag for the reseed, the actual reseed is performed
- * the next time the DRNG is requested to deliver random data.
+ * The call marks the fully seeded DRNGs for a reseed and wakes the reseed
+ * worker, which reseeds them ahead of the next request. Without the worker,
+ * the reseed is performed the next time the DRNG is requested to deliver
+ * random data.
  */
 void esdm_drng_force_reseed(void);
 
 /**
  * @brief Indicator whether the ESDM is operational
  *
- * The ESDM is operational if at least one DRNG is fully seeded with the amount
- * of entropy equal to the DRNG security strength (regular mode) or with the
- * amount of entropy stipulated by SP800-90C (FIPS mode).
+ * The ESDM is operational if the initial DRNG, the fallback for every request,
+ * is fully seeded with the amount of entropy equal to the DRNG security
+ * strength (regular mode) or with the amount of entropy stipulated by
+ * SP800-90C (FIPS mode). The seeding of any other DRNG does not count.
  *
  * @return 1 if operational, 0 if not operational
  */
@@ -439,7 +442,9 @@ int esdm_drg3_compliant(void);
 int esdm_drg4_compliant(void);
 
 /**
- * @brief Indicator whether at least one DRNG is fully seeded
+ * @brief Indicator whether the initial DRNG is fully seeded
+ *
+ * The seeding of any other DRNG does not count, see esdm_state_operational.
  *
  * @return 1 if fully seeded, 0 if not fully seeded
  */
