@@ -629,10 +629,26 @@ static void test_flood(void)
 	atomic_store(&test_insert_delay_us, 20);
 
 	for (i = 0; i < TEST_FLOODERS; i++) {
+		/*
+		 * The kernel's minimum. What a flooder has in flight is
+		 * drained after the flood, and a default sized buffer holds
+		 * tens of thousands of insertions - more than a sanitizer and
+		 * coverage build inserts in the time waited for them below.
+		 */
+		int sndbuf = 1;
+
 		flooders[i].fd = test_connect();
 		if (flooders[i].fd < 0) {
 			CHECK(0, "cannot connect to %s: %s", sockpath,
 			      strerror(errno));
+			break;
+		}
+
+		if (setsockopt(flooders[i].fd, SOL_SOCKET, SO_SNDBUF, &sndbuf,
+			       sizeof(sndbuf)) < 0) {
+			CHECK(0, "cannot shrink a flooder's buffer: %s",
+			      strerror(errno));
+			close(flooders[i].fd);
 			break;
 		}
 
