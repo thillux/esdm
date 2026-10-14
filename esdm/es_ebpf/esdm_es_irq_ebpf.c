@@ -1,9 +1,8 @@
 /*
  * ESDM Slow Entropy Source: eBPF-based interrupt entropy source
  *
- * Collects entropy from the timing of hardware and soft interrupts observed
- * via eBPF programs attached to the irq_handler_entry and softirq_entry
- * tracepoints. In contrast to the interrupt entropy source implemented by
+ * Collects entropy from the timing of hardware interrupts observed via an eBPF
+ * program attached to the irq_handler_entry tracepoint. In contrast to the interrupt entropy source implemented by
  * esdm_es_irq.c, no kernel patch is required. Also, the interrupt timings
  * are only observed and not diverted from the kernel RNG - as the kernel RNG
  * processes the same events, the data of this entropy source is credited

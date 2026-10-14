@@ -163,9 +163,10 @@ limit that this value must be in the range between 0 and 256.
 When configuring this value to 0, the kernel RNG entropy source will provide
 256 bits of data without being credited to contain entropy.
 
-Note: This value is set to 0 automatically when booting the kernel in FIPS
-mode (with fips=1 kernel command line option). This is due to the fact that
-random.c is not SP800-90B compliant.
+Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, this value
+is set to 0 automatically when booting the kernel in FIPS mode (with fips=1
+kernel command line option). This is due to the fact that random.c is not
+SP800-90B compliant.
 ''')
 
 ################################################################################
@@ -383,10 +384,10 @@ option('es_irq_ebpf', type: 'feature', value: 'disabled',
 The ESDM models an entropy source based on the timing of the
 occurrence of interrupts. In contrast to the es_irq entropy
 source which requires a patched kernel, this entropy source
-obtains the interrupt timing by attaching eBPF programs to the
-stable irq_handler_entry and softirq_entry tracepoints of a
-stock Linux kernel (BTF/CO-RE required, i.e. the kernel must be
-built with CONFIG_DEBUG_INFO_BTF).
+obtains the interrupt timing by attaching an eBPF program to the
+stable irq_handler_entry tracepoint of a stock Linux kernel
+(BTF/CO-RE required, i.e. the kernel must be built with
+CONFIG_DEBUG_INFO_BTF).
 
 Note: unlike the es_irq entropy source, this entropy source
 does not divert the interrupt timings from the kernel RNG - it

@@ -332,8 +332,8 @@ esdm_ebpf_timer_arm(struct esdm_ebpf_percpu_state *state)
  * replace it.
  *
  * The in_progress flag guards against same-CPU nesting: e.g. for the
- * interrupt entropy source a hardirq may preempt the program running in
- * softirq context on the same CPU. Nested contexts on one CPU are strictly
+ * interrupt entropy source a nested hardirq may preempt the program on the
+ * same CPU. Nested contexts on one CPU are strictly
  * stacked, so a plain flag without atomics is sufficient - the nested event
  * is simply skipped.
  */

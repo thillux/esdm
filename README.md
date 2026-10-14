@@ -182,8 +182,8 @@ during the startup of the `esdm-server` and then deactivate itself.
 As an alternative to the kernel-patch based scheduler and interrupt entropy
 sources above, the ESDM provides eBPF-based variants (`es_sched_ebpf` and
 `es_irq_ebpf`) that collect the same event timing on a stock Linux kernel:
-eBPF programs attached to the stable `sched_switch`, `irq_handler_entry`
-and `softirq_entry` tracepoints record the event time stamps, execute the
+eBPF programs attached to the stable `sched_switch` and
+`irq_handler_entry` tracepoints record the event time stamps, execute the
 SP800-90B health tests (RCT and APT) on the raw data in FIPS 140,
 SP800-90C and NTG.1 mode and deposit the time between successive events of
 a CPU. The spacing of the events is where the
