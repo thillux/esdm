@@ -38,6 +38,7 @@
 #include <stdbool.h>
 #include "buffer.h"
 #include "config.h"
+#include "constructor.h"
 #include "conv_be_le.h"
 #include "esdm_rpc_client_internal.h"
 #include "esdm_rpc_protocol.h"
@@ -65,16 +66,73 @@ struct esdm_rpcc_write_buf {
  * call - they never carry state across calls or get touched by another thread.
  * So one buffer set per calling thread suffices instead of one per connection,
  * bounding this memory by the number of RPC-issuing threads rather than by the
- * connection pool size. esdm_rpcc_reqbuf is cast to the protocol header
- * structs, hence the 64-bit alignment.
+ * connection pool size. reqbuf is cast to the protocol header structs, hence
+ * the 64-bit alignment.
+ *
+ * They are allocated on first use rather than declared __thread: glibc carves
+ * the TLS of a library loaded at startup out of every thread's stack, and
+ * 129 KiB of it broke threads with small stacks in any process linking or
+ * preloading this library.
  */
-static __thread uint8_t esdm_rpcc_reqbuf[ESDM_RPC_MAX_MSG_SIZE]
-	__attribute__((aligned(sizeof(uint64_t))));
+struct esdm_rpcc_tbuf {
+	uint8_t reqbuf[ESDM_RPC_MAX_MSG_SIZE]
+		__attribute__((aligned(sizeof(uint64_t))));
+	/*
+	 * Scratch buffer used to unpack a response without a malloc()/free()
+	 * round-trip per call; backs the esdm_rpc_alloc() bump allocator.
+	 */
+	uint8_t unpack_buf[ESDM_RPC_MAX_UNPACK_SIZE];
+};
+
+static pthread_key_t esdm_rpcc_tbuf_key;
+static pthread_once_t esdm_rpcc_tbuf_once = PTHREAD_ONCE_INIT;
+static bool esdm_rpcc_tbuf_key_valid;
+
+/* The buffers are zeroized after every use, freeing them is all that is left */
+static void esdm_rpcc_tbuf_free(void *tbuf)
+{
+	free(tbuf);
+}
+
+static void esdm_rpcc_tbuf_key_create(void)
+{
+	esdm_rpcc_tbuf_key_valid =
+		!pthread_key_create(&esdm_rpcc_tbuf_key, esdm_rpcc_tbuf_free);
+}
+
+/* The calling thread's buffers, NULL when they cannot be allocated. */
+static struct esdm_rpcc_tbuf *esdm_rpcc_tbuf_get(void)
+{
+	struct esdm_rpcc_tbuf *tbuf;
+
+	pthread_once(&esdm_rpcc_tbuf_once, esdm_rpcc_tbuf_key_create);
+	if (!esdm_rpcc_tbuf_key_valid)
+		return NULL;
+
+	tbuf = pthread_getspecific(esdm_rpcc_tbuf_key);
+	if (tbuf)
+		return tbuf;
+
+	tbuf = calloc(1, sizeof(*tbuf));
+	if (!tbuf)
+		return NULL;
+	if (pthread_setspecific(esdm_rpcc_tbuf_key, tbuf)) {
+		free(tbuf);
+		return NULL;
+	}
+
+	return tbuf;
+}
+
 /*
- * Scratch buffer used to unpack a response without a malloc()/free() round-trip
- * per call; backs the esdm_rpc_alloc() bump allocator while in use.
+ * A library unloaded with dlclose() must not leave its key destructor behind
+ * for threads exiting later. Buffers still held by other threads leak then.
  */
-static __thread uint8_t esdm_rpcc_unpack_buf[ESDM_RPC_MAX_UNPACK_SIZE];
+ESDM_DEFINE_DESTRUCTOR(esdm_rpcc_tbuf_key_delete)
+{
+	if (esdm_rpcc_tbuf_key_valid)
+		pthread_key_delete(esdm_rpcc_tbuf_key);
+}
 
 static void register_fork_handler(void);
 
@@ -374,7 +432,8 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
  */
 static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 				unsigned int method_index,
-				esdm_rpc_client_connection_t *rpc_conn)
+				esdm_rpc_client_connection_t *rpc_conn,
+				struct esdm_rpcc_tbuf *tbuf)
 {
 #define ESDM_RPCC_BUF_WRITE_HEADER_SZ (sizeof(struct esdm_rpc_proto_cs_header))
 
@@ -382,7 +441,7 @@ static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 	int ret;
 	struct esdm_rpc_proto_cs_header *cs_header;
 	struct esdm_rpc_write_data_buf tmp = {
-		.dst_len = sizeof(esdm_rpcc_reqbuf) - ESDM_RPCC_BUF_WRITE_HEADER_SZ,
+		.dst_len = sizeof(tbuf->reqbuf) - ESDM_RPCC_BUF_WRITE_HEADER_SZ,
 		.dst_written = 0,
 	};
 
@@ -395,9 +454,9 @@ static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 		return -EFAULT;
 	}
 
-	tmp.dst_buf = esdm_rpcc_reqbuf + ESDM_RPCC_BUF_WRITE_HEADER_SZ;
+	tmp.dst_buf = tbuf->reqbuf + ESDM_RPCC_BUF_WRITE_HEADER_SZ;
 
-	cs_header = (struct esdm_rpc_proto_cs_header *)esdm_rpcc_reqbuf;
+	cs_header = (struct esdm_rpc_proto_cs_header *)tbuf->reqbuf;
 	cs_header->method_index = le_bswap32(method_index);
 	cs_header->message_length = le_bswap32(message_length);
 	cs_header->request_id = le_bswap32(0);
@@ -416,7 +475,7 @@ static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 		goto out;
 	}
 
-	CKINT_LOG(esdm_rpc_client_write_data_fd(rpc_conn, esdm_rpcc_reqbuf,
+	CKINT_LOG(esdm_rpc_client_write_data_fd(rpc_conn, tbuf->reqbuf,
 						ESDM_RPCC_BUF_WRITE_HEADER_SZ +
 							message_length),
 		  "Submission of message data failed with error %d\n", ret);
@@ -428,7 +487,7 @@ out:
 	 * and clear data from ESDM in your application or patch
 	 * ESDM to include a cryptographic tunnel to your application.
 	 */
-	memset_secure(esdm_rpcc_reqbuf, 0,
+	memset_secure(tbuf->reqbuf, 0,
 		      message_length + ESDM_RPCC_BUF_WRITE_HEADER_SZ);
 	return ret;
 }
@@ -439,6 +498,7 @@ out:
  */
 static int
 esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
+			     struct esdm_rpcc_tbuf *tbuf,
 			     const ProtobufCMessageDescriptor *message_desc,
 			     ProtobufCClosure closure, void *closure_data,
 			     unsigned int max_retries)
@@ -461,7 +521,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		return -EINVAL;
 
 	/* The cast is appropriate as the buffer is aligned to 64 bits. */
-	received_data = (struct esdm_rpc_proto_sc *)esdm_rpcc_reqbuf;
+	received_data = (struct esdm_rpc_proto_sc *)tbuf->reqbuf;
 
 	/* Read the data into the local buffer storage */
 	do {
@@ -478,8 +538,8 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		 * full message is submitted in one send operation. Therefore,
 		 * short-reads cannot occur here and can be ignored.
 		 */
-		received = read(rpc_conn->fd, esdm_rpcc_reqbuf,
-				sizeof(esdm_rpcc_reqbuf));
+		received = read(rpc_conn->fd, tbuf->reqbuf,
+				sizeof(tbuf->reqbuf));
 
 		/*
 		 * Only a poll timeout of this very read keeps the wait going -
@@ -626,16 +686,16 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			}
 		} else {
 			/*
-			 * Unpack into a per-connection scratch buffer via a bump
+			 * Unpack into a per-thread scratch buffer via a bump
 			 * allocator instead of malloc()/free(). This avoids a
 			 * heap allocation per call and lets us reliably zeroize
 			 * the unpacked copy afterwards - the default allocator's
 			 * free() would otherwise leave it in the heap unscrubbed.
 			 */
 			struct buffer tlh = {
-				.len = sizeof(esdm_rpcc_unpack_buf),
+				.len = sizeof(tbuf->unpack_buf),
 				.consumed = 0,
-				.buf = esdm_rpcc_unpack_buf,
+				.buf = tbuf->unpack_buf,
 			};
 			ProtobufCAllocator allocator = {
 				.alloc = esdm_rpc_alloc,
@@ -659,7 +719,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 				closure(msg, closure_data);
 			}
 			if (tlh.consumed)
-				memset_secure(esdm_rpcc_unpack_buf, 0,
+				memset_secure(tbuf->unpack_buf, 0,
 					      tlh.consumed);
 		}
 		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
@@ -695,7 +755,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 	}
 
 	if (received > 0) {
-		memset_secure(esdm_rpcc_reqbuf, 0, (size_t)received);
+		memset_secure(tbuf->reqbuf, 0, (size_t)received);
 	}
 	return ret;
 }
@@ -707,6 +767,7 @@ int esdm_rpcc_fuzz_response(const ProtobufCMessageDescriptor *message_desc,
 			    ProtobufCClosure closure, void *closure_data)
 {
 	esdm_rpc_client_connection_t rpc_conn;
+	struct esdm_rpcc_tbuf *tbuf;
 	int sockets[2];
 	int ret;
 
@@ -731,11 +792,17 @@ int esdm_rpcc_fuzz_response(const ProtobufCMessageDescriptor *message_desc,
 		goto out;
 	}
 
+	tbuf = esdm_rpcc_tbuf_get();
+	if (!tbuf) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	memset(&rpc_conn, 0, sizeof(rpc_conn));
 	rpc_conn.fd = sockets[0];
 
-	ret = esdm_rpc_client_read_handler(&rpc_conn, message_desc, closure,
-					   closure_data,
+	ret = esdm_rpc_client_read_handler(&rpc_conn, tbuf, message_desc,
+					   closure, closure_data,
 					   ESDM_MAX_RX_TX_RETRIES);
 
 out:
@@ -776,6 +843,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 			max_uint32(ESDM_MAX_RX_TX_RETRIES,
 				   ESDM_RPCC_RX_SUBMISSION_MS /
 					   ESDM_RPCC_RX_POLL_MS);
+	struct esdm_rpcc_tbuf *tbuf = esdm_rpcc_tbuf_get();
 	struct timespec current_time, start_time;
 	int64_t used_before_ns;
 	bool reconnected = false;
@@ -792,6 +860,11 @@ static void esdm_client_invoke(ProtobufCService *service,
 		reset_conn_socket(rpc_conn);
 
 	rpc_conn->last_error = 0;
+
+	if (!tbuf) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &start_time);
 
@@ -818,11 +891,13 @@ static void esdm_client_invoke(ProtobufCService *service,
 		}
 
 		/* Pack the protobuf-c data and send it over the wire */
-		CKINT_LOG(esdm_rpc_client_pack(input, method_index, rpc_conn),
+		CKINT_LOG(esdm_rpc_client_pack(input, method_index, rpc_conn,
+					       tbuf),
 			  "Sending of data failed: %d\n", ret);
 
 		/* Receive data */
-		ret = esdm_rpc_client_read_handler(rpc_conn, method->output,
+		ret = esdm_rpc_client_read_handler(rpc_conn, tbuf,
+						   method->output,
 						   closure, closure_data,
 						   rx_retries);
 
@@ -890,7 +965,7 @@ static void esdm_client_destroy(ProtobufCService *service)
 		reset_conn_socket(rpc_conn);
 	}
 	/*
-	 * No per-connection buffer to wipe - the per-thread esdm_rpcc_reqbuf is
+	 * No per-connection buffer to wipe - the per-thread buffers are
 	 * zeroized after every invoke in esdm_rpc_client_read_handler().
 	 */
 	mutex_w_unlock(&rpc_conn->lock);

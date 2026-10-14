@@ -60,6 +60,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_small_stack_test = executable(
+			'rpc_small_stack_test',
+			[ 'rpc_small_stack_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	rpc_connect_deadline_test = executable(
 			'rpc_connect_deadline_test',
 			[ 'rpc_connect_deadline_test.c' ],
@@ -176,6 +184,10 @@ if get_option('esdm-server').enabled()
 	# nothing else may run alongside.
 	test('RPC call get_random_bytes retries on EAGAIN',
 		rpc_get_random_bytes_eagain_test, is_parallel: false)
+
+	# Needs no server: only the thread creation is tested.
+	test('RPC client leaves small thread stacks usable',
+		rpc_small_stack_test)
 
 	# The same stand-in, answering calls while the client is set up and
 	# torn down under them.

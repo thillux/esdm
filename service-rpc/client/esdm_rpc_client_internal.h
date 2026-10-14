@@ -103,10 +103,10 @@ struct esdm_rpc_client_connection {
 
 	/*
 	 * The request/response and unpack scratch buffers are not stored per
-	 * connection but per calling thread (see esdm_rpcc_reqbuf /
-	 * esdm_rpcc_unpack_buf in esdm_rpc_client.c): they are only ever used
-	 * during a single synchronous invoke held by the calling thread, so one
-	 * buffer set per thread suffices instead of one per connection. This
+	 * connection but per calling thread (see struct esdm_rpcc_tbuf in
+	 * esdm_rpc_client.c): they are only ever used during a single
+	 * synchronous invoke held by the calling thread, so one buffer set per
+	 * thread suffices instead of one per connection. This
 	 * bounds the buffer memory by the number of threads issuing RPCs rather
 	 * than by the size of the connection pool.
 	 */
