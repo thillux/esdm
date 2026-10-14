@@ -142,11 +142,11 @@ int main(int argc, char *argv[])
 		if (sched_setaffinity(getpid(), sizeof(cpu_set_t), &set) ==
 		    -1) {
 			printf("Cannot pin process to CPU 1\n");
-			return 1;
+			return 77;
 		}
 		if (sched_getcpu() < 1) {
 			printf("Cannot pin process to CPU 1\n");
-			return 1;
+			return 77;
 		}
 	}
 	ret = esdm_drng_mgr_max_wo_reseed_test(drng_instances > 1 ? true :

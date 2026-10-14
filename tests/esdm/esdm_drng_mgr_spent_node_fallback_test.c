@@ -130,7 +130,7 @@ int main(void)
 	if (sched_setaffinity(getpid(), sizeof(cpu_set_t), &set) == -1 ||
 	    sched_getcpu() < 1) {
 		printf("Cannot pin process to CPU 1\n");
-		return 1;
+		return 77;
 	}
 
 	return esdm_drng_mgr_spent_node_fallback_test();
