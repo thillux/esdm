@@ -1395,6 +1395,16 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 	return conn;
 }
 
+/* Did an accept fail for want of descriptors within the last poll interval? */
+static bool esdm_egd_starving(uint64_t now)
+{
+	uint64_t starved_at = atomic_load(&esdm_egd_starved_at);
+
+	/* Another worker may have stored a time later than @now. */
+	return starved_at && (now < starved_at ||
+			      now - starved_at < ESDM_EGD_IDLE_POLL_MS);
+}
+
 /*
  * Is the server short of connection slots or descriptors? See
  * ESDM_EGD_IDLE_TIMEOUT_MS. A failed accept counts for as long as a connection
@@ -1464,7 +1474,7 @@ static int esdm_egd_handler(void *args)
 	/*
 	 * accept() ran out of descriptors or memory. The client stays queued,
 	 * so the level-triggered listener would wake us again at once: listen
-	 * no more until a connection closes or a poll interval passes quietly.
+	 * no more for a while, see below.
 	 */
 	bool accept_paused = false;
 	size_t paused_connections = 0;
@@ -1571,9 +1581,17 @@ static int esdm_egd_handler(void *args)
 			goto out;
 		}
 
+		/*
+		 * The pause ends with a quiet poll interval, a connection
+		 * closed here, or a shortage older than the interval - the
+		 * descriptors may have been freed elsewhere, and a client of
+		 * this worker sending more often than the interval would
+		 * otherwise keep it paused.
+		 */
 		if (accept_paused &&
 		    (!nfds ||
-		     atomic_load(&esdm_egd_connections) < paused_connections))
+		     atomic_load(&esdm_egd_connections) < paused_connections ||
+		     !esdm_egd_starving(esdm_egd_now_ms())))
 			accept_paused = false;
 
 		for (i = 0; i < nfds; i++) {
