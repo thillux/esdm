@@ -2418,17 +2418,27 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 	if (mutex_w_trylock(&esdm_get_seed_lock) != 0)
 		return -EAGAIN;
 
-	CKINT(esdm_drng_sleep_while_not_all_nodes_seeded(
-		flags & ESDM_GET_SEED_NONBLOCK));
+	for (;;) {
+		CKINT(esdm_drng_sleep_while_not_all_nodes_seeded(
+			flags & ESDM_GET_SEED_NONBLOCK));
 
-	/* Try to get the pool lock and sleep on it to get it. */
-	esdm_pool_lock();
-
-	/* If an ESDM DRNG becomes unseeded, give this DRNG precedence. */
-	if (!esdm_pool_all_nodes_seeded_get()) {
+		/* Try to get the pool lock and sleep on it to get it. */
+		esdm_pool_lock();
+		if (esdm_pool_all_nodes_seeded_get())
+			break;
 		esdm_pool_unlock();
-		buflen = 0;
-		goto out;
+
+		/*
+		 * A DRNG became unseeded meanwhile and takes precedence. The
+		 * buffer holds nothing but its size, so this is no answer of
+		 * 0 bytes - which a caller would take for a filled buffer -
+		 * but one to try again, the blocking caller waiting for it.
+		 */
+		if ((flags & ESDM_GET_SEED_NONBLOCK) ||
+		    atomic_load(&esdm_drng_mgr_terminate)) {
+			ret = -EAGAIN;
+			goto out;
+		}
 	}
 
 	/*

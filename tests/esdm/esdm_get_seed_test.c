@@ -115,15 +115,16 @@ int main(int argc, char *argv[])
 	 * Now that we guaranteed that all DRNGs are initialized, get the seed
 	 */
 	rc = esdm_get_seed(buf, buflen, ESDM_GET_SEED_NONBLOCK);
-	if (rc < 0) {
-		printf("esdm_get_seed returned an error %zd\n", rc);
-		ret = 1;
+	/* A DRNG losing its seed meanwhile takes precedence. */
+	if (rc == -EAGAIN) {
+		printf("esdm_get_seed was unable to produce entropy\n");
+		ret = 77;
 		goto out;
 	}
 
-	if (rc == 0) {
-		printf("esdm_get_seed was unable to produce entropy\n");
-		ret = 77;
+	if (rc <= 0) {
+		printf("esdm_get_seed returned an error %zd\n", rc);
+		ret = 1;
 		goto out;
 	}
 
@@ -154,16 +155,16 @@ int main(int argc, char *argv[])
 
 	rc = esdm_get_seed(buf, buflen,
 			   ESDM_GET_SEED_NONBLOCK | ESDM_GET_SEED_FULLY_SEEDED);
-	if (rc < 0) {
-		printf("esdm_get_seed returned an error for fully seeded request %zd\n",
-		       rc);
-		ret = 1;
+	if (rc == -EAGAIN) {
+		printf("esdm_get_seed was unable to produce entropy\n");
+		ret = 77;
 		goto out;
 	}
 
-	if (rc == 0) {
-		printf("esdm_get_seed was unable to produce entropy\n");
-		ret = 77;
+	if (rc <= 0) {
+		printf("esdm_get_seed returned an error for fully seeded request %zd\n",
+		       rc);
+		ret = 1;
 		goto out;
 	}
 

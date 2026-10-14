@@ -159,19 +159,21 @@ enum esdm_get_seed_flags {
  * requirements during instantiating a DRNG and at runtime of the DRNG. When
  * specifying ESDM_GET_SEED_FULLY_SEEDED the caller indicates the DRNG was
  * already fully seeded and the regular amount of entropy is requested.
- * Otherwise, the ESDM will obtain the entropy rate required for initial
- * seeding. The following minimum entropy rates will be obtained:
+ * Otherwise, the ESDM requests the entropy required for initial seeding. The
+ * following amounts are requested from each entropy source individually:
  *
- * * FIPS mode:
+ * * SP800-90C oversampling in effect (see esdm_es_oversampling()):
  *	* Initial seeding: 384 bits of entropy
  *	* Runtime seeding: 256 bits of entropy
- * * Non-FIPS mode:
- *	* 128 bits of entropy in any case
+ * * Otherwise: 256 bits of entropy in any case
  *
- * Albeit these are minimum entropy rates, the ESDM tries to request the
- * given amount of entropy from each entropy source individually. If the
- * minimum amount of entropy cannot be obtained collectively by all entropy
- * sources, the ESDM will not fill the buffer.
+ * These are requested, not guaranteed amounts: the sources are only asked
+ * once at least 256 bits are available from all of them together, and what
+ * they deliver may fall short. The buffer is filled with what they deliver,
+ * and entropy_rate below reports the entropy it holds - the caller must check
+ * it against what its DRNG needs. A blocking call usually returns once one
+ * collection gathered any entropy, but either call may report an entropy_rate
+ * of 0.
  *
  * Hint: if you do not want to use the ESDM's DRNGs in general, you may want
  * to consider to reduce the number of DRNGs to only one to reduce the pressure
@@ -208,8 +210,10 @@ enum esdm_get_seed_flags {
  * @param [in] flags Flags field to adjust the behavior
  *
  * @return -EINVAL or -EMSGSIZE indicating the buffer is too small, -EAGAIN when
- *	   the call would block, but NONBLOCK is specified, > 0 the size of
- *	   the filled buffer.
+ *	   the call would block, but NONBLOCK is specified, or when another
+ *	   esdm_get_seed() call is in progress - one caller is served at a
+ *	   time, blocking or not -, -EOPNOTSUPP if the self tests failed, > 0
+ *	   the size of the filled buffer.
  */
 ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 		      enum esdm_get_seed_flags flags);
