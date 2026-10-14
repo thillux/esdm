@@ -341,6 +341,12 @@ conf_data.set('ESDM_AUX_INPUT_HAS_FULL_ENTROPY', get_option('aux-has-full-entrop
 
 conf_data.set('ESDM_MEMORY_DEBUG', get_option('memory-debug').enabled())
 
+# fips_enabled() trusts ESDM_SERVER_FORCE_FIPS only through secure_getenv(),
+# which also refuses it to a binary gaining privileges through file capabilities
+conf_data.set('HAVE_SECURE_GETENV',
+	      cc.has_function('secure_getenv',
+			      prefix: '#define _GNU_SOURCE\n#include <stdlib.h>'))
+
 # Guards the entry points the fuzz harnesses drive the RPC interfaces
 # through - see tests/fuzz.
 conf_data.set('ESDM_FUZZING', get_option('fuzzing').enabled())
