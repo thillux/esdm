@@ -125,20 +125,14 @@ static bool esdm_testing_store(struct esdm_testing *data, u64 value, u32 *boot)
 
 	/*
 	 * Disable entropy testing for boot time testing after ring buffer
-	 * is filled.
+	 * is filled. No printk: this runs from the hooks with the raw lock
+	 * held, and a console wake-up would re-enter the hook on this CPU.
 	 */
-	if (*boot) {
-		if (((u32)atomic_read(&data->rb_writer)) >=
-		    ESDM_TESTING_RINGBUFFER_SIZE) {
-			*boot = 2;
-			pr_warn_once(
-				"One time data collection test disabled\n");
-			raw_spin_unlock_irqrestore(&data->lock, flags);
-			return false;
-		}
-
-		if (atomic_read(&data->rb_writer) == 1)
-			pr_warn("One time data collection test enabled\n");
+	if (*boot && ((u32)atomic_read(&data->rb_writer)) >=
+			     ESDM_TESTING_RINGBUFFER_SIZE) {
+		*boot = 2;
+		raw_spin_unlock_irqrestore(&data->lock, flags);
+		return false;
 	}
 
 	data->esdm_testing_rb[((u32)atomic_read(&data->rb_writer)) &

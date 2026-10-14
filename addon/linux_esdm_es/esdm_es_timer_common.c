@@ -65,10 +65,8 @@ static struct irq_work esdm_gcd_warn_work = IRQ_WORK_INIT(esdm_gcd_warn_func);
 
 static void esdm_gcd_set_check(u64 running_gcd)
 {
-	if (!esdm_gcd_tested()) {
+	if (!esdm_gcd_tested())
 		esdm_gcd_set(running_gcd);
-		pr_debug("Setting GCD to %llu\n", running_gcd);
-	}
 }
 
 u64 esdm_gcd_analyze(u64 *history, size_t nelem)

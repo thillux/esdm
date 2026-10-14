@@ -52,13 +52,16 @@ bool esdm_enforce_panic_on_permanent_health_failure(void)
 	return esdm_panic_on_permanent_health_failure;
 }
 
+/*
+ * No printk here: the health tests reset from the hot path, where the
+ * deferred health-test messages already report it.
+ */
 void esdm_reset_state(enum esdm_internal_es es)
 {
 	if (es == esdm_int_es_irq)
 		esdm_es_mgr_irq_reset();
 	if (es == esdm_int_es_sched)
 		esdm_es_mgr_sched_reset();
-	pr_debug("reset ESDM ES %u\n", es);
 }
 
 /* Module init: allocate memory, register the device file */
