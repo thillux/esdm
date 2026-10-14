@@ -34,8 +34,9 @@
 #include "memset_secure.h"
 
 /*
- * PID of the namespace init child the supervisor waits for. Written once
- * before the forwarding signal handlers are installed, read-only afterwards.
+ * PID of the namespace init child the supervisor waits for. Written before
+ * the forwarding signal handlers are installed and cleared, with them
+ * blocked, before the child is reaped.
  */
 static volatile pid_t linux_pidns_child;
 
@@ -60,6 +61,8 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 	static const int fwd_signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM,
 					   SIGUSR1 };
 	struct sigaction sa;
+	sigset_t fwd_set;
+	siginfo_t info;
 	unsigned int i;
 	pid_t pid;
 	int errsv, status;
@@ -124,17 +127,33 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = linux_pidns_forward_signal;
 	sigemptyset(&sa.sa_mask);
-	/* SA_RESTART: resume the waitpid() below after forwarding */
+	/* SA_RESTART: resume the waitid() below after forwarding */
 	sa.sa_flags = SA_RESTART;
-	for (i = 0; i < sizeof(fwd_signals) / sizeof(fwd_signals[0]); i++)
+	sigemptyset(&fwd_set);
+	for (i = 0; i < sizeof(fwd_signals) / sizeof(fwd_signals[0]); i++) {
 		sigaction(fwd_signals[i], &sa, NULL);
+		sigaddset(&fwd_set, fwd_signals[i]);
+	}
 
-	for (;;) {
-		if (waitpid(pid, &status, 0) >= 0)
-			break;
+	/*
+	 * Wait without reaping: the daemon stays a zombie, so its PID cannot
+	 * be handed out again while a forwarded signal may still target it.
+	 * Stop forwarding before reaping it.
+	 */
+	while (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT) < 0) {
 		if (errno != EINTR) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
 				    "Cannot wait for PID namespace init: %s\n",
+				    strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+	}
+	sigprocmask(SIG_BLOCK, &fwd_set, NULL);
+	linux_pidns_child = 0;
+	while (waitpid(pid, &status, 0) < 0) {
+		if (errno != EINTR) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+				    "Cannot reap PID namespace init: %s\n",
 				    strerror(errno));
 			exit(EXIT_FAILURE);
 		}
@@ -157,6 +176,9 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 		 * daemon's fate.
 		 */
 		signal(sig, SIG_DFL);
+		sigemptyset(&fwd_set);
+		sigaddset(&fwd_set, sig);
+		sigprocmask(SIG_UNBLOCK, &fwd_set, NULL);
 		raise(sig);
 		/* Reached only if the signal did not terminate us */
 		exit(128 + sig);
