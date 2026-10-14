@@ -7,8 +7,9 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/gcd.h>
+#include <linux/bitops.h>
 #include <linux/irq_work.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/random.h>
 
@@ -69,6 +70,33 @@ static void esdm_gcd_set_check(u64 running_gcd)
 		esdm_gcd_set(running_gcd);
 }
 
+/*
+ * Binary GCD as lib/math/gcd.c, but on u64: gcd() takes unsigned long and
+ * would truncate the time stamps on 32-bit kernels.
+ */
+static u64 esdm_gcd64(u64 a, u64 b)
+{
+	u64 r = a | b;
+
+	if (!a || !b)
+		return r;
+
+	b >>= __ffs64(b);
+	if (b == 1)
+		return r & -r;
+
+	for (;;) {
+		a >>= __ffs64(a);
+		if (a == 1)
+			return r & -r;
+		if (a == b)
+			return a << __ffs64(r);
+		if (a < b)
+			swap(a, b);
+		a -= b;
+	}
+}
+
 u64 esdm_gcd_analyze(u64 *history, size_t nelem)
 {
 	u64 running_gcd = 0;
@@ -90,7 +118,7 @@ u64 esdm_gcd_analyze(u64 *history, size_t nelem)
 		 * This code checks for such increments, and allows the library
 		 * to output the number of such changes have occurred.
 		 */
-		running_gcd = (u64)gcd(history[i], running_gcd);
+		running_gcd = esdm_gcd64(history[i], running_gcd);
 
 		/* Zeroize data */
 		history[i] = 0;
@@ -180,7 +208,7 @@ void esdm_time_process(struct esdm_es_ring *ring, enum esdm_internal_es es,
 	} else {
 		/* GCD is known and applied */
 		esdm_time_process_common(ring, es, raw_hires_store,
-					 now_time / gcd);
+					 div64_u64(now_time, gcd));
 	}
 
 	perf_time(now_time);
