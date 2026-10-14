@@ -1429,8 +1429,13 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 		esdm_cuse_set_pollmask(fi->poll_events, &mask);
 		fuse_reply_poll(req, mask);
 
-		if (mask) {
-			/* Event already available (replied above). */
+		if (mask || !ph) {
+			/*
+			 * Event already available (replied above), or a poll
+			 * that does not wait (e.g. timeout 0) and passes no
+			 * handle: registering it would leave a node without
+			 * handle, which marks a suspend wake-up.
+			 */
 			fuse_notify_poll(ph);
 			fuse_pollhandle_destroy(ph);
 		} else {

@@ -477,6 +477,18 @@ static void test_poll_urandom(void)
 	esdm_cuse_poll((fuse_req_t)&r, &fi, NULL);
 	CHECK_EQ(atomic_load(&r.replies), 1);
 	CHECK_EQ(r.revents, 0);
+
+	/*
+	 * A poll that does not wait passes no handle. It must leave nothing
+	 * registered: a node without handle marks a suspend wake-up, which
+	 * the next poll would report as an event.
+	 */
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "a poll without handle was registered");
+	test_req_init(&r);
+	esdm_cuse_poll((fuse_req_t)&r, &fi, NULL);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.revents, 0);
 	esdm_cuse_poll_remove_fh(1, false);
 }
 
