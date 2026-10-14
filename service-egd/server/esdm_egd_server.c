@@ -71,6 +71,15 @@
 #define ESDM_EGD_READ_BUDGET (4 * ESDM_EGD_BUFSIZE)
 
 /*
+ * Prediction resistant generations per connection and round. One costs several
+ * reseeds - tens of milliseconds - for a two byte request, so the read budget
+ * alone would let one client pipeline seconds of work into a single round and
+ * hold up everybody else on the worker. The ordinary generator is cheap enough
+ * for the read budget to bound it.
+ */
+#define ESDM_EGD_PR_BUDGET 1
+
+/*
  * Upper bound of concurrently served clients. EGD clients may hold their
  * connection open for their entire lifetime, so this limits clients, not
  * requests; beyond it, connections stay queued in the listen backlog. Generous
@@ -216,6 +225,20 @@ struct esdm_egd_conn {
 	 */
 	uint8_t answer[ESDM_EGD_MAX_TRANSFER];
 	uint8_t answer_len;
+
+	/*
+	 * Generations left in this round of the event loop, see
+	 * ESDM_EGD_PR_BUDGET, and the round they were granted for.
+	 */
+	unsigned int pr_budget;
+	uint64_t budget_round;
+
+	/*
+	 * A command is waiting in the input buffer for the next round's
+	 * budget. It is served by the event loop without any event of its own:
+	 * its bytes are no longer in the socket.
+	 */
+	bool yielded;
 
 	/*
 	 * The client takes no more responses - it hung up, or shut down its
@@ -692,7 +715,7 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
  *	   caller decides whether to answer short or to come back for more),
  *	   < 0 on all other errors
  */
-static int esdm_egd_get_random(const struct esdm_egd_conn *conn, uint8_t *buf,
+static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
 			       size_t len, size_t *generated)
 {
 	bool pr = conn->listener->prediction_resistance;
@@ -700,9 +723,11 @@ static int esdm_egd_get_random(const struct esdm_egd_conn *conn, uint8_t *buf,
 
 	*generated = 0;
 
-	if (pr)
+	if (pr) {
+		if (conn->pr_budget)
+			conn->pr_budget--;
 		ret = esdm_get_random_bytes_pr_noblock(buf, len);
-	else
+	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
 
 	if (ret < 0)
@@ -877,6 +902,22 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 	return esdm_egd_write(conn, resp, 1 + (size_t)len);
 }
 
+/* May the connection generate once more in this round? */
+static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn)
+{
+	return !conn->listener->prediction_resistance || conn->pr_budget;
+}
+
+/* Grant the connection its budget once per round of the event loop. */
+static void esdm_egd_conn_round(struct esdm_egd_conn *conn, uint64_t round)
+{
+	if (conn->budget_round == round)
+		return;
+
+	conn->budget_round = round;
+	conn->pr_budget = ESDM_EGD_PR_BUDGET;
+}
+
 /* Serve a deferred blocking read request, if there is one. */
 static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 {
@@ -884,6 +925,10 @@ static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 
 	if (!conn->deferred)
 		return 0;
+
+	/* Still deferred - the next round continues it. */
+	if (!esdm_egd_may_generate(conn))
+		return -EAGAIN;
 
 	ret = esdm_egd_cmd_read_block(conn, conn->deferred);
 	if (ret)
@@ -943,13 +988,20 @@ static void esdm_egd_consume(struct esdm_egd_conn *conn, size_t len)
  *
  * It stops at the first command whose response the client did not take right
  * away, which is what makes one response buffer enough: a client asking faster
- * than it reads is slowed down by its own socket, not buffered for.
+ * than it reads is slowed down by its own socket, not buffered for. It also
+ * stops at a generation the round has no budget left for (conn->yielded).
  *
  * @return 0 when the connection remains usable, < 0 when it has to be closed
  */
 static int esdm_egd_process(struct esdm_egd_conn *conn)
 {
 	int ret;
+
+	conn->yielded = false;
+
+	/* Nothing new is started once shutdown is requested. */
+	if (atomic_load(&esdm_egd_exit))
+		return 0;
 
 	/* The response of the previous command has to be out of the way. */
 	ret = esdm_egd_flush(conn);
@@ -1012,6 +1064,14 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			goto consume;
 		}
 
+		/* Left for the next round, see ESDM_EGD_PR_BUDGET. */
+		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK) &&
+		    conn->in[1] && !esdm_egd_may_generate(conn)) {
+			conn->yielded = true;
+			return 0;
+		}
+
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = esdm_egd_cmd_entropy_count(conn);
@@ -1062,6 +1122,9 @@ consume:
 		 */
 		if (esdm_egd_out_pending(conn))
 			return 0;
+
+		if (atomic_load(&esdm_egd_exit))
+			return 0;
 	}
 
 	return 0;
@@ -1111,7 +1174,11 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 			pos += chunk;
 		}
 
-		ret = esdm_egd_process(&conn);
+		/* Each record is a round, and as many follow as it needs. */
+		do {
+			conn.pr_budget = ESDM_EGD_PR_BUDGET;
+			ret = esdm_egd_process(&conn);
+		} while (!ret && conn.yielded);
 		if (ret)
 			break;
 	}
@@ -1134,19 +1201,28 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 static int esdm_egd_read(struct esdm_egd_conn *conn)
 {
 	size_t budget = ESDM_EGD_READ_BUDGET;
+	int ret;
+
+	/* What a previous round left for this one comes first. */
+	if (conn->yielded) {
+		ret = esdm_egd_process(conn);
+		if (ret)
+			return ret;
+	}
 
 	while (1) {
 		ssize_t received;
 		size_t room;
-		int ret;
 
 		/*
-		 * While a request is deferred, a response is on its way out or
-		 * the buffer is full, do not read further: the pending data
-		 * stays in the socket buffer, which applies backpressure to the
-		 * client instead of requiring unbounded buffering here.
+		 * While a request is deferred or waits for its budget, a
+		 * response is on its way out or the buffer is full, do not read
+		 * further: the pending data stays in the socket buffer, which
+		 * applies backpressure to the client instead of requiring
+		 * unbounded buffering here.
 		 */
-		if (conn->deferred || esdm_egd_out_pending(conn) ||
+		if (conn->deferred || conn->yielded ||
+		    esdm_egd_out_pending(conn) ||
 		    conn->in_len >= sizeof(conn->in))
 			return 0;
 
@@ -1341,7 +1417,7 @@ static bool esdm_egd_scarce(uint64_t now)
 static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
 				   uint64_t now, bool scarce)
 {
-	if (conn->deferred || esdm_egd_out_pending(conn) ||
+	if (conn->deferred || conn->yielded || esdm_egd_out_pending(conn) ||
 	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
 		return false;
 
@@ -1362,13 +1438,15 @@ static int esdm_egd_handler(void *args)
 	struct epoll_event events[ESDM_EGD_MAX_EVENTS];
 	size_t deferred_requests = 0;
 	/*
-	 * Did a deferred request get any data in the last round? As long as one
-	 * makes progress the next round follows immediately: the prediction
-	 * resistance generator delivers a large request in chunks, and waiting
-	 * the poll interval between them would multiply its latency. Other
-	 * clients are still served in between.
+	 * Did a deferred request get any data in the last round, or does a
+	 * command wait for the next round's budget? Then the next round follows
+	 * immediately: the prediction resistance generator delivers a large
+	 * request in chunks, and waiting the poll interval between them would
+	 * multiply its latency. Other clients are still served in between.
 	 */
 	bool deferred_progress = false;
+	/* Round of the event loop, see esdm_egd_conn_round() */
+	uint64_t round = 0;
 	/*
 	 * The listening FD is level-triggered, so it has to be disarmed while
 	 * no further client may be accepted - otherwise epoll_wait would
@@ -1439,6 +1517,8 @@ static int esdm_egd_handler(void *args)
 				   ESDM_EGD_MAX_CONNECTIONS) &&
 				  !accept_paused;
 		int nfds, i;
+
+		round++;
 
 		if (want_armed != listen_armed) {
 			bool armed_all = true;
@@ -1514,6 +1594,7 @@ static int esdm_egd_handler(void *args)
 			}
 
 			conn = events[i].data.ptr;
+			esdm_egd_conn_round(conn, round);
 
 			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
 				/*
@@ -1558,7 +1639,7 @@ static int esdm_egd_handler(void *args)
 			 */
 			if (!ret && !more_input &&
 			    (events[i].events & EPOLLRDHUP) && !conn->deferred &&
-			    !esdm_egd_out_pending(conn))
+			    !conn->yielded && !esdm_egd_out_pending(conn))
 				ret = -EPIPE;
 
 			if (ret) {
@@ -1580,10 +1661,11 @@ static int esdm_egd_handler(void *args)
 
 		/*
 		 * Whatever is not waiting for an event of its own: a deferred
-		 * request, which completes when entropy arrives, and a response
-		 * whose client has not made room, retried here so a missed
-		 * EPOLLOUT cannot strand it. The deferred requests are recounted
-		 * on the way, as the loop above may have changed their number.
+		 * request, which completes when entropy arrives, a command
+		 * waiting for its budget, and a response whose client has not
+		 * made room, retried here so a missed EPOLLOUT cannot strand it.
+		 * The deferred requests are recounted on the way, as the loop
+		 * above may have changed their number.
 		 */
 		deferred_requests = 0;
 		deferred_progress = false;
@@ -1592,9 +1674,14 @@ static int esdm_egd_handler(void *args)
 			uint64_t out_since = conn->out_since;
 			bool stuck;
 
-			if (!conn->deferred && !esdm_egd_out_pending(conn))
+			if (atomic_load(&esdm_egd_exit))
+				break;
+
+			if (!conn->deferred && !conn->yielded &&
+			    !esdm_egd_out_pending(conn))
 				continue;
 
+			esdm_egd_conn_round(conn, round);
 			collected = conn->answer_len;
 			deferred = conn->deferred;
 
@@ -1644,6 +1731,9 @@ static int esdm_egd_handler(void *args)
 				if (conn->deferred)
 					deferred_requests++;
 			}
+
+			if (conn->yielded)
+				deferred_progress = true;
 
 			esdm_egd_conn_arm(epfd, conn);
 		}
@@ -1770,8 +1860,8 @@ void esdm_egd_server_fini(void)
 	 * finalized - none may be inside esdm_get_random_bytes_full_noblock or
 	 * esdm_pool_insert_aux by then. They are special threads and thus not
 	 * covered by the RPC server's thread_wait_all(). The bound is generous
-	 * against the poll interval - and against a round of reading, which
-	 * ESDM_EGD_READ_BUDGET bounds and the exit request cuts short - but
+	 * against the poll interval and the one generation a worker may still
+	 * be in - no further command is started once exit is requested - but
 	 * shutdown must not hang either.
 	 */
 	for (i = 0; i < 100 && atomic_load(&esdm_egd_workers_running); i++) {
