@@ -308,9 +308,10 @@ attaching an eBPF program to the stable sched_switch tracepoint
 of a stock Linux kernel (BTF/CO-RE required, i.e. the kernel
 must be built with CONFIG_DEBUG_INFO_BTF).
 
-The event timestamps are health-tested (SP800-90B RCT and APT)
-inside the eBPF program, which collects the time between
-successive events of a CPU in per-CPU buffers - the spacing of
+In FIPS 140, SP800-90C and NTG.1 mode the event timestamps are
+health-tested (SP800-90B RCT and APT) inside the eBPF program,
+which collects the time between successive events of a CPU in
+per-CPU buffers - the spacing of
 the events is where the entropy is, and it is the signal the
 SP800-90B assessment measures. A buffer is handed to a BPF ring
 buffer once it is full, or after an idle deadline when its CPU
