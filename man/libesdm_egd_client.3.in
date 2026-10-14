@@ -141,6 +141,7 @@ Once connected, the operations stay within
 .BR read (2),
 .BR write (2),
 .BR poll (2),
+.BR rt_sigprocmask (2),
 .BR close (2),
 .BR getpid (2),
 .BR clock_gettime (2),
@@ -159,9 +160,16 @@ which that filter answers with
 .B SECCOMP_RET_KILL
 \- and
 .B MSG_NOSIGNAL
-is therefore not available, so a write is preceded by a poll that catches a
-vanished peer before it could raise
-.BR SIGPIPE .
+is therefore not available:
+.B SIGPIPE
+is blocked around a write instead. Should the peer vanish right before a write,
+the
+.B SIGPIPE
+it raises is taken off with
+.BR sigtimedwait (2)
+\- unless
+.B SIGPIPE
+was ignored when the connection was made, as it is in OpenSSH.
 .PP
 Establishing a connection is a different matter: it needs
 .BR socket (2)
