@@ -120,6 +120,13 @@ add_project_link_arguments('-Wl,-z,now', language : 'c')
 # No executable stack
 add_project_link_arguments('-Wl,-z,noexecstack', language : 'c')
 
+# The client libraries export the logger so that the copy of the frontend
+# linking them interposes theirs. Clang drops that interposition under LTO and
+# binds the library's own calls to its own copy unless told otherwise (GCC's
+# default already keeps it).
+add_project_arguments(cc.get_supported_arguments('-fsemantic-interposition'),
+		      language : 'c')
+
 # Prepare distribution
 dist_script = find_program('addon/sanity_checks.sh', required: true)
 meson.add_dist_script(dist_script, meson.project_version())

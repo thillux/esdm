@@ -125,9 +125,13 @@ LIBESDM_1.0 {
  */
 LIBESDM_PRIVATE_1.0 {
 	global:
-		/* esdm_logger.h */
+		/*
+		 * esdm_logger.h - the ESDM server links no logger of its own
+		 * and uses this one, so it needs everything it calls.
+		 */
 		_esdm_logger;
 		esdm_logger_enable_syslog;
+		esdm_logger_inc_verbosity;
 		esdm_logger_set_verbosity;
 
 		/* esdm_es_jent.h */
@@ -158,14 +162,10 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_selftest_es_state;
 
 		/*
-		 * threading_support.h - the thread pool keeps its state in the
-		 * static library, so every module linking it holds a copy.
-		 * Every function of it has to be named here, so that the copy
-		 * of whoever links it next to us (the ESDM server does)
-		 * interposes all of them and only that copy is used. One left
-		 * out resolves to this library's copy: a thread is put into
-		 * one pool and waited for in another, or thread_fork_join()
-		 * misses the stack size and the shutdown the server set. The
+		 * threading_support.h - the ESDM server links no thread pool
+		 * of its own and uses this one, so that the library and the
+		 * server put their threads into one pool and the stack size
+		 * and the shutdown the server sets apply to all of them. The
 		 * test suite checks the list against the header.
 		 */
 		thread_available;

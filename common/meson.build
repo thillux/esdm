@@ -1,12 +1,18 @@
+# The logger and the thread pool keep process-wide state. The ESDM server must
+# share it with libesdm, so it takes them from the library instead of linking
+# copies of its own - see esdm_server_common_static_lib.
+common_state_src = files([
+	'esdm_logger.c',
+	'threading_support.c',
+])
+
 # for i in $(ls *.c | sort); do echo "'$i',"; done
 common_src = files([
 	'binhexbin.c',
 	'buffer.c',
-	'esdm_logger.c',
 	'helper.c',
 	'linux_support.c',
 	'os_random.c',
-	'threading_support.c',
 	'xoshiro_prng.c',
 ])
 
@@ -21,6 +27,9 @@ endif
 if get_option('fips140')
 	common_src += files(['fips_integrity.c'])
 endif
+
+common_stateless_src = common_src
+common_src += common_state_src
 
 conf_data = configuration_data()
 

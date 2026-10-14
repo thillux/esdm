@@ -126,6 +126,17 @@ esdm_common_static_lib = static_library('esdm_common_static',
 	dependencies: [ dependencies_client ],
 	)
 
+# For the ESDM server, which links libesdm next to it: without the logger and
+# the thread pool, so that it uses the copies in libesdm and shares their state.
+# Interposing its own copies does not work reliably - clang's LTO binds the
+# library's internal calls to the library's copies.
+esdm_server_common_static_lib = static_library('esdm_server_common_static',
+	[ common_stateless_src, crypto_src ],
+	include_directories: include_dirs_server,
+	dependencies: [ dependencies_client ],
+	build_by_default: false,
+	)
+
 esdm_static_lib = static_library('esdm_static',
 	[ crypto_src, esdm_src ],
 	 include_directories: include_dirs_esdm_lib,
