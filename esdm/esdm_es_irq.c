@@ -264,11 +264,10 @@ static int esdm_irq_initialize(void)
 	mutex_unlock(&irq_mutex);
 
 	/*
-	 * The presence of the interrupt entropy source implies that the main
-         * entropy source of the kernel random.c is being taken away.
+	 * The kernel RNG ES caps its rate itself while this ES is credited
+	 * (esdm_krng_properties_entropylevel()), leaving the configured rate
+	 * alone.
 	 */
-	esdm_config_es_krng_entropy_rate_set(
-		ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
 
 #if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
 	if (irq_buf_alloced) {
