@@ -427,13 +427,6 @@ static int esdm_cuse_drop_privileges(void)
 	if (esdm_cuse_dropped)
 		return 0;
 
-	/*
-	 * The namespaces are hardening on top of the privilege drop, a failure
-	 * to enter them is logged. It must not keep the daemon from dropping
-	 * its privileges.
-	 */
-	esdm_cuse_isolate_namespace();
-
 	/* Without root, there is nothing to drop */
 	if (geteuid() != 0)
 		return 0;
@@ -1936,6 +1929,15 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			esdm_cuse_term_signals,
 			ARRAY_SIZE(esdm_cuse_term_signals), NULL));
 	}
+
+	/*
+	 * Namespaces are per thread: enter them before libfuse and the thread
+	 * pool start any, so that every thread serving the device is isolated.
+	 * They are hardening on top of the privilege drop, a failure to enter
+	 * them is only logged.
+	 */
+	if (!param.is_help)
+		esdm_cuse_isolate_namespace();
 
 	/* One thread group */
 	CKINT(thread_init(1));
