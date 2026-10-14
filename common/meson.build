@@ -127,6 +127,19 @@ conf_data.set('ESDM_JENT_ALL_CACHES',
 # overrides this and keeps the per-ES counts honored.
 disable_es_buf = sp80090c and not get_option('es_buf_force')
 
+# esdm_es_buf_alloc() refuses any other block count at runtime, which silently
+# leaves the ES without its cache. A power of two up to 2^31 is what divides
+# 2^31, meson having no bitwise operators.
+foreach es_blocks_opt : ['es_jent_entropy_blocks', 'es_irq_entropy_blocks',
+			 'es_sched_entropy_blocks', 'es_hwrand_entropy_blocks',
+			 'es_tpm2_entropy_blocks', 'es_pkcs11_entropy_blocks',
+			 'es_jent_kernel_entropy_blocks']
+	es_blocks = get_option(es_blocks_opt)
+	if es_blocks != 0 and (es_blocks < 4 or 2147483648 % es_blocks != 0)
+		error(es_blocks_opt + ' must be 0 or a power of two of at least 4')
+	endif
+endforeach
+
 # In esdm_es_jent.c the ESDM_JENT_ENTROPY_BLOCKS are divided by 4 and yet
 # need to result in a value larger than zero
 if get_option('es_jent_entropy_blocks') >= 4 and not disable_es_buf
