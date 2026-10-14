@@ -452,6 +452,14 @@ static unsigned int esdm_jent_flags(void)
 	}
 #endif /* JENT_VERSION >= 3070000 */
 
+#ifdef ESDM_JENT_ALL_CACHES
+#ifdef JENT_CACHE_ALL
+	flags |= JENT_CACHE_ALL;
+#else
+#error "es_jent_all_caches needs a jitterentropy library providing JENT_CACHE_ALL"
+#endif
+#endif
+
 	return flags;
 }
 
