@@ -48,7 +48,7 @@ esdm_rpcc_get_random_bytes_cb(const RandValResponse *response,
 	esdm_rpcc_error_check(response, buffer);
 
 	if (response->ret < 0) {
-		buffer->ret = response->ret;
+		buffer->ret = esdm_rpcc_randval_ret(response->ret);
 		return;
 	}
 

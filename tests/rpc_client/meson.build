@@ -60,6 +60,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_hostile_answer_test = executable(
+			'rpc_hostile_answer_test',
+			[ 'rpc_hostile_answer_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	rpc_small_stack_test = executable(
 			'rpc_small_stack_test',
 			[ 'rpc_small_stack_test.c' ],
@@ -184,6 +192,10 @@ if get_option('esdm-server').enabled()
 	# nothing else may run alongside.
 	test('RPC call get_random_bytes retries on EAGAIN',
 		rpc_get_random_bytes_eagain_test, is_parallel: false)
+
+	# A stand-in server again, answering what no ESDM would.
+	test('RPC client refuses answers it cannot back',
+		rpc_hostile_answer_test, is_parallel: false)
 
 	# Needs no server: only the thread creation is tested.
 	test('RPC client leaves small thread stacks usable',

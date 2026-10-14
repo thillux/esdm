@@ -48,7 +48,7 @@ static void esdm_rpcc_get_seed_cb(const RandValResponse *response,
 
 	esdm_rpcc_error_check(response, buffer);
 
-	buffer->ret = response->ret;
+	buffer->ret = esdm_rpcc_randval_ret(response->ret);
 
 	/*
 	 * Track the copied length separately from the caller's capacity: the
@@ -72,6 +72,10 @@ static void esdm_rpcc_get_seed_cb(const RandValResponse *response,
 	    buffer->buf != NULL) {
 		memcpy(buffer->buf, response->randval.data, buffer->copied);
 	}
+
+	/* A seed is never longer than the bytes that came with it */
+	if (buffer->ret > 0 && (size_t)buffer->ret > buffer->copied)
+		buffer->ret = -EPROTO;
 
 	/* Zeroization of response is handled in esdm_rpc_client_read_handler */
 }
