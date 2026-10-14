@@ -172,11 +172,13 @@ static atomic_int server_exit = 0;
  * its connections to make room: the least recently active one of the UID with
  * the most connections in that worker. The clients reconnect transparently, so
  * service goes on for everybody, at the price of churn under attack. Never
- * closed are a connection with a request not read yet or an answer the client
- * did not read yet, and any connection of the privileged interface. The
- * choice is made within the accepting worker, as each worker owns its
- * connections: closing one of another worker would race with that worker
- * serving it.
+ * closed are a connection with a request not read yet, and any connection of
+ * the privileged interface. One with an answer the client did not read yet is
+ * closed only when no idle one is left: the answer stays readable after the
+ * close, and sparing such connections altogether would let a client that
+ * always leaves its last answer unread hold its slots forever. The choice is
+ * made within the accepting worker, as each worker owns its connections:
+ * closing one of another worker would race with that worker serving it.
  */
 #define ESDM_RPC_RESERVED_FDS (2048 + 512)
 #define ESDM_RPCS_MAX_WORKER_CONNECTIONS 1024
@@ -790,20 +792,27 @@ static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 	return false;
 }
 
-/*
- * Has @rpc_conn a request not read yet, or an answer its client did not read
- * yet? Either way the client is in the middle of a call.
- */
-static bool esdm_rpcs_conn_busy(const struct esdm_rpcs_connection *rpc_conn)
+/* Where the client of a connection is in a call, see esdm_rpcs_conn_state() */
+enum esdm_rpcs_conn_state {
+	esdm_rpcs_conn_idle,
+	/* An answer the client did not read yet - it can after a close */
+	esdm_rpcs_conn_answered,
+	/* A request not read yet - a close would lose it */
+	esdm_rpcs_conn_requested,
+};
+
+static enum esdm_rpcs_conn_state
+esdm_rpcs_conn_state(const struct esdm_rpcs_connection *rpc_conn)
 {
 	int inq = 0, outq = 0;
 
-	/* In doubt, it is */
-	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) ||
-	    ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq))
-		return true;
+	/* In doubt, the client is further into the call */
+	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) || inq > 0)
+		return esdm_rpcs_conn_requested;
+	if (ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq) || outq > 0)
+		return esdm_rpcs_conn_answered;
 
-	return inq > 0 || outq > 0;
+	return esdm_rpcs_conn_idle;
 }
 
 static int esdm_rpcs_uid_cmp(const void *a, const void *b)
@@ -816,13 +825,15 @@ static int esdm_rpcs_uid_cmp(const void *a, const void *b)
 /*
  * The connection of a full worker to close for a new one, see
  * ESDM_RPC_RESERVED_FDS. @list is in the order of the last activity, the least
- * recent first. NULL if every connection is busy.
+ * recent first. NULL if every connection has a request not read yet.
  */
 static struct esdm_rpcs_connection *
 esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 {
 	uid_t uids[ESDM_RPCS_MAX_WORKER_CONNECTIONS];
-	struct esdm_rpcs_connection *rpc_conn, *fallback = NULL;
+	/* The first one found, per state and whether of the preferred UID */
+	struct esdm_rpcs_connection *rpc_conn,
+		*cand[esdm_rpcs_conn_requested][2] = { { NULL } };
 	size_t i, n = 0, run = 0, best_run = 0;
 	uid_t best = 0;
 
@@ -845,20 +856,34 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 
 	/*
 	 * The least recent idle one of that UID, else of any UID - which is
-	 * also the choice when no UID holds more than one.
+	 * also the choice when no UID holds more than one. Only without an idle
+	 * one, one with an unread answer, chosen the same way.
 	 */
 	TAILQ_FOREACH(rpc_conn, list, tailq)
 	{
 		bool preferred = (best_run > 1 && rpc_conn->peer_uid == best);
+		enum esdm_rpcs_conn_state state;
 
-		if ((!preferred && fallback) || esdm_rpcs_conn_busy(rpc_conn))
+		if (!preferred && cand[esdm_rpcs_conn_idle][0])
 			continue;
-		if (preferred || best_run < 2)
+
+		state = esdm_rpcs_conn_state(rpc_conn);
+		if (state == esdm_rpcs_conn_requested)
+			continue;
+		if (state == esdm_rpcs_conn_idle && preferred)
 			return rpc_conn;
-		fallback = rpc_conn;
+		if (!cand[state][preferred])
+			cand[state][preferred] = rpc_conn;
 	}
 
-	return fallback;
+	for (i = 0; i < ARRAY_SIZE(cand); i++) {
+		if (cand[i][1])
+			return cand[i][1];
+		if (cand[i][0])
+			return cand[i][0];
+	}
+
+	return NULL;
 }
 
 /* An event of a connection closed before the event was handled */
@@ -867,7 +892,7 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 /*
  * Close a connection of the full worker owning @list for a new one. The
  * events still to be handled in this round, @num of @pending, are voided for
- * it. Returns false if every connection is busy.
+ * it. Returns false if every connection has a request not read yet.
  */
 static bool esdm_rpcs_make_room(int epfd,
 				struct esdm_rpcs_connection_list *list,
@@ -1160,7 +1185,7 @@ static int esdm_rpcs_handler(void *args)
 						esdm_logger(
 							LOGGER_DEBUG,
 							LOGGER_C_RPC,
-							"Refusing client FD %d, all connections busy\n",
+							"Refusing client FD %d, every connection has a request pending\n",
 							accepted_fd);
 						esdm_rpcs_release_conn(
 							rpc_conn);

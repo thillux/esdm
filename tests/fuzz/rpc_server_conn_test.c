@@ -29,7 +29,9 @@
  *     lose the connection right after its answer,
  *   - the unprivileged interface keeps descriptors in reserve, and a new
  *     connection beyond its bound makes room by closing an idle one rather
- *     than waiting for a descriptor that does not come.
+ *     than waiting for a descriptor that does not come,
+ *   - leaving answers unread does not keep a client's connections from
+ *     being closed to make room, and the answers stay readable.
  */
 
 #include <errno.h>
@@ -218,6 +220,28 @@ static bool test_answered(int fd, uint32_t request_id, int timeout_ms)
 	return le_bswap32(reply.request_id) == request_id;
 }
 
+/* Wait up to @timeout_ms for an answer, but leave it unread */
+static bool test_answer_waiting(int fd, int timeout_ms)
+{
+	struct esdm_rpc_proto_sc_header reply;
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+	/* A connection closed without an answer polls readable as well */
+	return poll(&pfd, 1, timeout_ms) == 1 &&
+	       recv(fd, &reply, sizeof(reply), MSG_PEEK | MSG_DONTWAIT) ==
+		       (ssize_t)sizeof(reply);
+}
+
+/* Has the server closed @fd, whose answers were all read? */
+static bool test_closed(int fd)
+{
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	uint8_t b;
+
+	return poll(&pfd, 1, 0) == 1 &&
+	       recv(fd, &b, sizeof(b), MSG_DONTWAIT) == 0;
+}
+
 /*
  * A call taking longer than the idle timeout keeps its connection: the next
  * request on it, sent once the server had the chance to reap it, is answered.
@@ -254,17 +278,11 @@ static void test_long_call(void)
  * The clients of test_many_conns(), in a process of their own: they need more
  * descriptors than the server is allowed. Returns the number of failures.
  */
-static int test_many_conns_client(rlim_t nofile)
+static int test_many_conns_client(void)
 {
-	struct rlimit rl = { .rlim_cur = nofile, .rlim_max = nofile };
 	static int fds[TEST_CONNS];
 	unsigned int i, closed = 0;
 	int fail = 0;
-
-	if (setrlimit(RLIMIT_NOFILE, &rl)) {
-		fprintf(stderr, "cannot raise the descriptor limit\n");
-		return 1;
-	}
 
 	for (i = 0; i < TEST_CONNS; i++) {
 		fds[i] = test_connect(test_unpriv_path);
@@ -303,11 +321,7 @@ static int test_many_conns_client(rlim_t nofile)
 
 	/* Those closed to make room tell by an end of file */
 	for (i = 1; i < TEST_CONNS - 1; i++) {
-		struct pollfd pfd = { .fd = fds[i], .events = POLLIN };
-		uint8_t b;
-
-		if (poll(&pfd, 1, 0) == 1 &&
-		    recv(fds[i], &b, sizeof(b), MSG_DONTWAIT) == 0)
+		if (test_closed(fds[i]))
 			closed++;
 	}
 	if (closed < TEST_CONNS - TEST_NOFILE / 2) {
@@ -329,29 +343,106 @@ static int test_many_conns_client(rlim_t nofile)
 }
 
 /*
- * Many more connections than the server has descriptors for, one after the
- * other, each idle once served: every one is served, the oldest are closed -
- * but not one whose answer the client has not read yet.
+ * The clients of test_unread_answers(), each leaving its answer unread the
+ * way one would that keeps its connections from being closed to make room.
+ * Returns the number of failures.
  */
-static void test_many_conns(rlim_t nofile)
+static int test_unread_answers_client(void)
 {
+	static int fds[TEST_CONNS];
+	unsigned int i, closed = 0;
+	int fail = 0;
+
+	for (i = 0; i < TEST_CONNS; i++) {
+		fds[i] = test_connect(test_unpriv_path);
+		if (fds[i] < 0) {
+			fprintf(stderr, "connection %u: %s\n", i,
+				strerror(-fds[i]));
+			return fail + 1;
+		}
+
+		if (!test_send(fds[i], i)) {
+			fprintf(stderr, "connection %u: cannot send\n", i);
+			return fail + 1;
+		}
+
+		if (!test_answer_waiting(fds[i], 1000)) {
+			fprintf(stderr, "connection %u was not served\n", i);
+			return fail + 1;
+		}
+	}
+
+	/* Those closed to make room still hand out their answer */
+	for (i = 0; i < TEST_CONNS; i++) {
+		if (!test_answered(fds[i], i, 0)) {
+			fprintf(stderr, "the answer of connection %u was lost\n",
+				i);
+			fail++;
+		} else if (test_closed(fds[i])) {
+			closed++;
+		}
+	}
+	if (closed < TEST_CONNS - TEST_NOFILE / 2) {
+		fprintf(stderr, "only %u connections were closed\n", closed);
+		fail++;
+	}
+
+	for (i = 0; i < TEST_CONNS; i++)
+		close(fds[i]);
+
+	return fail;
+}
+
+/*
+ * Run @client in a process of its own: it needs more descriptors than the
+ * server is allowed.
+ */
+static void test_clients(int (*client)(void), rlim_t nofile)
+{
+	struct rlimit rl = { .rlim_cur = nofile, .rlim_max = nofile };
 	pid_t pid;
 	int status;
-
-	printf("%u connections against a descriptor limit of %u\n",
-	       TEST_CONNS, TEST_NOFILE);
 
 	fflush(stdout);
 	pid = fork();
 	CHECK(pid >= 0, "cannot fork: %s", strerror(errno));
 	if (pid < 0)
 		return;
-	if (!pid)
-		_exit(test_many_conns_client(nofile));
+	if (!pid) {
+		if (setrlimit(RLIMIT_NOFILE, &rl)) {
+			fprintf(stderr, "cannot raise the descriptor limit\n");
+			_exit(1);
+		}
+		_exit(client());
+	}
 
 	CHECK(waitpid(pid, &status, 0) == pid, "cannot wait for the clients");
 	CHECK(WIFEXITED(status) && !WEXITSTATUS(status),
 	      "the clients failed");
+}
+
+/*
+ * Many more connections than the server has descriptors for, one after the
+ * other, each idle once served: every one is served, the oldest are closed -
+ * but not one whose answer the client has not read yet while idle ones are
+ * left.
+ */
+static void test_many_conns(rlim_t nofile)
+{
+	printf("%u connections against a descriptor limit of %u\n",
+	       TEST_CONNS, TEST_NOFILE);
+	test_clients(test_many_conns_client, nofile);
+}
+
+/*
+ * As many connections, none of them idle as each answer stays unread: every
+ * one is served all the same, and no answer is lost.
+ */
+static void test_unread_answers(rlim_t nofile)
+{
+	printf("%u connections with unread answers against a descriptor limit of %u\n",
+	       TEST_CONNS, TEST_NOFILE);
+	test_clients(test_unread_answers_client, nofile);
 }
 
 int main(void)
@@ -402,9 +493,10 @@ int main(void)
 
 	test_long_call();
 
-	if (client_nofile)
+	if (client_nofile) {
 		test_many_conns(client_nofile);
-	else
+		test_unread_answers(client_nofile);
+	} else
 		printf("hard descriptor limit too low - skipping the many connections\n");
 
 	esdm_rpc_server_signal_exit();

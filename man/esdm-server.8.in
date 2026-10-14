@@ -154,8 +154,10 @@ at most half of the limit, to the EGD and privileged interfaces. This bound is
 split evenly over the server threads, at most 1024 connections each, and logged
 at startup. A thread whose share is taken does not refuse a new connection but
 closes one of its idle ones \- the least recently used one of the UID holding
-the most connections in that thread. A connection with a request or an answer
-in transit is never closed for that, nor is one of the privileged interface.
+the most connections in that thread. A connection with a request not read yet
+is never closed for that, nor is one of the privileged interface. One with an
+answer its client has not read yet is closed only when no idle one is left; the
+client still reads that answer.
 .TP
 .B EGD interface
 Served by one worker thread per online CPU, at most four, each serving the
