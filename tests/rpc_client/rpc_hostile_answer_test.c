@@ -6,6 +6,9 @@
  * over buffer bytes it never wrote. And get_seed handed back the return code
  * of the server even when it named more bytes than came with the answer.
  *
+ * get_seed with a buffer larger than an answer can carry got the server's
+ * refusal with the size it can serve, and returned that as an errno.
+ *
  * A stand-in server in this process gives those answers on the unprivileged
  * socket the client connects to.
  *
@@ -52,7 +55,12 @@ enum test_answer {
 	test_answer_wrapping_ret,
 	/* A seed claiming more bytes than the answer carries */
 	test_answer_seed_overclaim,
+	/* A seed, unless the request is larger than the server serves */
+	test_answer_seed_limited,
 };
+
+/* The largest get_seed request the ESDM server serves */
+#define TEST_SEED_MAX (ESDM_RPC_MAX_DATA / sizeof(uint64_t) * sizeof(uint64_t))
 
 static _Atomic enum test_answer test_answer;
 static atomic_bool test_stop;
@@ -74,6 +82,25 @@ static size_t test_put_varint(uint8_t *buf, uint64_t val)
 	return i;
 }
 
+/* The len field (1) of a request, 0 if it has none */
+static uint64_t test_request_len(const uint8_t *data, size_t len)
+{
+	uint64_t val = 0;
+	unsigned int shift = 0;
+	size_t i;
+
+	if (len < 2 || data[0] != 0x08)
+		return 0;
+
+	for (i = 1; i < len && shift < 64; i++, shift += 7) {
+		val |= (uint64_t)(data[i] & 0x7f) << shift;
+		if (!(data[i] & 0x80))
+			return val;
+	}
+
+	return 0;
+}
+
 /* Answer one request on @fd; false when the connection is gone */
 static bool test_serve(int fd)
 {
@@ -83,6 +110,7 @@ static bool test_serve(int fd)
 	struct esdm_rpc_proto_sc_header sc;
 	uint8_t *msg = resp + sizeof(sc);
 	size_t msglen = 0;
+	uint64_t len;
 	ssize_t rc;
 
 	rc = recv(fd, req, sizeof(req), 0);
@@ -92,6 +120,7 @@ static bool test_serve(int fd)
 		return false;
 
 	memcpy(&cs, req, sizeof(cs));
+	len = test_request_len(req + sizeof(cs), (size_t)rc - sizeof(cs));
 
 	/* RandValResponse: ret (field 1, int64), randval (field 2, bytes) */
 	msg[msglen++] = 0x08;
@@ -102,6 +131,20 @@ static bool test_serve(int fd)
 		break;
 	case test_answer_seed_overclaim:
 		msglen += test_put_varint(msg + msglen, 2 * TEST_LEN);
+		msg[msglen++] = 0x12;
+		msglen += test_put_varint(msg + msglen, TEST_LEN);
+		memset(msg + msglen, TEST_FILL, TEST_LEN);
+		msglen += TEST_LEN;
+		break;
+	case test_answer_seed_limited:
+		/* As esdm_rpc_get_seed() refuses a request it cannot serve */
+		if (len > TEST_SEED_MAX) {
+			int64_t max = -(int64_t)TEST_SEED_MAX;
+
+			msglen += test_put_varint(msg + msglen, (uint64_t)max);
+			break;
+		}
+		msglen += test_put_varint(msg + msglen, TEST_LEN);
 		msg[msglen++] = 0x12;
 		msglen += test_put_varint(msg + msglen, TEST_LEN);
 		memset(msg + msglen, TEST_FILL, TEST_LEN);
@@ -214,6 +257,7 @@ static int test_expect(const char *what, ssize_t rc, ssize_t expected)
 
 static int test_run(void)
 {
+	static uint8_t large[TEST_SEED_MAX + 4096];
 	uint8_t buf[TEST_LEN];
 	int ret = 0;
 
@@ -234,6 +278,12 @@ static int test_run(void)
 			   esdm_rpcc_get_seed(buf, sizeof(buf),
 					      ESDM_GET_SEED_NONBLOCK),
 			   -EPROTO);
+
+	atomic_store(&test_answer, test_answer_seed_limited);
+	ret |= test_expect("get_seed, buffer larger than an answer",
+			   esdm_rpcc_get_seed(large, sizeof(large),
+					      ESDM_GET_SEED_NONBLOCK),
+			   TEST_LEN);
 
 	return ret;
 }

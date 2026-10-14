@@ -97,7 +97,13 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	msg.len = buflen;
+	/*
+	 * A seed is far smaller than one answer can carry, so a larger buffer
+	 * asks for no more than that. The server refuses anything beyond it
+	 * with the size it can serve, which is no errno to pass on.
+	 */
+	msg.len = min_size(buflen, ESDM_RPC_MAX_DATA / sizeof(uint64_t) *
+					   sizeof(uint64_t));
 	msg.flags = flags;
 
 	for (;;) {
@@ -124,6 +130,11 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 			goto out;
 
 		ret = buffer.ret;
+		/* The size hint, see above */
+		if (ret < -255) {
+			ret = -EPROTO;
+			goto out;
+		}
 		if (ret >= 0)
 			esdm_test_shm_status_add_rpc_client_written(
 				buffer.copied);
