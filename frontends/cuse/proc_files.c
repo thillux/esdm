@@ -36,6 +36,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "binhexbin.h"
@@ -835,6 +837,59 @@ static void show_help(const char *progname)
 	       "\n");
 }
 
+static int esdm_proc_mountpoint_opt(void *data, const char *arg, int key,
+				    struct fuse_args *outargs)
+{
+	char **mountpoint = data;
+
+	(void)outargs;
+
+	if (key == FUSE_OPT_KEY_NONOPT && !*mountpoint)
+		*mountpoint = strdup(arg);
+
+	return 1;
+}
+
+/*
+ * A previous instance that died leaves its FUSE mount behind, where every
+ * access fails with ENOTCONN - fuse_main() included, which resolves the mount
+ * point first, so a restart could never take over. Detach such a mount.
+ */
+static void esdm_proc_detach_stale(const struct fuse_args *args)
+{
+	struct fuse_args tmp = FUSE_ARGS_INIT(0, NULL);
+	char *mountpoint = NULL;
+	struct stat sb;
+	unsigned int ctr;
+	int i;
+
+	for (i = 0; i < args->argc; i++) {
+		if (fuse_opt_add_arg(&tmp, args->argv[i]))
+			goto out;
+	}
+	if (fuse_opt_parse(&tmp, &mountpoint, NULL,
+			   esdm_proc_mountpoint_opt) == -1 ||
+	    !mountpoint)
+		goto out;
+
+	for (ctr = 0; ctr < 3; ctr++) {
+		if (stat(mountpoint, &sb) == 0 || errno != ENOTCONN)
+			break;
+		if (umount2(mountpoint, MNT_DETACH) < 0) {
+			esdm_logger(LOGGER_WARN, LOGGER_C_CUSE,
+				    "Cannot detach stale mount on %s: %s\n",
+				    mountpoint, strerror(errno));
+			break;
+		}
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_CUSE,
+			    "Detached stale mount on %s\n", mountpoint);
+	}
+
+out:
+	free(mountpoint);
+	fuse_opt_free_args(&tmp);
+}
+
 int main(int argc, char *argv[])
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -864,6 +919,8 @@ int main(int argc, char *argv[])
 		show_help(argv[0]);
 		fuse_opt_add_arg(&args, "--help");
 		args.argv[0][0] = '\0';
+	} else if (geteuid() == 0) {
+		esdm_proc_detach_stale(&args);
 	}
 
 	if (esdm_proc_options.relabel) {
