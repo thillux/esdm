@@ -184,6 +184,7 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 					   const uint8_t *addtl,
 					   size_t addtllen, bool test_mode)
 {
+	static const uint8_t kat_nonce[16] = { 0 };
 	struct esdm_openssl_drng_state *state = drng;
 	struct timespec current_time = { 0 };
 	OSSL_PARAM params[3] = { 0 };
@@ -234,6 +235,14 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 			params[1] = OSSL_PARAM_construct_octet_string(
 				OSSL_RAND_PARAM_TEST_NONCE, (void *)addtl,
 				addtllen);
+		} else if (test_mode) {
+			/*
+			 * The KATs were computed with a 16 byte zero nonce, while
+			 * a struct timespec is only 8 bytes on 32-bit glibc.
+			 */
+			params[1] = OSSL_PARAM_construct_octet_string(
+				OSSL_RAND_PARAM_TEST_NONCE, (void *)kat_nonce,
+				sizeof(kat_nonce));
 		} else {
 			params[1] = OSSL_PARAM_construct_octet_string(
 				OSSL_RAND_PARAM_TEST_NONCE,
