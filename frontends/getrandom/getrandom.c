@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
@@ -80,6 +81,23 @@ static void esdm_getrandom_lib_init(void)
 
 out:
 	mutex_unlock(&getrandom_mutex);
+}
+
+/*
+ * A thread of the parent may hold the lock in the middle of the initialization
+ * when another one forks. It does not exist in the child, which would wait for
+ * the lock forever on its first call. So the child creates the lock anew, and
+ * is_initialized tells whether the initialization still has to be done.
+ */
+static void esdm_getrandom_fork_child(void)
+{
+	mutex_init(&getrandom_mutex, 0);
+}
+
+ESDM_DEFINE_CONSTRUCTOR(esdm_getrandom_lib_constructor);
+static void esdm_getrandom_lib_constructor(void)
+{
+	pthread_atfork(NULL, NULL, esdm_getrandom_fork_child);
 }
 
 ESDM_DEFINE_DESTRUCTOR(esdm_getrandom_lib_exit);
