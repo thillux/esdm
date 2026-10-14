@@ -27,6 +27,7 @@
 #include "config.h"
 #include "esdm.h"
 #include "esdm_definitions.h"
+#include "esdm_es_aux.h"
 #include "esdm_es_jent.h"
 #include "esdm_es_mgr.h"
 #include "esdm_es_mgr_cb.h"
@@ -91,6 +92,7 @@ int main(void)
 {
 	uint32_t e_bits[esdm_ext_es_last];
 	uint32_t i, other = esdm_ext_es_last, second = esdm_ext_es_last;
+	uint32_t seed_bits = esdm_get_seed_entropy_osr(true, false);
 	int ret = 0;
 
 	/* Two entropy sources next to the jitter RNG are needed below. */
@@ -111,18 +113,30 @@ int main(void)
 	printf("Jitter RNG is NTG.1 conformant on its own: %s\n",
 	       esdm_jent_ntg1() ? "true" : "false");
 
+	printf("Seed entropy of the initial seeding: %u bits\n", seed_bits);
+
 	/*
 	 * The jitter RNG alone carries NTG.1 only if it is operated in its own
 	 * NTG.1 mode, otherwise it is one source out of the two that NTG.1
 	 * asks for.
 	 */
 	memset(e_bits, 0, sizeof(e_bits));
-	e_bits[esdm_ext_es_jitter] = ESDM_AIS2031_NPTRNG_MIN_ENTROPY;
+	e_bits[esdm_ext_es_jitter] = seed_bits;
 	ret += check("jitter RNG alone", e_bits, esdm_jent_ntg1());
 
-	/* Below the required entropy the jitter RNG does not suffice either. */
+	/*
+	 * NTG.1 comes on top of the seed entropy, the security strength plus
+	 * the SP800-90C oversampling: the 240 bits NTG.1 asks of the jitter
+	 * RNG do not suffice by themselves.
+	 */
 	memset(e_bits, 0, sizeof(e_bits));
-	e_bits[esdm_ext_es_jitter] = ESDM_AIS2031_NPTRNG_MIN_ENTROPY - 1;
+	e_bits[esdm_ext_es_jitter] = ESDM_AIS2031_NPTRNG_MIN_ENTROPY;
+	ret += check("jitter RNG alone at the NTG.1 minimum", e_bits,
+		     esdm_jent_ntg1() &&
+			     ESDM_AIS2031_NPTRNG_MIN_ENTROPY >= seed_bits);
+
+	memset(e_bits, 0, sizeof(e_bits));
+	e_bits[esdm_ext_es_jitter] = seed_bits - 1;
 	ret += check("jitter RNG alone, one bit short", e_bits, false);
 
 	/*

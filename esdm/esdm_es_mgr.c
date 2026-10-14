@@ -638,6 +638,15 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		       struct entropy_buf *eb)
 {
 	/*
+	 * The security strength, plus the SP800-90C oversampling, is needed
+	 * in any case: NTG.1 below comes on top of it. The jitter RNG alone
+	 * at 240 bits would otherwise suffice for an SP800-90C instantiation
+	 * asking for 384 bits.
+	 */
+	if (collected_entropy < esdm_get_seed_entropy_osr(do_full_init, false))
+		return false;
+
+	/*
 	 * AIS20/31 NTG.1:
 	 * - Two entropy sources with each delivering 240 bits initially,
 	 *   unless a single NTG.1 conformant jitter RNG covers the requirement
@@ -658,8 +667,7 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		return (result >= 2);
 	}
 
-	return (collected_entropy >=
-		esdm_get_seed_entropy_osr(do_full_init, false));
+	return true;
 }
 
 /*
