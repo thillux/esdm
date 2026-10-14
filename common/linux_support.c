@@ -48,24 +48,20 @@ static void linux_pidns_forward_signal(int sig)
 		kill(child, sig);
 }
 
-int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
+int linux_isolate_namespace_prefork(const int *fwd_signals,
+				    unsigned int nr_fwd_signals,
+				    void (*supervisor_exit_cb)(void))
 {
-	/*
-	 * Signals the supervisor relays to the daemon: the termination signals
-	 * handled by the server and CUSE frontends plus SIGUSR1 used by
-	 * esdm-server-signal-helper for the suspend trigger. SIGUSR2 is
-	 * deliberately not relayed: nothing in the daemon installs a handler
-	 * for it, so forwarding it would hit the child's default disposition
-	 * and terminate the daemon on a stray external SIGUSR2.
-	 */
-	static const int fwd_signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM,
-					   SIGUSR1 };
-	struct sigaction sa;
-	sigset_t fwd_set;
+	struct sigaction sa, sa_chld;
+	sigset_t fwd_set, old_mask;
 	siginfo_t info;
 	unsigned int i;
 	pid_t pid;
 	int errsv, status;
+
+	sigemptyset(&fwd_set);
+	for (i = 0; i < nr_fwd_signals; i++)
+		sigaddset(&fwd_set, fwd_signals[i]);
 
 	/*
 	 * Unshare the PID namespace before the first fork and before any
@@ -86,16 +82,38 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
 		    "Successfully entered isolating PID namespace\n");
 
+	/*
+	 * Block the forwarded signals until the supervisor's forwarders are
+	 * installed. In between, one would run the caller's handler in the
+	 * supervisor, or kill it, instead of reaching the daemon.
+	 */
+	sigprocmask(SIG_BLOCK, &fwd_set, &old_mask);
+
+	/*
+	 * An inherited SIG_IGN of SIGCHLD makes the kernel reap the daemon
+	 * itself, and the supervisor could neither wait for it nor mirror its
+	 * exit status or clean up after it.
+	 */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGCHLD, &sa, &sa_chld);
+
 	pid = fork();
 	if (pid < 0) {
 		errsv = errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
 			    "Cannot fork into PID namespace: %s\n",
 			    strerror(errsv));
+		sigaction(SIGCHLD, &sa_chld, NULL);
+		sigprocmask(SIG_SETMASK, &old_mask, NULL);
 		return -errsv;
 	}
 
 	if (pid == 0) {
+		sigaction(SIGCHLD, &sa_chld, NULL);
+		sigprocmask(SIG_SETMASK, &old_mask, NULL);
+
 		/*
 		 * Child: PID 1 of the new namespace, continues as the actual
 		 * daemon. Tie its lifetime to the supervisor so a SIGKILLed
@@ -116,8 +134,7 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 	 * test harnesses) address the daemon by this PID, so relay the
 	 * daemon control signals to the namespace init and mirror its exit
 	 * status. A signal is only delivered to a PID namespace init from an
-	 * ancestor namespace if the init installed a handler for it, which
-	 * the daemon does for all signals forwarded here.
+	 * ancestor namespace if the init installed a handler for it.
 	 */
 	linux_pidns_child = pid;
 
@@ -126,14 +143,14 @@ int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void))
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = linux_pidns_forward_signal;
-	sigemptyset(&sa.sa_mask);
+	sa.sa_mask = fwd_set;
 	/* SA_RESTART: resume the waitid() below after forwarding */
 	sa.sa_flags = SA_RESTART;
-	sigemptyset(&fwd_set);
-	for (i = 0; i < sizeof(fwd_signals) / sizeof(fwd_signals[0]); i++) {
+	for (i = 0; i < nr_fwd_signals; i++)
 		sigaction(fwd_signals[i], &sa, NULL);
-		sigaddset(&fwd_set, fwd_signals[i]);
-	}
+
+	/* Forward what arrived since the signals were blocked */
+	sigprocmask(SIG_UNBLOCK, &fwd_set, NULL);
 
 	/*
 	 * Wait without reaping: the daemon stays a zombie, so its PID cannot

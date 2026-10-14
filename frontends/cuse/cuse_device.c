@@ -192,6 +192,8 @@ static atomic_bool esdm_cuse_poll_checker_ready = false;
  * current value; pointer-sized loads/stores are atomic on supported platforms.
  */
 static struct fuse_session *volatile esdm_cuse_session;
+/* A termination signal arrived before the session was published */
+static volatile sig_atomic_t esdm_cuse_exit_requested;
 static sem_t *_Atomic esdm_cuse_semid = SEM_FAILED;
 static const char *esdm_sem_name = NULL;
 
@@ -287,26 +289,27 @@ static void esdm_cuse_sig_handler(int sig)
 	 * async-signal-safe and several could self-deadlock against an
 	 * interrupted worker (e.g. holding the malloc arena or a mutex).
 	 */
+	esdm_cuse_exit_requested = 1;
 	if (se)
 		fuse_session_exit(se);
 }
 
+/*
+ * Only asynchronous termination signals get the graceful handler: it makes the
+ * FUSE loop return so teardown (incl. bind-unmount) runs in normal context.
+ * Synchronous fault signals (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT/SIGSYS/
+ * SIGTRAP) are deliberately left at their default disposition - a "set flag and
+ * return" handler would loop forever on the faulting instruction, and running
+ * teardown from a fault context is unsafe; a core dump is more useful there.
+ */
+static const int esdm_cuse_term_signals[] = {
+	SIGHUP,	 SIGINT,  SIGQUIT,   SIGTERM, SIGALRM,
+	SIGIO,	 SIGPOLL, SIGPROF,   SIGPWR,  SIGUSR1,
+	SIGUSR2, SIGVTALRM, SIGXCPU, SIGXFSZ,
+};
+
 static int esdm_cuse_install_sig_handler(void)
 {
-	/*
-	 * Only asynchronous termination signals get the graceful handler: it
-	 * makes the FUSE loop return so teardown (incl. bind-unmount) runs in
-	 * normal context. Synchronous fault signals (SIGSEGV/SIGBUS/SIGILL/
-	 * SIGFPE/SIGABRT/SIGSYS/SIGTRAP) are deliberately left at their default
-	 * disposition - a "set flag and return" handler would loop forever on
-	 * the faulting instruction, and running teardown from a fault context is
-	 * unsafe; a core dump is more useful there.
-	 */
-	static const int term_signals[] = {
-		SIGHUP,	  SIGINT,  SIGQUIT,   SIGTERM, SIGALRM,
-		SIGIO,	  SIGPOLL, SIGPROF,   SIGPWR,  SIGUSR1,
-		SIGUSR2,  SIGVTALRM, SIGXCPU, SIGXFSZ,
-	};
 	struct sigaction sa;
 	size_t i;
 
@@ -325,8 +328,8 @@ static int esdm_cuse_install_sig_handler(void)
 	 */
 	sa.sa_flags = 0;
 
-	for (i = 0; i < sizeof(term_signals) / sizeof(term_signals[0]); i++)
-		sigaction(term_signals[i], &sa, NULL);
+	for (i = 0; i < ARRAY_SIZE(esdm_cuse_term_signals); i++)
+		sigaction(esdm_cuse_term_signals[i], &sa, NULL);
 
 	return 0;
 }
@@ -1887,6 +1890,12 @@ int main_common(const char *_devname, const char *target, const char *semname,
 		  "Initialization of dispatcher failed\n");
 
 	/*
+	 * Before the PID namespace below: its init only receives the signals
+	 * it has a handler for.
+	 */
+	esdm_cuse_install_sig_handler();
+
+	/*
 	 * Enter PID namespace (opt-in via --pid_namespace)
 	 *
 	 * The kernel reports the PID of a caller in the PID namespace that
@@ -1899,7 +1908,9 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			LOGGER_WARN, LOGGER_C_CUSE,
 			"PID namespace requested: the privileged ioctls (RNDADDTOENTCNT, RNDADDENTROPY, RNDCLEARPOOL, RNDZAPENTCNT, RNDRESEEDCRNG) are refused to every caller\n");
 		CKINT(esdm_cuse_daemonize(&args));
-		CKINT(linux_isolate_namespace_prefork(NULL));
+		CKINT(linux_isolate_namespace_prefork(
+			esdm_cuse_term_signals,
+			ARRAY_SIZE(esdm_cuse_term_signals), NULL));
 	}
 
 	/* One thread group */
@@ -1913,8 +1924,6 @@ int main_common(const char *_devname, const char *target, const char *semname,
 	ci.dev_info_argc = 1;
 	ci.dev_info_argv = dev_info_argv;
 	ci.flags = CUSE_UNRESTRICTED_IOCTL;
-
-	esdm_cuse_install_sig_handler();
 
 	/*
 	 * Open-code cuse_lowlevel_main() so the session handle is reachable by
@@ -1932,6 +1941,8 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			ret = 1;
 		} else {
 			esdm_cuse_session = se;
+			if (esdm_cuse_exit_requested)
+				fuse_session_exit(se);
 
 			if (multithreaded)
 				ret = esdm_cuse_session_loop(se,
