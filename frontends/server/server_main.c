@@ -629,6 +629,8 @@ int main(int argc, char *argv[])
 		static const int fwd_signals[] = { SIGHUP, SIGINT, SIGQUIT,
 						   SIGTERM, SIGUSR1 };
 
+		/* The EGD clients are told the supervisor's PID. */
+		esdm_egd_server_set_pid(getpid());
 		CKINT(linux_isolate_namespace_prefork(fwd_signals,
 						      ARRAY_SIZE(fwd_signals),
 						      esdm_rpc_server_cleanup));

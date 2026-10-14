@@ -98,9 +98,17 @@ static int server_start(void)
 	if (server_pid == 0) {
 		char binary[FILENAME_MAX];
 		char socket_arg[sizeof(sockpath)];
-		/* Verbose logging implies staying in the foreground. */
-		char *argv[] = { binary, (char *)"-vvvvv",
-				 (char *)"--egd_socket", socket_arg, NULL };
+		/*
+		 * Verbose logging implies staying in the foreground. In its
+		 * own PID namespace the daemon is PID 1 there, while the PID
+		 * to report is the one started here, see the PID request.
+		 */
+		char *argv[] = { binary,
+				 (char *)"-vvvvv",
+				 (char *)"--pid_namespace",
+				 (char *)"--egd_socket",
+				 socket_arg,
+				 NULL };
 
 		snprintf(binary, sizeof(binary), "%s", server);
 		snprintf(socket_arg, sizeof(socket_arg), "%s", sockpath);
@@ -209,14 +217,13 @@ int main(int argc, char *argv[])
 	CHECK(esdm_egd_client_get_pid(client, &pid) == 0,
 	      "the PID request failed");
 	/*
-	 * What the protocol promises is a PID the caller can act on, not one
-	 * particular process of the daemon - so check that it is alive rather
-	 * than which one it is.
+	 * A PID the caller can act on: the process started here, which
+	 * forwards signals to the daemon - not the daemon, whose own PID is 1
+	 * and names init outside its namespace.
 	 */
-	CHECK(pid > 0 && kill(pid, 0) == 0,
-	      "the reported PID %d is not a running process", (int)pid);
-	printf("  the server reports PID %d, started as %d\n", (int)pid,
-	       (int)server_pid);
+	CHECK(pid == server_pid,
+	      "the server reports PID %d, it was started as %d", (int)pid,
+	      (int)server_pid);
 
 	printf("EGD server: entropy count\n");
 	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0,

@@ -304,6 +304,9 @@ static struct esdm_egd_listener esdm_egd_listeners[] = {
 
 static atomic_int esdm_egd_exit = 0;
 
+/* PID reported by the get PID command, see esdm_egd_server_set_pid() */
+static pid_t esdm_egd_pid = 0;
+
 static struct esdm_peer_limit esdm_egd_peer_limit =
 	ESDM_PEER_LIMIT_INIT("EGD server", ESDM_EGD_MAX_CONNECTIONS_PER_UID);
 /* Workers serving the EGD sockets, see esdm_egd_server_start() */
@@ -358,6 +361,11 @@ int esdm_egd_server_enable(const char *socket_path)
 int esdm_egd_server_enable_pr(const char *socket_path)
 {
 	return esdm_egd_listener_enable(ESDM_EGD_LISTENER_PR, socket_path);
+}
+
+void esdm_egd_server_set_pid(pid_t pid)
+{
+	esdm_egd_pid = pid;
 }
 
 static bool esdm_egd_listener_enabled(const struct esdm_egd_listener *listener)
@@ -901,7 +909,8 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 	uint8_t resp[1 + 20];
 	int len;
 
-	len = snprintf((char *)resp + 1, sizeof(resp) - 1, "%d", (int)getpid());
+	len = snprintf((char *)resp + 1, sizeof(resp) - 1, "%d",
+		       esdm_egd_pid ? (int)esdm_egd_pid : (int)getpid());
 	if (len < 0 || (size_t)len >= sizeof(resp))
 		return -EFAULT;
 
