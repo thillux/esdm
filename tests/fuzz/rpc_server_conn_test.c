@@ -31,7 +31,8 @@
  *     connection beyond its bound makes room by closing an idle one rather
  *     than waiting for a descriptor that does not come,
  *   - leaving answers unread does not keep a client's connections from
- *     being closed to make room, and the answers stay readable.
+ *     being closed to make room, and the answers stay readable,
+ *   - no connection is closed to make room while a worker has a free slot.
  */
 
 #include <errno.h>
@@ -53,6 +54,7 @@
 #include "common_test.h"
 #include "config.h"
 #include "conv_be_le.h"
+#include "esdm_config.h"
 #include "esdm_logger.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
@@ -343,6 +345,77 @@ static int test_many_conns_client(void)
 }
 
 /*
+ * The unprivileged connections the server admits in total, the way it sizes
+ * them for TEST_NOFILE.
+ */
+static unsigned int test_conn_bound(void)
+{
+	unsigned int threads = esdm_config_online_nodes(), per_thread;
+
+	if (threads > THREADING_MAX_WORKER_THREADS)
+		threads = THREADING_MAX_WORKER_THREADS;
+	per_thread = (TEST_NOFILE / 2) / threads;
+	if (!per_thread)
+		per_thread = 1;
+
+	return per_thread * threads;
+}
+
+/*
+ * The clients of test_fill(), each idle once served. Returns the number of
+ * failures.
+ */
+static int test_fill_client(void)
+{
+	static int fds[TEST_CONNS];
+	unsigned int i, bound = test_conn_bound(), closed = 0;
+	struct timespec start, end;
+	long elapsed_ms;
+	int fail = 0;
+
+	if (bound > TEST_CONNS)
+		bound = TEST_CONNS;
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	for (i = 0; i < bound; i++) {
+		fds[i] = test_connect(test_unpriv_path);
+		if (fds[i] < 0) {
+			fprintf(stderr, "connection %u: %s\n", i,
+				strerror(-fds[i]));
+			return fail + 1;
+		}
+
+		if (!test_send(fds[i], i) || !test_answered(fds[i], i, 1000)) {
+			fprintf(stderr, "connection %u was not served\n", i);
+			return fail + 1;
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	elapsed_ms = (end.tv_sec - start.tv_sec) * 1000 +
+		     (end.tv_nsec - start.tv_nsec) / 1000000;
+
+	for (i = 0; i < bound; i++) {
+		if (test_closed(fds[i]))
+			closed++;
+	}
+
+	/* The idle reaper may close the first ones on a slow machine */
+	if (elapsed_ms >= TEST_IDLE_MS / 2) {
+		printf("connecting took %ld ms - not checked\n", elapsed_ms);
+	} else if (closed) {
+		fprintf(stderr,
+			"%u of %u connections were closed below the bound\n",
+			closed, bound);
+		fail++;
+	}
+
+	for (i = 0; i < bound; i++)
+		close(fds[i]);
+
+	return fail;
+}
+
+/*
  * The clients of test_unread_answers(), each leaving its answer unread the
  * way one would that keeps its connections from being closed to make room.
  * Returns the number of failures.
@@ -422,6 +495,17 @@ static void test_clients(int (*client)(void), rlim_t nofile)
 }
 
 /*
+ * As many connections as the server admits in total, each idle once served:
+ * none is closed, whichever worker accepts it.
+ */
+static void test_fill(rlim_t nofile)
+{
+	printf("%u connections, the bound for a descriptor limit of %u\n",
+	       test_conn_bound(), TEST_NOFILE);
+	test_clients(test_fill_client, nofile);
+}
+
+/*
  * Many more connections than the server has descriptors for, one after the
  * other, each idle once served: every one is served, the oldest are closed -
  * but not one whose answer the client has not read yet while idle ones are
@@ -494,6 +578,7 @@ int main(void)
 	test_long_call();
 
 	if (client_nofile) {
+		test_fill(client_nofile);
 		test_many_conns(client_nofile);
 		test_unread_answers(client_nofile);
 	} else

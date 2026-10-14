@@ -82,6 +82,9 @@ struct esdm_rpcs {
 	ProtobufCService *service;
 	int server_listening_fd;
 	bool privileged;
+	/* Connections of all workers, and their slots, see esdm_rpcs_full() */
+	atomic_size_t num_connections;
+	atomic_size_t max_connections;
 };
 
 struct esdm_rpcs_connection {
@@ -167,7 +170,8 @@ static atomic_int server_exit = 0;
  * and the server itself. The bound is split evenly over the worker threads,
  * each holding at most ESDM_RPCS_MAX_WORKER_CONNECTIONS.
  *
- * A worker whose slots are all taken does not turn a new connection away -
+ * A worker whose slots are all taken stops accepting while another worker has
+ * a free slot. Once all are taken, it does not turn a new connection away -
  * whoever holds the slots would lock everybody else out - but closes one of
  * its connections to make room: the least recently active one of the UID with
  * the most connections in that worker. The clients reconnect transparently, so
@@ -920,6 +924,27 @@ static bool esdm_rpcs_make_room(int epfd,
 	return true;
 }
 
+/* Are the slots of all workers serving @proto taken? */
+static bool esdm_rpcs_full(struct esdm_rpcs *proto)
+{
+	return atomic_load(&proto->num_connections) >=
+	       atomic_load(&proto->max_connections);
+}
+
+/* Account a connection @thread takes up, in @num of its own */
+static void esdm_rpcs_conn_get(struct esdm_rpc_thread *thread, size_t *num)
+{
+	++*num;
+	atomic_fetch_add(&thread->proto->num_connections, 1);
+}
+
+/* Account a connection @thread gives up */
+static void esdm_rpcs_conn_put(struct esdm_rpc_thread *thread, size_t *num)
+{
+	--*num;
+	atomic_fetch_sub(&thread->proto->num_connections, 1);
+}
+
 /* Thread main for receiving new connections and processing them. */
 static int esdm_rpcs_handler(void *args)
 {
@@ -930,7 +955,10 @@ static int esdm_rpcs_handler(void *args)
 #define ESDM_RPCS_MAX_EVENTS 512
 	struct epoll_event events[ESDM_RPCS_MAX_EVENTS];
 	size_t max_connections = 0, num_connections = 0;
-	/* Close a connection for a new one, see ESDM_RPC_RESERVED_FDS */
+	/*
+	 * Close a connection for a new one once all workers are full, see
+	 * ESDM_RPC_RESERVED_FDS
+	 */
 	bool evict = false;
 	/*
 	 * The listening socket is level-triggered: while it is armed and a
@@ -939,8 +967,9 @@ static int esdm_rpcs_handler(void *args)
 	 * accepting, so leaving it armed would spin the worker at 100% CPU. Track
 	 * the arm state and disarm/re-arm the listening FD as the cap is
 	 * crossed, which also gives real backpressure (pending clients stay
-	 * queued in the listen backlog instead of being dropped). A worker that
-	 * makes room by closing a connection keeps accepting instead.
+	 * queued in the listen backlog instead of being dropped) and leaves the
+	 * connection to a worker with a free slot. Once all are full, a worker
+	 * that makes room by closing a connection keeps accepting instead.
 	 */
 	bool listen_armed = true;
 	/* accept() ran out of resources - see the accept path below */
@@ -1042,7 +1071,8 @@ static int esdm_rpcs_handler(void *args)
 		 * slot frees up so new connections are served again.
 		 */
 		bool want_armed =
-			(num_connections < max_connections || evict) &&
+			(num_connections < max_connections ||
+			 (evict && esdm_rpcs_full(thread->proto))) &&
 			!accept_paused;
 		if (want_armed != listen_armed) {
 			struct epoll_event lev = {
@@ -1106,7 +1136,8 @@ static int esdm_rpcs_handler(void *args)
 
 			/* new connection? */
 			if (events[i].events & EPOLLIN && rpc_conn == NULL &&
-			    (num_connections < max_connections || evict)) {
+			    (num_connections < max_connections ||
+			     (evict && esdm_rpcs_full(thread->proto)))) {
 				accepted_fd = accept4(
 					thread->proto->server_listening_fd,
 					NULL, NULL,
@@ -1191,7 +1222,8 @@ static int esdm_rpcs_handler(void *args)
 							rpc_conn);
 						continue;
 					}
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
 				}
 				/*
 				 * Idle since now, not since the epoch - or the
@@ -1247,7 +1279,8 @@ static int esdm_rpcs_handler(void *args)
 					LOGGER_DEBUG, LOGGER_C_RPC,
 					"Processing new incoming connection for FD %d\n",
 					rpc_conn->child_fd);
-				++num_connections;
+				esdm_rpcs_conn_get(thread,
+						   &num_connections);
 				esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 					    "num connections: %lu\n",
 					    num_connections);
@@ -1269,7 +1302,8 @@ static int esdm_rpcs_handler(void *args)
 						     tailq);
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
 					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
@@ -1304,7 +1338,8 @@ static int esdm_rpcs_handler(void *args)
 						     tailq);
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
 					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
@@ -1345,7 +1380,8 @@ static int esdm_rpcs_handler(void *args)
 					epoll_ctl(epfd, EPOLL_CTL_DEL,
 						  tmp1->child_fd, NULL);
 					esdm_rpcs_release_conn(tmp1);
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
 					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
@@ -1366,6 +1402,7 @@ out:
 			    tmp1->child_fd);
 		epoll_ctl(epfd, EPOLL_CTL_DEL, tmp1->child_fd, NULL);
 		esdm_rpcs_release_conn(tmp1);
+		esdm_rpcs_conn_put(thread, &num_connections);
 	}
 
 	if (tfd >= 0) {
@@ -1422,6 +1459,8 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 	}
 
 	max_connections = esdm_rpcs_worker_slots(proto, num_threads);
+	atomic_store(&proto->num_connections, 0);
+	atomic_store(&proto->max_connections, max_connections * num_threads);
 
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
 		    "Using %zu %sprivileged RPC worker threads, %zu connections each\n",
@@ -1461,6 +1500,8 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 			if (!t)
 				goto out;
 			num_threads = t;
+			atomic_store(&proto->max_connections,
+				     max_connections * num_threads);
 			break;
 		}
 
