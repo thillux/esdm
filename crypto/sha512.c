@@ -27,7 +27,8 @@
 
 struct esdm_hash_state {
 	uint64_t H[8];
-	size_t msg_len;
+	/* 64 bits on 32-bit platforms: final() encodes it, it must not wrap */
+	uint64_t msg_len;
 	uint8_t partial[ESDM_SHA512_SIZE_BLOCK];
 };
 
@@ -147,7 +148,7 @@ static void sha512_update(struct esdm_hash_state *ctx, const uint8_t *in,
 	if (!inlen)
 		return;
 
-	partial = ctx->msg_len % ESDM_SHA512_SIZE_BLOCK;
+	partial = (unsigned int)(ctx->msg_len % ESDM_SHA512_SIZE_BLOCK);
 
 	ctx->msg_len += inlen;
 
@@ -186,7 +187,9 @@ static void sha512_update(struct esdm_hash_state *ctx, const uint8_t *in,
 
 static void sha512_final(struct esdm_hash_state *ctx, uint8_t *digest)
 {
-	unsigned int i, partial = ctx->msg_len % ESDM_SHA512_SIZE_BLOCK;
+	unsigned int partial =
+		(unsigned int)(ctx->msg_len % ESDM_SHA512_SIZE_BLOCK);
+	unsigned int i;
 
 	/*
 	 * We know a-priori that we have at least one byte free in the partial
@@ -210,13 +213,9 @@ static void sha512_final(struct esdm_hash_state *ctx, uint8_t *digest)
 	/* Fill the unused part of the partial buffer with zeros */
 	memset(ctx->partial + partial, 0, ESDM_SHA512_SIZE_BLOCK - partial);
 
-	/*
-	 * Add the message length in bits at the end of the partial buffer.
-	 * Compute in 64 bits: msg_len is size_t, so shifting in place would
-	 * drop the top bits (wrong digest) for inputs >= 512 MiB on 32-bit.
-	 */
+	/* Add the message length in bits at the end of the partial buffer. */
 	be64_to_ptr(ctx->partial + (ESDM_SHA512_SIZE_BLOCK - 8),
-		    (uint64_t)ctx->msg_len << 3);
+		    ctx->msg_len << 3);
 
 	/* Final transformation */
 	sha512_transform(ctx, ctx->partial);

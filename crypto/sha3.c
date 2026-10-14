@@ -31,7 +31,12 @@
 struct esdm_hash_state {
 	uint8_t partial[ESDM_SHA3_MAX_SIZE_BLOCK];
 	uint64_t state[SHA3_STATE_WORDS];
-	size_t msg_len;
+	/*
+	 * 64 bits even on 32-bit platforms: a size_t would wrap after 4 GiB,
+	 * and as 2^32 is no multiple of the rate, the partial block offset
+	 * derived from it would then be wrong.
+	 */
+	uint64_t msg_len;
 	size_t digestsize;
 	unsigned int r;
 	unsigned int rword;
@@ -292,7 +297,7 @@ static inline void sha3_fill_state_aligned(struct esdm_hash_state *ctx,
 static void keccak_absorb(struct esdm_hash_state *ctx, const uint8_t *in,
 			  size_t inlen)
 {
-	size_t partial = ctx->msg_len % ctx->r;
+	size_t partial = (size_t)(ctx->msg_len % ctx->r);
 
 	ctx->squeeze_more = 0;
 
@@ -359,7 +364,7 @@ static void keccak_absorb(struct esdm_hash_state *ctx, const uint8_t *in,
 
 static void keccak_squeeze(struct esdm_hash_state *ctx, uint8_t *digest)
 {
-	size_t partial = ctx->msg_len % ctx->r;
+	size_t partial = (size_t)(ctx->msg_len % ctx->r);
 	size_t i, digest_len = ctx->digestsize;
 	uint32_t part;
 	volatile uint32_t *part_p;
