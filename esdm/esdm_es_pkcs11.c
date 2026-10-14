@@ -525,14 +525,19 @@ static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
 static void esdm_es_pkcs11_es_state(char *buf, size_t buflen)
 {
 	uint32_t poolsize, entropy_rate;
-	const char *token_label = "(none)";
+	/*
+	 * A PKCS#11 token label has 32 bytes. Copied, as a reconfiguration or
+	 * a re-discovery frees it once the lock is dropped.
+	 */
+	char token_label[33] = "(none)";
 	const char *module_path = ESDM_PKCS11_MODULE_PATH;
 
 	mutex_reader_lock(&pkcs11_mutex);
 	poolsize = esdm_es_pkcs11_entropylevel_locked(esdm_security_strength());
 	entropy_rate = esdm_es_pkcs11_entropylevel_locked(256);
 	if (pkcs11_slot && pkcs11_slot->token && pkcs11_slot->token->label)
-		token_label = pkcs11_slot->token->label;
+		snprintf(token_label, sizeof(token_label), "%s",
+			 pkcs11_slot->token->label);
 	mutex_reader_unlock(&pkcs11_mutex);
 
 	snprintf(buf, buflen,
