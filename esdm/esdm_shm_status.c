@@ -518,7 +518,7 @@ int esdm_shm_status_init(void)
 			"Status report truncated to the %zu bytes of the shared memory segment\n",
 			sizeof(esdm_shm_status->info));
 	}
-	esdm_shm_status->infolen = strlen(esdm_shm_status->info);
+	esdm_shm_status->infolen = (uint32_t)strlen(esdm_shm_status->info);
 	esdm_shm_status->unpriv_threads = esdm_config_online_nodes();
 
 	/*
