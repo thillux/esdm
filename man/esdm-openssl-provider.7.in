@@ -116,7 +116,10 @@ key of their provider section in
 .IR openssl.cnf ,
 from the
 .B ESDM_EGD_SOCKET
-environment variable, and from the path the ESDM was built with. Configuring
+environment variable, and from the path the ESDM was built with. The variable
+names the socket of the ordinary generator, so
+.I libesdm\-egd\-provider\-pr.so
+skips it and goes to the path of the prediction resistance socket. Configuring
 the EGD variant therefore differs from the above only in the module and in the
 properties:
 .PP

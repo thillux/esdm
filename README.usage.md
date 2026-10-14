@@ -290,7 +290,8 @@ one socket, for instance:
 
   Without the `egd_socket` key the socket is taken from the `ESDM_EGD_SOCKET`
   environment variable and, failing that, from the path the respective provider
-  was built with.
+  was built with. The variable names the ordinary socket, so the `-pr` provider
+  skips it.
 
 ### Prediction resistance
 
