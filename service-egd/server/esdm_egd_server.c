@@ -730,6 +730,14 @@ static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
 	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
 
+	/*
+	 * The ESDM left the operational state on the way - its initial DRNG
+	 * reached its limit without a reseed. A blocking read waits for it to
+	 * return, as for one that never got there.
+	 */
+	if (ret == -EOPNOTSUPP && !esdm_state_operational())
+		return -EAGAIN;
+
 	if (ret < 0)
 		return (ret == -EAGAIN) ? -EAGAIN : (int)ret;
 
