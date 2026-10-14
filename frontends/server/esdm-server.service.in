@@ -72,7 +72,8 @@ PrivateMounts=no
 PrivateNetwork=yes
 PrivateTmp=yes
 PrivateUsers=no
-ProcSubset=pid
+# No ProcSubset=pid: it hides /proc/sys/crypto/fips_enabled, which a FIPS 140
+# build reads as "kernel not in FIPS mode", silently leaving FIPS mode off.
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectHome=yes
