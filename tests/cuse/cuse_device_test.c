@@ -91,6 +91,9 @@ static struct {
 /* The caller every handler below sees */
 static struct fuse_ctx test_ctx;
 
+/* The entropy count the last RNDADDENTROPY handed to the ESDM */
+static uint32_t added_entropy_cnt;
+
 static unsigned int notify_calls;
 static unsigned int destroy_calls;
 static unsigned int raise_calls;
@@ -412,13 +415,13 @@ static void test_ioctl_compat(void)
 	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
 
 	/* And the data transferred is checked as for one */
+	caller_is_root(true);
 	rpi->buf_size = 4;
-	rpi->entropy_count = 33;
+	rpi->entropy_count = -1;
 	compat_ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
 
-	caller_is_root(true);
 	compat_ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
@@ -459,9 +462,10 @@ static void test_ioctl_retries(void)
 
 /*
  * What the kernel's own RNDADDENTROPY rejects, this one has to reject as well:
- * a negative buffer size, and a claim of more entropy than the buffer can hold.
- * A caller getting either past this check would move the ESDM's entropy
- * estimate with data that does not carry the entropy.
+ * a negative buffer size and a negative entropy count, after the check of the
+ * caller as in the kernel. A claim of more entropy than the buffer can hold the
+ * kernel takes, and so does this one, but the ESDM is credited no more than the
+ * buffer holds.
  */
 static void test_ioctl_addentropy_rejected(void)
 {
@@ -474,24 +478,36 @@ static void test_ioctl_addentropy_rejected(void)
 	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
 	const size_t datalen = 32;
 
+	caller_is_root(true);
+
 	rpi->buf_size = -1;
 	rpi->entropy_count = 8;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, drop_calls);
 
 	rpi->buf_size = (int)datalen;
 	rpi->entropy_count = -1;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, drop_calls);
 
 	/* More bits than the buffer holds */
 	rpi->buf_size = (int)datalen;
 	rpi->entropy_count = (int)datalen * 8 + 1;
+	added_entropy_cnt = 0;
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_IOCTL);
+	CHECK_EQ(added_entropy_cnt, datalen * 8);
+
+	/* The privilege check comes first, as in the kernel */
+	caller_is_root(false);
+	rpi->entropy_count = -1;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(reply.err, EPERM);
 }
 
 /*
@@ -1042,8 +1058,8 @@ int test_add_entropy(const uint8_t *entropy_buf, size_t entropy_buf_len,
 {
 	(void)entropy_buf;
 	(void)entropy_buf_len;
-	(void)entropy_cnt;
 	(void)int_data;
+	added_entropy_cnt = entropy_cnt;
 	return priv_rpc_ret;
 }
 

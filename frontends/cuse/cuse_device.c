@@ -1100,55 +1100,62 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 					     sizeof(struct rand_pool_info) };
 
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
-		} else if (rpi->buf_size < 0) {
-			fuse_reply_err(req, EINVAL);
-		} else if ((size_t)rpi->buf_size !=
-			   in_bufsz - sizeof(struct rand_pool_info)) {
+			break;
+		}
+		if (rpi->buf_size >= 0 &&
+		    (size_t)rpi->buf_size !=
+			    in_bufsz - sizeof(struct rand_pool_info)) {
 			struct iovec iov = { arg,
 					     sizeof(struct rand_pool_info) +
 						     (size_t)rpi->buf_size };
 
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
-		} else if (rpi->entropy_count < 0 ||
-			   (uint64_t)rpi->entropy_count >
-				   (uint64_t)rpi->buf_size * 8) {
-			/*
-			 * Reject a negative entropy_count (which would otherwise
-			 * become a huge value once cast to uint32_t) and any
-			 * claim of more entropy bits than the supplied buffer
-			 * can hold, mirroring the kernel's RNDADDENTROPY check.
-			 */
-			fuse_reply_err(req, EINVAL);
-		} else {
-			/*
-			 * This operation requires privileges. Thus, raise the
-			 * privilege level to the same level as the caller has.
-			 */
-			ret = esdm_cuse_priv_call_start(req);
-			if (ret) {
-				fuse_reply_err(req, ret);
-				return;
-			}
-
-			esdm_invoke(esdm_rpcc_rnd_add_entropy_int(
-				(const uint8_t *)rpi->buf,
-				(size_t)rpi->buf_size,
-				(uint32_t)rpi->entropy_count, req));
-
-			/* In case of an error, update the kernel */
-			if (ret && !esdm_cuse_priv_in_progress(&ret)) {
-				if (backend_fd >= 0 &&
-				    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
-					ret = -errno;
-				else
-					ret = 0;
-			}
-			esdm_cuse_drop_privilege_transient();
-			if (ret)
-				fuse_reply_err(req, -ret);
-			else
-				fuse_reply_ioctl(req, 0, NULL, 0);
+			break;
 		}
+
+		/*
+		 * This operation requires privileges. Thus, raise the
+		 * privilege level to the same level as the caller has. As the
+		 * kernel, check the caller before the request's fields.
+		 */
+		ret = esdm_cuse_priv_call_start(req);
+		if (ret) {
+			fuse_reply_err(req, ret);
+			return;
+		}
+
+		/*
+		 * The kernel refuses a negative entropy_count, which would
+		 * become a huge value once cast to uint32_t. A count beyond
+		 * the bits of the buffer it takes, as the kernel does, but
+		 * credits no more than the buffer can hold.
+		 */
+		if (rpi->buf_size < 0 || rpi->entropy_count < 0) {
+			esdm_cuse_drop_privilege_transient();
+			fuse_reply_err(req, EINVAL);
+			return;
+		}
+		ent_count_bits = (uint32_t)min_uint64(
+			(uint64_t)rpi->entropy_count,
+			(uint64_t)rpi->buf_size * 8);
+
+		esdm_invoke(esdm_rpcc_rnd_add_entropy_int(
+			(const uint8_t *)rpi->buf, (size_t)rpi->buf_size,
+			ent_count_bits, req));
+
+		/* In case of an error, update the kernel */
+		if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+			if (backend_fd >= 0 &&
+			    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
+				ret = -errno;
+			else
+				ret = 0;
+		}
+		esdm_cuse_drop_privilege_transient();
+		if (ret)
+			fuse_reply_err(req, -ret);
+		else
+			fuse_reply_ioctl(req, 0, NULL, 0);
 		break;
 	case RNDZAPENTCNT:
 	case RNDCLEARPOOL:
