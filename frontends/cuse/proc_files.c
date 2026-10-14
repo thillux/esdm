@@ -832,8 +832,8 @@ static void show_help(const char *progname)
 	printf("usage: %s [options] <mountpoint>\n\n", progname);
 	printf("File-system specific options:\n"
 	       "    --verbosity=<u>     Verbosity level\n"
-	       "    --relabel           Perform automatic SELinux relabeling"
-	       "    --syslog            Log via syslog"
+	       "    --relabel           Perform automatic SELinux relabeling\n"
+	       "    --syslog            Log via syslog\n"
 	       "\n");
 }
 
