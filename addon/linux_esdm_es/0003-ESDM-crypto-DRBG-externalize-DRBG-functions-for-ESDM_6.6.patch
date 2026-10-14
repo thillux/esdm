@@ -29,7 +29,7 @@ index 211757f3f972..1ec87d5ef34d 100644
  	},
  #endif /* CONFIG_CRYPTO_DRBG_HMAC */
  };
-+EXPORT_SYMBOL(drbg_cores);
++EXPORT_SYMBOL_NS_GPL(drbg_cores, ESDM);
  
  static int drbg_uninstantiate(struct drbg_state *drbg);
  
@@ -46,7 +46,7 @@ index 211757f3f972..1ec87d5ef34d 100644
  		return 32;
  	}
  }
-+EXPORT_SYMBOL(drbg_sec_strength);
++EXPORT_SYMBOL_NS_GPL(drbg_sec_strength, ESDM);
  
  /*
   * FIPS 140-2 continuous self test for the noise source
@@ -63,7 +63,7 @@ index 211757f3f972..1ec87d5ef34d 100644
  		drbg->fips_primed = false;
  	}
  }
-+EXPORT_SYMBOL(drbg_dealloc_state);
++EXPORT_SYMBOL_NS_GPL(drbg_dealloc_state, ESDM);
  
  /*
   * Allocate all sub-structures for a DRBG state.
@@ -78,7 +78,7 @@ index 211757f3f972..1ec87d5ef34d 100644
  	drbg_dealloc_state(drbg);
  	return ret;
  }
-+EXPORT_SYMBOL(drbg_alloc_state);
++EXPORT_SYMBOL_NS_GPL(drbg_alloc_state, ESDM);
  
  /*************************************************************************
   * DRBG interface functions
@@ -96,7 +96,7 @@ index 211757f3f972..1ec87d5ef34d 100644
  		}
  	}
  }
-+EXPORT_SYMBOL(drbg_convert_tfm_core);
++EXPORT_SYMBOL_NS_GPL(drbg_convert_tfm_core, ESDM);
  
  static int drbg_kcapi_init(struct crypto_tfm *tfm)
  {

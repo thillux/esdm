@@ -13,10 +13,10 @@ noop.
 Signed-off-by: Stephan Mueller <smueller@chronox.de>
 ---
  drivers/misc/Makefile      |  2 ++
- drivers/misc/esdm_sched.c  | 55 ++++++++++++++++++++++++++++++++++++++
+ drivers/misc/esdm_sched.c  | 63 ++++++++++++++++++++++++++++++++++++++
  include/linux/esdm_sched.h | 20 ++++++++++++++
  kernel/sched/core.c        |  3 +++
- 4 files changed, 80 insertions(+)
+ 4 files changed, 88 insertions(+)
  create mode 100644 drivers/misc/esdm_sched.c
  create mode 100644 include/linux/esdm_sched.h
 
@@ -35,10 +35,10 @@ index 56de43943cd5..7272f3c80719 100644
  obj-$(CONFIG_AD525X_DPOT)	+= ad525x_dpot.o
 diff --git a/drivers/misc/esdm_sched.c b/drivers/misc/esdm_sched.c
 new file mode 100644
-index 000000000000..dfe537936c15
+index 000000000000..a6e5a8cf9069
 --- /dev/null
 +++ b/drivers/misc/esdm_sched.c
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,63 @@
 +/* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 +/*
 + * Copyright (C) 2026, Stephan Mueller <smueller@chronox.de>
@@ -51,6 +51,14 @@ index 000000000000..dfe537936c15
 +#include <linux/esdm_sched.h>
 +#include <linux/module.h>
 +#include <linux/rcupdate.h>
++#include <linux/version.h>
++
++/* Symbol namespaces are string literals since 6.13. */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
++#define ESDM_SYMBOL_NS "ESDM"
++#else
++#define ESDM_SYMBOL_NS ESDM
++#endif
 +
 +static esdm_sched_randomness_t esdm_sched_randomness_func = NULL;
 +
@@ -75,7 +83,7 @@ index 000000000000..dfe537936c15
 +		return -EAGAIN;
 +	return 0;
 +}
-+EXPORT_SYMBOL(esdm_sched_register);
++EXPORT_SYMBOL_NS_GPL(esdm_sched_register, ESDM_SYMBOL_NS);
 +
 +/*
 + * Returns once no CPU executes the callback any more, so the caller may free
@@ -93,7 +101,7 @@ index 000000000000..dfe537936c15
 +
 +	synchronize_rcu();
 +}
-+EXPORT_SYMBOL(esdm_sched_unregister);
++EXPORT_SYMBOL_NS_GPL(esdm_sched_unregister, ESDM_SYMBOL_NS);
 diff --git a/include/linux/esdm_sched.h b/include/linux/esdm_sched.h
 new file mode 100644
 index 000000000000..f5935eca193a

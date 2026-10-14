@@ -360,5 +360,11 @@ module_init(esdm_es_mgr_init);
 module_exit(esdm_es_mgr_exit);
 
 MODULE_LICENSE("Dual BSD/GPL");
+/* The kernel patches export into ESDM, a string literal since 6.13 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("ESDM");
+#else
+MODULE_IMPORT_NS(ESDM);
+#endif
 MODULE_AUTHOR("Stephan Mueller <smueller@chronox.de>");
 MODULE_DESCRIPTION("ESDM entropy source manager");

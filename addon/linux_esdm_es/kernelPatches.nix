@@ -34,11 +34,15 @@ in
 ]
 # Since 7.2 the kernel DRBG is a private HMAC_DRBG without the internals this
 # patch exported; esdm_es brings its own HMAC_DRBG there (esdm_drbg_kcapi.c).
+# 6.12 and 6.18 differ only in the namespace of the exports, a string literal
+# since 6.13.
 ++ lib.optional (lib.versionOlder kernel.version "7.2") {
   name = "esdm_drbg_visibility";
   patch =
     if lib.versionOlder kernel.version "6.12" then
       ./0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM_6.6.patch
+    else if lib.versionOlder kernel.version "6.13" then
+      ./0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM_6.12.patch
     else
       ./0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM_6.18.patch;
 }
