@@ -94,7 +94,9 @@ static uint32_t ebpf_pool_extract(struct esdm_ebpf_es *es)
  * seeding treat it as validated and put its data into the seed buffer.
  *
  * The records are handed to the ring buffer callback directly, as
- * ring_buffer__consume() would until the callback stops it.
+ * ring_buffer__consume() would until the callback stops it. libbpf has
+ * consumed the record whose callback stops it, so that record must have been
+ * taken in.
  */
 static void ebpf_pool_uncredited(struct esdm_ebpf_es *es)
 {
@@ -132,6 +134,7 @@ static void ebpf_pool_uncredited(struct esdm_ebpf_es *es)
 		fed += rec.events;
 	}
 	CHECK_EQ(ret, ESDM_EBPF_FETCH_DONE);
+	CHECK_EQ(es->ingested, fed + rec.events);
 	CHECK(es->ingested >= es->fetch_target,
 	      "the uncredited fetch stopped short of its bound");
 	CHECK(es->ingested < es->fetch_target + ESDM_EBPF_BATCH_EVENTS,

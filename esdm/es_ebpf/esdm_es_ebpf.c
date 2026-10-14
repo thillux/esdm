@@ -73,10 +73,11 @@
 /*
  * Returned by the record handler once the conditioning pool cannot credit
  * another event. libbpf aborts the ring buffer consumption on a negative
- * callback return without advancing past the record, so that event and
- * everything behind it stay buffered for the next fetch.
- * ring_buffer__consume_n() would say this directly, but it is a libbpf 1.5 API
- * and the distributions this builds on are still on 1.3.
+ * callback return, but only after it advanced past the record handed to the
+ * callback, so the handler takes that record in first: everything behind it
+ * stays buffered for the next fetch. ring_buffer__consume_n() would say this
+ * directly, but it is a libbpf 1.5 API and the distributions this builds on
+ * are still on 1.3.
  */
 #define ESDM_EBPF_FETCH_DONE (-ECANCELED)
 
@@ -1052,16 +1053,17 @@ static int esdm_ebpf_handle_record(void *ctx, void *data, size_t size)
 	switch (type) {
 	case esdm_ebpf_rec_event:
 		/*
-		 * Stop here once the pool is full rather than hash events it
-		 * cannot credit. The record keeps its place in the ring buffer
-		 * and the next fetch takes it.
+		 * The record is consumed whatever is returned, so it is taken
+		 * in before stopping. Stop once the pool is full rather than
+		 * hash events it cannot credit: the records behind this one
+		 * keep their place in the ring buffer for the next fetch.
 		 */
+		if (size >= ESDM_EBPF_EVENT_REC_LEN(0))
+			esdm_ebpf_handle_events(es, data, size);
 		if (es->fetch_uncredited ?
 			    es->ingested >= es->fetch_target :
 			    es->credited_events >= es->fetch_target)
 			return ESDM_EBPF_FETCH_DONE;
-		if (size >= ESDM_EBPF_EVENT_REC_LEN(0))
-			esdm_ebpf_handle_events(es, data, size);
 		break;
 	case esdm_ebpf_rec_wipe:
 		/* Filler left behind by a wipe that could not finish */
