@@ -855,6 +855,19 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		}
 
 		/*
+		 * An interrupted reader is no failure of the ESDM to cover for:
+		 * the kernel still waits for the reply on a signal that does not
+		 * kill the caller, which would get the fallback's bytes before
+		 * the ESDM is seeded. It gets what was read, or EINTR.
+		 */
+		if (ret < 0 && fuse_req_interrupted(req)) {
+			if (read_bytes)
+				break;
+			ret = -EINTR;
+			goto out;
+		}
+
+		/*
 		 * If call to the ESDM server failed, let us fall back to the
 		 * fallback file descriptor. Yet, we do not cover for short
 		 * reads as this entire CUSE handling is prone to short reads
@@ -940,6 +953,12 @@ void esdm_cuse_write_internal(fuse_req_t req, const char *buf, size_t size,
 	goto out;
 
 err:
+	/* As for a read, an interrupted writer is not served by the fallback */
+	if (ret < 0 && fuse_req_interrupted(req)) {
+		ret = written ? 0 : -EINTR;
+		goto out;
+	}
+
 	/*
 	 * If call to the ESDM server failed, let us fall back to the
 	 * fallback file descriptor. It writes the entire buffer into the

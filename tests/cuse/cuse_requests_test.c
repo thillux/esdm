@@ -442,6 +442,44 @@ static void test_read_interrupted_giving_way(void)
 }
 
 /*
+ * An interrupted reader or writer is not served by the kernel device: a read
+ * would hand out its bytes before the ESDM is seeded.
+ */
+static void test_interrupted_no_fallback(void)
+{
+	static const char data[16] = { 0 };
+	struct fuse_file_info fi;
+	struct test_req r;
+	int fd;
+
+	fd = open("/dev/zero", O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/zero");
+		return;
+	}
+
+	memset(&fi, 0, sizeof(fi));
+	test_req_init(&r);
+	atomic_store(&r.interrupted, true);
+	atomic_store(&test_seeded, false);
+	esdm_cuse_read_internal((fuse_req_t)&r, 32, 0, &fi, test_get_unseeded,
+				fd);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.kind, REPLY_ERR);
+	CHECK_EQ(r.err, EINTR);
+
+	test_req_init(&r);
+	atomic_store(&r.interrupted, true);
+	esdm_cuse_write_internal((fuse_req_t)&r, data, sizeof(data), 0, &fi,
+				 fd);
+	CHECK_EQ(atomic_load(&r.replies), 1);
+	CHECK_EQ(r.kind, REPLY_ERR);
+	CHECK_EQ(r.err, EINTR);
+
+	close(fd);
+}
+
+/*
  * /dev/urandom is always readable and writable, as the kernel's is, which has
  * no poll handler. Without a status segment, nothing tells that the ESDM is
  * seeded - which /dev/random waits for, but /dev/urandom does not.
@@ -507,6 +545,7 @@ int main(int argc, char *argv[])
 	test_read_reply_once();
 	test_read_gives_way();
 	test_read_interrupted_giving_way();
+	test_interrupted_no_fallback();
 	test_poll_urandom();
 
 	return common_test_result("cuse_requests");
