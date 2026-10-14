@@ -451,7 +451,7 @@ static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 	if (message_length > ESDM_RPC_MAX_INTERNAL_MSG_SIZE) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 			    "Unexpected message length: %zu\n", message_length);
-		return -EFAULT;
+		return -EMSGSIZE;
 	}
 
 	tmp.dst_buf = tbuf->reqbuf + ESDM_RPCC_BUF_WRITE_HEADER_SZ;

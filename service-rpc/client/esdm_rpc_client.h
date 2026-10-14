@@ -629,7 +629,8 @@ int esdm_rpcc_rnd_add_to_ent_cnt_int(unsigned int entcnt, void *int_data);
  *
  * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
  *	    interrupted after the request was sent and must not be repeated,
- *	    see esdm_invoke)
+ *	    see esdm_invoke; -EMSGSIZE means entropy_buf does not fit into one
+ *	    message of just under 64 KiB)
  */
 int esdm_rpcc_rnd_add_entropy(const uint8_t *entropy_buf,
 			      size_t entropy_buf_len, uint32_t entropy_cnt);

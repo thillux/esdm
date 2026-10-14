@@ -213,6 +213,12 @@ nor the caller should repeat it.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
+.B \-EMSGSIZE
+means the request does not fit into one message of just under 64 KiB, which
+limits the entropy buffer of
+.BR esdm_rpcc_rnd_add_entropy ().
+.BR esdm_rpcc_write_data ()
+splits its data into messages itself.
 .PP
 .B \-ETIMEDOUT
 means the server did not answer in time. A request of the unprivileged endpoint
