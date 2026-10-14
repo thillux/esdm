@@ -126,6 +126,19 @@ if the report does not fit into the buffer; what fits is left in it.
 .BI "void esdm_status_machine(struct esdm_status_st *" status ");"
 The same information in a structure meant for programmatic use.
 .TP
+.BI "int esdm_status_drng_json(uint32_t " node ", char *" buf ", size_t " buflen ");"
+The state of the DRNG instance of
+.I node
+as a JSON document. Returns 0 on success,
+.B \-ENODEV
+if the node has no DRNG instance, which tells a caller walking the nodes
+from 0 upwards that it reached the end, and
+.B \-EMSGSIZE
+if the document does not fit into the buffer.
+.TP
+.BI "int esdm_status_drng_pr_json(char *" buf ", size_t " buflen ");"
+The same for the DRNG instance serving prediction resistance requests.
+.TP
 .BI "void esdm_version(char *" buf ", size_t " buflen ");"
 Version information.
 .TP

@@ -51,6 +51,22 @@ For process shutdown paths where the other users cannot be reached.
 .BI "void esdm_rpcc_force_fini_priv_service(void);"
 The same for the privileged endpoint.
 .TP
+.BI "int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **" rpc_conn ", void *" int_data ");"
+.TP
+.BI "void esdm_rpcc_put_unpriv_service(esdm_rpc_client_connection_t *" rpc_conn ");"
+.TP
+.BI "int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **" rpc_conn ", void *" int_data ");"
+.TP
+.BI "void esdm_rpcc_put_priv_service(esdm_rpc_client_connection_t *" rpc_conn ");"
+Check a connection handle of the respective endpoint out of the pool and
+return it, for applications issuing requests on a handle themselves. The
+service must be initialized; the get calls do not establish it and fail with
+.B \-EFAULT
+otherwise, or with
+.B \-ESHUTDOWN
+while it is being torn down. The handle belongs to the pool and must not be
+freed. Passing NULL to a put call is a no\-op.
+.TP
 .BI "int esdm_rpcc_set_max_online_nodes(uint32_t " nodes ");"
 Limit the number of connection pool nodes the client keeps. Call before
 initializing a service.
@@ -159,11 +175,13 @@ Entropy level below which polling writers are woken.
 .TP
 .BI "int esdm_rpcc_get_min_reseed_secs(unsigned int *" seconds ");"
 Minimum number of seconds between two reseed operations.
-.SS Administration
-These require the privileged endpoint.
+.SS Contributing data
 .TP
 .BI "int esdm_rpcc_write_data(const uint8_t *" data_buf ", size_t " data_buf_len ");"
-Write data into the auxiliary pool without crediting entropy.
+Write data into the auxiliary pool without crediting entropy. This uses the
+unprivileged endpoint and is open to every user.
+.SS Administration
+These require the privileged endpoint.
 .TP
 .BI "int esdm_rpcc_set_write_wakeup_thresh(unsigned int " thresh ");"
 Set the write wakeup threshold.
@@ -173,6 +191,15 @@ Set the minimum reseed interval.
 .TP
 .BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
 Set the token label and user PIN of the PKCS#11 entropy source.
+.TP
+.BI "int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *" result ");"
+Run the self tests of the server now. Returns 0 if every self test passed and
+the ESDM hands out random bits, otherwise the error of the failing test, or
+.B \-EOPNOTSUPP
+where an earlier failure still holds the output back. If
+.I result
+is not NULL, it receives the state of the crypto and the entropy source self
+tests and the number of entropy sources tested and failed, on error too.
 .SS Linux random device IOCTLs
 These mirror the
 .BR ioctl (2)
@@ -236,8 +263,9 @@ for its duration, so calls from several threads proceed concurrently as long as
 the pool has free entries and block on each other otherwise. Applications that
 manage connection handles themselves with
 .BR esdm_rpcc_get_unpriv_service ()
-must return them with
-.BR esdm_rpcc_put_unpriv_service ()
+or
+.BR esdm_rpcc_get_priv_service ()
+must return them with the matching put call
 as soon as the request completed, since a checked\-out handle is held
 exclusively.
 .SH EXAMPLE
