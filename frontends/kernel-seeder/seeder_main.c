@@ -249,9 +249,11 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 		}
 
 		if (ret < 0) {
-			esdm_logger(LOGGER_ERR, LOGGER_C_SEEDER,
-				    "Failure in generating random bits: %zd\n",
-				    ret);
+			/* An RPC abandoned for the termination is no failure */
+			if (atomic_load(&should_run))
+				esdm_logger(LOGGER_ERR, LOGGER_C_SEEDER,
+					    "Failure in generating random bits: %zd\n",
+					    ret);
 		} else {
 			rpi->entropy_count = ESDM_LINUX_RESEED_ENTROPY_COUNT;
 			if (pr_mode()) {
@@ -322,6 +324,17 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 
 out:
 	return fn_ret;
+}
+
+/*
+ * Abandon an RPC on termination: the get calls keep asking an unseeded ESDM
+ * until it is seeded, which a stop must not wait for.
+ */
+static int seeder_interrupt(void *data)
+{
+	(void)data;
+
+	return !atomic_load(&should_run);
 }
 
 /*
@@ -469,7 +482,7 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	if (esdm_rpcc_init_unpriv_service(NULL) != 0) {
+	if (esdm_rpcc_init_unpriv_service(seeder_interrupt) != 0) {
 		printf("unable to initialize unprivileged ESDM service, exiting!");
 		tool_ret = EXIT_FAILURE;
 		goto out;
