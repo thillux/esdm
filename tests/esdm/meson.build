@@ -398,9 +398,9 @@ if get_option('esdm-server').enabled()
 	endif
 	test('ESDM DRNG manager max w/o reseed bits large request - 1 DRNG',
 		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
-		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
 	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
+			esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
 		test('ESDM DRNG manager spent node DRNG falls back to the initial DRNG',
 			esdm_drng_mgr_spent_node_fallback_test)
 	endif
