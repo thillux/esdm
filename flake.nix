@@ -946,6 +946,7 @@
           # The test suite on a 32-bit system - see esdm-i686.
           // lib.optionalAttrs (system == "x86_64-linux") {
             i686 = self.packages.${system}.esdm-i686;
+            i686-openssl = self.packages.${system}.esdm-i686-openssl;
           };
 
         packages =
@@ -2000,6 +2001,19 @@
                   description = "ESDM built for i686, running the meson test suite";
                 };
               });
+
+          # The same with the OpenSSL backend, whose DRBG self test depends on
+          # the nonce length it hands to OpenSSL.
+          esdm-i686-openssl = self.packages.${system}.esdm-i686.overrideAttrs (prev: {
+            pname = "esdm-i686-openssl";
+            buildInputs = prev.buildInputs ++ [ pkgs.pkgsi686Linux.openssl ];
+            mesonFlags =
+              (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
+              ++ [ "-Dcrypto_backend=openssl" ];
+            meta = prev.meta // {
+              description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
+            };
+          });
         };
 
         # One live system per defined kernel version, e.g. live_6_18. Only
