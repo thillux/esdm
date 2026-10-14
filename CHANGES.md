@@ -26,7 +26,8 @@ AIS 20/31 DRG classes the build satisfies (a DRG.4 build reports DRG.3 as well)
 
 * NTG.1 seeding strategy: seed from the jitter RNG alone when it is operated in
 its own NTG.1 mode (es_jent_ntg1 with jitterentropy >= 3.7.0), as it is NTG.1
-conformant without a second entropy source
+conformant without a second entropy source, once it delivered the full seed
+entropy
 
 * Add eBPF-based scheduler and interrupt entropy sources (es_sched_ebpf,
 es_irq_ebpf): no kernel patches required, in-program SP800-90B health tests,
@@ -191,7 +192,7 @@ addon/es_ebpf_testing
 
 * fix: esdm-server exits with an error when the RPC or EGD interfaces cannot be set up, instead of 0, and no longer waits forever for an unprivileged interface that failed to start; the idle timeout is honored to the microsecond
 
-* esdm-server: an unprivileged peer is limited to max(512, min(16 per online CPU, half the RLIMIT_NOFILE)) RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed, so a local user can no longer exhaust the connections or file descriptors of the server; the unprivileged RPC connections are bounded in total as well, leaving descriptors for the EGD interface, and a full worker closes the least recently active idle connection, preferring the UID holding the most, to make room for a new one - many UIDs of one user (subordinate UIDs) no longer lock out other users
+* esdm-server: an unprivileged peer is limited to max(512, min(16 per online CPU, half the RLIMIT_NOFILE)) RPC and 256 EGD connections, and EGD connections idle for 60 seconds are closed when their slots or descriptors are wanted, so a local user can no longer exhaust the connections or file descriptors of the server; the unprivileged RPC connections are bounded in total as well, leaving descriptors for the EGD interface, and once every worker is full, a worker closes the least recently active connection - an idle one before one whose answer is unread - preferring the UID holding the most, to make room for a new one - many UIDs of one user (subordinate UIDs) no longer lock out other users
 
 * fix: RPC client: a forked child only closes the inherited sockets instead of shutting down the connections the parent still uses (which made the parent resend requests); a server that does not answer is given up on instead of retried forever; a privileged request is not sent again after the server closed the connection, as it may already have been applied; a status report truncated to the maximum message size is delivered with -EMSGSIZE, and the JSON status calls leave the buffer empty on any server error
 
@@ -257,7 +258,7 @@ addon/es_ebpf_testing
 
 * RPC client: a privileged call interrupted after its request was sent returns -EINPROGRESS instead of -EINTR, as the request may have been applied, and esdm_invoke() does not send it again; fix: an invalid timeout of esdm_rpcc_get_random_bytes_full_timeout() returns -EINVAL instead of aborting; a failing read of an answer is reported as the error it is; the writer-preferring connection lock is used in the real build; RPC server: a connection is idle from its last answer, not its last request
 
-* fix: CUSE: with libfuse >= 3.12 up to 1024 worker threads (-o max_threads) serve the devices instead of libfuse's default of 10, which waiting readers could exhaust and stall every other request including the privileged ioctls; an interrupted privileged ioctl is not run against the kernel again, crediting no entropy twice; a suspend or server exit wakes the pollers of every CUSE daemon (status segment version 3); --pid_namespace without -f no longer kills the daemon at startup; a failing fallback read or write reports its errno instead of EPERM; esdm-proc lets root's writes overtake the unprivileged readers
+* fix: CUSE: with libfuse >= 3.12 up to 1024 worker threads (-o max_threads) serve the devices instead of libfuse's default of 10, which waiting readers could exhaust and stall every other request including the privileged ioctls; an interrupted privileged ioctl is not run against the kernel again, crediting no entropy twice; a suspend or server exit wakes the pollers of every CUSE daemon (status segment version 4); --pid_namespace without -f no longer kills the daemon at startup; a failing fallback read or write reports its errno instead of EPERM; esdm-proc lets root's writes overtake the unprivileged readers
 
 * fix: Linux kernel addon: the VM fork notifier is registered with CONFIG_VMGENID=m as well, as nixpkgs kernels have it, so cloned VMs no longer keep identical entropy state; the event rings are sized from the OSR, which made module load hit BUG() from OSR 7 on; flake: the testing interfaces are built only on request and the package version is taken from meson.build
 
@@ -265,7 +266,29 @@ addon/es_ebpf_testing
 
 * flake: build and test the ESDM on i686; the VM checks verify that the kernel interrupt and scheduler ES deliver credited entropy
 
-* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the RPC random bytes tests no longer pass on a failed request; the kernel seeder test requires a clean server exit; a failing worker of the parallel CUSE stress test reports device, size, round and errno
+* fix: RPC client: the request and unpack buffers are allocated per thread on first use instead of being 129 KiB of static TLS, which made thread creation with small stacks fail or crash in every process linking the client or preloading libesdm_getrandom; random data answers with an impossible return code and seed answers claiming more than they carry are refused with -EPROTO; get_seed asks for no more than the server serves; an oversized privileged request returns -EMSGSIZE; the getrandom interposer survives a fork during its initialization; the status segment has one layout for 32 and 64 bit processes
+
+* fix: RPC server: an unread answer no longer shields a connection from being closed to make room, and a full worker no longer closes connections while other workers have free slots
+
+* fix: EGD server: one prediction resistant generation per connection and round, so a client pipelining PR requests no longer stalls the other clients of its worker; a blocking read is deferred instead of the connection closed while the ESDM is not operational; accepting resumes after a descriptor shortage; GET_PID reports the supervisor under --pid_namespace
+
+* fix: the shipped esdm-server unit hid /proc/sys/crypto/fips_enabled (ProcSubset=pid), silently disabling FIPS mode on a fips=1 kernel; it allows AF_ALG when the Kernel Jitter RNG ES is built; the suspend trigger fires before the system sleeps instead of after resume; esdm-kernel-seeder reseeds at the configured linux-reseed-interval instead of every 10 seconds and stops on SIGTERM while the ESDM is not seeded
+
+* fix: CUSE: a poll with timeout 0 no longer makes the next poll report an event; an interrupted read or write is not served from the kernel device; every daemon thread runs in the isolating network and cgroup namespaces; RNDADDENTROPY checks the caller first and credits at most the buffer's bits, as the kernel does; esdm-proc detaches the mount a crashed instance left behind
+
+* fix: PID namespace supervisor: forwards every signal the daemon handles, loses none arriving at startup, copes with an inherited ignored SIGCHLD and signals no reaped PID; built with clang and LTO, esdm-server and libesdm no longer run separate thread pools and loggers; ESDM_SERVER_FORCE_FIPS is read with secure_getenv()
+
+* fix: NTG.1 seeding from the jitter RNG alone requires the full seed entropy (with SP800-90C oversampling, if enabled) as well; esdm_get_seed() returns -EAGAIN instead of an empty answer when the DRNGs lose their seed during the call; the DRNG instance count no longer overcounts after a failed node allocation
+
+* fix: eBPF ES: the record ending a fetch is no longer dropped, which made the available entropy drift upward; the health tests run in SP800-90C mode as well; the IRQ ES no longer overrides the configured kernel RNG entropy rate; the PKCS#11 status no longer reads a freed token label; es_jent_all_caches takes effect; an es_*_entropy_blocks value that is not a power of two is refused at configure time
+
+* fix: OpenSSL backend: the DRBG self test uses a fixed nonce, as it failed on 32 bit glibc; GnuTLS backend: require GnuTLS >= 3.6.8, whose private DRBG context layout it copies; builtin SHA-2 and SHA-3 count the message length in 64 bits, as SHA-3 lost input after 4 GiB on 32 bit systems
+
+* fix: Linux kernel addon: no printk from the hook path; builds on 32 bit kernels; the kernel patches export their symbols GPL-only in the ESDM namespace, with a DRBG patch for 6.12
+
+* flake: build and test the ESDM on i686 with the OpenSSL backend
+
+* tests: integration test environments detect a missing daemon binary and a server that never came up; fixed sleeps replaced by polling for the seeded state; new regression tests for the fixes above; the EGD raw protocol test also runs under the NTG.1 seeding strategy; the reseed interval test measures the interval instead of sleeping past it and the operational state test retries its scenario; the Jitter RNG only and the initial DRNG security tests also run under the NTG.1 seeding strategy; new tests of the connection limits, the EGD idle timeout and the non-blocking PR request; the node DRNG tests skip where CPU 1 cannot be used; the RPC random bytes tests no longer pass on a failed request; the kernel seeder test requires a clean server exit; a failing worker of the parallel CUSE stress test reports device, size, round and errno
 
 * tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
 
