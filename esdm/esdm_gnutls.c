@@ -182,6 +182,11 @@ const struct esdm_hash_cb esdm_gnutls_hash_cb = {
 	.hash_dealloc = esdm_gnutls_hash_dealloc,
 };
 
+/*
+ * Copy of the private struct from GnuTLS' lib/nettle/int/drbg-aes.h, whose
+ * header is not installed. Older GnuTLS releases had a larger layout that
+ * drbg_aes_init() would write past, hence the minimum version in meson.build.
+ */
 struct drbg_aes_ctx {
 	unsigned seeded;
 	/* The current key */

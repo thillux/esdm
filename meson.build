@@ -227,7 +227,10 @@ if get_option('crypto_backend') == 'builtin'
 endif
 
 if get_option('crypto_backend') == 'gnutls'
-	gnutls_dep = dependency('gnutls', version: '>= 3.5', required: true)
+	# esdm_gnutls.c copies GnuTLS' private struct drbg_aes_ctx, which had
+	# a larger layout (prev_block) up to at least 3.6.4. 3.6.8 is the first
+	# release verified to match.
+	gnutls_dep = dependency('gnutls', version: '>= 3.6.8', required: true)
 
 	# The SP800-90A Block_Cipher_df in front of GnuTLS' CTR DRBG uses the
 	# AES-256 core directly. GnuTLS only lists nettle in Requires.private,
