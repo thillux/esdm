@@ -47,6 +47,7 @@
 
 #include "buffer.h"
 #include "common_test.h"
+#include "esdm_rpc_client_helper.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_service.h"
@@ -795,6 +796,29 @@ static void test_status_response_size(void)
 	free(text);
 }
 
+/*
+ * The 64-bit return code of a RandValResponse is range checked rather than cut
+ * to the ssize_t of the client. Only on 32-bit systems would the RPC tests see
+ * a wrong conversion, so the bounds are checked here directly.
+ */
+static void test_randval_ret(void)
+{
+	const int64_t max = ESDM_RPC_MAX_DATA;
+
+	CHECK_EQ(esdm_rpcc_randval_ret(0), 0);
+	CHECK_EQ(esdm_rpcc_randval_ret(max), max);
+	CHECK_EQ(esdm_rpcc_randval_ret(-max), -max);
+	CHECK_EQ(esdm_rpcc_randval_ret(-EAGAIN), -EAGAIN);
+
+	CHECK_EQ(esdm_rpcc_randval_ret(max + 1), -EPROTO);
+	CHECK_EQ(esdm_rpcc_randval_ret(-max - 1), -EPROTO);
+	/* A byte count and an error once cut to 32 bits */
+	CHECK_EQ(esdm_rpcc_randval_ret(((int64_t)1 << 32) + 16), -EPROTO);
+	CHECK_EQ(esdm_rpcc_randval_ret(((int64_t)1 << 32) - EAGAIN), -EPROTO);
+	CHECK_EQ(esdm_rpcc_randval_ret(INT64_MAX), -EPROTO);
+	CHECK_EQ(esdm_rpcc_randval_ret(INT64_MIN), -EPROTO);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -815,6 +839,7 @@ int main(int argc, char *argv[])
 	test_append_data();
 	test_append_data_overflow();
 	test_status_response_size();
+	test_randval_ret();
 
 	return common_test_result("rpc_protocol");
 }

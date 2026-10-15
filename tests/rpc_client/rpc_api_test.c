@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "common_test.h"
+#include "config.h"
 #include "env.h"
 #include "esdm_rpc_client.h"
 #include "esdm_rpc_service.h"
@@ -341,8 +342,13 @@ static void test_set_pkcs11_config(void)
 	 */
 	esdm_invoke(esdm_rpcc_set_pkcs11_config("esdm-test-token",
 						"esdm-test-pin"));
-	CHECK(ret == 0 || ret < 0,
+#ifdef ESDM_ES_PKCS11
+	/* No such token in the test environment - see esdm_es_pkcs11.h */
+	CHECK(ret == 0 || ret == -ENODEV || ret == -ENOENT || ret == -EACCES,
 	      "set_pkcs11_config returned an unexpected value %d", ret);
+#else
+	CHECK_EQ(ret, -ENOENT);
+#endif
 	printf("set_pkcs11_config returned %d\n", ret);
 }
 

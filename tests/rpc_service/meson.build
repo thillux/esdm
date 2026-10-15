@@ -8,7 +8,8 @@ rpc_protocol_test = executable(
 		'rpc_protocol_test',
 		[ service_rpc_src, 'rpc_protocol_test.c' ],
 		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
+				       include_directories('../common',
+							   '../../service-rpc/client') ],
 		dependencies: dependencies_server,
 		link_with: esdm_common_static_lib,
 	)

@@ -618,14 +618,15 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 	fuzz_num_seeds++;
 
 	/*
-	 * A call that gives up on its answer, then another one on the same
-	 * connection.
+	 * A call that may give up on its answer, then another one on the same
+	 * connection. Whether the answer beats the deadline of 1 ms is up to
+	 * the scheduler - one of 0 passes before the request goes out.
 	 */
 	seed = fuzz_seed_data[fuzz_num_seeds];
 	seed[0] = fuzz_call_get_random_bytes_full_timeout;
 	seed[1] = 0x0f;
 	seed[2] = 0xff; /* as many bytes as the harness hands out */
-	seed[3] = 0; /* no deadline at all */
+	seed[3] = 1;
 	seed[4] = fuzz_call_get_seed;
 	seed[5] = 0;
 	seed[6] = 0; /* into a buffer of no size */
