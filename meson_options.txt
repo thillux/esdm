@@ -1011,15 +1011,17 @@ wrapper around interfaces offered by ESDM that can be directly used.''')
 option('client-connect-timeout-exponent', type: 'integer', min: 20, max: 29, value: 28,
        description: '''Timeout for ESDM client/server connection
 
-Set the rpc client connect timeout to
+Set the pause of the rpc client between two connection attempts to
 1 << VAL nanoseconds. Change the default with care/know the consequences!
 (perform tests under load, ...)''')
 
 option('client-rx-tx-timeout-exponent', type: 'integer', min: 20, max: 29, value: 28,
        description: '''Timeout for ESDM client/server rx/tx operations
 
-Set the rpc client send/receive timeout to
-1 << VAL nanoseconds. Change the default with care/know the consequences!
+Set the rpc client send timeout, and the interval at which it checks for an
+interruption while waiting for an answer, to 1 << VAL nanoseconds. The wait for
+the answer is fixed (about 1.6 seconds per submission, 6.4 seconds in total).
+Change the default with care/know the consequences!
 (perform tests under load, ...)''')
 
 option('client-reconnect-attempts', type: 'integer', min: 5, max: 30, value: 10,

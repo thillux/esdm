@@ -49,11 +49,14 @@ all can be applied.
 
 ### Lower Connection Timeout
 
-The timeouts of the connection to the ESDM server can be lowered with the
-configuration options `client-connect-timeout-exponent` (connection setup) and
-`client-rx-tx-timeout-exponent` (sending a request and receiving its answer).
-Setting them to, for example, 22 implies that after 4ms wait time the
-connection is closed and reopened.
+The waits of the connection to the ESDM server can be lowered with the
+configuration options `client-connect-timeout-exponent` (the pause between two
+connection attempts) and `client-rx-tx-timeout-exponent` (the wait for the
+socket to take a request, and the interval at which a client waiting for an
+answer checks whether to give up). Setting them to, for example, 22 implies
+waits of 4ms. The wait for an answer itself is fixed: an unprivileged request
+is sent again on a new connection after about 1.6 seconds, and given up after
+about 6.4.
 
 ### Increase Scheduling Priority of ESDM Daemons
 
