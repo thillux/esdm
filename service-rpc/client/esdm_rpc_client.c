@@ -344,7 +344,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 	static const int CLIENT_TX_TIMEOUT_MS =
 		(1 << ESDM_CLIENT_RX_TX_TIMEOUT_EXPONENT) / 1000000;
 	unsigned int retries = 0;
-	int pret;
+	int pret, err = -EIO;
 	ssize_t ret;
 
 	if (rpc_conn->fd < 0)
@@ -383,6 +383,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 			 * EPIPE is due to the server was restarted -> reconnect
 			 */
 			if (pret == 0) {
+				err = -ETIMEDOUT;
 				continue;
 			}
 
@@ -391,6 +392,7 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 					LOGGER_DEBUG, LOGGER_C_RPC,
 					"Connection to server needs to be re-established\n");
 
+				err = -EPIPE;
 				reset_conn_socket(rpc_conn);
 				int rc = esdm_connect_proto_service(rpc_conn);
 				if (rc)
@@ -406,6 +408,10 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 			return -errsv;
 		}
 	} while (ret < 0 && retries <= ESDM_MAX_RX_TX_RETRIES);
+
+	/* The retries ran out: report why the last one failed */
+	if (ret < 0)
+		return err;
 
 	/*
 	 * SOCK_SEQPACKET guarantees atomic messages - a short write is a
