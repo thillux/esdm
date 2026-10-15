@@ -81,7 +81,9 @@ static void check_reset_discards_cache(void)
 	struct entropy_es out;
 	unsigned int i;
 
-	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name), 0);
+	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name,
+				   NULL),
+		 0);
 	TEST_BUF_ALLOCED = true;
 
 	fill_cache();
@@ -140,7 +142,9 @@ static void check_init_failure_drops_fd(const char *path, int flags, int expect)
 	if (fd < 0)
 		return;
 
-	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name), 0);
+	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name,
+				   NULL),
+		 0);
 	TEST_BUF_ALLOCED = true;
 	fill_cache();
 

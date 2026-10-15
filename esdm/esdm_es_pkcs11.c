@@ -285,7 +285,8 @@ static int esdm_es_pkcs11_init(void)
 	if (pkcs11_buf_alloced) {
 		esdm_es_buf_reset(&pkcs11_buf);
 	} else if (esdm_es_buf_alloc(&pkcs11_buf, ESDM_PKCS11_ENTROPY_BLOCKS,
-				     "PKCS#11") == 0) {
+				     "PKCS#11",
+				     esdm_config_es_pkcs11_entropy_rate) == 0) {
 		pkcs11_buf_alloced = true;
 	}
 #endif
