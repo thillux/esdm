@@ -34,6 +34,8 @@
 
 static struct kcapi_handle *jent_rng = NULL;
 static DEFINE_MUTEX_UNLOCKED(jent_rng_mutex);
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static bool jent_kernel_selftest_failed = false;
 
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf jent_kernel_buf;
@@ -100,7 +102,7 @@ static int esdm_jent_kernel_init(void)
 /* Caller must hold jent_rng_mutex. */
 static uint32_t esdm_jent_kernel_entropylevel_locked(uint32_t requested_bits)
 {
-	if (jent_rng == NULL)
+	if (jent_rng == NULL || jent_kernel_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -269,8 +271,12 @@ static int esdm_jent_kernel_selftest(void)
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"KernelJitterRNG ES: the kernel jitterentropy RNG repeated its output\n");
+		jent_kernel_selftest_failed = true;
 		ret = -EFAULT;
+		goto out;
 	}
+
+	jent_kernel_selftest_failed = false;
 
 out:
 	mutex_unlock(&jent_rng_mutex);

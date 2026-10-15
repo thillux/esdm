@@ -21,6 +21,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdatomic.h>
 #include <sys/random.h>
 #include <sys/stat.h>
 
@@ -40,6 +41,9 @@
 #include "math_helper.h"
 
 static uint32_t krng_entropy = ESDM_KERNEL_RNG_ENTROPY_RATE;
+
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static atomic_bool esdm_krng_selftest_failed = false;
 
 static void esdm_krng_fini(void)
 {
@@ -97,6 +101,9 @@ static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 static uint32_t esdm_krng_entropylevel(uint32_t requested_bits)
 {
 	uint32_t entropylevel = krng_entropy;
+
+	if (atomic_load(&esdm_krng_selftest_failed))
+		return 0;
 
 	/*
 	 * If a specific entropy value is configured, use it instead of the
@@ -183,8 +190,12 @@ static int esdm_krng_selftest(void)
 	if (!memcmp(first, second, sizeof(first))) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "KernelRNG ES: getrandom(2) repeated its output\n");
+		atomic_store(&esdm_krng_selftest_failed, true);
 		ret = -EFAULT;
+		goto out;
 	}
+
+	atomic_store(&esdm_krng_selftest_failed, false);
 
 out:
 	memset_secure(first, 0, sizeof(first));
