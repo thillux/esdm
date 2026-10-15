@@ -246,11 +246,8 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 	    ESDM_DRNG_SECURITY_STRENGTH_BITS)
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"%s ES: entropy rate of %u bits per %u data bits exceeds the %u bits per event the configured oversampling rate of %u supports - crediting is capped\n",
-			es->name, rate, ESDM_DRNG_SECURITY_STRENGTH_BITS,
-			ESDM_DRNG_SECURITY_STRENGTH_BITS /
-				(ESDM_EBPF_EVENT_DATA_BITS * osr),
-			osr);
+			"%s ES: entropy rate of %u bits per %u data bits exceeds the 1/%u bit per event the configured oversampling rate supports - crediting is capped\n",
+			es->name, rate, ESDM_DRNG_SECURITY_STRENGTH_BITS, osr);
 
 	cfg->raw_sampling = 0;
 	cfg->flush_deadline_ns = ESDM_EBPF_FLUSH_DEADLINE_NS;
