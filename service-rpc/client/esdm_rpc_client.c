@@ -745,7 +745,13 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		 */
 		msg = ERR_PTR(privileged ? -EINPROGRESS : -EINTR);
 		closure(msg, closure_data);
-	} else {
+	} else if (!ret) {
+		/*
+		 * An answer, but a failure status or less than a header. No
+		 * answer at all (ret < 0) is no case for the closure: the
+		 * caller resubmits or reports it through last_error, and a
+		 * result set here would outlive a resubmission that fails.
+		 */
 		ProtobufCMessage *msg;
 
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
