@@ -408,8 +408,10 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
  *		  relative time with tv_sec >= 0 and tv_nsec in [0, 999999999]
  *
  * @return: read data length on success, < 0 on error (-ETIMEDOUT once @ts
- *	    elapsed, -EINVAL for an invalid @ts, -EINTR means connection was
- *	    interrupted and the caller may try again)
+ *	    elapsed - or the error of the last connection attempt when the
+ *	    server could not be reached until then -, -EINVAL for an invalid
+ *	    @ts, -EINTR means connection was interrupted and the caller may try
+ *	    again)
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
 						struct timespec *ts);
@@ -790,8 +792,9 @@ int esdm_rpcc_get_min_reseed_secs_int(unsigned int *seconds, void *int_data);
 /**
  * @brief urandom_min_reseed_secs /proc write handler
  *
- * The call sets the urandom_min_reseed_secs of the ESDM to the given bit value
- * where zero asks for a reseed before every request
+ * The call sets the maximum time in seconds between two reseeds of a DRNG,
+ * where zero asks for a reseed before every request and values above one hour
+ * are capped to it
  *
  * See random(4) for documentation.
  *

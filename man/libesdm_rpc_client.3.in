@@ -96,7 +96,9 @@ Random data, blocking until the ESDM is fully seeded.
 The same, bounded by the relative timeout
 .IR ts ,
 after which it returns
-.BR \-ETIMEDOUT .
+.BR \-ETIMEDOUT ,
+or the error of the last connection attempt when the server could not be
+reached until then.
 A
 .I ts
 with a negative field or a
@@ -176,7 +178,7 @@ Size of the entropy pool, in bits.
 Entropy level below which polling writers are woken.
 .TP
 .BI "int esdm_rpcc_get_min_reseed_secs(unsigned int *" seconds ");"
-Minimum number of seconds between two reseed operations.
+Maximum time in seconds between two reseeds of a DRNG.
 .SS Contributing data
 .TP
 .BI "int esdm_rpcc_write_data(const uint8_t *" data_buf ", size_t " data_buf_len ");"
@@ -189,7 +191,8 @@ These require the privileged endpoint.
 Set the write wakeup threshold.
 .TP
 .BI "int esdm_rpcc_set_min_reseed_secs(unsigned int " seconds ");"
-Set the minimum reseed interval.
+Set that time. Zero seconds reseeds before every request, values above one hour
+are capped to it.
 .TP
 .BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
 Set the token label and user PIN of the PKCS#11 entropy source.
