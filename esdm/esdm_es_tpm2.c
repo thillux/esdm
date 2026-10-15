@@ -50,6 +50,8 @@ static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
  */
 #define ESDM_TPM2_REOPEN_INTERVAL_SEC 5
 static bool tpm2_lost = false;
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static bool tpm2_selftest_failed = false;
 static time_t tpm2_reopen_at = 0;
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -332,7 +334,7 @@ static int esdm_es_tpm2_init(void)
 /* Caller must hold tpm2_mutex. */
 static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
 {
-	if (tpm2_fd < 0)
+	if (tpm2_fd < 0 || tpm2_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
@@ -582,16 +584,52 @@ static bool esdm_es_tpm2_active(void)
 	return ret;
 }
 
-/* The connection to the TPM is still there. */
+/* Two reads of the TPM that have to succeed and have to differ. */
 static int esdm_es_tpm2_selftest(void)
 {
+	uint8_t first[16], second[16];
+	int ret = 0;
+
+	mutex_lock(&tpm2_mutex);
+
+	esdm_es_tpm2_reopen_locked();
 	if (tpm2_fd < 0) {
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-			    "TPM2 ES: no device - nothing to test\n");
-		return 0;
+		/* A device that went away is a failure, one never there not */
+		if (tpm2_lost) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+				    "TPM2 ES: connection to the TPM lost\n");
+			ret = -EFAULT;
+		} else {
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+				    "TPM2 ES: no device - nothing to test\n");
+		}
+		goto out;
 	}
 
-	return 0;
+	if (esdm_es_tpm2_get_internal(first, sizeof(first)) ||
+	    esdm_es_tpm2_get_internal(second, sizeof(second))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "TPM2 ES: the TPM did not deliver\n");
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if (!memcmp(first, second, sizeof(first))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "TPM2 ES: the TPM repeated its output\n");
+		tpm2_selftest_failed = true;
+		ret = -EFAULT;
+		goto out;
+	}
+
+	tpm2_selftest_failed = false;
+
+out:
+	mutex_unlock(&tpm2_mutex);
+	memset_secure(first, 0, sizeof(first));
+	memset_secure(second, 0, sizeof(second));
+
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_tpm2 = {

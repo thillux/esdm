@@ -356,13 +356,20 @@ static bool esdm_hwrand_active(void)
 /* The device is still open and its last read worked. */
 static int esdm_hwrand_selftest(void)
 {
-	if (esdm_hwrand_fd < 0) {
+	bool open, failed;
+
+	mutex_reader_lock(&hwrand_mutex);
+	open = esdm_hwrand_fd >= 0;
+	failed = esdm_hwrand_read_failed;
+	mutex_reader_unlock(&hwrand_mutex);
+
+	if (!open) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "HWRand ES: no device - nothing to test\n");
 		return 0;
 	}
 
-	if (esdm_hwrand_read_failed) {
+	if (failed) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"HWRand ES: the last read from the device failed\n");

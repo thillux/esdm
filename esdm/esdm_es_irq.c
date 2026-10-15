@@ -549,17 +549,26 @@ static bool esdm_irq_active(void)
 	return esdm_config_es_irq_retry() || fd_present;
 }
 
-/* The kernel interface of the entropy source is still open. */
+/* The kernel interface of the entropy source still answers. */
 static int esdm_irq_selftest(void)
 {
+	uint32_t entropy;
+	int ret = 0;
+
+	mutex_lock(&irq_mutex);
 	if (esdm_irq_entropy_fd < 0) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
 			"IRQ ES: kernel interface not available - nothing to test\n");
-		return 0;
+	} else if (ioctl(esdm_irq_entropy_fd, ESDM_IRQ_AVAIL_ENTROPY,
+			 &entropy) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "IRQ ES: kernel interface failed: %d\n", ret);
 	}
+	mutex_unlock(&irq_mutex);
 
-	return 0;
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_irq = {

@@ -63,6 +63,8 @@ static char *pkcs11_runtime_pin = NULL;
  */
 static char *pkcs11_runtime_token_label = NULL;
 static DEFINE_MUTEX_UNLOCKED(pkcs11_mutex);
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static bool pkcs11_selftest_failed = false;
 
 /*
  * Earliest time to look for a token again (ESDM_PKCS11_RETRY_INTERVAL_SEC),
@@ -294,7 +296,7 @@ static int esdm_es_pkcs11_init(void)
 /* Caller must hold pkcs11_mutex. */
 static uint32_t esdm_es_pkcs11_entropylevel_locked(uint32_t requested_bits)
 {
-	if (!pkcs11_slot)
+	if (!pkcs11_slot || pkcs11_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -560,22 +562,49 @@ static bool esdm_es_pkcs11_active(void)
 	return ESDM_PKCS11_MODULE_PATH[0] != '\0';
 }
 
-/* The token is still there and the session still usable. */
+/*
+ * Two reads of the token that have to succeed and have to differ. An absent
+ * token is no failure: the source waits for one to come back.
+ */
 static int esdm_es_pkcs11_selftest(void)
 {
-	bool usable;
+	uint8_t first[16], second[16];
+	int ret = 0;
 
 	mutex_lock(&pkcs11_mutex);
-	usable = (pkcs11_module_loaded && pkcs11_slot != NULL);
-	mutex_unlock(&pkcs11_mutex);
 
-	if (!usable) {
+	if (!pkcs11_module_loaded || !pkcs11_slot) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "PKCS11 ES: no token - nothing to test\n");
-		return 0;
+		goto out;
 	}
 
-	return 0;
+	if (PKCS11_generate_random(pkcs11_slot, first, sizeof(first)) ||
+	    PKCS11_generate_random(pkcs11_slot, second, sizeof(second))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "PKCS11 ES: the token did not deliver\n");
+		/* As a failed read does, see esdm_es_pkcs11_get_sync() */
+		esdm_es_pkcs11_drop_slot_locked();
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if (!memcmp(first, second, sizeof(first))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "PKCS11 ES: the token repeated its output\n");
+		pkcs11_selftest_failed = true;
+		ret = -EFAULT;
+		goto out;
+	}
+
+	pkcs11_selftest_failed = false;
+
+out:
+	mutex_unlock(&pkcs11_mutex);
+	memset_secure(first, 0, sizeof(first));
+	memset_secure(second, 0, sizeof(second));
+
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_pkcs11 = {

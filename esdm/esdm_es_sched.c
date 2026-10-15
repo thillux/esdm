@@ -550,19 +550,28 @@ static bool esdm_sched_active(void)
 }
 
 /*
- * The kernel interface of the entropy source is still open - see the IRQ ES,
+ * The kernel interface of the entropy source still answers - see the IRQ ES,
  * whose scheduler counterpart this is.
  */
 static int esdm_sched_selftest(void)
 {
+	uint32_t entropy;
+	int ret = 0;
+
+	mutex_lock(&sched_mutex);
 	if (esdm_sched_entropy_fd < 0) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
 			"Scheduler ES: kernel interface not available - nothing to test\n");
-		return 0;
+	} else if (ioctl(esdm_sched_entropy_fd, ESDM_SCHED_AVAIL_ENTROPY,
+			 &entropy) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "Scheduler ES: kernel interface failed: %d\n", ret);
 	}
+	mutex_unlock(&sched_mutex);
 
-	return 0;
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_sched = {
