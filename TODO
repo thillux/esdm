@@ -1,1 +1,4 @@
 - replace double-hash operations maintaining the different pools in favor of an XDRBG construction
+
+- set -euxo pipefail in alle Skripte
+- jitterentropy kmod name configurable for AF_ALG
