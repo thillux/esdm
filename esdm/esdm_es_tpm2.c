@@ -426,9 +426,10 @@ static int esdm_es_tpm2_get_internal(uint8_t *buf, uint32_t len)
 	memset_secure(stir_buf, 0, sizeof(stir_buf));
 #endif
 
+	/* The answer is the size field and exactly the bytes requested */
 	if (esdm_es_tpm2_transceive(&getrandom_cmd, (uint8_t *)&bytes_requested,
 				    sizeof(bytes_requested), &getrandom_rsp,
-				    resp_buf, sizeof(resp_buf))) {
+				    resp_buf, sizeof(uint16_t) + len)) {
 		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 			    "TPM 2.0 get random failed. RC: 0x%04x\n",
 			    getrandom_rsp.responseCode);
