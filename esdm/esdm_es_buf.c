@@ -27,9 +27,18 @@
 #include "esdm_logger.h"
 #include "memset_secure.h"
 
+/* Pairs with the release store of esdm_es_buf_alloc() */
+static bool esdm_es_buf_published(struct esdm_es_buf *buf)
+{
+	return atomic_load_explicit(&buf->ready, memory_order_acquire);
+}
+
 int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
 		      const char *name)
 {
+	_Atomic enum esdm_es_buf_state *states;
+	struct entropy_es *blocks;
+
 	if (!buf || !name)
 		return -EINVAL;
 
@@ -38,24 +47,27 @@ int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
 	if (num_blocks < 4 || (num_blocks & (num_blocks - 1)) != 0)
 		return -EINVAL;
 
-	memset(buf, 0, sizeof(*buf));
-
-	buf->blocks = calloc(num_blocks, sizeof(*buf->blocks));
-	if (!buf->blocks)
-		return -ENOMEM;
-
-	buf->states = calloc(num_blocks, sizeof(*buf->states));
-	if (!buf->states) {
-		free(buf->blocks);
-		buf->blocks = NULL;
+	blocks = calloc(num_blocks, sizeof(*blocks));
+	states = calloc(num_blocks, sizeof(*states));
+	if (!blocks || !states) {
+		free(blocks);
+		free((void *)states);
 		return -ENOMEM;
 	}
 
+	/*
+	 * Consumers may already ask an unallocated cache, e.g. when a source
+	 * comes up on the monitor thread while a seeding runs. They see it
+	 * only once ready is set, after everything else.
+	 */
+	buf->blocks = blocks;
+	buf->states = states;
 	buf->num_blocks = num_blocks;
 	buf->mask = num_blocks - 1;
 	buf->name = name;
 	atomic_store(&buf->idx, -1);
 	atomic_store(&buf->monitor_initialized, false);
+	atomic_store_explicit(&buf->ready, true, memory_order_release);
 
 	return 0;
 }
@@ -64,6 +76,8 @@ void esdm_es_buf_free(struct esdm_es_buf *buf)
 {
 	if (!buf)
 		return;
+
+	atomic_store(&buf->ready, false);
 
 	if (buf->blocks) {
 		memset_secure(buf->blocks,
@@ -85,7 +99,7 @@ void esdm_es_buf_reset(struct esdm_es_buf *buf)
 {
 	unsigned int i;
 
-	if (!buf || !buf->blocks)
+	if (!buf || !esdm_es_buf_published(buf))
 		return;
 
 	/*
@@ -134,7 +148,7 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 {
 	unsigned int i;
 
-	if (!buf || !buf->blocks || !fill)
+	if (!buf || !esdm_es_buf_published(buf) || !fill)
 		return -EINVAL;
 
 	/* skip first run to be responsive on RPC interface
@@ -201,7 +215,7 @@ bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
 {
 	unsigned int slot;
 
-	if (!buf || !buf->blocks || !eb_es)
+	if (!buf || !esdm_es_buf_published(buf) || !eb_es)
 		return false;
 
 	/*
