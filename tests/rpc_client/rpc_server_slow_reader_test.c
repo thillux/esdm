@@ -327,18 +327,33 @@ static bool test_closed_by_server(int fd)
 
 /*
  * Wait until the server closed all of @fds; the number of those it did. Also
- * tell how long it took from the first of them to the last.
+ * tell how long it took from the first of them to the last, and how many of
+ * them the server had read all requests of before it closed them: those were
+ * not dropped for a full send buffer but reaped as idle, which also closes
+ * them all at once.
  */
 static unsigned int test_wait_closed(const int *fds, unsigned int num,
-				     uint64_t *span_ms)
+				     uint64_t *span_ms, unsigned int *drained)
 {
+	static bool seen_closed[TEST_SLOW_CONNS];
+	static bool all_read[TEST_SLOW_CONNS];
 	uint64_t end = test_now_ms() + TEST_DROP_MS, first = 0, now;
 	unsigned int i, closed;
 
+	*drained = 0;
+
 	do {
 		for (i = 0, closed = 0; i < num; i++) {
-			if (test_closed_by_server(fds[i]))
+			if (seen_closed[i]) {
 				closed++;
+			} else if (test_closed_by_server(fds[i])) {
+				seen_closed[i] = true;
+				if (all_read[i])
+					(*drained)++;
+				closed++;
+			} else {
+				all_read[i] = test_requests_read(fds[i]);
+			}
 		}
 
 		now = test_now_ms();
@@ -360,7 +375,7 @@ int main(void)
 	static int fds[TEST_SLOW_CONNS];
 	struct rlimit rl;
 	uint8_t buf[32];
-	unsigned int first, rest, i, opened = 0, closed = 0;
+	unsigned int first, rest, i, opened = 0, closed = 0, drained = 0;
 	size_t sndbuf;
 	uint64_t span = 0;
 	pthread_t caller;
@@ -467,7 +482,7 @@ int main(void)
 	printf("%u connections sent %u + %u requests each without reading\n",
 	       opened, first, rest);
 
-	closed = test_wait_closed(fds, opened, &span);
+	closed = test_wait_closed(fds, opened, &span, &drained);
 	/* And some more calls after that */
 	test_sleep_ms(500);
 	atomic_store(&test_stop, true);
@@ -491,6 +506,9 @@ int main(void)
 	       closed, opened, (unsigned long long)span);
 	if (closed != opened) {
 		printf("FAIL: connections that do not read are kept\n");
+		ret = 1;
+	} else if (drained) {
+		printf("FAIL: %u connections were reaped as idle\n", drained);
 		ret = 1;
 	} else if (span > TEST_MAX_MS) {
 		/*

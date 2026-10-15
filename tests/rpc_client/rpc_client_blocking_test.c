@@ -7,7 +7,8 @@
  * wait for the seeding, the timeout of esdm_rpcc_get_random_bytes_full_timeout
  * must hold - also with an int_data given -, a child forked during such a
  * timed call must keep the registered interrupt function, and a teardown must
- * cope with a getter waiting for a busy connection.
+ * cope with a getter waiting for a busy connection. The non-blocking PR call,
+ * by contrast, gives up on the first -EAGAIN.
  *
  * The client is limited to one connection, so that every call competes for
  * it. A stand-in server in this process answers on the unprivileged socket the
@@ -62,12 +63,15 @@
  * UnprivAccess in unpriv_access.proto.
  */
 #define TEST_METHOD_GET_RANDOM_BYTES_FULL 3
+#define TEST_METHOD_GET_RANDOM_BYTES_PR 4
 #define TEST_METHOD_GET_RANDOM_BYTES 5
 
 /* Whether the stand-in ESDM is seeded */
 static atomic_bool test_seeded;
 /* Milliseconds the stand-in takes to answer get_random_bytes */
 static atomic_uint test_delay_ms;
+/* PR requests the stand-in serves before it answers -EAGAIN */
+static atomic_int test_pr_left;
 static atomic_bool test_stop;
 
 static int test_listen_fd = -1;
@@ -138,6 +142,20 @@ static uint64_t test_request_len(const uint8_t *data, size_t len)
 	return 0;
 }
 
+/* Whether a PR request is served rather than answered -EAGAIN */
+static bool test_pr_take(void)
+{
+	int left = atomic_load(&test_pr_left);
+
+	while (left > 0) {
+		if (atomic_compare_exchange_weak(&test_pr_left, &left,
+						 left - 1))
+			return true;
+	}
+
+	return false;
+}
+
 /* Answer one request on @fd; false when the connection is gone */
 static bool test_serve(int fd)
 {
@@ -163,11 +181,14 @@ static bool test_serve(int fd)
 
 	/* RandValResponse: ret (field 1, int64), randval (field 2, bytes) */
 	msg[msglen++] = 0x08;
-	if (cs.method_index == TEST_METHOD_GET_RANDOM_BYTES_FULL &&
-	    !atomic_load(&test_seeded)) {
+	if ((cs.method_index == TEST_METHOD_GET_RANDOM_BYTES_FULL &&
+	     !atomic_load(&test_seeded)) ||
+	    (cs.method_index == TEST_METHOD_GET_RANDOM_BYTES_PR &&
+	     !test_pr_take())) {
 		msglen += test_put_varint(msg + msglen,
 					  (uint64_t)(int64_t)-EAGAIN);
 	} else if (cs.method_index == TEST_METHOD_GET_RANDOM_BYTES_FULL ||
+		   cs.method_index == TEST_METHOD_GET_RANDOM_BYTES_PR ||
 		   cs.method_index == TEST_METHOD_GET_RANDOM_BYTES) {
 		if (cs.method_index == TEST_METHOD_GET_RANDOM_BYTES &&
 		    atomic_load(&test_delay_ms))
@@ -594,6 +615,45 @@ static int test_timeout_with_int_data(void)
 }
 
 /*
+ * The non-blocking PR call does not wait for the PR DRNG: an -EAGAIN of the
+ * server ends it, with -EAGAIN when nothing was obtained, with what was
+ * obtained otherwise.
+ */
+static int test_pr_nonblock(void)
+{
+	uint8_t buf[2 * TEST_LEN];
+	uint64_t start, took;
+	ssize_t rc;
+	int ret = 0;
+
+	printf("Non-blocking PR call answered -EAGAIN\n");
+
+	atomic_store(&test_pr_left, 0);
+	start = test_now_ms();
+	rc = esdm_rpcc_get_random_bytes_pr_nonblock(buf, TEST_LEN);
+	took = test_now_ms() - start;
+	if (rc != -EAGAIN) {
+		printf("FAIL: the call returned %zd\n", rc);
+		ret = 1;
+	}
+	if (took > 500) {
+		printf("FAIL: the call waited %llu ms\n",
+		       (unsigned long long)took);
+		ret = 1;
+	}
+
+	/* One chunk served, the next one refused */
+	atomic_store(&test_pr_left, 1);
+	rc = esdm_rpcc_get_random_bytes_pr_nonblock(buf, sizeof(buf));
+	if (rc != TEST_LEN) {
+		printf("FAIL: the partly served call returned %zd\n", rc);
+		ret = 1;
+	}
+
+	return ret;
+}
+
+/*
  * The connections are released while one call is in progress on the only
  * connection and another one waits for it. The waiting call fails, the one in
  * progress completes, and the release neither hangs nor frees the connection
@@ -677,6 +737,7 @@ int main(void)
 	ret = test_not_held_while_unseeded();
 	ret |= test_timeout_and_fork();
 	ret |= test_timeout_with_int_data();
+	ret |= test_pr_nonblock();
 	/* Releases the connections */
 	ret |= test_fini_with_waiter();
 
