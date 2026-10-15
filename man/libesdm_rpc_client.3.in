@@ -159,7 +159,9 @@ means the node has no DRNG instance.
 The same for the DRNG instance serving prediction resistant requests.
 .TP
 .BI "int esdm_rpcc_jent_status(char *" buf ", size_t " buflen ");"
-Internal status of the Jitter RNG entropy source.
+Internal status of the Jitter RNG entropy source as a JSON document, with the
+error handling of
+.BR esdm_rpcc_status_json ().
 .TP
 .BI "int esdm_rpcc_is_fully_seeded(bool *" fully_seeded ");"
 Whether the ESDM is fully seeded.

@@ -906,12 +906,16 @@ int esdm_rpcc_selftest_int(struct esdm_rpcc_selftest_result *result,
  * This call uses the unprivileged RPC endpoint of the ESDM server. It therefore
  * can be invoked by any user.
  *
- * @param [out] buf Buffer to be filled with human-readable status information.
- *		    The string will be NULL-terminated.
+ * Like esdm_rpcc_status_json, a document that does not fit into the buffer
+ * leaves it empty and returns -EMSGSIZE.
+ *
+ * @param [out] buf Buffer to be filled with the status of the Jitter RNG as a
+ *		    JSON object. The string will be NULL-terminated.
  * @param [in] buflen Size of the buffer provided by the caller.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, -EMSGSIZE if the document does not fit into the
+ *	    buffer, < 0 on other errors (-EINTR means connection was
+ *	    interrupted and the caller may try again)
  */
 int esdm_rpcc_jent_status(char *buf, size_t buflen);
 
