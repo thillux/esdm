@@ -25,6 +25,7 @@
 #include "esdm_es_buf.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
+#include "math_helper.h"
 #include "memset_secure.h"
 
 /* Pairs with the release store of esdm_es_buf_alloc() */
@@ -33,11 +34,17 @@ static bool esdm_es_buf_published(struct esdm_es_buf *buf)
 	return atomic_load_explicit(&buf->ready, memory_order_acquire);
 }
 
+static uint32_t esdm_es_buf_rate(struct esdm_es_buf *buf)
+{
+	return buf->rate ? buf->rate() : 0;
+}
+
 int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
-		      const char *name)
+		      const char *name, esdm_es_buf_rate_t rate)
 {
 	_Atomic enum esdm_es_buf_state *states;
 	struct entropy_es *blocks;
+	uint32_t *fill_rates;
 
 	if (!buf || !name)
 		return -EINVAL;
@@ -49,9 +56,11 @@ int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
 
 	blocks = calloc(num_blocks, sizeof(*blocks));
 	states = calloc(num_blocks, sizeof(*states));
-	if (!blocks || !states) {
+	fill_rates = calloc(num_blocks, sizeof(*fill_rates));
+	if (!blocks || !states || !fill_rates) {
 		free(blocks);
 		free((void *)states);
+		free(fill_rates);
 		return -ENOMEM;
 	}
 
@@ -62,6 +71,8 @@ int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
 	 */
 	buf->blocks = blocks;
 	buf->states = states;
+	buf->fill_rates = fill_rates;
+	buf->rate = rate;
 	buf->num_blocks = num_blocks;
 	buf->mask = num_blocks - 1;
 	buf->name = name;
@@ -90,6 +101,8 @@ void esdm_es_buf_free(struct esdm_es_buf *buf)
 		free((void *)buf->states);
 		buf->states = NULL;
 	}
+	free(buf->fill_rates);
+	buf->fill_rates = NULL;
 	buf->num_blocks = 0;
 	buf->mask = 0;
 	atomic_store(&buf->monitor_initialized, false);
@@ -146,6 +159,7 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 			      esdm_es_buf_fill_t fill,
 			      esdm_es_buf_ready_t ready, void *ctx)
 {
+	uint32_t rate;
 	unsigned int i;
 
 	if (!buf || !esdm_es_buf_published(buf) || !fill)
@@ -176,6 +190,7 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 		}
 
 		gen = atomic_load(&buf->gen);
+		rate = esdm_es_buf_rate(buf);
 		fill(&buf->blocks[i], requested_bits, ctx);
 
 		atomic_thread_fence(memory_order_seq_cst);
@@ -194,6 +209,8 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 			continue;
 		}
 
+		/* A rate raised during the fill may have applied to it */
+		buf->fill_rates[i] = max_uint32(rate, esdm_es_buf_rate(buf));
 		atomic_store(&buf->states[i], esdm_es_buf_filled);
 
 		esdm_logger(
@@ -208,6 +225,21 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 	esdm_es_add_entropy();
 
 	return 0;
+}
+
+/*
+ * The entropy of a block at the rate configured now: one filled at a higher
+ * rate was credited for more than the source is assessed to deliver.
+ */
+static uint32_t esdm_es_buf_credit(struct esdm_es_buf *buf, unsigned int slot)
+{
+	uint32_t rate = esdm_es_buf_rate(buf), fill_rate = buf->fill_rates[slot];
+
+	if (!buf->rate || rate >= fill_rate)
+		return buf->blocks[slot].e_bits;
+
+	return (uint32_t)((uint64_t)buf->blocks[slot].e_bits * rate /
+			  fill_rate);
 }
 
 bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
@@ -287,7 +319,7 @@ bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
 		    "%s ES monitor: used slot %u\n", buf->name, slot);
 
 	memcpy(eb_es->e, buf->blocks[slot].e, ESDM_DRNG_INIT_SEED_SIZE_BYTES);
-	eb_es->e_bits = credited ? buf->blocks[slot].e_bits : 0;
+	eb_es->e_bits = credited ? esdm_es_buf_credit(buf, slot) : 0;
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "obtained %u bits of entropy from %s ES cache\n",
