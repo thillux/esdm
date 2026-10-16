@@ -42,6 +42,12 @@ addon/es_ebpf_testing
 
 * Add PKCS11 entropy source
 
+* Add external entropy sources: noise sources developed outside of the ESDM against the new libesdm_es_ext (esdm_es_ext.h, libesdm_es_ext(3)) as a struct esdm_es_ext_plugin, loaded into the ESDM as a plugin library (ExternalLib ES: esdm-server --es_ext_lib, meson option es_ext_lib_path) or read from a provider process over a Unix domain socket with a documented protocol (ExternalSocket ES: esdm-server --es_ext_socket, meson option es_ext_socket_path; the provider has to run as root or as the user of --es_ext_socket_uid / es_ext_socket_peer_uid); a block is credited with the entropy the source claims, capped by es_ext_lib_entropy_rate / es_ext_socket_entropy_rate (256 by default) or --es_ext_lib_entropy_rate / --es_ext_socket_entropy_rate, and with nothing while the source fails or claims more than the block holds
+
+* Add esdm-es-ext-serve, serving an external entropy source plugin library on the socket esdm-server --es_ext_socket reads, so that the same plugin runs in the daemon or in a process of its own
+
+* PKCS#11 ES: esdm-server --pkcs11_module PATH selects the provider module in place of es_pkcs11_module_path
+
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
 * SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
