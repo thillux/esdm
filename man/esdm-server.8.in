@@ -132,6 +132,16 @@ Serve the EGD protocol backed by the prediction\-resistance generator on
 .IR PATH .
 The EGD protocol cannot select the generator per request, hence the separate
 socket.
+.TP
+.BR \-\-pkcs11_module " \fIPATH\fR"
+Load the PKCS#11 provider module
+.I PATH
+for the PKCS#11 entropy source instead of the module the build was configured
+with (meson option
+.BR es_pkcs11_module_path ).
+The module is loaded while the daemon still has its privileges. Refused by a
+build without the PKCS#11 entropy source (meson option
+.BR es_pkcs11 ).
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP

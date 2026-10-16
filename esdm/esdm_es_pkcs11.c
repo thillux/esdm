@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +63,16 @@ static char *pkcs11_runtime_pin = NULL;
  * compile-time default ESDM_PKCS11_TOKEN_LABEL". Owned by this module.
  */
 static char *pkcs11_runtime_token_label = NULL;
+/*
+ * Optional override of the module path, as given on the command line of the
+ * server. NULL means "use the compile-time default ESDM_PKCS11_MODULE_PATH".
+ * Unlike the PIN and the token label it is configuration rather than a secret
+ * or a choice made at runtime, so it outlives esdm_fini() as the entropy rates
+ * do: a re-init loads the module it names again. Owned by this module.
+ */
+static char *pkcs11_runtime_module_path = NULL;
+/* Between init and fini - a new module path is loaded at once then */
+static bool pkcs11_initialized = false;
 static DEFINE_MUTEX_UNLOCKED(pkcs11_mutex);
 /* Set by a self test that saw a repeated output, cleared by one that passes */
 static bool pkcs11_selftest_failed = false;
@@ -83,6 +94,19 @@ static const char *esdm_es_pkcs11_token_label_locked(void)
 {
 	return pkcs11_runtime_token_label ? pkcs11_runtime_token_label :
 					    ESDM_PKCS11_TOKEN_LABEL;
+}
+
+/* Caller must hold pkcs11_mutex. */
+static const char *esdm_es_pkcs11_module_path_locked(void)
+{
+	return pkcs11_runtime_module_path ? pkcs11_runtime_module_path :
+					    ESDM_PKCS11_MODULE_PATH;
+}
+
+/* Is a module configured at all? Caller must hold pkcs11_mutex. */
+static bool esdm_es_pkcs11_configured_locked(void)
+{
+	return esdm_es_pkcs11_module_path_locked()[0] != '\0';
 }
 
 /* Caller must hold pkcs11_mutex (write lock). */
@@ -172,6 +196,7 @@ static void esdm_es_pkcs11_finalize(void)
 	esdm_es_pkcs11_finalize_locked();
 	esdm_es_pkcs11_clear_runtime_pin_locked();
 	esdm_es_pkcs11_clear_runtime_token_label_locked();
+	pkcs11_initialized = false;
 	mutex_unlock(&pkcs11_mutex);
 
 #if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
@@ -218,7 +243,7 @@ static PKCS11_SLOT *esdm_es_pkcs11_pick_slot(void)
  */
 static int esdm_es_pkcs11_open_module_locked(void)
 {
-	const char *module_path = ESDM_PKCS11_MODULE_PATH;
+	const char *module_path = esdm_es_pkcs11_module_path_locked();
 	const char *pin = esdm_es_pkcs11_pin_locked();
 	int logged_in = 0;
 
@@ -300,6 +325,7 @@ static int esdm_es_pkcs11_init(void)
 {
 	mutex_lock(&pkcs11_mutex);
 	(void)esdm_es_pkcs11_open_module_locked();
+	pkcs11_initialized = true;
 	mutex_unlock(&pkcs11_mutex);
 
 #if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
@@ -417,7 +443,7 @@ static void esdm_es_pkcs11_reacquire_locked(void)
 {
 	struct timespec now;
 
-	if (pkcs11_slot || ESDM_PKCS11_MODULE_PATH[0] == '\0')
+	if (pkcs11_slot || !esdm_es_pkcs11_configured_locked())
 		return;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &now) ||
@@ -496,14 +522,15 @@ static void esdm_es_pkcs11_buf_fill(struct entropy_es *eb_es,
 static int esdm_es_pkcs11_monitor(void)
 {
 	uint32_t requested_bits = esdm_get_seed_entropy_osr(false, true);
-	bool slot_present;
-
-	if (ESDM_PKCS11_MODULE_PATH[0] == '\0')
-		return 0;
+	bool configured, slot_present;
 
 	mutex_reader_lock(&pkcs11_mutex);
+	configured = esdm_es_pkcs11_configured_locked();
 	slot_present = pkcs11_slot != NULL;
 	mutex_reader_unlock(&pkcs11_mutex);
+
+	if (!configured)
+		return 0;
 
 	/*
 	 * If we lost the slot (read failure earlier, or smartcard was removed
@@ -559,9 +586,12 @@ static void esdm_es_pkcs11_es_state(char *buf, size_t buflen)
 	 * a re-discovery frees it once the lock is dropped.
 	 */
 	char token_label[33] = "(none)";
-	const char *module_path = ESDM_PKCS11_MODULE_PATH;
+	/* Copied as well, as a new module path frees the old one */
+	char module_path[PATH_MAX];
 
 	mutex_reader_lock(&pkcs11_mutex);
+	snprintf(module_path, sizeof(module_path), "%s",
+		 esdm_es_pkcs11_module_path_locked());
 	poolsize = esdm_es_pkcs11_entropylevel_locked(esdm_security_strength());
 	entropy_rate = esdm_es_pkcs11_entropylevel_locked(256);
 	if (pkcs11_slot && pkcs11_slot->token && pkcs11_slot->token->label)
@@ -580,13 +610,19 @@ static void esdm_es_pkcs11_es_state(char *buf, size_t buflen)
 
 static bool esdm_es_pkcs11_active(void)
 {
+	bool ret;
+
 	/*
-	 * Stay active as long as a module is configured at compile time. The
-	 * monitor handles slot (re-)acquisition, so a temporarily absent
-	 * smartcard does not turn the source off — it just delivers no entropy
-	 * until the card comes back.
+	 * Stay active as long as a module is configured, at compile time or
+	 * on the command line. The monitor handles slot (re-)acquisition, so a
+	 * temporarily absent smartcard does not turn the source off — it just
+	 * delivers no entropy until the card comes back.
 	 */
-	return ESDM_PKCS11_MODULE_PATH[0] != '\0';
+	mutex_reader_lock(&pkcs11_mutex);
+	ret = esdm_es_pkcs11_configured_locked();
+	mutex_reader_unlock(&pkcs11_mutex);
+
+	return ret;
 }
 
 /*
@@ -745,6 +781,50 @@ int esdm_es_pkcs11_set_token_label(const char *label)
 
 #if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
 	if (pkcs11_buf_alloced)
+		esdm_es_buf_reset(&pkcs11_buf);
+#endif
+
+	free(old);
+
+	return ret;
+}
+
+DSO_PUBLIC
+int esdm_es_pkcs11_set_module_path(const char *path)
+{
+	char *new_copy = NULL;
+	char *old;
+	bool reopened;
+	int ret = 0;
+
+	if (!path)
+		return -EINVAL;
+
+	if (path[0] != '\0') {
+		new_copy = strdup(path);
+		if (!new_copy)
+			return -ENOMEM;
+	}
+
+	mutex_lock(&pkcs11_mutex);
+
+	old = pkcs11_runtime_module_path;
+	pkcs11_runtime_module_path = new_copy;
+
+	/*
+	 * Set before esdm_init(), as the server does, the module is loaded by
+	 * the init of the source. Once the source runs, the module it uses is
+	 * replaced right away, as a new token label is.
+	 */
+	reopened = pkcs11_initialized;
+	if (reopened)
+		ret = esdm_es_pkcs11_open_module_locked();
+
+	mutex_unlock(&pkcs11_mutex);
+
+#if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
+	/* What the old module delivered is not credited for the new one */
+	if (reopened && pkcs11_buf_alloced)
 		esdm_es_buf_reset(&pkcs11_buf);
 #endif
 

@@ -29,6 +29,7 @@
  * derefs, crashes, malformed state strings and max/curr_entropy divergence.
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +38,7 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+#include "esdm_es_pkcs11.h"
 
 #define ES_IDX esdm_ext_es_pkcs11
 #define ES_NAME "pkcs11"
@@ -121,6 +123,78 @@ static int es_pkcs11_getdata(void)
 	return 0;
 }
 
+#define ES_TEST_MODULE "/nonexistent/libesdm-pkcs11-test.so"
+
+/*
+ * A module path set at runtime - what esdm-server --pkcs11_module does before
+ * esdm_init() - replaces the one of the build: the source is configured with
+ * it, tries to load it, reports it, and credits nothing from a module that
+ * cannot be loaded. It outlives the fini of the source, and an empty path goes
+ * back to the one of the build.
+ */
+static int es_pkcs11_module_path(void)
+{
+	char buf[512];
+	int ret = 0;
+
+	if (esdm_es_pkcs11_set_module_path(NULL) != -EINVAL) {
+		printf("ES %s - fail: a NULL module path was accepted\n",
+		       ES_NAME);
+		ret++;
+	}
+
+	if (esdm_es_pkcs11_set_module_path(ES_TEST_MODULE)) {
+		printf("ES %s - fail: the module path was not set\n", ES_NAME);
+		return ret + 1;
+	}
+
+	/* Twice, as the path must survive the fini in between */
+	for (unsigned int i = 0; i < 2; i++) {
+		(void)esdm_es[ES_IDX]->init();
+
+		memset(buf, 0, sizeof(buf));
+		esdm_es[ES_IDX]->state(buf, sizeof(buf));
+		if (!strstr(buf, ES_TEST_MODULE)) {
+			printf("ES %s - fail: the state does not report the module set (%s)\n",
+			       ES_NAME, buf);
+			ret++;
+		}
+		if (!esdm_es[ES_IDX]->active()) {
+			printf("ES %s - fail: a module set at runtime does not configure the source\n",
+			       ES_NAME);
+			ret++;
+		}
+		if (esdm_es[ES_IDX]->curr_entropy(esdm_security_strength())) {
+			printf("ES %s - fail: entropy credited from a module that cannot be loaded\n",
+			       ES_NAME);
+			ret++;
+		}
+
+		esdm_es[ES_IDX]->fini();
+	}
+
+	/* Back to the module of the build */
+	(void)esdm_es[ES_IDX]->init();
+	(void)esdm_es_pkcs11_set_module_path("");
+	memset(buf, 0, sizeof(buf));
+	esdm_es[ES_IDX]->state(buf, sizeof(buf));
+	if (strstr(buf, ES_TEST_MODULE)) {
+		printf("ES %s - fail: clearing the module path kept it (%s)\n",
+		       ES_NAME, buf);
+		ret++;
+	}
+	if (esdm_es[ES_IDX]->active() != (ESDM_PKCS11_MODULE_PATH[0] != '\0')) {
+		printf("ES %s - fail: without a module set the source does not follow the build\n",
+		       ES_NAME);
+		ret++;
+	}
+	esdm_es[ES_IDX]->fini();
+
+	if (!ret)
+		printf("ES %s - pass: module path set at runtime\n", ES_NAME);
+	return ret;
+}
+
 int main(int argc, char *argv[])
 {
 	int ret = 0;
@@ -129,6 +203,8 @@ int main(int argc, char *argv[])
 	(void)argv;
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
+
+	ret += es_pkcs11_module_path();
 
 	if (esdm_es[ES_IDX]->init)
 		/* init may fail when the device is absent - tolerate it */

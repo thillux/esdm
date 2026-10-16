@@ -610,8 +610,10 @@ option('es_pkcs11_module_path', type: 'string', value: '',
 Path of the PKCS#11 module shared library to load (e.g.
 /usr/lib/softhsm/libsofthsm2.so or /usr/lib/pkcs11/opensc-pkcs11.so).
 
-When left empty, the PKCS#11 entropy source is disabled at runtime even if it
-was compiled in.
+esdm-server --pkcs11_module PATH loads another module in its place.
+
+When left empty and not given on the command line either, the PKCS#11 entropy
+source is disabled at runtime even if it was compiled in.
 ''')
 
 option('es_pkcs11_token_label', type: 'string', value: '',
