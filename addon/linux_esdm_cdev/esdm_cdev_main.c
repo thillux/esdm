@@ -410,9 +410,13 @@ static int __init esdm_cdev_init(void)
 	if (ret)
 		return ret;
 
-	ret = misc_register(&esdm_cdev_random_dev);
+	ret = esdm_cdev_proc_init();
 	if (ret)
 		goto err_egd;
+
+	ret = misc_register(&esdm_cdev_random_dev);
+	if (ret)
+		goto err_proc;
 
 	ret = misc_register(&esdm_cdev_urandom_dev);
 	if (ret)
@@ -425,6 +429,8 @@ static int __init esdm_cdev_init(void)
 
 err_random:
 	misc_deregister(&esdm_cdev_random_dev);
+err_proc:
+	esdm_cdev_proc_fini();
 err_egd:
 	esdm_cdev_watch_stop();
 	esdm_cdev_egd_fini();
@@ -433,13 +439,15 @@ err_egd:
 
 /*
  * The devices hold a reference to the module while they are open, so nobody
- * reads or waits in them once this runs. The watcher is stopped before the
- * connections it uses go away.
+ * reads or waits in them once this runs. The proc files are removed waiting
+ * for the ones being read, and the watcher is stopped before the connections
+ * it uses go away.
  */
 static void __exit esdm_cdev_exit(void)
 {
 	misc_deregister(&esdm_cdev_urandom_dev);
 	misc_deregister(&esdm_cdev_random_dev);
+	esdm_cdev_proc_fini();
 	esdm_cdev_watch_stop();
 	esdm_cdev_egd_fini();
 }

@@ -77,4 +77,8 @@ int esdm_cdev_egd_priv(u8 cmd, bool has_arg, u32 arg);
 int esdm_cdev_run_in_init(int (*fn)(void *out), void (*discard)(void *out),
 			  void *res, size_t reslen, unsigned int timeout_ms);
 
+/* /proc/esdm, esdm_cdev_proc.c */
+int esdm_cdev_proc_init(void);
+void esdm_cdev_proc_fini(void);
+
 #endif /* ESDM_CDEV_H */
