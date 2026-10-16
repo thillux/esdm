@@ -127,6 +127,11 @@ client that can connect is served. Allow the user the ESDM runs as: it
 connects as root at start up, but with its privileges dropped once it
 reconnects.
 .TP
+.BI "int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *" server ", int " enable );
+Offer DTLS to the clients, or not. A library built with DTLS offers it by
+default; enabling it in one built without returns
+.BR \-EOPNOTSUPP .
+.TP
 .BI "int esdm_es_ext_server_run(struct esdm_es_ext_server *" server );
 Serve the connected clients, one request after the other, until
 .BR esdm_es_ext_server_stop ()
@@ -190,6 +195,25 @@ the length); a GET_ENTROPY answered with status 0 is followed by exactly the
 length bytes of data, any other response by nothing.
 .PP
 A message that breaks any of this ends the connection.
+.SS DTLS
+An ESDM built with DTLS (meson option
+.BR dtls ,
+with the TLS stack of its crypto backend) sends
+.B ESDM_ES_EXT_PROTO_STARTDTLS
+(type 3, length 0) as its first request. A provider answering it with status 0
+expects a DTLS 1.2 handshake on the connection next, the ESDM being the client.
+Every DTLS record is one message of the socket; a request or response travels
+as DTLS application data, in records carrying one byte in front of their part
+of it \- 1 if more parts follow, 0 for the last one. A provider that cannot do
+DTLS answers
+.BR \-EOPNOTSUPP ,
+and the connection goes on unencrypted; one that does not know STARTDTLS closes
+the connection, and the ESDM connects again without asking.
+.PP
+The DTLS is opportunistic and unauthenticated: the provider presents an
+ephemeral self-signed certificate that is not verified. What the ESDM trusts
+the provider for remains the credentials of the process on the other end of
+the socket; the DTLS keeps the data from being read off the channel.
 .SH EXAMPLE
 A plugin library, built with
 .B cc \-shared \-fPIC

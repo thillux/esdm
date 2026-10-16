@@ -226,6 +226,13 @@ seconds; one that is not connected, or failed, is credited with nothing until
 it delivers again, which the daemon finds out on its own. The same entropy credit
 applies as for a plugin, with the rate of
 .BR \-\-es_ext_socket_entropy_rate .
+.PP
+A daemon built with DTLS (meson option
+.BR dtls )
+asks the provider to encrypt the connection with DTLS, and uses it unencrypted
+if the provider cannot; the status of the source says which. The DTLS is
+unauthenticated \- the credentials of the provider remain what it is trusted
+for \- and keeps the data credited as entropy from being read off the channel.
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP

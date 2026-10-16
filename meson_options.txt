@@ -1075,6 +1075,21 @@ With this option, the ESDM auxiliary client library is enabled allowing access
 to auxiliary functions offered by the ESDM. This library is a convenience
 wrapper around interfaces offered by ESDM that can be directly used.''')
 
+option('dtls', type: 'feature', value: 'disabled',
+       description: '''Encrypt the connections of the ESDM with DTLS, opportunistically.
+
+The RPC connections between the ESDM server and its clients, and the channel
+between the ESDM and an external entropy source provider, are encrypted with
+DTLS 1.2 where both ends support it: the client asks for it after connecting
+and goes on unencrypted if the server does not. The DTLS is unauthenticated -
+the credentials of the peer on the Unix domain socket remain what it is trusted
+for - and keeps random numbers and seed material from being read off the
+connection.
+
+The DTLS is provided by the TLS stack of the crypto backend: crypto_backend
+openssl, gnutls or botan. The builtin and the leancrypto backend have none.
+''')
+
 option('esdm-es-ext', type: 'feature', value: 'enabled',
        description: '''Enable the external entropy source library
 

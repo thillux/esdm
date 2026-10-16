@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "common_test.h"
+#include "config.h"
 #include "es_ext_test_plugin.h"
 #include "esdm_es_ext.h"
 #include "esdm_es_ext_proto.h"
@@ -382,6 +383,97 @@ static void test_server_allow(const char *good)
 	esdm_es_ext_plugin_unload(handle);
 }
 
+/*
+ * STARTDTLS, as the ESDM sends it first: answered in the clear with -EOPNOTSUPP
+ * by a server that does not offer DTLS - the connection goes on unencrypted -
+ * and with 0 by one that does, after which the server takes the next message
+ * for the handshake: anything else ends the connection.
+ */
+static void test_server_startdtls(const char *good)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
+	struct esdm_es_ext_plugin_handle *handle;
+	const struct esdm_es_ext_plugin *plugin;
+	struct esdm_es_ext_server *server;
+	const uint8_t *data;
+	unsigned int round;
+	pthread_t thread;
+	uint32_t bits = 0;
+	int32_t status = -1;
+	ssize_t n;
+	int fd;
+
+	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
+	if (!plugin)
+		return;
+
+	/* Round 0 without DTLS offered, round 1 with it, where it can be */
+	for (round = 0; round < 2; round++) {
+		CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0600,
+						  &server),
+			 0);
+		if (!server)
+			break;
+#ifdef ESDM_DTLS
+		CHECK_EQ(esdm_es_ext_server_set_dtls(server, (int)round), 0);
+#else
+		CHECK_EQ(esdm_es_ext_server_set_dtls(server, 1), -EOPNOTSUPP);
+		CHECK_EQ(esdm_es_ext_server_set_dtls(server, 0), 0);
+#endif
+		CHECK_EQ(pthread_create(&thread, NULL, test_server_thread,
+					server),
+			 0);
+
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect to the provider");
+		if (fd >= 0) {
+			n = test_request(fd, ESDM_ES_EXT_PROTO_STARTDTLS, 0,
+					 rsp, sizeof(rsp));
+			CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+			if (n > 0)
+				CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+						 rsp, (size_t)n,
+						 ESDM_ES_EXT_PROTO_STARTDTLS, 0,
+						 &status, &bits, &data),
+					 0);
+#ifdef ESDM_DTLS
+			if (round) {
+				/* DTLS drops what is no record: no answer */
+				struct timeval tv = { .tv_usec = 200000 };
+
+				CHECK_EQ(status, 0);
+				setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv,
+					   sizeof(tv));
+				/* No handshake but a request */
+				n = test_request(fd,
+						 ESDM_ES_EXT_PROTO_GET_ENTROPY,
+						 16, rsp, sizeof(rsp));
+				CHECK(n <= 0,
+				      "a request in the clear was answered after STARTDTLS");
+				close(fd);
+				goto next;
+			}
+#endif
+			CHECK_EQ(status, -EOPNOTSUPP);
+
+			/* Unencrypted, and STARTDTLS only once */
+			n = test_request(fd, ESDM_ES_EXT_PROTO_GET_ENTROPY, 16,
+					 rsp, sizeof(rsp));
+			CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 16);
+			close(fd);
+		}
+#ifdef ESDM_DTLS
+	next:
+#endif
+		esdm_es_ext_server_stop(server);
+		pthread_join(thread, NULL);
+		esdm_es_ext_server_free(server);
+	}
+
+	CHECK_EQ(esdm_es_ext_server_set_dtls(NULL, 0), -EINVAL);
+	esdm_es_ext_plugin_unload(handle);
+}
+
 /* The example plugin of es-ext/example, built to read /dev/urandom */
 static void test_example(const char *path)
 {
@@ -426,6 +518,7 @@ int main(int argc, char *argv[])
 	test_loader(argv[1], argv[2], argv[3], argv[4]);
 	test_server(argv[1]);
 	test_server_allow(argv[1]);
+	test_server_startdtls(argv[1]);
 	test_example(argv[5]);
 
 	unlink(test_socket);

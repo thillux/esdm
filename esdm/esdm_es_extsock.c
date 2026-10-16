@@ -59,6 +59,7 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_ext.h"
+#include "esdm_dtls.h"
 #include "esdm_es_ext_proto.h"
 #include "esdm_es_extsock.h"
 #include "esdm_es_mgr.h"
@@ -83,6 +84,14 @@ static long extsock_peer_uid = ESDM_EXT_SOCKET_PEER_UID;
 static int extsock_fd = -1;
 /* The uid of the provider connected to */
 static uid_t extsock_connected_uid = 0;
+
+/*
+ * The DTLS of the connection, NULL while it is unencrypted - see esdm_dtls.h
+ * and esdm_es_ext.h on the opportunistic DTLS. The context is set up on first
+ * use.
+ */
+static struct esdm_dtls_ctx *extsock_dtls_ctx = NULL;
+static struct esdm_dtls *extsock_dtls = NULL;
 
 /*
  * The last request to the provider failed, or its last self test did. Kept
@@ -123,9 +132,17 @@ static bool esdm_es_extsock_configured_locked(void)
 	return esdm_es_extsock_path_locked()[0] != '\0';
 }
 
+/* Is the connection encrypted? Caller must hold extsock_mutex. */
+static bool esdm_es_extsock_encrypted_locked(void)
+{
+	return extsock_dtls != NULL;
+}
+
 /* Caller must hold extsock_mutex (write lock). */
 static void esdm_es_extsock_disconnect_locked(void)
 {
+	esdm_dtls_free(extsock_dtls);
+	extsock_dtls = NULL;
 	if (extsock_fd >= 0)
 		close(extsock_fd);
 	extsock_fd = -1;
@@ -169,7 +186,7 @@ static void esdm_es_extsock_log_once(int what, enum esdm_logger_verbosity level,
  *
  * @return 0 when connected, a negative errno otherwise
  */
-static int esdm_es_extsock_connect_locked(void)
+static int esdm_es_extsock_open_locked(void)
 {
 	const char *path = esdm_es_extsock_path_locked();
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
@@ -219,20 +236,163 @@ static int esdm_es_extsock_connect_locked(void)
 
 	extsock_fd = fd;
 	extsock_connected_uid = cred.uid;
-	extsock_last_logged = 0;
-	/* Its claims are not assessed by the ESDM, which is worth a line */
-	esdm_logger(
-		extsock_was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
-		LOGGER_C_ES,
-		"External ES provider %s connected (uid %u), its entropy claims credited with up to %u bits per 256 bits\n",
-		path, (unsigned int)cred.uid,
-		esdm_config_es_ext_socket_entropy_rate());
-	extsock_was_connected = true;
 	return 0;
 
 err:
 	close(fd);
 	return ret;
+}
+
+static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
+					       uint8_t *rsp);
+
+#ifdef ESDM_DTLS
+
+/* The milliseconds left until @deadline, 0 once it passed */
+static int esdm_es_extsock_ms_left(const struct timespec *deadline)
+{
+	struct timespec now;
+	int64_t ms;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	ms = (int64_t)(deadline->tv_sec - now.tv_sec) * 1000 +
+	     (deadline->tv_nsec - now.tv_nsec) / 1000000;
+	return ms > 0 ? (int)ms : 0;
+}
+
+/*
+ * Ask the provider connected to for DTLS, and do the handshake if it agrees.
+ * Caller must hold extsock_mutex (write lock).
+ *
+ * @return 0 when the connection is encrypted now, -EOPNOTSUPP when it goes on
+ *	   unencrypted, any other negative errno when the connection is gone - the
+ *	   provider closed it, did not answer, or the handshake failed
+ */
+static int esdm_es_extsock_startdtls_locked(void)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	struct timespec deadline;
+	const uint8_t *data;
+	struct esdm_dtls *dtls;
+	uint32_t bits;
+	int32_t status;
+	ssize_t n;
+	int ret;
+
+	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_STARTDTLS, 0,
+					    rsp);
+	if (n < 0)
+		return (int)n;
+	if (esdm_es_ext_proto_rsp_unpack(rsp, (size_t)n,
+					 ESDM_ES_EXT_PROTO_STARTDTLS, 0,
+					 &status, &bits, &data)) {
+		esdm_es_extsock_disconnect_locked();
+		return -EPROTO;
+	}
+	if (status)
+		return -EOPNOTSUPP;
+
+	if (!extsock_dtls_ctx) {
+		ret = esdm_dtls_ctx_alloc(false, &extsock_dtls_ctx);
+		if (ret) {
+			esdm_es_extsock_disconnect_locked();
+			return ret;
+		}
+	}
+
+	ret = esdm_dtls_alloc(
+		extsock_dtls_ctx, extsock_fd,
+		ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA, &dtls);
+	if (ret) {
+		esdm_es_extsock_disconnect_locked();
+		return ret;
+	}
+
+	/* The handshake is bound by the same time a request is */
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += ESDM_EXT_SOCKET_TIMEOUT_MS / 1000;
+	deadline.tv_nsec += (ESDM_EXT_SOCKET_TIMEOUT_MS % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000L;
+	}
+
+	for (;;) {
+		struct pollfd pfd = { .fd = extsock_fd, .events = POLLIN };
+		int left;
+
+		ret = esdm_dtls_handshake(dtls);
+		if (!ret)
+			break;
+		if (ret != -EAGAIN)
+			goto err;
+
+		left = esdm_es_extsock_ms_left(&deadline);
+		if (!left) {
+			ret = -ETIMEDOUT;
+			goto err;
+		}
+		if (poll(&pfd, 1, left) < 0 && errno != EINTR) {
+			ret = -errno;
+			goto err;
+		}
+	}
+
+	extsock_dtls = dtls;
+	return 0;
+
+err:
+	esdm_dtls_free(dtls);
+	esdm_es_extsock_disconnect_locked();
+	return ret;
+}
+
+#endif /* ESDM_DTLS */
+
+/*
+ * Connect to the provider, encrypted if it can be, and unencrypted if not.
+ * Caller must hold extsock_mutex (write lock).
+ *
+ * @return 0 when connected, a negative errno otherwise
+ */
+static int esdm_es_extsock_connect_locked(void)
+{
+	const char *path = esdm_es_extsock_path_locked();
+	int ret = esdm_es_extsock_open_locked();
+
+	if (ret)
+		return ret;
+
+#ifdef ESDM_DTLS
+	ret = esdm_es_extsock_startdtls_locked();
+	if (ret && ret != -EOPNOTSUPP) {
+		/*
+		 * A provider that does not know STARTDTLS closes the
+		 * connection, and one whose handshake failed is gone with it:
+		 * opportunistic as the DTLS is, the provider is used
+		 * unencrypted then, on a new connection.
+		 */
+		esdm_es_extsock_log_once(
+			3, LOGGER_WARN,
+			"no DTLS with it, using the connection unencrypted",
+			path);
+		ret = esdm_es_extsock_open_locked();
+		if (ret)
+			return ret;
+	}
+#endif
+
+	extsock_last_logged = 0;
+	/* Its claims are not assessed by the ESDM, which is worth a line */
+	esdm_logger(
+		extsock_was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
+		LOGGER_C_ES,
+		"External ES provider %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
+		path, (unsigned int)extsock_connected_uid,
+		esdm_es_extsock_encrypted_locked() ? "DTLS" : "unencrypted",
+		esdm_config_es_ext_socket_entropy_rate());
+	extsock_was_connected = true;
+	return 0;
 }
 
 /*
@@ -282,10 +442,17 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 	 * One request at a time: the provider's answers are read before the
 	 * next request goes out, so this fits into the socket buffer.
 	 */
-	n = send(extsock_fd, req, sizeof(req), MSG_DONTWAIT | MSG_NOSIGNAL);
-	if (n != (ssize_t)sizeof(req)) {
-		n = n < 0 ? -errno : -EIO;
-		goto err;
+	if (extsock_dtls) {
+		n = esdm_dtls_send(extsock_dtls, req, sizeof(req));
+		if (n)
+			goto err;
+	} else {
+		n = send(extsock_fd, req, sizeof(req),
+			 MSG_DONTWAIT | MSG_NOSIGNAL);
+		if (n != (ssize_t)sizeof(req)) {
+			n = n < 0 ? -errno : -EIO;
+			goto err;
+		}
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -302,8 +469,13 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 			goto err;
 		}
 
-		ret = poll(&pfd, 1,
-			   (int)(ESDM_EXT_SOCKET_TIMEOUT_MS - elapsed_ms));
+		/* A record DTLS read already is not signalled by the socket */
+		if (extsock_dtls && esdm_dtls_pending(extsock_dtls))
+			ret = 1;
+		else
+			ret = poll(
+				&pfd, 1,
+				(int)(ESDM_EXT_SOCKET_TIMEOUT_MS - elapsed_ms));
 		if (ret < 0 && errno == EINTR)
 			continue;
 		if (ret < 0) {
@@ -312,6 +484,18 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 		}
 		if (ret == 0)
 			continue;
+
+		if (extsock_dtls) {
+			/* A message larger than any answer is -EMSGSIZE */
+			n = esdm_dtls_recv(extsock_dtls, rsp,
+					   ESDM_ES_EXT_PROTO_RSP_LEN +
+						   ESDM_ES_EXT_PROTO_MAX_DATA);
+			if (n == -EAGAIN)
+				continue;
+			if (n < 0)
+				goto err;
+			return n;
+		}
 
 		/*
 		 * MSG_TRUNC reports the size of the message even when it does
@@ -369,6 +553,8 @@ static void esdm_es_extsock_fini(void)
 {
 	mutex_lock(&extsock_mutex);
 	esdm_es_extsock_disconnect_locked();
+	esdm_dtls_ctx_free(extsock_dtls_ctx);
+	extsock_dtls_ctx = NULL;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
 	mutex_unlock(&extsock_mutex);
@@ -529,8 +715,10 @@ static void esdm_es_extsock_es_state(char *buf, size_t buflen)
 	if (extsock_fd < 0)
 		snprintf(status, sizeof(status), "not connected");
 	else
-		snprintf(status, sizeof(status), "connected (uid %u)%s",
+		snprintf(status, sizeof(status), "connected (uid %u), %s%s",
 			 (unsigned int)extsock_connected_uid,
+			 esdm_es_extsock_encrypted_locked() ? "DTLS" :
+							      "unencrypted",
 			 extsock_selftest_failed ? ", failing its self test" :
 			 extsock_read_failed	 ? ", failing" :
 						   "");

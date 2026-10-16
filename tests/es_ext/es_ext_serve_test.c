@@ -28,6 +28,7 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -208,6 +209,51 @@ static void test_default_clients(const char *serve, const char *plugin)
 	CHECK_EQ(test_wait(pid), 0);
 }
 
+/* With --no_dtls, a STARTDTLS is refused and the client goes on in the clear */
+static void test_no_dtls(const char *serve, const char *plugin)
+{
+	char uid[16];
+	char *const argv[] = { (char *)serve, "--plugin",  (char *)plugin,
+			       "--socket",    test_socket, "--client_uid",
+			       uid,	      "--no_dtls", NULL };
+	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	const uint8_t *data;
+	uint32_t bits = 0;
+	int32_t status = 0;
+	pid_t pid;
+	ssize_t n;
+	int fd;
+
+	snprintf(uid, sizeof(uid), "%u", (unsigned int)getuid());
+	pid = test_spawn(argv);
+	CHECK(pid > 0, "cannot start %s", serve);
+	if (pid <= 0)
+		return;
+	CHECK(test_wait_socket(), "the provider did not create its socket");
+
+	fd = test_connect();
+	CHECK(fd >= 0, "cannot connect to the provider");
+	if (fd >= 0) {
+		esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STARTDTLS, 0);
+		CHECK_EQ(send(fd, req, sizeof(req), MSG_NOSIGNAL),
+			 (ssize_t)sizeof(req));
+		n = recv(fd, rsp, sizeof(rsp), 0);
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+		if (n > 0)
+			CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+					 rsp, (size_t)n,
+					 ESDM_ES_EXT_PROTO_STARTDTLS, 0,
+					 &status, &bits, &data),
+				 0);
+		CHECK_EQ(status, -EOPNOTSUPP);
+		close(fd);
+	}
+
+	CHECK_EQ(kill(pid, SIGTERM), 0);
+	CHECK_EQ(test_wait(pid), 0);
+}
+
 static void test_refusals(const char *serve, const char *plugin,
 			  const char *bad_version)
 {
@@ -259,6 +305,7 @@ int main(int argc, char *argv[])
 	test_refusals(argv[1], argv[2], argv[3]);
 	test_serve(argv[1], argv[2]);
 	test_default_clients(argv[1], argv[2]);
+	test_no_dtls(argv[1], argv[2]);
 
 	unlink(test_socket);
 	rmdir(test_dir);

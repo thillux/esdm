@@ -77,6 +77,9 @@ static void *test_server_run(void *arg)
 	return (void *)(intptr_t)esdm_es_ext_server_run(arg);
 }
 
+/* Whether the provider offers DTLS, as far as the library can */
+static bool test_server_dtls = true;
+
 static int test_server_start(void)
 {
 	int ret = esdm_es_ext_server_alloc(&es_ext_test_plugin, test_good, 0600,
@@ -84,6 +87,8 @@ static int test_server_start(void)
 
 	if (ret)
 		return ret;
+	if (!test_server_dtls)
+		esdm_es_ext_server_set_dtls(test_server, 0);
 	return -pthread_create(&test_server_thread, NULL, test_server_run,
 			       test_server);
 }
@@ -109,6 +114,8 @@ enum test_evil_mode {
 };
 
 static atomic_int test_evil_mode = TEST_EVIL_GOOD;
+/* A provider not knowing STARTDTLS: it closes the connection on it */
+static atomic_bool test_evil_old = false;
 static atomic_bool test_evil_stop = false;
 static atomic_uint test_evil_connections = 0;
 static int test_evil_listen = -1;
@@ -151,6 +158,18 @@ static void *test_evil_run(void *arg)
 				break;
 
 			memset(data, 0xee, sizeof(data));
+
+			/* No DTLS here: refused, or unknown to an old provider */
+			if (type == ESDM_ES_EXT_PROTO_STARTDTLS) {
+				if (atomic_load(&test_evil_old))
+					break;
+				len = esdm_es_ext_proto_rsp_pack(
+					rsp, type, -EOPNOTSUPP, 0, NULL, 0);
+				if (send(fd, rsp, len, MSG_NOSIGNAL) !=
+				    (ssize_t)len)
+					break;
+				continue;
+			}
 			switch (atomic_load(&test_evil_mode)) {
 			case TEST_EVIL_SILENT:
 				continue;
@@ -459,6 +478,189 @@ static void test_protocol_breaches(void)
 	close(test_evil_listen);
 }
 
+/******************************************************************************
+ * The channel as a relay between the source and the provider sees it
+ ******************************************************************************/
+
+static char test_relay[sizeof(test_dir) + 32];
+static int test_relay_listen = -1;
+static atomic_bool test_relay_stop = false;
+/* A message of the provider held the plaintext data of the test plugin */
+static atomic_bool test_relay_saw_plaintext = false;
+static atomic_uint test_relay_messages = 0;
+
+/* The test plugin fills a block with one byte value - a run of 16 tells */
+static bool test_has_run(const uint8_t *buf, size_t len)
+{
+	size_t i, run = 1;
+
+	for (i = 1; i < len; i++) {
+		run = buf[i] == buf[i - 1] ? run + 1 : 1;
+		if (run >= 16)
+			return true;
+	}
+	return false;
+}
+
+static void *test_relay_run(void *arg)
+{
+	(void)arg;
+
+	while (!atomic_load(&test_relay_stop)) {
+		struct sockaddr_un addr = { .sun_family = AF_UNIX };
+		struct pollfd pfd[2] = { { .fd = test_relay_listen,
+					   .events = POLLIN } };
+		int esdm, provider;
+
+		if (poll(pfd, 1, 50) <= 0)
+			continue;
+		esdm = accept4(test_relay_listen, NULL, NULL, SOCK_CLOEXEC);
+		if (esdm < 0)
+			continue;
+
+		provider = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", test_good);
+		if (provider < 0 ||
+		    connect(provider, (struct sockaddr *)&addr, sizeof(addr))) {
+			close(esdm);
+			if (provider >= 0)
+				close(provider);
+			continue;
+		}
+
+		/* Every message on to the other side, one by one */
+		for (;;) {
+			uint8_t buf[8192];
+			ssize_t n;
+
+			pfd[0] =
+				(struct pollfd){ .fd = esdm, .events = POLLIN };
+			pfd[1] = (struct pollfd){ .fd = provider,
+						  .events = POLLIN };
+			if (poll(pfd, 2, 50) <= 0) {
+				if (atomic_load(&test_relay_stop))
+					break;
+				continue;
+			}
+			if (pfd[0].revents) {
+				n = recv(esdm, buf, sizeof(buf), 0);
+				if (n <= 0 || send(provider, buf, (size_t)n,
+						   MSG_NOSIGNAL) != n)
+					break;
+			}
+			if (pfd[1].revents) {
+				n = recv(provider, buf, sizeof(buf), 0);
+				if (n <= 0)
+					break;
+				atomic_fetch_add(&test_relay_messages, 1);
+				if (test_has_run(buf, (size_t)n))
+					atomic_store(&test_relay_saw_plaintext,
+						     true);
+				if (send(esdm, buf, (size_t)n, MSG_NOSIGNAL) !=
+				    n)
+					break;
+			}
+		}
+		close(esdm);
+		close(provider);
+	}
+
+	return NULL;
+}
+
+/*
+ * What the channel shows to whoever can observe it: with DTLS, none of the
+ * data delivered; unencrypted, all of it - which tells that the relay would
+ * have seen the data if it was there.
+ */
+static void test_eavesdrop(bool dtls)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	pthread_t relay;
+	unsigned int i;
+
+	test_server_stop();
+	test_server_dtls = dtls;
+	CHECK_EQ(test_server_start(), 0);
+	test_server_dtls = true;
+
+	test_relay_listen = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", test_relay);
+	unlink(test_relay);
+	CHECK_EQ(bind(test_relay_listen, (struct sockaddr *)&addr,
+		      sizeof(addr)),
+		 0);
+	CHECK_EQ(listen(test_relay_listen, 4), 0);
+	atomic_store(&test_relay_stop, false);
+	atomic_store(&test_relay_saw_plaintext, false);
+	atomic_store(&test_relay_messages, 0);
+	CHECK_EQ(pthread_create(&relay, NULL, test_relay_run, NULL), 0);
+
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_relay), 0);
+	for (i = 0; i < 4; i++)
+		CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK(atomic_load(&test_relay_messages) >= 4,
+	      "the relay saw no answers");
+
+#ifdef ESDM_DTLS
+	if (dtls) {
+		CHECK(test_state_has("DTLS"),
+		      "the connection is not encrypted");
+		CHECK(!atomic_load(&test_relay_saw_plaintext),
+		      "the data delivered can be read off the channel");
+	} else
+#endif
+	{
+		CHECK(test_state_has("unencrypted"),
+		      "the state does not say the connection is unencrypted");
+		CHECK(atomic_load(&test_relay_saw_plaintext),
+		      "the relay does not see the data of an unencrypted channel");
+	}
+
+	atomic_store(&test_relay_stop, true);
+	ES->fini();
+	pthread_join(relay, NULL);
+	close(test_relay_listen);
+	unlink(test_relay);
+	CHECK_EQ(ES->init(), 0);
+}
+
+/*
+ * A provider that does not know STARTDTLS closes the connection on it, and is
+ * used unencrypted on the next connection, right away.
+ */
+static void test_old_provider(void)
+{
+#ifdef ESDM_DTLS
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	pthread_t evil;
+	unsigned int conns;
+
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	atomic_store(&test_evil_old, true);
+	CHECK_EQ(test_evil_start(&evil), 0);
+	conns = atomic_load(&test_evil_connections);
+
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 2);
+	CHECK(test_state_has("unencrypted"),
+	      "an old provider is not used unencrypted");
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_old, false);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	CHECK_EQ(ES->init(), 0);
+#endif
+}
+
 int main(void)
 {
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
@@ -469,6 +671,7 @@ int main(void)
 	}
 	snprintf(test_good, sizeof(test_good), "%s/good.socket", test_dir);
 	snprintf(test_evil, sizeof(test_evil), "%s/evil.socket", test_dir);
+	snprintf(test_relay, sizeof(test_relay), "%s/relay.socket", test_dir);
 
 	test_arguments();
 	test_unconfigured();
@@ -483,6 +686,9 @@ int main(void)
 	test_peer_check();
 	test_reconnect();
 	test_late_provider();
+	test_eavesdrop(true);
+	test_eavesdrop(false);
+	test_old_provider();
 	test_protocol_breaches();
 
 	if (test_server)

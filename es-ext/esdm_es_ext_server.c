@@ -40,7 +40,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm_es_ext.h"
+#include "esdm_dtls.h"
 #include "esdm_es_ext_proto.h"
 #include "esdm_logger.h"
 #include "esdm_server_socket.h"
@@ -61,6 +63,16 @@
 /* Users that may be allowed with esdm_es_ext_server_allow_uid() */
 #define ESDM_ES_EXT_SERVER_MAX_UIDS 8
 
+/* Where a client is on its connection */
+enum esdm_es_ext_client_state {
+	/* Requests in the clear, as connected */
+	ESDM_ES_EXT_CLIENT_PLAIN,
+	/* STARTDTLS answered, the handshake in progress */
+	ESDM_ES_EXT_CLIENT_HANDSHAKE,
+	/* Requests as DTLS application data */
+	ESDM_ES_EXT_CLIENT_DTLS,
+};
+
 struct esdm_es_ext_server {
 	const struct esdm_es_ext_plugin *plugin;
 	void *ctx;
@@ -70,6 +82,12 @@ struct esdm_es_ext_server {
 	/* Written to by esdm_es_ext_server_stop() */
 	int stop_pipe[2];
 	int clients[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
+	enum esdm_es_ext_client_state
+		client_state[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
+
+	/* The DTLS context with the ephemeral key, NULL while not offered */
+	struct esdm_dtls_ctx *dtls_ctx;
+	struct esdm_dtls *client_dtls[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
 
 	/* Clients accepted next to root; none set accepts any client */
 	uid_t allowed_uids[ESDM_ES_EXT_SERVER_MAX_UIDS];
@@ -86,6 +104,10 @@ static void esdm_es_ext_server_close_client(struct esdm_es_ext_server *server,
 {
 	if (server->clients[i] < 0)
 		return;
+
+	esdm_dtls_free(server->client_dtls[i]);
+	server->client_dtls[i] = NULL;
+	server->client_state[i] = ESDM_ES_EXT_CLIENT_PLAIN;
 
 	close(server->clients[i]);
 	server->clients[i] = -1;
@@ -151,6 +173,7 @@ static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
 	for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++) {
 		if (server->clients[i] < 0) {
 			server->clients[i] = fd;
+			server->client_state[i] = ESDM_ES_EXT_CLIENT_PLAIN;
 			return;
 		}
 	}
@@ -162,7 +185,108 @@ static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
 }
 
 /*
- * Serve one request of client @i.
+ * Go on with the handshake of client @i.
+ *
+ * @return true if the client is still connected afterwards
+ */
+static bool esdm_es_ext_server_handshake(struct esdm_es_ext_server *server,
+					 unsigned int i)
+{
+	int ret = esdm_dtls_handshake(server->client_dtls[i]);
+
+	if (!ret) {
+		server->client_state[i] = ESDM_ES_EXT_CLIENT_DTLS;
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ANY,
+			"External ES provider: client switched to DTLS (%s)\n",
+			esdm_dtls_cipher(server->client_dtls[i]));
+		return true;
+	}
+
+	if (ret == -EAGAIN)
+		return true;
+
+	esdm_logger(
+		LOGGER_WARN, LOGGER_C_ANY,
+		"External ES provider: DTLS handshake failed, client disconnected\n");
+	esdm_es_ext_server_close_client(server, i);
+	return false;
+}
+
+/*
+ * Receive the next message of client @i into @buf of @len bytes - a request,
+ * or one byte more than a request has to tell a longer message.
+ *
+ * @return the size of the message, which may exceed @len for a message in the
+ *	   clear, -EAGAIN if none is there yet, 0 if the client is gone
+ */
+static ssize_t esdm_es_ext_server_recv(struct esdm_es_ext_server *server,
+				       unsigned int i, uint8_t *buf, size_t len)
+{
+	ssize_t n;
+
+	if (server->client_state[i] == ESDM_ES_EXT_CLIENT_DTLS) {
+		/* A message longer than a request is -EMSGSIZE: closed */
+		n = esdm_dtls_recv(server->client_dtls[i], buf, len);
+		if (n == -EAGAIN)
+			return -EAGAIN;
+		return n < 0 ? 0 : n;
+	}
+
+	/*
+	 * MSG_TRUNC for the real size of the message: a longer one is a
+	 * protocol error, not a request cut to size.
+	 */
+	n = recv(server->clients[i], buf, len, MSG_DONTWAIT | MSG_TRUNC);
+	if (n < 0 &&
+	    (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+		return -EAGAIN;
+	return n < 0 ? 0 : n;
+}
+
+/*
+ * Send the response @rsp of @len bytes to client @i.
+ *
+ * The client sends one request at a time and reads the answer, so the answer
+ * fits into its receive queue. One that does not read is not waited for.
+ *
+ * @return true if all of it was sent
+ */
+static bool esdm_es_ext_server_send(struct esdm_es_ext_server *server,
+				    unsigned int i, const uint8_t *rsp,
+				    size_t len)
+{
+	if (server->client_state[i] == ESDM_ES_EXT_CLIENT_DTLS)
+		return !esdm_dtls_send(server->client_dtls[i], rsp, len);
+
+	return send(server->clients[i], rsp, len,
+		    MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)len;
+}
+
+/*
+ * Answer a STARTDTLS request of client @i, still in the clear: a handshake is
+ * to follow if the server offers DTLS, the client goes on in the clear
+ * otherwise.
+ *
+ * @return the status of the answer
+ */
+static int esdm_es_ext_server_startdtls(struct esdm_es_ext_server *server,
+					unsigned int i)
+{
+	if (!server->dtls_ctx)
+		return -EOPNOTSUPP;
+
+	/* The requests of the client, nothing larger */
+	if (esdm_dtls_alloc(server->dtls_ctx, server->clients[i],
+			    ESDM_ES_EXT_PROTO_REQ_LEN, &server->client_dtls[i]))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+/*
+ * Serve what client @i has sent: one request, or the next step of its DTLS
+ * handshake.
  *
  * @return true if the client is still connected afterwards
  */
@@ -173,53 +297,56 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	uint8_t data[ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint32_t length, entropy_bits = 0;
-	int fd = server->clients[i];
 	uint16_t type;
 	size_t rsp_len;
 	ssize_t n;
 	int status;
 	bool ret = false;
 
-	/*
-	 * One byte more than a request has, and MSG_TRUNC for the real size of
-	 * the message: a longer one is a protocol error, not a request cut to
-	 * size.
-	 */
-	n = recv(fd, req, sizeof(req), MSG_DONTWAIT | MSG_TRUNC);
-	if (n < 0 &&
-	    (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+	if (server->client_state[i] == ESDM_ES_EXT_CLIENT_HANDSHAKE)
+		return esdm_es_ext_server_handshake(server, i);
+
+	n = esdm_es_ext_server_recv(server, i, req, sizeof(req));
+	if (n == -EAGAIN)
 		return true;
 	if (n <= 0)
 		goto out;
 	if ((size_t)n > sizeof(req) ||
-	    esdm_es_ext_proto_req_unpack(req, (size_t)n, &type, &length)) {
+	    esdm_es_ext_proto_req_unpack(req, (size_t)n, &type, &length) ||
+	    /* Once, and in the clear */
+	    (type == ESDM_ES_EXT_PROTO_STARTDTLS &&
+	     server->client_state[i] != ESDM_ES_EXT_CLIENT_PLAIN)) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ANY,
 			"External ES provider: invalid request, client disconnected\n");
 		goto out;
 	}
 
-	if (type == ESDM_ES_EXT_PROTO_GET_ENTROPY) {
+	switch (type) {
+	case ESDM_ES_EXT_PROTO_GET_ENTROPY:
 		status = esdm_es_ext_plugin_get(server->plugin, server->ctx,
 						data, length, &entropy_bits);
-	} else {
+		break;
+	case ESDM_ES_EXT_PROTO_STARTDTLS:
+		status = esdm_es_ext_server_startdtls(server, i);
+		break;
+	default:
 		status = server->plugin->selftest ?
 				 server->plugin->selftest(server->ctx) :
 				 0;
-		if (status > 0)
+		/* An errno, or what it stands for */
+		if (status > 0 || status < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
 			status = -EIO;
+		break;
 	}
 
 	rsp_len = esdm_es_ext_proto_rsp_pack(rsp, type, status, entropy_bits,
 					     data, length);
+	ret = esdm_es_ext_server_send(server, i, rsp, rsp_len);
 
-	/*
-	 * The client sends one request at a time and reads the answer, so the
-	 * answer fits into its receive queue. One that does not read is not
-	 * waited for.
-	 */
-	n = send(fd, rsp, rsp_len, MSG_DONTWAIT | MSG_NOSIGNAL);
-	ret = n == (ssize_t)rsp_len;
+	/* The answer to STARTDTLS went out in the clear, the handshake follows */
+	if (ret && type == ESDM_ES_EXT_PROTO_STARTDTLS && !status)
+		server->client_state[i] = ESDM_ES_EXT_CLIENT_HANDSHAKE;
 
 out:
 	memset_secure(data, 0, sizeof(data));
@@ -324,6 +451,14 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 	}
 	s->initialized = true;
 
+#ifdef ESDM_DTLS
+	/* Offered by default; a server without it still serves in the clear */
+	if (esdm_dtls_ctx_alloc(true, &s->dtls_ctx))
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ANY,
+			"External ES provider: DTLS cannot be set up, serving unencrypted\n");
+#endif
+
 	*server = s;
 	return 0;
 
@@ -349,6 +484,22 @@ int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid)
 
 	server->allowed_uids[server->allowed_uids_num++] = uid;
 	return 0;
+}
+
+DSO_PUBLIC
+int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable)
+{
+	if (!server)
+		return -EINVAL;
+
+	if (!enable) {
+		esdm_dtls_ctx_free(server->dtls_ctx);
+		server->dtls_ctx = NULL;
+		return 0;
+	}
+	if (server->dtls_ctx)
+		return 0;
+	return esdm_dtls_ctx_alloc(true, &server->dtls_ctx);
 }
 
 DSO_PUBLIC
@@ -448,6 +599,8 @@ void esdm_es_ext_server_free(struct esdm_es_ext_server *server)
 
 	if (server->initialized && server->plugin->fini)
 		server->plugin->fini(server->ctx);
+
+	esdm_dtls_ctx_free(server->dtls_ctx);
 
 	if (server->stop_pipe[0] >= 0)
 		close(server->stop_pipe[0]);

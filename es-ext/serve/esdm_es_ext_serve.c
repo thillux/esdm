@@ -28,6 +28,7 @@
 #include <getopt.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,7 @@ static void usage(void)
 		"\t-u --client_uid <USER>\tServe clients running as USER (uid or name)\n");
 	fprintf(stderr,
 		"\t\t\tnext to root; may be repeated (default: nobody)\n");
+	fprintf(stderr, "\t   --no_dtls\tDo not offer DTLS to the clients\n");
 	fprintf(stderr,
 		"\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t-h --help\tThis help information\n");
@@ -97,6 +99,7 @@ int main(int argc, char *argv[])
 		{ "socket", required_argument, NULL, 's' },
 		{ "mode", required_argument, NULL, 'm' },
 		{ "client_uid", required_argument, NULL, 'u' },
+		{ "no_dtls", no_argument, NULL, 'D' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
@@ -109,6 +112,7 @@ int main(int argc, char *argv[])
 	uid_t client_uids[SERVE_MAX_CLIENT_UIDS];
 	unsigned int client_uids_num = 0, i;
 	mode_t mode = 0666;
+	bool dtls = true;
 	int c, ret;
 
 	while ((c = getopt_long(argc, argv, "l:s:m:u:vh", opts, NULL)) != -1) {
@@ -153,6 +157,9 @@ int main(int argc, char *argv[])
 			client_uids[client_uids_num++] = uid;
 			break;
 		}
+		case 'D':
+			dtls = false;
+			break;
 		case 'v':
 			esdm_logger_inc_verbosity();
 			break;
@@ -215,6 +222,10 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 	}
+
+	/* Offered by a library that has it, unless told otherwise */
+	if (!dtls)
+		esdm_es_ext_server_set_dtls(serve_server, 0);
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = serve_stop;

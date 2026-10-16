@@ -83,11 +83,20 @@ static void test_request(void)
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 
+	/* STARTDTLS asks for nothing either */
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STARTDTLS, 0);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 0);
+	CHECK_EQ(type, ESDM_ES_EXT_PROTO_STARTDTLS);
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STARTDTLS, 4);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+
 	/* Unknown types */
 	esdm_es_ext_proto_req_pack(req, 0, 16);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
-	esdm_es_ext_proto_req_pack(req, 3, 16);
+	esdm_es_ext_proto_req_pack(req, 4, 0);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 }

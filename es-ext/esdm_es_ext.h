@@ -121,10 +121,11 @@ struct esdm_es_ext_plugin {
  * Request, ESDM_ES_EXT_PROTO_REQ_LEN bytes:
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
- *	u16 type		ESDM_ES_EXT_PROTO_GET_ENTROPY or
- *				ESDM_ES_EXT_PROTO_SELFTEST
+ *	u16 type		ESDM_ES_EXT_PROTO_GET_ENTROPY,
+ *				ESDM_ES_EXT_PROTO_SELFTEST or
+ *				ESDM_ES_EXT_PROTO_STARTDTLS
  *	u32 length		bytes asked for, 1 to ESDM_ES_EXT_PROTO_MAX_DATA
- *				for GET_ENTROPY, 0 for SELFTEST
+ *				for GET_ENTROPY, 0 otherwise
  *
  * Response, ESDM_ES_EXT_PROTO_RSP_LEN bytes followed by the data:
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
@@ -137,12 +138,30 @@ struct esdm_es_ext_plugin {
  *
  * A response that breaks any of this is discarded and the connection closed.
  * A provider closes a connection on a request that breaks it.
+ *
+ * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
+ * first request. A provider answering it with status 0 expects a DTLS 1.2
+ * handshake on the connection next, the ESDM being the client: every DTLS
+ * record, handshake records included, is one message. All later requests and
+ * responses are DTLS application data, each one carried by records with one
+ * byte in front - 1 if more parts of it follow, 0 for the last one, see
+ * esdm_dtls.h - and STARTDTLS is not sent again. A
+ * provider that cannot do DTLS answers -EOPNOTSUPP, and the connection goes on
+ * unencrypted. A provider that does not know STARTDTLS closes the connection,
+ * and the ESDM connects again without asking - so do a failed handshake.
+ *
+ * The DTLS is opportunistic and unauthenticated: the provider presents an
+ * ephemeral self-signed certificate the ESDM does not verify. What the ESDM
+ * trusts the provider for are the credentials of the process on the other end
+ * of the Unix domain socket. The DTLS keeps the data from being read off the
+ * channel by whoever can observe it.
  ******************************************************************************/
 
 #define ESDM_ES_EXT_PROTO_MAGIC 0x58455345 /* "ESEX" in memory */
 #define ESDM_ES_EXT_PROTO_VERSION 1
 #define ESDM_ES_EXT_PROTO_GET_ENTROPY 1
 #define ESDM_ES_EXT_PROTO_SELFTEST 2
+#define ESDM_ES_EXT_PROTO_STARTDTLS 3
 #define ESDM_ES_EXT_PROTO_MAX_DATA 512
 #define ESDM_ES_EXT_PROTO_REQ_LEN 12
 #define ESDM_ES_EXT_PROTO_RSP_LEN 16
@@ -192,6 +211,21 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
  *	   allowed already
  */
 int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid);
+
+/**
+ * @brief Offer DTLS to the clients, or not
+ *
+ * A library built with DTLS support (meson option dtls) answers the
+ * STARTDTLS request of a client with a DTLS handshake by default; disabled,
+ * it answers -EOPNOTSUPP and the client goes on unencrypted.
+ *
+ * @param [in] server The server, not running yet
+ * @param [in] enable Whether DTLS is offered
+ *
+ * @return 0 on success, -EOPNOTSUPP to enable DTLS in a library built without
+ *	   it, -ENOMEM if the DTLS context cannot be set up
+ */
+int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable);
 
 /**
  * @brief Serve requests until esdm_es_ext_server_stop() is called

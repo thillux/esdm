@@ -76,6 +76,12 @@ Give the user of
 .B esdm\-server \-\-username
 if the ESDM runs as another one.
 .TP
+.B \-\-no_dtls
+Do not offer DTLS to the clients. A build with DTLS (meson option
+.BR dtls )
+offers it by default, see
+.BR libesdm_es_ext (3).
+.TP
 .BR \-v ", " \-\-verbose
 Verbose logging; repeat for more.
 .TP

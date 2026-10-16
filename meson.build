@@ -281,6 +281,27 @@ if get_option('crypto_backend') == 'openssl' or get_option('openssl-rand-provide
 	openssl_dep = dependency('openssl', version : '>=3.0', required: true)
 endif
 
+# The DTLS of the connections is provided by the TLS stack of the crypto
+# backend - see common/esdm_dtls.h. Everything speaking to another process
+# is built with dependencies_client or dependencies_server, so the stack is
+# handed to all of them; one not using it is not linked against it
+# (b_asneeded).
+if get_option('dtls').enabled()
+	if get_option('crypto_backend') == 'openssl'
+		dtls_deps = [ openssl_dep ]
+	elif get_option('crypto_backend') == 'gnutls'
+		dtls_deps = [ gnutls_dep ]
+	elif get_option('crypto_backend') == 'botan'
+		dtls_deps = [ botan_dep ]
+	else
+		error('dtls needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none')
+	endif
+	dependencies_client += dtls_deps
+	dependencies_server += dtls_deps
+else
+	dtls_deps = []
+endif
+
 if get_option('openssl-rand-provider').enabled()
 	subdirs += [ 'frontends/openssl-provider' ]
 endif

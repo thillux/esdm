@@ -28,6 +28,16 @@ if get_option('fips140')
 	common_src += files(['fips_integrity.c'])
 endif
 
+# The DTLS of the connections, by the TLS stack of the crypto backend - see
+# esdm_dtls.h and the dtls option in the top-level meson.build
+if get_option('dtls').enabled()
+	common_src += files([
+		'esdm_dtls.c',
+		'esdm_dtls_' + get_option('crypto_backend') +
+			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
+	])
+endif
+
 common_stateless_src = common_src
 common_src += common_state_src
 
@@ -248,6 +258,7 @@ conf_data.set('ESDM_EXT_SOCKET_ENTROPY_RATE',
 	      get_option('es_ext_socket_entropy_rate'))
 conf_data.set('ESDM_EXT_SOCKET_PEER_UID',
 	      get_option('es_ext_socket_peer_uid'))
+conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
 
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())
 conf_data.set('ESDM_JENT_KERNEL_ENTROPY_RATE',

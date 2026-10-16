@@ -72,14 +72,15 @@ static inline uint32_t esdm_es_ext_get_le32(const uint8_t *p)
 static inline bool esdm_es_ext_proto_type_valid(uint16_t type)
 {
 	return type == ESDM_ES_EXT_PROTO_GET_ENTROPY ||
-	       type == ESDM_ES_EXT_PROTO_SELFTEST;
+	       type == ESDM_ES_EXT_PROTO_SELFTEST ||
+	       type == ESDM_ES_EXT_PROTO_STARTDTLS;
 }
 
 /* Is @length what a request of @type may ask for? */
 static inline bool esdm_es_ext_proto_length_valid(uint16_t type,
 						  uint32_t length)
 {
-	if (type == ESDM_ES_EXT_PROTO_SELFTEST)
+	if (type != ESDM_ES_EXT_PROTO_GET_ENTROPY)
 		return length == 0;
 
 	return length >= 1 && length <= ESDM_ES_EXT_PROTO_MAX_DATA;
