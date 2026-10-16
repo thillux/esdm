@@ -52,6 +52,18 @@ static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
 static bool tpm2_lost = false;
 /* Set by a self test that saw a repeated output, cleared by one that passes */
 static bool tpm2_selftest_failed = false;
+/*
+ * Set when a read from the TPM failed while its device is open, cleared by the
+ * next read that delivers in full. A TPM answering with an error that is no
+ * reason to retry - TPM_RC_FAILURE of a TPM in failure mode, say - keeps its
+ * connection: the resource manager is there and the TPM keeps answering, it
+ * just does not deliver. While set no entropy is claimed, so the source neither
+ * inflates the entropy the ESDM reports as available nor counts as one credited
+ * with entropy, as esdm_hwrand_read_failed does for /dev/hwrng. The source is
+ * still asked - its data then goes in as additional data - which is how a TPM
+ * that delivers again is noticed.
+ */
+static bool tpm2_read_failed = false;
 static time_t tpm2_reopen_at = 0;
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -288,6 +300,7 @@ static void esdm_es_tpm2_finalize(void)
 	mutex_lock(&tpm2_mutex);
 	esdm_es_tpm2_finalize_locked();
 	tpm2_lost = false;
+	tpm2_read_failed = false;
 	mutex_unlock(&tpm2_mutex);
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -307,6 +320,7 @@ static int esdm_es_tpm2_init(void)
 	/* Allow the init function to be called multiple times */
 	esdm_es_tpm2_finalize_locked();
 	tpm2_lost = false;
+	tpm2_read_failed = false;
 
 	ret = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
 	if (ret < 0) {
@@ -336,7 +350,7 @@ static int esdm_es_tpm2_init(void)
 /* Caller must hold tpm2_mutex. */
 static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
 {
-	if (tpm2_fd < 0 || tpm2_selftest_failed)
+	if (tpm2_fd < 0 || tpm2_selftest_failed || tpm2_read_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
@@ -487,12 +501,15 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 						 requested_bits - done_bits);
 		uint32_t chunk_bytes = chunk_bits >> 3;
 
-		if (esdm_es_tpm2_get_internal(buffer, tpm2_max_chunk_bytes))
+		if (esdm_es_tpm2_get_internal(buffer, tpm2_max_chunk_bytes)) {
+			tpm2_read_failed = true;
 			goto err;
+		}
 		memcpy(eb_es->e + (done_bits >> 3), buffer, chunk_bytes);
 		done_bits += chunk_bits;
 	}
 
+	tpm2_read_failed = false;
 	eb_es->e_bits = esdm_es_tpm2_entropylevel_locked(requested_bits);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "obtained %u bits of entropy from TPM 2.0 entropy source\n",
@@ -639,9 +656,14 @@ static int esdm_es_tpm2_selftest(void)
 	    esdm_es_tpm2_get_internal(second, sizeof(second))) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "TPM2 ES: the TPM did not deliver\n");
+		/* No entropy is claimed until a read delivers again */
+		tpm2_read_failed = true;
 		ret = -EFAULT;
 		goto out;
 	}
+
+	/* Both reads delivered in full */
+	tpm2_read_failed = false;
 
 	if (!memcmp(first, second, sizeof(first))) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,

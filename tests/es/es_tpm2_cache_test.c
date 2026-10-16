@@ -27,9 +27,15 @@
  * - A request that has to be served with entropy collected for it - the
  *   seeding of the prediction resistance DRNG - must not take a cached block.
  *
+ * - A TPM that answers TPM2_GetRandom with an error that is no reason to retry
+ *   - TPM_RC_FAILURE of a TPM in failure mode - keeps its connection, but is
+ *   credited with no entropy until it delivers again: not by what it reads,
+ *   not by what it reports as available, and not as a source that is credited
+ *   at all. The same holds once a self test found it not delivering.
+ *
  * A TPM is simulated on a socket pair: the source is compiled into the test
  * and talks to the stand-in, which answers TPM2_GetRandom and TPM2_StirRandom
- * and can be told to repeat its output.
+ * and can be told to repeat its output or to fail.
  */
 
 #include "config.h"
@@ -50,6 +56,10 @@ static char tpm2_test_path[256];
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
 
 static atomic_bool tpm2_test_repeat = false;
+static atomic_bool tpm2_test_fail = false;
+
+/* TPM_RC_FAILURE: the TPM is in failure mode */
+static const TPM2_RC TPM2_RC_FAILURE = 0x00000101;
 
 static int tpm2_test_read_full(int fd, uint8_t *buf, size_t len)
 {
@@ -75,6 +85,29 @@ static void *tpm2_test_device(void *arg)
 			break;
 
 		memset(rsp, 0, sizeof(rsp));
+		if (code == TPM2_CC_GET_RANDOM && size >= 12 &&
+		    atomic_load(&tpm2_test_fail)) {
+			uint16_t len = ptr_to_be16(cmd + 10);
+
+			if (len > 32)
+				break;
+
+			/*
+			 * An error response is the header alone. A TPM device
+			 * ends the read after it, which a stream socket does
+			 * not: the answer is padded to what the source reads,
+			 * the header says 10 bytes all the same.
+			 */
+			be16_to_ptr(rsp, TPM2_ST_NO_SESSIONS);
+			be32_to_ptr(rsp + 2, 10);
+			be32_to_ptr(rsp + 6, TPM2_RC_FAILURE);
+			rsp_size = 12 + len;
+			if (esdm_safe_write(fd, rsp, rsp_size) !=
+			    (ssize_t)rsp_size)
+				break;
+			continue;
+		}
+
 		if (code == TPM2_CC_GET_RANDOM && size >= 12) {
 			uint16_t len = ptr_to_be16(cmd + 10);
 
@@ -212,6 +245,41 @@ int main(void)
 	atomic_store(&tpm2_test_repeat, false);
 	CHECK_EQ(esdm_es_tpm2.selftest(), 0);
 	CHECK_EQ(tpm2_test_get(true), expected);
+
+	/*
+	 * A TPM in failure mode answers, so its connection stays - and it is
+	 * credited with nothing while it does not deliver.
+	 */
+	atomic_store(&tpm2_test_fail, true);
+	CHECK_EQ(tpm2_test_get(false), 0);
+	CHECK(esdm_es_tpm2.active(), "a TPM that answers lost its connection");
+	CHECK_EQ(esdm_es_tpm2.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS),
+		 0);
+	CHECK_EQ(esdm_es_tpm2.max_entropy(), 0);
+	CHECK(esdm_es_tpm2.selftest() < 0,
+	      "a TPM in failure mode passed the self test");
+
+	/* The next read that delivers restores the credit */
+	atomic_store(&tpm2_test_fail, false);
+	CHECK_EQ(tpm2_test_get(false), expected);
+	CHECK(esdm_es_tpm2.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS) > 0,
+	      "a TPM that delivers again is credited with nothing");
+	CHECK(esdm_es_tpm2.max_entropy() > 0,
+	      "a TPM that delivers again counts as not credited");
+
+	/* A self test the TPM does not deliver to takes the credit away */
+	atomic_store(&tpm2_test_fail, true);
+	CHECK(esdm_es_tpm2.selftest() < 0,
+	      "a TPM in failure mode passed the self test");
+	CHECK_EQ(esdm_es_tpm2.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS),
+		 0);
+	CHECK_EQ(esdm_es_tpm2.max_entropy(), 0);
+
+	/* And one it delivers to gives it back */
+	atomic_store(&tpm2_test_fail, false);
+	CHECK_EQ(esdm_es_tpm2.selftest(), 0);
+	CHECK(esdm_es_tpm2.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS) > 0,
+	      "a TPM passing its self test is credited with nothing");
 
 	/* Closes the source's end, which ends the stand-in */
 	esdm_es_tpm2.fini();
