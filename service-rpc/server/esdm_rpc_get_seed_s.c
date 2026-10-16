@@ -45,9 +45,13 @@ void esdm_rpc_get_seed(UnprivAccess_Service *service,
 	} else {
 		memset(rndval, 0, min_size(sizeof(rndval), request->len));
 
-		response.ret =
-			esdm_get_seed(rndval, request->len,
-				      request->flags | ESDM_GET_SEED_NONBLOCK);
+		/*
+		 * Within the worker's share of the entropy sources - each
+		 * collection costs as much as a reseed, and the worker's other
+		 * clients wait for it.
+		 */
+		response.ret = esdm_rpcs_get_seed(rndval, request->len,
+						  request->flags);
 
 		if (response.ret > 0) {
 			size_t resp_len;

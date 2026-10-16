@@ -111,8 +111,11 @@ Random data with prediction resistance.
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *" buf ", size_t " buflen ");"
 The same, but where the ESDM cannot serve prediction resistant data right away
-\- it is not operational yet, or another prediction resistant request is in
-flight \- it returns the data obtained so far, or
+\- it is not operational yet, another prediction resistant request is in
+flight, or the server thread already spent its share of the current round on
+collections from the entropy sources, see
+.BR esdm_rpcc_get_seed ()
+\- it returns the data obtained so far, or
 .B \-EAGAIN
 if that is none, rather than waiting.
 .TP
@@ -126,7 +129,16 @@ and
 .BR ESDM_GET_SEED_FULLY_SEEDED ;
 see
 .BR libesdm (3)
-for the layout of the returned buffer.
+for the layout of the returned buffer. The server collects the seed without
+waiting, and answers
+.B \-EAGAIN
+when it cannot right away: the ESDM is not fully seeded yet, another seed is
+being collected, or the server thread already spent its share of the current
+round on collections from the entropy sources \- requests for seeds and for
+prediction resistant data share it. With
+.BR ESDM_GET_SEED_NONBLOCK ,
+that is returned; without it, the request is sent again after a pause until
+it is served.
 .SS Status
 .TP
 .BI "int esdm_rpcc_status(char *" buf ", size_t " buflen ");"

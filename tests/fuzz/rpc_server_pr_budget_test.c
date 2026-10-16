@@ -18,13 +18,14 @@
  */
 
 /*
- * Prediction resistant requests spread over many connections of one worker of
- * the RPC server.
+ * Prediction resistant requests, and requests for seed material, spread over
+ * many connections of one worker of the RPC server.
  *
- * Each costs a reseed, and a worker serves all of its ready connections one
- * after the other: unbound, a few hundred of them hold up every other client
- * of the worker for seconds. The worker therefore spends only so much time per
- * round on them and answers the rest with -EAGAIN, which the clients retry on.
+ * Each costs a reseed - the seed is collected from the entropy sources just
+ * the same -, and a worker serves all of its ready connections one after the
+ * other: unbound, a few hundred of them hold up every other client of the
+ * worker for seconds. The worker therefore spends only so much time per round
+ * on them and answers the rest with -EAGAIN, which the clients retry on.
  *
  * The real unprivileged service is served on a socket of the test's own,
  * through the serve hook of the fuzz harnesses, by a single worker - with
@@ -73,7 +74,7 @@
 
 /*
  * The time the server spends per round on prediction resistant requests, see
- * ESDM_RPCS_PR_BUDGET_NS. The flood is sized to take several times as long.
+ * ESDM_RPCS_ROUND_BUDGET_NS. The flood is sized to take several times as long.
  */
 #define TEST_BUDGET_MS 25
 
@@ -254,22 +255,85 @@ static uint64_t test_pr_cost_us(void)
 	return best;
 }
 
-static void test_flood(void)
+/* Size of the seed buffer, see test_seed_cost_us() */
+static uint64_t test_seed_len;
+
+/*
+ * Time one collection of seed material takes here, in microseconds, the way
+ * the server does it for a client. Its size goes to test_seed_len.
+ */
+static uint64_t test_seed_cost_us(void)
+{
+	static uint64_t buf[ESDM_RPC_MAX_DATA / sizeof(uint64_t)];
+	uint64_t start, best = UINT64_MAX;
+	unsigned int i;
+
+	if (esdm_get_seed(buf, sizeof(uint64_t), ESDM_GET_SEED_NONBLOCK) !=
+		    -EMSGSIZE ||
+	    !buf[0] || buf[0] > sizeof(buf))
+		return UINT64_MAX;
+	test_seed_len = buf[0];
+
+	for (i = 0; i < 5; i++) {
+		ssize_t rc;
+
+		start = test_now_us();
+		rc = esdm_get_seed(buf, test_seed_len, ESDM_GET_SEED_NONBLOCK);
+		if (rc != (ssize_t)test_seed_len)
+			continue;
+		if (test_now_us() - start < best)
+			best = test_now_us() - start;
+	}
+
+	return best;
+}
+
+/* Is every connection accepted - served a cheap request? */
+static bool test_accepted(int *fds, unsigned int num, uint32_t ent)
+{
+	unsigned int i;
+
+	for (i = 0; i < num; i++) {
+		if (!test_send(fds[i], ent, NULL, UINT32_MAX) ||
+		    !test_answer(fds[i], UINT32_MAX, 10000, NULL))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Many requests for @method, each of which collects from the entropy sources,
+ * pending at once on connections of one worker: some of them are answered
+ * -EAGAIN, and a cheap request right behind them is answered nonetheless.
+ */
+static void test_flood(const char *method)
 {
 	static int fds[TEST_MAX_CONNS];
-	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
-	uint32_t pr = test_method("RpcGetRandomBytesPr");
+	GetRandomBytesRequest pr_msg = GET_RANDOM_BYTES_REQUEST__INIT;
+	GetSeedRequest seed_msg = GET_SEED_REQUEST__INIT;
+	const ProtobufCMessage *msg;
+	bool seed = !strcmp(method, "RpcGetSeed");
+	uint32_t call = test_method(method);
 	uint32_t ent = test_method("RpcGetEntLvl");
 	unsigned int i, conns, served = 0, eagain = 0, other = 0, opened = 0;
 	uint64_t cost, start, bystander_us;
 	int bystander;
 
-	printf("Prediction resistant requests on many connections of one worker\n");
+	printf("%s requests on many connections of one worker\n", method);
 
-	cost = test_pr_cost_us();
+	cost = seed ? test_seed_cost_us() : test_pr_cost_us();
 	if (cost == UINT64_MAX) {
-		printf("  SKIPPED: the PR DRNG does not deliver here\n");
+		printf("  SKIPPED: the ESDM does not deliver it here\n");
 		return;
+	}
+
+	if (seed) {
+		seed_msg.len = test_seed_len;
+		msg = &seed_msg.base;
+	} else {
+		pr_msg.len = TEST_PR_LEN;
+		msg = &pr_msg.base;
 	}
 
 	/*
@@ -297,10 +361,20 @@ static void test_flood(void)
 		}
 	}
 
-	msg.len = TEST_PR_LEN;
+	/*
+	 * The server accepts one connection per round: those it has not
+	 * accepted yet when the requests go out would trickle in one per round
+	 * - each of those rounds within the budget.
+	 */
+	if (!test_accepted(fds, conns, ent) ||
+	    !test_accepted(&bystander, 1, ent)) {
+		CHECK(0, "a connection was not accepted");
+		goto out;
+	}
+
 	for (i = 0; i < conns; i++)
-		CHECK(test_send(fds[i], pr, &msg.base, i),
-		      "cannot send request %u", i);
+		CHECK(test_send(fds[i], call, msg, i), "cannot send request %u",
+		      i);
 
 	/* Right behind the flood */
 	start = test_now_us();
@@ -318,7 +392,7 @@ static void test_flood(void)
 			continue;
 		}
 
-		if (rc == TEST_PR_LEN)
+		if (rc == (seed ? (int64_t)test_seed_len : TEST_PR_LEN))
 			served++;
 		else if (rc == -EAGAIN)
 			eagain++;
@@ -388,7 +462,8 @@ int main(void)
 		return 1;
 	}
 
-	test_flood();
+	test_flood("RpcGetRandomBytesPr");
+	test_flood("RpcGetSeed");
 
 	esdm_rpc_server_signal_exit();
 	pthread_join(thread, NULL);

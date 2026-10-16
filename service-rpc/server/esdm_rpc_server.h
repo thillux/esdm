@@ -60,6 +60,19 @@ bool esdm_rpc_client_is_privileged(void *closure_data);
  */
 ssize_t esdm_rpcs_get_random_bytes_pr(uint8_t *buf, size_t buflen);
 
+/**
+ * @brief Collect seed material for an RPC request
+ *
+ * esdm_get_seed() with ESDM_GET_SEED_NONBLOCK added to @flags, within the same
+ * share of the calling worker as esdm_rpcs_get_random_bytes_pr(): each call
+ * collects from all entropy sources, at the cost of a reseed. Beyond the bound,
+ * -EAGAIN is returned without collecting anything - the answer the clients
+ * already get while another caller collects seed material, and retry on.
+ *
+ * @return as esdm_get_seed()
+ */
+ssize_t esdm_rpcs_get_seed(uint64_t *buf, size_t nbytes, unsigned int flags);
+
 int esdm_rpc_server_init(const char *username, const char *groupname);
 void esdm_rpc_server_fini(void);
 
