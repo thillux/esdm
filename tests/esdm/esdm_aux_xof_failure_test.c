@@ -42,9 +42,9 @@
 #include "esdm_crypto.h"
 #include "esdm_definitions.h"
 #include "esdm_drng_mgr.h"
-#include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
+#include "esdm_xdrbg.h"
 
 static struct esdm_xof_cb esdm_ahf_xof_cb;
 static int (*esdm_ahf_xof_final_real)(void *xof, uint8_t *out, size_t outlen);
@@ -71,20 +71,20 @@ static int esdm_ahf_selftest(void)
 {
 	int ret = 0;
 
-	if (esdm_aux_xdrbg_selftest()) {
+	if (esdm_xdrbg_selftest()) {
 		printf("XDRBG self test fails with an intact XOF\n");
 		ret = 1;
 	}
 
 	esdm_ahf_fail = true;
-	if (!esdm_aux_xdrbg_selftest()) {
+	if (!esdm_xdrbg_selftest()) {
 		printf("XDRBG self test passes with a failing XOF\n");
 		ret = 1;
 	}
 	esdm_ahf_fail = false;
 
 	esdm_ahf_corrupt = true;
-	if (!esdm_aux_xdrbg_selftest()) {
+	if (!esdm_xdrbg_selftest()) {
 		printf("XDRBG self test passes with a corrupting XOF\n");
 		ret = 1;
 	}

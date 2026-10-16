@@ -39,12 +39,12 @@
 #include "esdm_crypto.h"
 #include "esdm_definitions.h"
 #include "esdm_drng_mgr.h"
-#include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 #include "esdm_es_mgr_cb.h"
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "esdm_selftest.h"
+#include "esdm_xdrbg.h"
 #include "helper.h"
 #include "mutex_w.h"
 #include "queue.h"
@@ -133,8 +133,8 @@ int esdm_selftest_crypto(void)
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_DRNG,
 		    "Hash self test passed successfully\n");
 
-	ret = esdm_aux_xdrbg_selftest();
-	CKINT_LOG(ret, "XDRBG-256 self test of the auxiliary pool failed: %d\n",
+	ret = esdm_xdrbg_selftest();
+	CKINT_LOG(ret, "XDRBG-256 self test of the entropy pools failed: %d\n",
 		  ret);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_DRNG,
 		    "XDRBG-256 self test passed successfully\n");
