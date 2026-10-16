@@ -19,8 +19,9 @@
 
 #include <errno.h>
 #include <gnutls/gnutls.h>
-#include <gnutls/crypto.h>
 #include <nettle/aes.h>
+#include <nettle/sha2.h>
+#include <nettle/version.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,87 +31,112 @@
 #include "memset_secure.h"
 #include "selftest_kat.h"
 
-#define ESDM_GNUTLS_HASH GNUTLS_DIG_SHA512
+/*
+ * The conditioning hash is nettle's SHA-512, operated on a context in memory
+ * ESDM owns rather than through GnuTLS' gnutls_hash_*() API on top of it.
+ *
+ * The entropy sources absorb raw noise into the hash - the CPU ES, for
+ * example, runs the RDSEED output of each pull through a context of its own.
+ * With the GnuTLS API that context is GnuTLS' private memory:
+ * gnutls_hash_deinit() releases it with a plain gnutls_free(), and nettle's
+ * sha512_digest() and sha512_init() leave the last input block in the
+ * context's data buffer, so the raw noise outlives the context in freed heap
+ * memory, and GnuTLS offers no way to erase it. Holding the nettle context
+ * directly lets the backend clear it with memset_secure() once it is done
+ * with it. Nettle is linked anyway for the AES core of Block_Cipher_df below,
+ * and it is what GnuTLS' SHA-512 resolves to in the first place. The DRBG
+ * remains GnuTLS' CTR DRBG.
+ */
+struct esdm_gnutls_hash_ctx {
+	struct sha512_ctx sha512;
+};
+
+/* Nettle 4 dropped the length argument of the digest functions */
+#if NETTLE_VERSION_MAJOR >= 4
+#define esdm_gnutls_sha512_digest(ctx, digest) sha512_digest(ctx, digest)
+#else
+#define esdm_gnutls_sha512_digest(ctx, digest)                                 \
+	sha512_digest(ctx, SHA512_DIGEST_SIZE, digest)
+#endif
 
 static uint32_t esdm_gnutls_hash_digestsize(void *hash)
 {
 	(void)hash;
-	return gnutls_hash_get_len(ESDM_GNUTLS_HASH);
+	return SHA512_DIGEST_SIZE;
 }
 
 static int esdm_gnutls_hash_init(void *hash)
 {
-	gnutls_hash_hd_t hd = (gnutls_hash_hd_t)hash;
+	struct esdm_gnutls_hash_ctx *ctx = (struct esdm_gnutls_hash_ctx *)hash;
 
 	/*
 	 * Start from an empty state like the other backends do, discarding
-	 * whatever a previous user absorbed without finalizing it. A NULL
-	 * digest makes gnutls_hash_output() only reset the state.
+	 * whatever a previous user absorbed without finalizing it - including
+	 * the input the data buffer still holds.
 	 */
-	gnutls_hash_output(hd, NULL);
+	memset_secure(ctx, 0, sizeof(*ctx));
+	sha512_init(&ctx->sha512);
 	return 0;
 }
 
 static int esdm_gnutls_hash_update(void *hash, const uint8_t *inbuf,
 				   size_t inbuflen)
 {
-	gnutls_hash_hd_t hd = (gnutls_hash_hd_t)hash;
-	int ret = gnutls_hash(hd, inbuf, inbuflen);
+	struct esdm_gnutls_hash_ctx *ctx = (struct esdm_gnutls_hash_ctx *)hash;
 
-	/*
-	 * gnutls_hash() can fail (e.g. with HW/PKCS#11-backed digests). Propagate
-	 * the failure so the entropy framework does not credit/emit a digest
-	 * computed over incompletely-absorbed input.
-	 */
-	if (ret < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_MD,
-			    "GnuTLS hash update failed: %s\n",
-			    gnutls_strerror(ret));
-		return -EFAULT;
-	}
+	sha512_update(&ctx->sha512, inbuflen, inbuf);
 	return 0;
 }
 
 static int esdm_gnutls_hash_final(void *hash, uint8_t *digest)
 {
-	gnutls_hash_hd_t hd = (gnutls_hash_hd_t)hash;
+	struct esdm_gnutls_hash_ctx *ctx = (struct esdm_gnutls_hash_ctx *)hash;
 
-	gnutls_hash_output(hd, digest);
-	return 0;
+	/*
+	 * sha512_digest() leaves the context initialized for a new message, as
+	 * gnutls_hash_output() did - but with the padded last block of the
+	 * message just finished still in its data buffer. Start over from a
+	 * cleared context instead.
+	 */
+	esdm_gnutls_sha512_digest(&ctx->sha512, digest);
+	return esdm_gnutls_hash_init(ctx);
 }
 
 static int esdm_gnutls_hash_alloc(void **ctx)
 {
-	gnutls_hash_hd_t *hd = (gnutls_hash_hd_t *)ctx;
-	int ret;
+	struct esdm_gnutls_hash_ctx *hash = calloc(1, sizeof(*hash));
 
-	ret = gnutls_hash_init(hd, ESDM_GNUTLS_HASH);
-	if (ret < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "GnuTLS hash init failed: %s\n",
-			    gnutls_strerror(ret));
-		*hd = NULL;
-		return -EFAULT;
+	if (!hash) {
+		*ctx = NULL;
+		return -ENOMEM;
 	}
+
+	sha512_init(&hash->sha512);
+	*ctx = hash;
 	return 0;
 }
 
 static void esdm_gnutls_hash_dealloc(void *ctx)
 {
-	gnutls_hash_hd_t hd = (gnutls_hash_hd_t)ctx;
+	struct esdm_gnutls_hash_ctx *hash = (struct esdm_gnutls_hash_ctx *)ctx;
 
-	if (hd)
-		gnutls_hash_deinit(hd, NULL);
+	if (!hash)
+		return;
+
+	memset_secure(hash, 0, sizeof(*hash));
+	free(hash);
 }
 
 static const char *esdm_gnutls_hash_name(void)
 {
-	return "GnuTLS SHA-512";
+	return "GnuTLS (nettle) SHA-512";
 }
 
 static void esdm_gnutls_hash_desc_zero(void *hash)
 {
-	(void)hash;
+	struct esdm_gnutls_hash_ctx *ctx = (struct esdm_gnutls_hash_ctx *)hash;
+
+	memset_secure(ctx, 0, sizeof(*ctx));
 }
 
 static int esdm_gnutls_hash_selftest(void)
