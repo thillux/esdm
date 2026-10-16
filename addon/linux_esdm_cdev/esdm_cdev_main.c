@@ -16,11 +16,13 @@
  *    O_NONBLOCK, the read waits for the rest.
  *  - Data written to either is mixed into the ESDM's auxiliary pool without
  *    being credited with entropy.
+ *  - The ioctls of the kernel's devices: RNDGETENTCNT for everybody, the ones
+ *    changing the entropy accounting only for a caller with CAP_SYS_ADMIN.
  *
  * While the ESDM cannot be reached, reads and writes are served by the
  * kernel's RNG instead, as the CUSE frontend falls back to the kernel's
  * devices: /dev/esdm_random waits for the kernel's RNG to be initialized
- * first.
+ * first. The ioctls fail with -ENOTCONN then, see esdm_cdev_ioctl().
  *
  * The kernel's /dev/random and /dev/urandom are left as they are.
  *
@@ -29,6 +31,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/capability.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -364,11 +367,98 @@ static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
 	return EPOLLOUT | EPOLLWRNORM;
 }
 
+/*
+ * The ioctls of drivers/char/random.c, with its checks: the caller's
+ * capability first, then the arguments.
+ *
+ * The module is root towards the ESDM, which therefore carries out whatever it
+ * sends. That makes the CAP_SYS_ADMIN check here the one that keeps an
+ * unprivileged caller from changing the ESDM's entropy accounting.
+ *
+ * While the ESDM cannot be reached, they fail with -ENOTCONN: the kernel's own
+ * entropy accounting cannot be changed from a module, and the kernel's devices
+ * are there for that.
+ */
+static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
+			    unsigned long arg)
+{
+	int __user *p = (int __user *)arg;
+	int ent_count, size, ret;
+
+	switch (cmd) {
+	case RNDGETENTCNT: {
+		struct esdm_cdev_state state;
+
+		ret = esdm_cdev_egd_get_state(&state);
+		if (ret)
+			return ret;
+		ent_count = (int)min_t(u32, state.ent_cnt, INT_MAX);
+		if (put_user(ent_count, p))
+			return -EFAULT;
+		return 0;
+	}
+	case RNDADDTOENTCNT:
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		if (get_user(ent_count, p))
+			return -EFAULT;
+		if (ent_count < 0)
+			return -EINVAL;
+		return esdm_cdev_egd_priv(ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT,
+					  true, (u32)ent_count);
+	case RNDADDENTROPY: {
+		ssize_t written;
+
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		if (get_user(ent_count, p++))
+			return -EFAULT;
+		if (ent_count < 0)
+			return -EINVAL;
+		if (get_user(size, p++))
+			return -EFAULT;
+		if (size < 0)
+			return -EINVAL;
+		if (!size)
+			return 0;
+
+		/*
+		 * Credited with no more than the data has bits, which the
+		 * ESDM enforces per insertion as well.
+		 */
+		written = esdm_cdev_egd_insert_user((const char __user *)p,
+						    (size_t)size,
+						    (u32)ent_count);
+		if (written < 0)
+			return (long)written;
+		/* As the kernel: credited, so it has to be all of it */
+		if (written != size)
+			return -EFAULT;
+		return 0;
+	}
+	case RNDZAPENTCNT:
+	case RNDCLEARPOOL:
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		return esdm_cdev_egd_priv(ESDM_EGD_CMD_ESDM_CLEAR_POOL, false,
+					  0);
+	case RNDRESEEDCRNG:
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
+		return esdm_cdev_egd_priv(ESDM_EGD_CMD_ESDM_RESEED, false, 0);
+	default:
+		/* The kernel's random_ioctl() answers with -EINVAL, too */
+		return -EINVAL;
+	}
+}
+
 static const struct file_operations esdm_cdev_random_fops = {
 	.owner = THIS_MODULE,
 	.read = esdm_cdev_read,
 	.write = esdm_cdev_write,
 	.poll = esdm_cdev_poll,
+	.unlocked_ioctl = esdm_cdev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 	.llseek = noop_llseek,
 };
 
@@ -377,6 +467,8 @@ static const struct file_operations esdm_cdev_urandom_fops = {
 	.owner = THIS_MODULE,
 	.read = esdm_cdev_read,
 	.write = esdm_cdev_write,
+	.unlocked_ioctl = esdm_cdev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 	.llseek = noop_llseek,
 };
 
