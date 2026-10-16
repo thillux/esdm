@@ -82,7 +82,7 @@ struct esdm_health_es_state {
 #define ESDM_SP80090B_STARTUP_BLOCKS                                           \
 	((ESDM_SP80090B_STARTUP_SAMPLES + ESDM_APT_WINDOW_SIZE - 1) /          \
 	 ESDM_APT_WINDOW_SIZE)
-	bool sp80090b_startup_done;
+	/* APT windows still to pass, zero: startup test passed */
 	atomic_t sp80090b_startup_blocks;
 
 	/* Bitmask of esdm_health_log_bit messages pending deferred printk */
@@ -94,8 +94,7 @@ struct esdm_health_es_state {
 	x.apt.apt_base = ATOMIC_INIT(-1),                                      \
 	x.apt.apt_trigger = ATOMIC_INIT(ESDM_APT_WINDOW_SIZE),                 \
 	x.apt.apt_base_set = false,                                            \
-	x.sp80090b_startup_blocks = ATOMIC_INIT(ESDM_SP80090B_STARTUP_BLOCKS), \
-	x.sp80090b_startup_done = false,
+	x.sp80090b_startup_blocks = ATOMIC_INIT(ESDM_SP80090B_STARTUP_BLOCKS),
 
 #define ESDM_HEALTH_OSR(curr) ((curr) / ESDM_DRNG_SECURITY_STRENGTH_BITS)
 #define ESDM_HEALTH_IRQ_RCT_CUTOFF(cutoff)                                     \
@@ -334,46 +333,49 @@ static void esdm_sp80090b_startup(struct esdm_health *health,
 {
 	struct esdm_health_es_state *es_state = &health->es_state[es];
 
-	if (!READ_ONCE(es_state->sp80090b_startup_done) &&
-	    atomic_dec_and_test(&es_state->sp80090b_startup_blocks)) {
-		WRITE_ONCE(es_state->sp80090b_startup_done, true);
+	/* Only the transition to zero completes the startup test */
+	if (!atomic_dec_if_positive(&es_state->sp80090b_startup_blocks))
 		esdm_health_log(es, esdm_health_log_startup_done);
-	}
 }
 
 /*
- * Handle failure of SP800-90B startup testing
+ * (Re-)start the SP800-90B startup test after a health test failure
+ *
+ * NOTE SP800-90B section 4.3 bullet 4 does not specify what exactly is to be
+ * done in case of failure! Thus, we do what makes sense, i.e. restarting the
+ * health test and thus gating the output function of /dev/random and
+ * getrandom(2).
+ *
+ * The startup test counts completed APT windows, but the APT window the
+ * failure fell into keeps running: restarting it would also restart counting
+ * towards the permanent cutoffs, which then could never be reached. Its
+ * completion must not count as a passed block, hence one block more than
+ * needed is armed, which that window consumes. The startup test thus passes
+ * only after the ESDM_SP80090B_STARTUP_SAMPLES samples following that window
+ * (window boundaries are fuzzy between concurrently inserting CPUs, as for
+ * the lock-less APT itself). After a permanent failure the window restarts
+ * and the extra block costs one window more than strictly needed.
+ *
+ * @return true if the startup test had passed before, i.e. this is a runtime
+ *	   failure
  */
-static void esdm_sp80090b_startup_failure(struct esdm_health *health,
+static bool esdm_sp80090b_startup_restart(struct esdm_health *health,
 					  enum esdm_internal_es es)
 {
 	struct esdm_health_es_state *es_state = &health->es_state[es];
+	/*
+	 * Gate the output before resetting the entropy state. The exchange
+	 * cannot interleave with a window completing on another CPU: either
+	 * that completion still passes the startup test - and this is a
+	 * runtime failure - or it consumes one of the new blocks.
+	 */
+	bool passed = !atomic_xchg(&es_state->sp80090b_startup_blocks,
+				   ESDM_SP80090B_STARTUP_BLOCKS + 1);
 
 	/* Reset entropy state NOTE: we are in atomic context */
 	esdm_reset_state(es);
 
-	/*
-	 * Reset the SP800-90B startup test.
-	 *
-	 * NOTE SP800-90B section 4.3 bullet 4 does not specify what
-	 * exactly is to be done in case of failure! Thus, we do what
-	 * makes sense, i.e. restarting the health test and thus gating
-	 * the output function of /dev/random and getrandom(2).
-	 */
-	atomic_set(&es_state->sp80090b_startup_blocks,
-		   ESDM_SP80090B_STARTUP_BLOCKS);
-}
-
-/*
- * Handle failure of SP800-90B runtime testing
- */
-static void esdm_sp80090b_runtime_failure(struct esdm_health *health,
-					  enum esdm_internal_es es)
-{
-	struct esdm_health_es_state *es_state = &health->es_state[es];
-
-	esdm_sp80090b_startup_failure(health, es);
-	WRITE_ONCE(es_state->sp80090b_startup_done, false);
+	return passed;
 }
 
 static void esdm_rct_reset(struct esdm_rct *rct);
@@ -392,7 +394,7 @@ static void esdm_sp80090b_permanent_failure(struct esdm_health *health,
 	}
 
 	esdm_health_log(es, esdm_health_log_permanent_failure);
-	esdm_sp80090b_runtime_failure(health, es);
+	esdm_sp80090b_startup_restart(health, es);
 
 	esdm_rct_reset(rct);
 	esdm_apt_reset(apt, 0);
@@ -402,15 +404,10 @@ static void esdm_sp80090b_permanent_failure(struct esdm_health *health,
 static void esdm_sp80090b_failure(struct esdm_health *health,
 				  enum esdm_internal_es es)
 {
-	struct esdm_health_es_state *es_state = &health->es_state[es];
-
-	if (READ_ONCE(es_state->sp80090b_startup_done)) {
+	if (esdm_sp80090b_startup_restart(health, es))
 		esdm_health_log(es, esdm_health_log_runtime_failure);
-		esdm_sp80090b_runtime_failure(health, es);
-	} else {
+	else
 		esdm_health_log(es, esdm_health_log_startup_failure);
-		esdm_sp80090b_startup_failure(health, es);
-	}
 }
 
 bool esdm_sp80090b_startup_complete_es(enum esdm_internal_es es)
@@ -421,7 +418,7 @@ bool esdm_sp80090b_startup_complete_es(enum esdm_internal_es es)
 	if (!esdm_sp80090b_health_enabled())
 		return true;
 
-	return READ_ONCE(es_state->sp80090b_startup_done);
+	return !atomic_read(&es_state->sp80090b_startup_blocks);
 }
 
 bool esdm_sp80090b_compliant(enum esdm_internal_es es)
