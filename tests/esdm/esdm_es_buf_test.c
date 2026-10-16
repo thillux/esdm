@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for esdm/esdm_es_buf.c - the per-entropy-source block cache that the
+ * Tests for esdm/es/esdm_es_buf.c - the per-entropy-source block cache that the
  * ES monitor fills asynchronously and a reseed drains.
  *
  * The cache is a lock-free state machine: every slot moves empty -> filling ->

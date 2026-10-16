@@ -58,7 +58,7 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 	# The status of a plugin or a provider, as the ESDM takes it
 	if get_option('es_ext').enabled()
 		es_ext_status_test = executable('es_ext_status_test',
-			[ '../../esdm/esdm_es_ext_status.c',
+			[ '../../esdm/es/esdm_es_ext_status.c',
 			  'es_ext_status_test.c' ],
 			include_directories: [ include_dirs_server,
 					       include_dirs_es_ext_test ],

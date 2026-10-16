@@ -24,7 +24,7 @@
 #include <stdio.h>
 
 #include "build_bug_on.h"
-#include "es_cpu/cpu_random.h"
+#include "cpu_random.h"
 #include "esdm_config.h"
 #include "esdm_crypto.h"
 #include "esdm_definitions.h"

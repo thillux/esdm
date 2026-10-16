@@ -34,7 +34,7 @@
 
 #include <stdatomic.h>
 #include "build_bug_on.h"
-#include "es_cpu/cpu_random.h"
+#include "cpu_random.h"
 #include "esdm.h"
 #include "esdm_drng_mgr.h"
 #include "esdm_es_aux.h"
@@ -49,8 +49,8 @@
 #include "esdm_es_krng.h"
 #include "esdm_es_mgr.h"
 #include "esdm_es_pkcs11.h"
-#include "es_ebpf/esdm_es_irq_ebpf.h"
-#include "es_ebpf/esdm_es_sched_ebpf.h"
+#include "esdm_es_irq_ebpf.h"
+#include "esdm_es_sched_ebpf.h"
 #include "esdm_es_sched.h"
 #include "esdm_interface_dev_common.h"
 #include "esdm_shm_status.h"

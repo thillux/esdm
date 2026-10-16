@@ -23,7 +23,7 @@
 # the "RNG correctly initialized" point (init DRNG fully seeded -> operational)
 # within a bounded time. The server emits the marker line below to stdout when
 # the ESDM_STARTUP_MARKER environment variable is set (see
-# esdm_set_operational() in esdm/esdm_es_mgr.c).
+# esdm_set_operational() in esdm/es/esdm_es_mgr.c).
 #
 # Once operational, each iteration also fetches 32 bytes of entropy through
 # esdm-tool (exercising the RPC path) and then sends SIGTERM to verify that the

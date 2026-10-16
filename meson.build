@@ -153,6 +153,12 @@ pkgconfig = import('pkgconfig')
 include_user_files = [ ]
 
 include_dirs_server = include_directories([ 'esdm',
+					    'esdm/crypto',
+					    'esdm/drng',
+					    'esdm/es',
+					    'esdm/es/cpu',
+					    'esdm/es/ebpf',
+					    'esdm/status',
 					    'crypto',
 					    'common',
 					    'es-ext',

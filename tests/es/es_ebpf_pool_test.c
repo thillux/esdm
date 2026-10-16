@@ -34,7 +34,7 @@
  */
 
 /* The unit under test */
-#include "es_ebpf/esdm_es_ebpf.c"
+#include "esdm_es_ebpf.c"
 
 #include "build_bug_on.h"
 #include "common_test.h"

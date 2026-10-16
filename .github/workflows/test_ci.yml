@@ -513,7 +513,7 @@ jobs:
       run: |
         sudo apt-get update
         # libbpf >= 1.2, clang for the BPF target and bpftool for the skeleton
-        # headers - see esdm/es_ebpf/meson.build.
+        # headers - see esdm/es/ebpf/meson.build.
         #
         # "bpftool" itself is only a virtual package on 24.04, so it cannot be
         # installed by that name - the providers are the linux-tools packages.

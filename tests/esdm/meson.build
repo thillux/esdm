@@ -9,7 +9,7 @@ esdm_ipc_ns = files('../test_ipc_ns.c')
 # and needs neither a server nor an initialized DRNG.
 esdm_es_buf_test = executable(
 	'esdm_es_buf_test',
-	[ files('../../esdm/esdm_es_buf.c'), 'esdm_es_buf_test.c' ],
+	[ files('../../esdm/es/esdm_es_buf.c'), 'esdm_es_buf_test.c' ],
 	include_directories: [ include_dirs_server,
 			       include_directories('../common') ],
 	dependencies: dependencies_server,
@@ -22,7 +22,7 @@ test('ESDM per-ES block cache', esdm_es_buf_test)
 # is compiled into the test, which needs nothing of the ESDM beyond it.
 esdm_status_txt_test = executable(
 	'esdm_status_txt_test',
-	[ files('../../esdm/esdm_status_txt.c'), 'esdm_status_txt_test.c' ],
+	[ files('../../esdm/status/esdm_status_txt.c'), 'esdm_status_txt_test.c' ],
 	include_directories: [ include_dirs_server,
 			       include_directories('../common') ],
 	dependencies: [ json_c_dep ],
@@ -52,7 +52,7 @@ endif
 if get_option('crypto_backend') == 'openssl'
 	esdm_openssl_reseed_test = executable(
 		'esdm_openssl_reseed_test',
-		[ files('../../esdm/esdm_openssl.c'),
+		[ files('../../esdm/crypto/esdm_openssl.c'),
 		  'esdm_openssl_reseed_test.c' ],
 		include_directories: [ include_dirs_esdm_lib,
 				       include_directories('../common') ],

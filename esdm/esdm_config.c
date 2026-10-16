@@ -26,7 +26,7 @@
 #include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
-#include "es_ebpf/esdm_es_irq_ebpf.h"
+#include "esdm_es_irq_ebpf.h"
 #include "esdm_es_irq.h"
 #include "esdm_es_mgr.h"
 #include "fips.h"

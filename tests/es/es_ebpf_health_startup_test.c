@@ -39,7 +39,7 @@
 #include <string.h>
 
 #include "common_test.h"
-#include "es_ebpf/esdm_es_ebpf_shared.h"
+#include "esdm_es_ebpf_shared.h"
 
 #ifndef __always_inline
 #define __always_inline inline __attribute__((__always_inline__))
@@ -58,7 +58,7 @@ static void *bpf_map_lookup_elem(void *map, const void *key)
 }
 
 /* The unit under test */
-#include "es_ebpf/esdm_es_ebpf_health.bpf.h"
+#include "esdm_es_ebpf_health.bpf.h"
 
 static struct esdm_ebpf_percpu_state state;
 static uint64_t test_time;

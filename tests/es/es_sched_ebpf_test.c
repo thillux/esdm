@@ -27,7 +27,7 @@
 #include <unistd.h>
 
 #include "config.h"
-#include "es_ebpf/esdm_es_sched_ebpf.h"
+#include "esdm_es_sched_ebpf.h"
 #include "esdm_config.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"

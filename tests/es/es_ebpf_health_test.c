@@ -28,7 +28,7 @@
 #include <stdio.h>
 
 #include "config.h"
-#include "es_ebpf/esdm_es_ebpf.h"
+#include "esdm_es_ebpf.h"
 
 struct cutoff_kat {
 	uint32_t osr;

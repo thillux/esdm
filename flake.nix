@@ -1825,7 +1825,7 @@
 
           # clang and bpftool are only build time tools of the eBPF variant, so
           # they have to be on the path of the script that does the building -
-          # esdm/es_ebpf/meson.build looks both of them up with find_program().
+          # esdm/es/ebpf/meson.build looks both of them up with find_program().
           esdm-coverage-ebpf-root = coverageRunnerOf {
             name = "esdm-coverage-ebpf-run";
             cov = self.packages.${system}.esdm-coverage-ebpf;
