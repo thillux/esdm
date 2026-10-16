@@ -19,6 +19,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,50 +152,82 @@ static void fips_post(void)
 	fips_post_objects();
 }
 
-bool fips_enabled(void)
+/*
+ * Whether the kernel runs in FIPS mode, as /proc/sys/crypto/fips_enabled says.
+ *
+ * A kernel without FIPS support has no such file, which is the one answer that
+ * means "no FIPS". Every other failure to learn the flag - a /proc that refuses
+ * the open or the read - leaves open whether the kernel is in FIPS mode, and
+ * the ESDM then assumes it is: running the FIPS-mode checks on a system that
+ * did not ask for them costs some start-up time, skipping them on one that did
+ * is not compliant.
+ */
+static bool fips_enabled_kernel(void)
 {
-	static char fipsflag[1] = { 'A' };
-	size_t n = 0;
+	FILE *fipsfile;
+	char fipsflag;
+	size_t n;
 
-	if (fipsflag[0] == 'A') {
-#ifdef HAVE_SECURE_GETENV
-		if (secure_getenv("ESDM_SERVER_FORCE_FIPS")) {
-#else
-		/*
-		 * Without secure_getenv, only trust the environment
-		 * if not running with elevated privileges.
-		 */
-		if (getuid() == geteuid() && getgid() == getegid() &&
-		    getenv("ESDM_SERVER_FORCE_FIPS")) {
-#endif
-			fipsflag[0] = '1';
-		} else {
-			FILE *fipsfile = NULL;
+	fipsfile = fopen("/proc/sys/crypto/fips_enabled", "r");
+	if (!fipsfile) {
+		int err = errno;
 
-			fipsfile = fopen("/proc/sys/crypto/fips_enabled", "r");
-			if (!fipsfile) {
-				if (errno == ENOENT) {
-					/* FIPS support not enabled in kernel */
-					fipsflag[0] = '0';
-					return 0;
-				} else {
-					esdm_logger(
-						LOGGER_ERR, LOGGER_C_ANY,
-						"FIPS: Cannot open fips_enabled file: %s\n",
-						strerror(errno));
-					return false;
-				}
-			}
+		/* FIPS support not enabled in kernel */
+		if (err == ENOENT)
+			return false;
 
-			n = fread((void *)fipsflag, 1, 1, fipsfile);
-			fclose(fipsfile);
-			if (n != 1) {
-				esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-					    "FIPS: Cannot read FIPS flag\n");
-				return false;
-			}
-		}
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"FIPS: Cannot open fips_enabled file: %s - assuming FIPS mode\n",
+			strerror(err));
+		return true;
 	}
 
-	return (fipsflag[0] == '1');
+	n = fread(&fipsflag, 1, 1, fipsfile);
+	fclose(fipsfile);
+	if (n != 1) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"FIPS: Cannot read FIPS flag - assuming FIPS mode\n");
+		return true;
+	}
+
+	/* The kernel writes "0" or "1", anything else is no "0" either */
+	return fipsflag != '0';
+}
+
+bool fips_enabled(void)
+{
+	/*
+	 * The decision once taken, -1 before. Taken once and kept: the callers
+	 * set up the ESDM according to it, and a later call that read the
+	 * flag differently - one that failed before, say - must not see
+	 * another mode than the one the ESDM was set up in. Callers racing to
+	 * take it agree on the first one stored.
+	 */
+	static atomic_int fips_mode = -1;
+	int expected = -1, mode = atomic_load(&fips_mode);
+
+	if (mode >= 0)
+		return mode;
+
+#ifdef HAVE_SECURE_GETENV
+	if (secure_getenv("ESDM_SERVER_FORCE_FIPS")) {
+#else
+	/*
+	 * Without secure_getenv, only trust the environment
+	 * if not running with elevated privileges.
+	 */
+	if (getuid() == geteuid() && getgid() == getegid() &&
+	    getenv("ESDM_SERVER_FORCE_FIPS")) {
+#endif
+		mode = 1;
+	} else {
+		mode = fips_enabled_kernel();
+	}
+
+	if (!atomic_compare_exchange_strong(&fips_mode, &expected, mode))
+		mode = expected;
+
+	return mode;
 }
