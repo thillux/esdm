@@ -757,6 +757,47 @@ static bool esdm_cuse_read_would_block(fuse_req_t req)
 	return !ret && !fully_seeded;
 }
 
+/*
+ * How long one chunk of an O_NONBLOCK read of seeded randomness may take.
+ *
+ * esdm_cuse_read_would_block() only tells how the ESDM was a moment ago.
+ * Should it stop being fully seeded before the data is requested - e.g. as an
+ * entropy source failed its health test - the blocking RPC call would ask again
+ * and again until it is seeded once more, which may be never, and keep the
+ * worker thread all along. The timed call ends there instead.
+ *
+ * A zero timeout does not do: the deadline has passed already when the RPC
+ * client is about to send the request, so it gives up without asking the ESDM
+ * at all. The timeout thus bounds how long a non-blocking reader may be held in
+ * this case. It is generous next to the round trip of a request that is served
+ * at once, so that a busy system does not report a seeded ESDM as EAGAIN.
+ */
+#define ESDM_CUSE_NONBLOCK_TIMEOUT_NS 500000000L
+
+/*
+ * esdm_rpcc_get_random_bytes_full_int for an O_NONBLOCK reader: -EAGAIN once
+ * the ESDM did not serve within ESDM_CUSE_NONBLOCK_TIMEOUT_NS. The timed call
+ * ends with -ETIMEDOUT also when the interrupt function abandons the request
+ * before the deadline - a reader that was interrupted keeps that, so that it is
+ * told EINTR, see esdm_cuse_read_internal().
+ */
+static ssize_t esdm_cuse_get_random_bytes_full_nonblock_int(uint8_t *buf,
+							    size_t buflen,
+							    void *int_data)
+{
+	struct timespec ts = { .tv_sec = 0,
+			       .tv_nsec = ESDM_CUSE_NONBLOCK_TIMEOUT_NS };
+	fuse_req_t req = (fuse_req_t)int_data;
+	ssize_t ret;
+
+	ret = esdm_rpcc_get_random_bytes_full_timeout_int(buf, buflen, &ts,
+							  int_data);
+	if (ret == -ETIMEDOUT && !(req && fuse_req_interrupted(req)))
+		return -EAGAIN;
+
+	return ret;
+}
+
 void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			     struct fuse_file_info *fi, get_func_t get,
 			     int fallback_fd)
@@ -787,6 +828,14 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		get = (fi->flags & O_NONBLOCK) ?
 			      esdm_rpcc_get_random_bytes_pr_nonblock_int :
 			      esdm_rpcc_get_random_bytes_pr_int;
+
+	/*
+	 * The seeded state checked below may be gone by the time the data is
+	 * requested, which the blocking call would wait out.
+	 */
+	if ((fi->flags & O_NONBLOCK) &&
+	    get == esdm_rpcc_get_random_bytes_full_int)
+		get = esdm_cuse_get_random_bytes_full_nonblock_int;
 
 	/*
 	 * Everything but the plain urandom read blocks until the ESDM is
@@ -841,7 +890,8 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		 * short read, nothing read is EAGAIN.
 		 */
 		if (ret == -EAGAIN &&
-		    get == esdm_rpcc_get_random_bytes_pr_nonblock_int) {
+		    (get == esdm_rpcc_get_random_bytes_pr_nonblock_int ||
+		     get == esdm_cuse_get_random_bytes_full_nonblock_int)) {
 			if (read_bytes)
 				break;
 			goto out;

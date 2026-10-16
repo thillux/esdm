@@ -132,6 +132,39 @@ ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *buf, size_t buflen)
 	return stub_fill(buf, buflen);
 }
 
+/*
+ * The timed request a non-blocking caller's seeded randomness takes, scripted
+ * call by call: 0 for success - the whole buffer, as the real one serves it in
+ * full or not at all - or a negative errno. Past the script, it succeeds.
+ */
+static ssize_t stub_full_timeout[4];
+static unsigned int stub_full_timeout_len, stub_full_timeout_calls;
+static struct timespec stub_full_timeout_ts;
+
+ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
+						struct timespec *ts)
+{
+	ssize_t rc = 0;
+
+	stub_full_timeout_ts = *ts;
+	if (stub_full_timeout_calls < stub_full_timeout_len)
+		rc = stub_full_timeout[stub_full_timeout_calls];
+	stub_full_timeout_calls++;
+
+	if (rc < 0)
+		return rc;
+
+	return stub_fill(buf, buflen);
+}
+
+static void stub_full_timeout_set(ssize_t first, ssize_t second)
+{
+	stub_full_timeout[0] = first;
+	stub_full_timeout[1] = second;
+	stub_full_timeout_len = 2;
+	stub_full_timeout_calls = 0;
+}
+
 ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *buf, size_t buflen)
 {
 	stub_pr_calls++;
@@ -202,12 +235,16 @@ static void test_nonblock_seeded(void)
 	stub_seeded_ret = 0;
 	stub_fully_seeded = true;
 	stub_full_calls = stub_pr_calls = 0;
+	stub_full_timeout_len = stub_full_timeout_calls = 0;
 
 	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK),
 		 (ssize_t)sizeof(buf));
 	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM),
 		 (ssize_t)sizeof(buf));
-	CHECK_EQ(stub_full_calls, 1);
+
+	/* Not the blocking request: the ESDM may stop being seeded meanwhile */
+	CHECK_EQ(stub_full_calls, 0);
+	CHECK_EQ(stub_full_timeout_calls, 1);
 
 	/* The prediction resistant request is made without waiting, too */
 	CHECK_EQ(stub_pr_calls, 0);
@@ -220,7 +257,76 @@ static void test_nonblock_seeded(void)
 	/* A blocking request does not ask first */
 	stub_fully_seeded = false;
 	CHECK_EQ(getrandom(buf, sizeof(buf), 0), (ssize_t)sizeof(buf));
-	CHECK_EQ(stub_full_calls, 2);
+	CHECK_EQ(stub_full_calls, 1);
+	CHECK_EQ(stub_full_timeout_calls, 1);
+}
+
+/*
+ * Seeded when asked, but no longer when the data is requested - an entropy
+ * source failed its health test, say. The blocking request would wait for the
+ * ESDM to be seeded again, the timed one gives up instead. That is the ESDM's
+ * answer: EAGAIN, not the kernel's data.
+ */
+static void test_nonblock_unseeded_meanwhile(void)
+{
+	size_t large_len = ESDM_RPC_MAX_DATA + 16;
+	uint8_t buf[16], *large;
+
+	stub_seeded_ret = 0;
+	stub_fully_seeded = true;
+	stub_full_calls = 0;
+
+	stub_full_timeout_set(-ETIMEDOUT, 0);
+	memset(buf, 0xa5, sizeof(buf));
+	errno = 0;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK), -1);
+	CHECK_EQ(errno, EAGAIN);
+	CHECK_EQ(stub_full_timeout_calls, 1);
+	CHECK_EQ(stub_full_calls, 0);
+	CHECK(buf[0] == 0xa5, "the kernel served the request instead");
+
+	/*
+	 * A zero timeout would end the request before it is sent, and the
+	 * timeout is how long a non-blocking caller may be held at most.
+	 */
+	CHECK(stub_full_timeout_ts.tv_sec || stub_full_timeout_ts.tv_nsec,
+	      "the non-blocking request never asks the ESDM");
+	CHECK(stub_full_timeout_ts.tv_sec < 2,
+	      "a non-blocking caller may be held for %ld s",
+	      (long)stub_full_timeout_ts.tv_sec);
+
+	/*
+	 * What one RPC carries at most is one timed request each, so what was
+	 * obtained before the ESDM stopped serving is returned as a short read.
+	 */
+	large = calloc(1, large_len);
+	if (!large) {
+		CHECK(0, "out of memory");
+		goto out;
+	}
+	stub_full_timeout_set(0, -ETIMEDOUT);
+	CHECK_EQ(getrandom(large, large_len, GRND_NONBLOCK),
+		 (ssize_t)ESDM_RPC_MAX_DATA);
+	CHECK_EQ(stub_full_timeout_calls, 2);
+	CHECK(large[0] == 0x42 && large[ESDM_RPC_MAX_DATA - 1] == 0x42,
+	      "the short read is not what the ESDM gave");
+
+	/* And served in full when the ESDM keeps serving */
+	stub_full_timeout_set(0, 0);
+	CHECK_EQ(getrandom(large, large_len, GRND_NONBLOCK),
+		 (ssize_t)large_len);
+	CHECK_EQ(stub_full_timeout_calls, 2);
+	free(large);
+
+	/* An ESDM that went away meanwhile is covered by the kernel */
+	stub_full_timeout_set(-ECONNREFUSED, 0);
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK),
+		 (ssize_t)sizeof(buf));
+	CHECK_EQ(stub_full_timeout_calls, 1);
+
+out:
+	stub_full_timeout_len = 0;
+	CHECK_EQ(stub_full_calls, 0);
 }
 
 /* Without an answer from the ESDM, the kernel decides */
@@ -357,6 +463,7 @@ int main(int argc, char *argv[])
 
 	test_nonblock_unseeded();
 	test_nonblock_seeded();
+	test_nonblock_unseeded_meanwhile();
 	test_nonblock_pr_busy();
 	test_nonblock_no_esdm();
 	test_getentropy_kernel();
