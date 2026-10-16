@@ -34,26 +34,57 @@
 #include "esdm_es_mgr.h"
 #include "esdm_shm_status.h"
 #include "helper.h"
-#include "esdm_sha512.h"
-#include "esdm_sha3.h"
+#include "memset_secure.h"
 #include "mutex_w.h"
 #include "ret_checkers.h"
+#include "selftest_kat.h"
 #include "visibility.h"
 
 /*
  * This is the auxiliary pool
  *
- * The aux pool array is aligned to 8 bytes to comfort any used
- * cipher implementations of the hash functions used to read the pool: for some
- * accelerated implementations, we need an alignment to avoid a realignment
- * which involves memcpy(). The alignment to 8 bytes should satisfy all crypto
- * implementations.
+ * Each pool is an XDRBG-256 (J. Kelsey, S. Lucks, S. Mueller: XDRBG: A
+ * Proposed Deterministic Random Bit Generator Based on Any XOF, IACR ToSC
+ * 2024(1)): the XDRBG over SHAKE256 with a state V of 64 bytes.
+ *
+ *	instantiate:	V = SHAKE256(seed || encode(alpha, 0), 64)
+ *	reseed:		V = SHAKE256(V || seed || encode(alpha, 1), 64)
+ *	generate:	V || out = SHAKE256(V || encode(alpha, 2), 64 + |out|)
+ *
+ * with encode(alpha, n) = alpha || (n * 85 + |alpha|) as one byte (appendix
+ * B.2 of the specification). The seed of a pool is all data inserted into it
+ * since its last extraction: the SHAKE256 of the next reseed - or of the
+ * instantiation, before the first extraction - absorbs V and every insert as
+ * it comes, and an extraction is a reseed followed by a generate. The output
+ * comes from the same squeeze the next V does, but never reveals it, which
+ * gives the backtracking resistance; a single unknown input after an
+ * extraction suffices for the prediction resistance of the next one.
+ *
+ * The pool aligned to 8 bytes comforts any used cipher implementation of the
+ * XOF: for some accelerated implementations, we need an alignment to avoid a
+ * realignment which involves memcpy(). The alignment to 8 bytes should satisfy
+ * all crypto implementations.
  */
+
+/* Size of the state V of XDRBG-256, which is the most entropy a pool holds */
+#define ESDM_AUX_XDRBG_V_SIZE 64
+
+/* The additional input alpha: the name of the pool, see esdm_aux_alpha() */
+#define ESDM_AUX_XDRBG_ALPHA "ESDM aux pool"
+#define ESDM_AUX_XDRBG_ALPHA_LEN (sizeof(ESDM_AUX_XDRBG_ALPHA) - 1 + 2)
+
+/* The XDRBG encodes the length of alpha in a byte along with n */
+#define ESDM_AUX_XDRBG_MAX_ALPHA 84
+
 struct esdm_pool {
-	/* Aux pool: digest state (internal) */
-	void *aux_pool_state;
-	/* Aux pool: digest state (output) */
-	void *aux_pool_out;
+	/*
+	 * SHAKE256 context of the next reseed, or instantiation: it absorbs V
+	 * and the data inserted since the last extraction
+	 */
+	void *xof;
+
+	/* The XOF the context is of */
+	const struct esdm_xof_cb *xof_cb;
 
 	/* Serialize read of entropy pool and update of aux pool */
 	mutex_w_t lock;
@@ -61,14 +92,14 @@ struct esdm_pool {
 	/* tracks entropy estimate in this pool */
 	atomic_int aux_entropy_bits;
 
-	/* Digest size of used hash */
-	atomic_int digestsize;
-
 	/* used for domain separation of inputs inserted into multiple pools */
 	uint16_t idx;
 
-	/* Aux pool initialized? */
+	/* The XOF context absorbs, after an instantiation starting with V */
 	bool initialized;
+
+	/* The XDRBG has a state V: the next extraction reseeds it */
+	bool instantiated;
 
 	/* Was lock above initialized? Never reset - the lock is not destroyed */
 	bool lock_initialized;
@@ -129,48 +160,23 @@ static void esdm_set_wakeup_bits(void)
 
 static void esdm_aux_fini_pool(struct esdm_pool *pool)
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb;
-
-	hash_cb = drng->hash_cb;
-	if (hash_cb->hash_dealloc) {
-		hash_cb->hash_dealloc(pool->aux_pool_state);
-		hash_cb->hash_dealloc(pool->aux_pool_out);
-	}
-	pool->aux_pool_state = NULL;
-	pool->aux_pool_out = NULL;
+	if (pool->xof && pool->xof_cb)
+		pool->xof_cb->xof_dealloc(pool->xof);
+	pool->xof = NULL;
 	pool->initialized = false;
+	pool->instantiated = false;
 }
 
 static int esdm_aux_init_pool(struct esdm_pool *pool)
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb;
-	int ret = 0;
-
-	hash_cb = drng->hash_cb;
-	if (hash_cb->hash_alloc) {
-		CKINT(hash_cb->hash_alloc(&pool->aux_pool_state));
-		CKINT(hash_cb->hash_alloc(&pool->aux_pool_out));
-	}
+	pool->xof_cb = esdm_default_xof_cb;
 	pool->initialized = false;
-	return ret;
-
-out:
-	if (pool->aux_pool_state && hash_cb->hash_dealloc) {
-		hash_cb->hash_dealloc(pool->aux_pool_state);
-		pool->aux_pool_state = NULL;
-	}
-	if (pool->aux_pool_out && hash_cb->hash_dealloc) {
-		hash_cb->hash_dealloc(pool->aux_pool_out);
-		pool->aux_pool_out = NULL;
-	}
-	return ret;
+	pool->instantiated = false;
+	return pool->xof_cb->xof_alloc(&pool->xof);
 }
 
 static int esdm_aux_init(void)
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
 	uint16_t i;
 	int ret = 0;
 
@@ -191,12 +197,12 @@ static int esdm_aux_init(void)
 		/*
 		 * Allow this to be called multiple times: it is also the reinit
 		 * callback (esdm_es_mgr_reinitialize()), where the pool still
-		 * carries the previous round's hash states and a live lock.
-		 * Release the states rather than overwriting the pointers, which
-		 * leaks them on every esdm_reinit(), and touch the lock only
-		 * once, as re-running mutex_w_init() on an initialized mutex is
+		 * carries the previous round's XOF context and a live lock.
+		 * Release the context rather than overwriting the pointer, which
+		 * leaks it on every esdm_reinit(), and touch the lock only once,
+		 * as re-running mutex_w_init() on an initialized mutex is
 		 * undefined. The lock outlives esdm_aux_fini(), so an init after
-		 * a fini takes the same path with the states already NULL.
+		 * a fini takes the same path with the context already NULL.
 		 */
 		if (!pool->lock_initialized) {
 			CKINT(mutex_w_init(&pool->lock, 0, 0));
@@ -204,29 +210,17 @@ static int esdm_aux_init(void)
 		}
 
 		/*
-		 * Replace the hash states and reset the entropy count under
-		 * the pool lock as a whole: a concurrent
-		 * esdm_pool_insert_aux() must neither see the states released
-		 * or not yet allocated nor have the entropy it credits in
-		 * between wiped out.
+		 * Replace the XOF context and reset the entropy count under the
+		 * pool lock as a whole: a concurrent esdm_pool_insert_aux()
+		 * must neither see the context released or not yet allocated
+		 * nor have the entropy it credits in between wiped out.
 		 */
 		mutex_w_lock(&pool->lock);
-		if (pool->aux_pool_state || pool->aux_pool_out)
+		if (pool->xof)
 			esdm_aux_fini_pool(pool);
 		atomic_store(&pool->aux_entropy_bits, 0);
-		pool->initialized = false;
 		pool->idx = i;
 		ret = esdm_aux_init_pool(pool);
-
-		/*
-		 * The size of the hash the pool is conditioned with, which is
-		 * the most entropy the pool holds - read from the hash rather
-		 * than assumed to be the largest one supported.
-		 */
-		if (!ret)
-			atomic_store(&pool->digestsize,
-				     (int)drng->hash_cb->hash_digestsize(
-					     pool->aux_pool_state));
 		mutex_w_unlock(&pool->lock);
 		CKINT(ret);
 	}
@@ -239,7 +233,7 @@ static int esdm_aux_init(void)
 	 */
 	esdm_shm_status_set_need_entropy();
 
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY, "Aux ES hash allocated\n");
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY, "Aux ES XDRBG allocated\n");
 
 out:
 	return ret;
@@ -252,7 +246,7 @@ static void esdm_aux_fini(void)
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
 		struct esdm_pool *pool = &esdm_pools[i];
 
-		/* Release the states under the lock - see esdm_aux_init() */
+		/* Release the context under the lock - see esdm_aux_init() */
 		if (pool->lock_initialized)
 			mutex_w_lock(&pool->lock);
 		esdm_aux_fini_pool(pool);
@@ -260,17 +254,14 @@ static void esdm_aux_fini(void)
 			mutex_w_unlock(&pool->lock);
 	}
 
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Aux ES hash deallocated\n");
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Aux ES XDRBG deallocated\n");
 }
 
-/* Obtain the digest size provided by the used hash in bits */
+/* Obtain the size of the state of the XDRBG of a pool in bits */
 DSO_PUBLIC
 uint32_t esdm_get_digestsize(void)
 {
-	uint32_t digestsize = atomic_read_u32(&esdm_pools[0].digestsize);
-
-	/* Before the pools are set up, the largest supported hash is assumed */
-	return (digestsize ? digestsize : ESDM_MAX_DIGESTSIZE) << 3;
+	return ESDM_AUX_XDRBG_V_SIZE << 3;
 }
 
 static void esdm_pool_set_entropy_pool(struct esdm_pool *pool,
@@ -321,15 +312,155 @@ static void esdm_aux_reset(void)
 	esdm_pool_set_entropy(0);
 }
 
-/* Insert data into auxiliary pool by using the hash update function. */
+/********************************** XDRBG *************************************/
+
+/* The additional input alpha of the pool @idx: its name and its index */
+static void esdm_aux_alpha(uint16_t idx,
+			   uint8_t alpha[ESDM_AUX_XDRBG_ALPHA_LEN])
+{
+	BUILD_BUG_ON(ESDM_AUX_XDRBG_ALPHA_LEN > ESDM_AUX_XDRBG_MAX_ALPHA);
+
+	memcpy(alpha, ESDM_AUX_XDRBG_ALPHA, sizeof(ESDM_AUX_XDRBG_ALPHA) - 1);
+	alpha[ESDM_AUX_XDRBG_ALPHA_LEN - 2] = (uint8_t)idx;
+	alpha[ESDM_AUX_XDRBG_ALPHA_LEN - 1] = (uint8_t)(idx >> 8);
+}
+
+/* Absorb encode(alpha, n) */
+static int esdm_aux_xdrbg_encode(const struct esdm_xof_cb *xof_cb, void *xof,
+				 const uint8_t *alpha, size_t alphalen,
+				 uint8_t n)
+{
+	uint8_t encode = (uint8_t)(n * 85 + alphalen);
+	int ret;
+
+	CKINT(xof_cb->xof_update(xof, alpha, alphalen));
+	CKINT(xof_cb->xof_update(xof, &encode, sizeof(encode)));
+
+out:
+	return ret;
+}
+
+/*
+ * Extraction: the XOF @xof has absorbed V - unless the XDRBG is not
+ * *@instantiated yet - and the seed. Reseed or instantiate the XDRBG with it,
+ * generate @outlen bytes into @out, and start the XOF over with the new V,
+ * ready to absorb the seed of the next extraction. On an error, the state of
+ * the XDRBG is gone.
+ */
+static int esdm_aux_xdrbg_extract(const struct esdm_xof_cb *xof_cb, void *xof,
+				  bool *instantiated, const uint8_t *alpha,
+				  size_t alphalen, uint8_t *out, size_t outlen)
+{
+	uint8_t v[ESDM_AUX_XDRBG_V_SIZE + ESDM_DRNG_INIT_SEED_SIZE_BYTES];
+	int ret;
+
+	if (outlen > sizeof(v) - ESDM_AUX_XDRBG_V_SIZE)
+		return -EINVAL;
+
+	/* Reseed, or instantiate */
+	CKINT(esdm_aux_xdrbg_encode(xof_cb, xof, alpha, alphalen,
+				    *instantiated ? 1 : 0));
+	CKINT(xof_cb->xof_final(xof, v, ESDM_AUX_XDRBG_V_SIZE));
+	*instantiated = true;
+
+	/* Generate */
+	CKINT(xof_cb->xof_init(xof));
+	CKINT(xof_cb->xof_update(xof, v, ESDM_AUX_XDRBG_V_SIZE));
+	CKINT(esdm_aux_xdrbg_encode(xof_cb, xof, alpha, alphalen, 2));
+	CKINT(xof_cb->xof_final(xof, v, ESDM_AUX_XDRBG_V_SIZE + outlen));
+
+	/* The next reseed starts with the new V */
+	CKINT(xof_cb->xof_init(xof));
+	CKINT(xof_cb->xof_update(xof, v, ESDM_AUX_XDRBG_V_SIZE));
+
+	memcpy(out, v + ESDM_AUX_XDRBG_V_SIZE, outlen);
+
+out:
+	if (ret)
+		*instantiated = false;
+	memset_secure(v, 0, sizeof(v));
+	return ret;
+}
+
+/*
+ * Known-answer test of the XDRBG-256 of the pools, the self test of their
+ * SHAKE256 as well: instantiate from the bytes 0x00 ... 0x3f and generate,
+ * reseed from 0x40 ... 0x7f and generate, all with the alpha of pool 0. The
+ * known answer is XDRBG-256 as specified, computed independently of the ESDM.
+ */
+#define ESDM_AUX_XDRBG_KAT_LEN 32
+
+int esdm_aux_xdrbg_selftest(void)
+{
+	static const uint8_t exp1[] = {
+		0xa6, 0x72, 0xf6, 0xb2, 0x42, 0x5b, 0x61, 0xb0,
+		0xa3, 0xfe, 0xad, 0x10, 0x1c, 0x71, 0xbc, 0x1e,
+		0x2b, 0xef, 0x4c, 0xf6, 0x43, 0xf0, 0xa8, 0xf5,
+		0x27, 0x5e, 0x64, 0xaa, 0x66, 0xf1, 0x95, 0x71,
+	};
+	static const uint8_t exp2[] = {
+		0x28, 0x38, 0x6c, 0x23, 0x92, 0xb8, 0xd1, 0x1f,
+		0x17, 0xa3, 0x19, 0x95, 0x5c, 0x7b, 0x72, 0x2d,
+		0x9f, 0x82, 0xf6, 0x92, 0xc7, 0xe3, 0x1b, 0x78,
+		0xae, 0x36, 0xab, 0x87, 0xd2, 0xc6, 0xe7, 0x57,
+	};
+	const struct esdm_xof_cb *xof_cb = esdm_default_xof_cb;
+	uint8_t alpha[ESDM_AUX_XDRBG_ALPHA_LEN];
+	uint8_t seed[2 * ESDM_AUX_XDRBG_V_SIZE];
+	uint8_t act[ESDM_AUX_XDRBG_KAT_LEN];
+	void *xof = NULL;
+	bool instantiated;
+	unsigned int i;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(exp1) != ESDM_AUX_XDRBG_KAT_LEN ||
+		     sizeof(exp2) != ESDM_AUX_XDRBG_KAT_LEN);
+	BUILD_BUG_ON(ESDM_AUX_XDRBG_KAT_LEN > ESDM_DRNG_INIT_SEED_SIZE_BYTES);
+
+	for (i = 0; i < sizeof(seed); i++)
+		seed[i] = (uint8_t)i;
+	esdm_aux_alpha(0, alpha);
+
+	CKINT(xof_cb->xof_alloc(&xof));
+
+	for (i = 0; i < 2; i++) {
+		/* A seed off by its first byte must not produce that output */
+		if (i)
+			seed[0] ^= 0x01;
+
+		instantiated = false;
+		CKINT(xof_cb->xof_init(xof));
+		CKINT(xof_cb->xof_update(xof, seed, ESDM_AUX_XDRBG_V_SIZE));
+		CKINT(esdm_aux_xdrbg_extract(xof_cb, xof, &instantiated, alpha,
+					     sizeof(alpha), act, sizeof(act)));
+		if (i) {
+			CKINT(esdm_kat_check_differs(act, exp1, sizeof(exp1)));
+			break;
+		}
+		CKINT(esdm_kat_check(act, exp1, sizeof(exp1)));
+
+		CKINT(xof_cb->xof_update(xof, seed + ESDM_AUX_XDRBG_V_SIZE,
+					 ESDM_AUX_XDRBG_V_SIZE));
+		CKINT(esdm_aux_xdrbg_extract(xof_cb, xof, &instantiated, alpha,
+					     sizeof(alpha), act, sizeof(act)));
+		CKINT(esdm_kat_check(act, exp2, sizeof(exp2)));
+	}
+
+out:
+	if (xof)
+		xof_cb->xof_dealloc(xof);
+	memset_secure(act, 0, sizeof(act));
+	return ret;
+}
+
+/******************************** Insert data *********************************/
+
+/* Insert data into auxiliary pool: the XDRBG absorbs it as seed */
 static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 				       const uint8_t *inbuf, size_t inbuflen,
 				       uint32_t entropy_bits)
 {
-	struct hash_ctx *shash = (struct hash_ctx *)pool->aux_pool_state;
-	struct hash_ctx *ohash = (struct hash_ctx *)pool->aux_pool_out;
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb;
+	const struct esdm_xof_cb *xof_cb = pool->xof_cb;
 	int ret = 0;
 
 	/*
@@ -342,49 +473,29 @@ static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 		entropy_bits =
 			min_uint32(entropy_bits, (uint32_t)(inbuflen << 3));
 
-	hash_cb = drng->hash_cb;
-
+	/* The seed of an instantiation */
 	if (!pool->initialized) {
-		CKINT(hash_cb->hash_init(shash));
-		CKINT(hash_cb->hash_init(ohash));
-
-		/*
-		 * Domain separation between state and output pool
-		 * Pad both strings to same length
-		 */
-		CKINT(hash_cb->hash_update(shash, (uint8_t *)"STATE0", 6));
-		CKINT(hash_cb->hash_update(ohash, (uint8_t *)"OUTPUT", 6));
-
-		/* Mark initialized only after domain separation succeeds */
+		CKINT(xof_cb->xof_init(pool->xof));
+		pool->instantiated = false;
 		pool->initialized = true;
 	}
 
 	/*
-	 * Domain separation between pools: insert the index of the pool to
-	 * prevent any chance of identical states of the pool if the caller
-	 * might insert the same data into the pool.
-	 *
-	 * This implies that the actual data inserted into a pool is always
-	 * idx || inbuf.
+	 * The pools are told apart by the alpha of their XDRBG, which carries
+	 * the index of the pool: the data inserted into several pools never
+	 * yields identical states.
 	 */
-	CKINT(hash_cb->hash_update(shash, (const uint8_t *)&pool->idx,
-				   sizeof(pool->idx)));
-	CKINT(hash_cb->hash_update(ohash, (const uint8_t *)&pool->idx,
-				   sizeof(pool->idx)));
-
-	/* Insert the actual data with or without entropy into the pool */
-	CKINT(hash_cb->hash_update(shash, inbuf, inbuflen));
-	CKINT(hash_cb->hash_update(ohash, inbuf, inbuflen));
+	CKINT(xof_cb->xof_update(pool->xof, inbuf, inbuflen));
 
 	/*
-	 * Cap the available entropy to the hash output size compliant to
-	 * SP800-90B section 3.1.5.1 table 1.
+	 * Cap the available entropy to the size of the state of the XDRBG
+	 * compliant to SP800-90B section 3.1.5.1 table 1.
 	 *
 	 * Guard against overflow in the addition.
 	 */
 	{
 		uint32_t existing = atomic_read_u32(&pool->aux_entropy_bits);
-		uint32_t cap = hash_cb->hash_digestsize(shash) << 3;
+		uint32_t cap = esdm_get_digestsize();
 
 		if (entropy_bits > cap - min_uint32(existing, cap))
 			entropy_bits = cap;
@@ -394,6 +505,16 @@ static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 	}
 
 out:
+	if (ret) {
+		/*
+		 * The XOF may have absorbed part of the data: start the pool
+		 * over with the next insert rather than continuing on a torn
+		 * state - see esdm_aux_get_pool().
+		 */
+		esdm_pool_set_entropy_pool(pool, 0);
+		pool->initialized = false;
+		pool->instantiated = false;
+	}
 	return ret;
 }
 
@@ -511,35 +632,24 @@ out:
 static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 				  uint32_t requested_bits)
 {
-	struct hash_ctx *shash = (struct hash_ctx *)pool->aux_pool_state;
-	struct hash_ctx *ohash = (struct hash_ctx *)pool->aux_pool_out;
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb;
+	uint8_t alpha[ESDM_AUX_XDRBG_ALPHA_LEN];
 	uint32_t collected_ent_bits, returned_ent_bits,
-		unused_bits = 0, digestsize, digestsize_bits,
-		requested_bits_osr;
-	uint8_t aux_state[ESDM_MAX_DIGESTSIZE];
-	uint8_t aux_output[ESDM_MAX_DIGESTSIZE];
+		unused_bits = 0, digestsize_bits, requested_bits_osr;
 
 	if (!pool->initialized)
 		return 0;
 
-	hash_cb = drng->hash_cb;
-	digestsize = hash_cb->hash_digestsize(shash);
-	digestsize_bits = digestsize << 3;
+	digestsize_bits = esdm_get_digestsize();
 
-	/* Cap to maximum entropy that can ever be generated with given hash */
+	/* Cap to maximum entropy that can ever be generated with the XDRBG */
 	esdm_cap_requested(digestsize_bits, requested_bits);
 
 	/*
-	 * Ensure that no more than the size of aux_pool can be requested and,
-	 * crucially, never more than fits into the caller's output buffer
-	 * (struct entropy_es::e is ESDM_DRNG_INIT_SEED_SIZE_BYTES). The digest
-	 * buffer is larger (ESDM_MAX_DIGESTSIZE), so bounding only by it would
-	 * permit the memcpy() below to overflow outbuf for a future caller.
+	 * Never more than fits into the caller's output buffer (struct
+	 * entropy_es::e is ESDM_DRNG_INIT_SEED_SIZE_BYTES).
 	 */
-	requested_bits = min_uint32(requested_bits, (ESDM_MAX_DIGESTSIZE << 3));
-	requested_bits = min_uint32(requested_bits, ESDM_DRNG_INIT_SEED_SIZE_BITS);
+	requested_bits =
+		min_uint32(requested_bits, ESDM_DRNG_INIT_SEED_SIZE_BITS);
 #ifdef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
 	requested_bits_osr = requested_bits;
 #else
@@ -547,9 +657,9 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 #endif
 
 	/* Cap entropy with entropy counter from aux pool and the used digest */
-	collected_ent_bits =
-		min_uint32(digestsize_bits,
-			   (uint32_t)atomic_exchange(&pool->aux_entropy_bits, 0));
+	collected_ent_bits = min_uint32(
+		digestsize_bits,
+		(uint32_t)atomic_exchange(&pool->aux_entropy_bits, 0));
 
 	/* We collected too much entropy and put the overflow back */
 	if (collected_ent_bits > requested_bits_osr) {
@@ -573,38 +683,16 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 		"obtained %u bits by collecting %u bits of entropy from aux pool, %u bits of entropy remaining\n",
 		returned_ent_bits, collected_ent_bits, unused_bits);
 
-	/*
-	 * 1) Hash into new state and output
-	 * 2) re-initialize hash states
-	 * 3) put back internal state into both hashes for backtracking resistance
-	 *
-	 * The internal state is never output to users of the aux source,
-	 * therefore it is no longer conceptually possible to correctly guess
-	 * the next output by knowing the last output and the next input into
-	 * the aux pool.
-	 *
-	 * A single unknown input per pool is now sufficient for backtracking resistance!
-	 */
-	if (hash_cb->hash_final(shash, aux_state) ||
-	    hash_cb->hash_final(ohash, aux_output) ||
-	    hash_cb->hash_init(shash) || hash_cb->hash_init(ohash) ||
-	    hash_cb->hash_update(shash, (uint8_t *)"STATE0", 6) ||
-	    hash_cb->hash_update(ohash, (uint8_t *)"OUTPUT", 6) ||
-	    /*
-	     * Absorb exactly the bytes hash_final() produced. The buffer is
-	     * ESDM_MAX_DIGESTSIZE, but hash_final() only wrote digestsize
-	     * bytes; absorbing the full buffer would feed uninitialized stack
-	     * for any backend whose digest is smaller than the maximum.
-	     */
-	    hash_cb->hash_update(shash, aux_state, digestsize) ||
-	    hash_cb->hash_update(ohash, aux_state, digestsize)) {
+	esdm_aux_alpha(pool->idx, alpha);
+	if (esdm_aux_xdrbg_extract(pool->xof_cb, pool->xof, &pool->instantiated,
+				   alpha, sizeof(alpha), outbuf,
+				   requested_bits >> 3)) {
 		/*
-		 * The hash chain failed part way: hash_final() may already have
-		 * finalized one or both hash states, so drop the initialized
-		 * flag to force a clean re-initialization on the next insert
-		 * rather than continuing to hash into a torn state.
+		 * The XDRBG failed part way: its state is gone, so drop the
+		 * initialized flag to force a new instantiation on the next
+		 * insert rather than continuing on a torn state.
 		 *
-		 * That re-initialization discards everything the pool has
+		 * That instantiation discards everything the pool has
 		 * absorbed, so the entropy it was credited with is gone with it
 		 * - the bits drained above as well as the overflow put back.
 		 * Clear the counter (the caller holds pool->lock, so this is the
@@ -614,18 +702,15 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 		 */
 		esdm_pool_set_entropy_pool(pool, 0);
 		pool->initialized = false;
+		memset_secure(outbuf, 0, requested_bits >> 3);
 		returned_ent_bits = 0;
-	} else {
-		/*
-		 * Do not truncate the output size exactly to collected_ent_bits
-		 * as the aux pool may contain data that is not credited with
-		 * entropy, but we want to use them to stir the DRNG state.
-		 */
-		memcpy(outbuf, aux_output, requested_bits >> 3);
 	}
 
-	memset_secure(aux_state, 0, sizeof(aux_state));
-	memset_secure(aux_output, 0, sizeof(aux_output));
+	/*
+	 * The output is not truncated to collected_ent_bits, as the aux pool
+	 * may contain data that is not credited with entropy, but we want to
+	 * use them to stir the DRNG state.
+	 */
 	return returned_ent_bits;
 }
 
@@ -710,26 +795,16 @@ static uint32_t esdm_aux_max_entropy(void)
 
 static void esdm_aux_es_state(char *buf, size_t buflen)
 {
-	struct esdm_drng *esdm_drng_init = esdm_drng_init_instance();
-	const char *hash_name;
-
-	/*
-	 * hash_cb is set once when the DRNG is allocated and never replaced, so
-	 * it can be read without a lock. hash_name() returns a static string.
-	 */
-	hash_name = esdm_drng_init->hash_cb->hash_name();
-
 	snprintf((char *)buf, buflen,
-		 " Hash for operating entropy pool: %s\n"
+		 " DRBG for operating entropy pool: XDRBG-256 with %s\n"
 		 " Available entropy: %u\n"
 		 " Maximum entropy: %u\n"
 		 " Pools: %u\n"
 		 " Write wakeup threshold: %u\n"
 		 " Digestsize: %u\n",
-		 hash_name,
-		 esdm_aux_avail_entropy(0), esdm_aux_max_entropy(),
-		 ESDM_NUM_AUX_POOLS, esdm_write_wakeup_bits,
-		 esdm_get_digestsize());
+		 esdm_default_xof_cb->xof_name(), esdm_aux_avail_entropy(0),
+		 esdm_aux_max_entropy(), ESDM_NUM_AUX_POOLS,
+		 esdm_write_wakeup_bits, esdm_get_digestsize());
 }
 
 static bool esdm_aux_active(void)
@@ -739,37 +814,22 @@ static bool esdm_aux_active(void)
 
 /*
  * The auxiliary pool holds no noise source of its own: what it is, is the
- * conditioning component every other source is compressed into.
+ * conditioning component every other source is compressed into - whose
+ * known-answer test is part of the self test of the crypto, see
+ * esdm_aux_xdrbg_selftest().
  */
 static int esdm_aux_selftest(void)
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb = drng->hash_cb;
-	uint32_t digestsize;
 	unsigned int i;
 
-	if (!hash_cb || !hash_cb->hash_digestsize || !hash_cb->hash_name) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-			    "Auxiliary ES: no conditioning hash\n");
-		return -EFAULT;
-	}
-
-	digestsize = esdm_get_digestsize();
-	if (digestsize < ESDM_DRNG_SECURITY_STRENGTH_BITS) {
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ES,
-			"Auxiliary ES: the conditioning hash produces %u bits, less than the security strength of %u bits\n",
-			digestsize, ESDM_DRNG_SECURITY_STRENGTH_BITS);
-		return -EFAULT;
-	}
+	BUILD_BUG_ON((ESDM_AUX_XDRBG_V_SIZE << 3) <
+		     ESDM_DRNG_SECURITY_STRENGTH_BITS);
 
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; i++) {
-		if (!esdm_pools[i].initialized) {
-			esdm_logger(
-				LOGGER_DEBUG, LOGGER_C_ES,
-				"Auxiliary ES: pool %u not initialized - nothing to test\n",
-				i);
-			return 0;
+		if (!esdm_pools[i].xof) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+				    "Auxiliary ES: pool %u has no XDRBG\n", i);
+			return -EFAULT;
 		}
 	}
 

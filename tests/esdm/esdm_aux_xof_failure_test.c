@@ -1,11 +1,14 @@
 /*
- * Test that a failed extraction from the auxiliary pool keeps no credit
+ * Test the auxiliary pool with a failing XOF
  *
- * When the hash chain of an extraction fails, the pool drops its hash states
- * and starts over with the next insert - and with them everything it absorbed.
- * The entropy it was credited with is gone along with that data, so it must not
- * be handed back to the counter: the next extraction would be credited with
- * entropy it never sees, and the pool would report it as available meanwhile.
+ * The known-answer test of its XDRBG fails with an XOF that fails or delivers
+ * wrong output.
+ *
+ * When the XDRBG of an extraction fails, the pool drops its state and starts
+ * over with the next insert - and with it everything it absorbed. The entropy
+ * it was credited with is gone along with that data, so it must not be handed
+ * back to the counter: the next extraction would be credited with entropy it
+ * never sees, and the pool would report it as available meanwhile.
  *
  * Driven through the entropy source callbacks without the rest of the ESDM, so
  * that no reseed running in the background takes the pool's entropy away
@@ -39,19 +42,57 @@
 #include "esdm_crypto.h"
 #include "esdm_definitions.h"
 #include "esdm_drng_mgr.h"
+#include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
 
-static struct esdm_hash_cb esdm_ahf_hash_cb;
-static int (*esdm_ahf_hash_final_real)(void *hash, uint8_t *digest);
-static bool esdm_ahf_fail;
+static struct esdm_xof_cb esdm_ahf_xof_cb;
+static int (*esdm_ahf_xof_final_real)(void *xof, uint8_t *out, size_t outlen);
+static bool esdm_ahf_fail, esdm_ahf_corrupt;
 
-/* The default hash, except that its final operation fails on demand */
-static int esdm_ahf_hash_final(void *hash, uint8_t *digest)
+/*
+ * The default XOF, except that its final operation fails, or delivers output
+ * off by a bit, on demand
+ */
+static int esdm_ahf_xof_final(void *xof, uint8_t *out, size_t outlen)
 {
+	int ret;
+
 	if (esdm_ahf_fail)
 		return -EFAULT;
-	return esdm_ahf_hash_final_real(hash, digest);
+	ret = esdm_ahf_xof_final_real(xof, out, outlen);
+	if (!ret && esdm_ahf_corrupt && outlen)
+		out[outlen - 1] ^= 0x01;
+	return ret;
+}
+
+/* The known-answer test of the XDRBG tells a broken XOF */
+static int esdm_ahf_selftest(void)
+{
+	int ret = 0;
+
+	if (esdm_aux_xdrbg_selftest()) {
+		printf("XDRBG self test fails with an intact XOF\n");
+		ret = 1;
+	}
+
+	esdm_ahf_fail = true;
+	if (!esdm_aux_xdrbg_selftest()) {
+		printf("XDRBG self test passes with a failing XOF\n");
+		ret = 1;
+	}
+	esdm_ahf_fail = false;
+
+	esdm_ahf_corrupt = true;
+	if (!esdm_aux_xdrbg_selftest()) {
+		printf("XDRBG self test passes with a corrupting XOF\n");
+		ret = 1;
+	}
+	esdm_ahf_corrupt = false;
+
+	if (!ret)
+		printf("XDRBG self test tells a broken XOF\n");
+	return ret;
 }
 
 static int esdm_ahf_insert(void)
@@ -65,8 +106,7 @@ static int esdm_ahf_insert(void)
 
 int main(int argc, char *argv[])
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb = drng->hash_cb;
+	const struct esdm_xof_cb *xof_cb = esdm_default_xof_cb;
 	struct esdm_es_cb *aux = esdm_es[esdm_ext_es_aux];
 	struct entropy_es eb_es;
 	uint32_t avail;
@@ -77,10 +117,15 @@ int main(int argc, char *argv[])
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
-	esdm_ahf_hash_cb = *hash_cb;
-	esdm_ahf_hash_final_real = hash_cb->hash_final;
-	esdm_ahf_hash_cb.hash_final = esdm_ahf_hash_final;
-	drng->hash_cb = &esdm_ahf_hash_cb;
+	esdm_ahf_xof_cb = *xof_cb;
+	esdm_ahf_xof_final_real = xof_cb->xof_final;
+	esdm_ahf_xof_cb.xof_final = esdm_ahf_xof_final;
+	esdm_default_xof_cb = &esdm_ahf_xof_cb;
+
+	if (esdm_ahf_selftest()) {
+		ret = 1;
+		goto out;
+	}
 
 	ret = aux->init();
 	if (ret) {
@@ -100,7 +145,7 @@ int main(int argc, char *argv[])
 		goto fini;
 	}
 
-	/* An extraction whose hash chain fails */
+	/* An extraction whose XDRBG fails */
 	esdm_ahf_fail = true;
 	memset(&eb_es, 0, sizeof(eb_es));
 	aux->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
@@ -139,6 +184,6 @@ int main(int argc, char *argv[])
 fini:
 	aux->fini();
 out:
-	drng->hash_cb = hash_cb;
+	esdm_default_xof_cb = xof_cb;
 	return ret;
 }

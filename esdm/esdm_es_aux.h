@@ -28,6 +28,9 @@
 
 extern struct esdm_es_cb esdm_es_aux;
 
+/* Known-answer test of the XDRBG-256 of the auxiliary pool and its SHAKE256 */
+int esdm_aux_xdrbg_selftest(void);
+
 /****************************** Helper code ***********************************/
 
 /* Obtain the security strength of the ESDM in bits */
