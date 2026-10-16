@@ -174,8 +174,12 @@ int esdm_ebpf_prepare(struct esdm_ebpf_es *es, struct bpf_object *obj,
 
 /*
  * Complete the initialization of an eBPF entropy source whose skeleton has
- * been loaded and attached by the caller: allocate the conditioning pool,
- * locate the ring buffer map and set up the ring buffer consumer.
+ * been loaded by the caller: allocate the conditioning pool, locate the ring
+ * buffer map and set up the ring buffer consumer.
+ *
+ * The caller attaches the programs only once this succeeded: from then on the
+ * events they collect can be erased again (esdm_ebpf_zeroize()), which a
+ * source not initialized cannot do. A failure here thus leaves nothing behind.
  */
 int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj);
 

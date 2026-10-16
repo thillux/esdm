@@ -193,22 +193,37 @@ static int esdm_irq_ebpf_initialize(void)
 		goto out;
 	}
 
+	/*
+	 * Set up the consumer side before anything is collected: an attached
+	 * program deposits raw deltas in the per-CPU state and the ring buffer
+	 * right away, and only an initialized entropy source can erase them
+	 * again (esdm_ebpf_zeroize() does nothing for one that is not loaded).
+	 * Initialized after the attach, a failure of the initialization left
+	 * them behind unwiped.
+	 */
+	ret = esdm_ebpf_init_es(&esdm_irq_ebpf_es, skel->obj);
+	if (ret) {
+		/* Not attached yet, so nothing was collected to erase */
+		esdm_es_irq_ebpf_bpf__destroy(skel);
+		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
+		goto out;
+	}
+
 	ret = esdm_es_irq_ebpf_bpf__attach(skel);
 	if (ret) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"Attaching of eBPF interrupt entropy source programs failed: %d\n",
 			ret);
-		esdm_es_irq_ebpf_bpf__destroy(skel);
+		/*
+		 * The programs that did get attached may have collected
+		 * already. As esdm_irq_ebpf_finalize_locked() does: detach,
+		 * erase while the maps are still there, then destroy them.
+		 */
+		esdm_es_irq_ebpf_bpf__detach(skel);
 		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
+		esdm_es_irq_ebpf_bpf__destroy(skel);
 		ret = 0;
-		goto out;
-	}
-
-	ret = esdm_ebpf_init_es(&esdm_irq_ebpf_es, skel->obj);
-	if (ret) {
-		esdm_es_irq_ebpf_bpf__destroy(skel);
-		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
 		goto out;
 	}
 
