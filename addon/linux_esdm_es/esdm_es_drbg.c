@@ -50,7 +50,8 @@ u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg)
  *
  * Length is capped with DRBG's security strength */
 static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
-					    uint8_t *block, size_t partial_len,
+					    void *drbg_state, uint8_t *block,
+					    size_t partial_len,
 					    u32 *returned_bits)
 {
 	u32 collected_events, collected_ent_bits, requested_events,
@@ -62,16 +63,15 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 	/* init returned bits with 0, increase, if generate successful */
 	*returned_bits = 0;
 
-	if ((partial_len << 3) >
-	    esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state)) {
+	if ((partial_len << 3) > esdm_drbg_cb->drbg_sec_strength(drbg_state)) {
 		pr_warn("more bits than DRBG security strength requested\n");
 		goto out;
 	}
 
 	/* Always request DRBG security strength for each block, generate less
 	 * bytes with DRBG, if advised by partial_len */
-	requested_bits = esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state);
-	if (!esdm_drbg_cb->drbg_is_initialized(drbg->drbg_state)) {
+	requested_bits = esdm_drbg_cb->drbg_sec_strength(drbg_state);
+	if (!esdm_drbg_cb->drbg_is_initialized(drbg_state)) {
 		requested_events = esdm_entropy_to_data(
 			requested_bits + esdm_init_osr(), drbg->entropy_bits);
 	} else {
@@ -86,7 +86,7 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 	collected_ent_bits =
 		esdm_data_to_entropy(collected_events, drbg->entropy_bits);
 	/* Apply oversampling: discount requested oversampling rate */
-	if (!esdm_drbg_cb->drbg_is_initialized(drbg->drbg_state)) {
+	if (!esdm_drbg_cb->drbg_is_initialized(drbg_state)) {
 		returned_ent_bits = esdm_reduce_by_init_osr(collected_ent_bits);
 	} else {
 		returned_ent_bits = esdm_reduce_by_osr(collected_ent_bits);
@@ -96,8 +96,7 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 		"obtained %u bits by collecting %u bits of entropy from %s-based noise source\n",
 		returned_ent_bits, collected_ent_bits, drbg->name);
 
-	if (esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state) >
-	    returned_ent_bits) {
+	if (esdm_drbg_cb->drbg_sec_strength(drbg_state) > returned_ent_bits) {
 		pr_warn("returned bits too small in %s-based noise source: %u\n",
 			drbg->name, returned_ent_bits);
 		/* nothing reached the DRBG, leave the events in the ring */
@@ -107,14 +106,14 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 
 	/* insert gathered entropy as additional input, HMAC-DRBG will insert
 	 * this into his state before generating output! */
-	ret = esdm_drbg_cb->drbg_seed(drbg->drbg_state, &seedlist);
+	ret = esdm_drbg_cb->drbg_seed(drbg_state, &seedlist);
 	if (ret) {
 		pr_warn("unable to seed drbg in %s-based noise source\n",
 			drbg->name);
 		goto out;
 	}
 
-	ret = esdm_drbg_cb->drbg_generate(drbg->drbg_state, block, partial_len,
+	ret = esdm_drbg_cb->drbg_generate(drbg_state, block, partial_len,
 					  (u8 *)drbg->domain_separation,
 					  drbg->domain_separation_len);
 	if (ret != partial_len) {
@@ -155,17 +154,21 @@ out:
 void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 			       struct entropy_buf *eb, u32 requested_bits)
 {
-	const u32 esdm_security_strength =
-		esdm_drbg_cb->drbg_sec_strength(drbg->drbg_state);
-	u32 full_blocks, done, gen;
+	/*
+	 * The DRBG is published by the deferred registration work, which may
+	 * run concurrently, and is NULL until then. Pairs with its
+	 * smp_store_release().
+	 */
+	void *drbg_state = smp_load_acquire(&drbg->drbg_state);
+	u32 esdm_security_strength, full_blocks, done, gen;
 
 	/* only set entropy, when generate was successful */
 	eb->e_bits = 0;
 
-	/*
-	 * The DRBG is allocated by the deferred registration work, until then
-	 * the state is NULL and its security strength 0.
-	 */
+	if (!drbg_state)
+		return;
+
+	esdm_security_strength = esdm_drbg_cb->drbg_sec_strength(drbg_state);
 	if (!esdm_security_strength)
 		return;
 
@@ -208,7 +211,7 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	while (done < requested_bits) {
 		u32 bits_returned;
 		bool ok = esdm_es_drbg_pool_extract_block(
-			drbg, eb->e + (done >> 3),
+			drbg, drbg_state, eb->e + (done >> 3),
 			min(esdm_security_strength, requested_bits - done) >> 3,
 			&bits_returned);
 		if (!ok) {

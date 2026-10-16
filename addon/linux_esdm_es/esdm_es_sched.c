@@ -207,6 +207,7 @@ struct esdm_es_cb esdm_es_sched = {
 
 int __init esdm_es_sched_module_init(void)
 {
+	void *drbg_state;
 	int ret;
 
 	if (!esdm_highres_timer()) {
@@ -217,18 +218,16 @@ int __init esdm_es_sched_module_init(void)
 	if (esdm_es_ring_alloc(&esdm_sched_ring))
 		return -ENOMEM;
 
+	/*
+	 * As for the IRQ ES, the DRBG is published only once everything else
+	 * succeeded, so an error path never frees a DRBG in use.
+	 */
 	/* switch to XDRBG, if upstream in the kernel */
-	esdm_sched_drbg.drbg_state = esdm_drbg_cb->drbg_alloc(
+	drbg_state = esdm_drbg_cb->drbg_alloc(
 		(u8 *)esdm_sched_drbg_domain_separation,
 		sizeof(esdm_sched_drbg_domain_separation) - 1);
-	/*
-	 * drbg_alloc() reports failure via ERR_PTR, never NULL. Testing for
-	 * NULL would store an error pointer as the live DRBG state and later
-	 * dereference / kfree it. Normalize to NULL so the teardown and the
-	 * NULL-guarded sec_strength/is_initialized helpers stay safe.
-	 */
-	if (IS_ERR_OR_NULL(esdm_sched_drbg.drbg_state)) {
-		esdm_sched_drbg.drbg_state = NULL;
+	/* drbg_alloc() reports failure via ERR_PTR, never NULL. */
+	if (IS_ERR_OR_NULL(drbg_state)) {
 		pr_warn("could not alloc DRBG for post-processing\n");
 		goto free_mem;
 	}
@@ -237,10 +236,12 @@ int __init esdm_es_sched_module_init(void)
 	ret = esdm_sched_register(esdm_sched_randomness);
 	if (ret) {
 		pr_warn("Unable to register ESDM scheduler ES\n");
-		esdm_drbg_cb->drbg_dealloc(esdm_sched_drbg.drbg_state);
-		esdm_sched_drbg.drbg_state = NULL;
+		esdm_drbg_cb->drbg_dealloc(drbg_state);
 		goto free_mem;
 	}
+
+	/* Pairs with smp_load_acquire() in esdm_es_drbg_pool_extract() */
+	smp_store_release(&esdm_sched_drbg.drbg_state, drbg_state);
 
 	pr_info("ESDM Scheduler ES registered, DRBG: %s\n",
 		esdm_drbg_cb->drbg_name());

@@ -199,6 +199,7 @@ static atomic_t esdm_es_irq_init_state = ATOMIC_INIT(esdm_es_init_unused);
 
 static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 {
+	void *drbg_state;
 	int ret;
 
 	/*
@@ -216,24 +217,24 @@ static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 		return;
 	}
 
+	/*
+	 * The DRBG is set up in a local and published only once everything
+	 * else succeeded: the ioctl interface runs concurrently to this work
+	 * and treats a NULL DRBG state as no entropy available. So nothing it
+	 * may use is ever freed in the error paths below.
+	 */
 	/* switch to XDRBG, if upstream in the kernel */
-	esdm_irq_drbg.drbg_state = esdm_drbg_cb->drbg_alloc(
+	drbg_state = esdm_drbg_cb->drbg_alloc(
 		(u8 *)esdm_irq_drbg_domain_separation,
 		sizeof(esdm_irq_drbg_domain_separation) - 1);
-	/*
-	 * drbg_alloc() reports failure via ERR_PTR, never NULL. Testing for
-	 * NULL would store an error pointer as the live DRBG state and later
-	 * dereference / kfree it. Normalize to NULL so the teardown and the
-	 * NULL-guarded sec_strength/is_initialized helpers stay safe.
-	 */
-	if (IS_ERR_OR_NULL(esdm_irq_drbg.drbg_state)) {
-		esdm_irq_drbg.drbg_state = NULL;
+	/* drbg_alloc() reports failure via ERR_PTR, never NULL. */
+	if (IS_ERR_OR_NULL(drbg_state)) {
 		pr_warn("could not alloc DRBG for post-processing\n");
 		goto err;
 	}
 
 	if (esdm_es_ring_alloc(&esdm_irq_ring))
-		goto err;
+		goto free_drbg;
 
 	ret = esdm_irq_register(esdm_add_interrupt_randomness);
 	if (ret) {
@@ -241,18 +242,18 @@ static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 		goto free_arrays;
 	}
 
+	/* Pairs with smp_load_acquire() in esdm_es_drbg_pool_extract() */
+	smp_store_release(&esdm_irq_drbg.drbg_state, drbg_state);
+
 	pr_info("ESDM IRQ ES registered, DRBG: %s\n",
 		esdm_drbg_cb->drbg_name());
 	return;
 
 free_arrays:
 	esdm_es_ring_free(&esdm_irq_ring);
-
+free_drbg:
+	esdm_drbg_cb->drbg_dealloc(drbg_state);
 err:
-	if (esdm_irq_drbg.drbg_state) {
-		esdm_drbg_cb->drbg_dealloc(esdm_irq_drbg.drbg_state);
-		esdm_irq_drbg.drbg_state = NULL;
-	}
 	atomic_set(&esdm_es_irq_init_state, esdm_es_init_unused);
 }
 
@@ -279,18 +280,18 @@ int __init esdm_es_irq_module_init(void)
 
 void esdm_es_irq_module_exit(void)
 {
-	if (atomic_read(&esdm_es_irq_init_state) == esdm_es_init_unused)
-		return;
-
 	/*
 	 * The deferred setup work may still be queued or sleeping in
 	 * wait_for_random_bytes(). Wait for it to finish before tearing down
 	 * (and before the module text/state it touches is freed); otherwise
-	 * the work runs against freed state. This also covers the
-	 * still-registering early return below, which would otherwise leave the
-	 * work pending. cancel_work_sync tolerates a never-queued work item.
+	 * the work runs against freed state. This must come before checking
+	 * the state: the error paths of the work set it to unused while still
+	 * executing. cancel_work_sync tolerates a never-queued work item.
 	 */
 	cancel_work_sync(&esdm_es_irq_set_callback);
+
+	if (atomic_read(&esdm_es_irq_init_state) == esdm_es_init_unused)
+		return;
 
 	/* If we are in still in registering phase, do not process it */
 	if (atomic_xchg(&esdm_es_irq_init_state, esdm_es_init_unregistering) <

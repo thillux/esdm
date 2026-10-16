@@ -22,7 +22,8 @@ struct esdm_es_ring;
 /*
  * struct esdm_es_drbg - per-source description of the DRBG post-processing
  * @ring:		per-CPU event ring feeding this DRBG
- * @drbg_state:		internal DRBG state; NULL until registration completes
+ * @drbg_state:		internal DRBG state; NULL until registration completes,
+ *			which publishes it with smp_store_release()
  * @domain_separation:	personalization / domain separation string used as
  *			additional input to drbg_generate()
  * @domain_separation_len: length of @domain_separation in bytes
