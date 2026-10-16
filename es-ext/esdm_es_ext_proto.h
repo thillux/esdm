@@ -37,6 +37,12 @@
 #include "esdm_es_ext.h"
 #include "memset_secure.h"
 
+/*
+ * The largest errno a status may carry, as the kernel bounds them (MAX_ERRNO):
+ * a status beyond is no errno, and negating INT32_MIN is undefined.
+ */
+#define ESDM_ES_EXT_PROTO_MAX_ERRNO 4095
+
 static inline void esdm_es_ext_put_le16(uint8_t *p, uint16_t v)
 {
 	p[0] = (uint8_t)v;
@@ -168,8 +174,8 @@ static inline int esdm_es_ext_proto_rsp_unpack(const uint8_t *in, size_t len,
 	st = (int32_t)esdm_es_ext_get_le32(in + 8);
 	bits = esdm_es_ext_get_le32(in + 12);
 
-	/* A status is 0 or a negative errno */
-	if (st > 0)
+	/* A status is 0 or a negative errno - which is what a caller negates */
+	if (st > 0 || st < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
 		return -EPROTO;
 
 	if (st || type != ESDM_ES_EXT_PROTO_GET_ENTROPY) {
@@ -222,7 +228,8 @@ esdm_es_ext_plugin_get(const struct esdm_es_ext_plugin *plugin, void *ctx,
 
 	if (!ret && (uint64_t)bits > (uint64_t)buflen * 8)
 		ret = -EINVAL;
-	if (ret > 0)
+	/* An errno, or what it stands for */
+	if (ret > 0 || ret < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
 		ret = -EIO;
 	if (ret) {
 		memset_secure(buf, 0, buflen);

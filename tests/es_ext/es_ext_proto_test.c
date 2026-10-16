@@ -166,6 +166,26 @@ static void test_response(void)
 					      &status, &bits, &got),
 		 -EPROTO);
 
+	/* Nor beyond what an errno can be - negating INT32_MIN is undefined */
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_SELFTEST,
+					 -ESDM_ES_EXT_PROTO_MAX_ERRNO, 0, NULL,
+					 0);
+	CHECK_EQ(esdm_es_ext_proto_rsp_unpack(rsp, len,
+					      ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					      &status, &bits, &got),
+		 0);
+	esdm_es_ext_put_le32(rsp + 8, (uint32_t)INT32_MIN);
+	CHECK_EQ(esdm_es_ext_proto_rsp_unpack(rsp, len,
+					      ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					      &status, &bits, &got),
+		 -EPROTO);
+	esdm_es_ext_put_le32(rsp + 8,
+			     (uint32_t)(-ESDM_ES_EXT_PROTO_MAX_ERRNO - 1));
+	CHECK_EQ(esdm_es_ext_proto_rsp_unpack(rsp, len,
+					      ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					      &status, &bits, &got),
+		 -EPROTO);
+
 	/* A self test answer */
 	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_SELFTEST,
 					 -EFAULT, 0, NULL, 0);
@@ -176,6 +196,9 @@ static void test_response(void)
 	CHECK_EQ(status, -EFAULT);
 }
 
+/* What the plugin returns, next to the claim of @ctx */
+static int test_plugin_ret;
+
 static int test_plugin_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 				   uint32_t *entropy_bits)
 {
@@ -183,7 +206,7 @@ static int test_plugin_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 
 	memset(buf, 0xa5, buflen);
 	*entropy_bits = *claim;
-	return 0;
+	return test_plugin_ret;
 }
 
 static void test_plugin_helpers(void)
@@ -217,6 +240,23 @@ static void test_plugin_helpers(void)
 		 -EINVAL);
 	CHECK_EQ(bits, 0);
 	CHECK_MEM_EQ(buf, zero, sizeof(buf));
+
+	/* What a plugin returns is an errno, or stands for one */
+	claim = 8;
+	test_plugin_ret = -ENODEV;
+	CHECK_EQ(esdm_es_ext_plugin_get(&plugin, &claim, buf, sizeof(buf),
+					&bits),
+		 -ENODEV);
+	test_plugin_ret = INT32_MIN;
+	CHECK_EQ(esdm_es_ext_plugin_get(&plugin, &claim, buf, sizeof(buf),
+					&bits),
+		 -EIO);
+	test_plugin_ret = 1;
+	CHECK_EQ(esdm_es_ext_plugin_get(&plugin, &claim, buf, sizeof(buf),
+					&bits),
+		 -EIO);
+	CHECK_MEM_EQ(buf, zero, sizeof(buf));
+	test_plugin_ret = 0;
 }
 
 int main(void)
