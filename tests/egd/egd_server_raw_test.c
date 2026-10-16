@@ -33,6 +33,11 @@
  *
  * It also checks that waiting for entropy is not blocking: while one client's
  * request waits, the server has to keep serving everybody else.
+ *
+ * The ESDM's own commands are checked here as well, see esdm_egd_protocol.h:
+ * the read that needs no seeding before the ESDM is seeded, the prediction
+ * resistant reads, the state and the status reports, and the privileged
+ * commands - carried out for root, refused to everybody else.
  */
 
 #define _GNU_SOURCE
@@ -48,6 +53,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -58,6 +64,8 @@
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
 #include "threading_support.h"
+
+#include "../status_json_check.h"
 
 /*
  * Two helpers the EGD server shares with the RPC server, which is not linked
@@ -559,24 +567,36 @@ static void test_split_command(void)
  */
 static void test_unknown_command(void)
 {
-	uint8_t cmd = 0xff;
+	/*
+	 * Far off, between the standard commands and the ESDM's own, and right
+	 * behind the ESDM's own.
+	 */
+	static const uint8_t cmds[] = { 0xff, 0x05, 0xdf,
+					ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS +
+						1 };
 	uint8_t buf[1];
+	unsigned int i;
 	int fd;
 
 	printf("EGD raw: unknown command\n");
 
-	fd = test_connect();
-	if (fd < 0) {
-		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
-		return;
+	for (i = 0; i < sizeof(cmds); i++) {
+		fd = test_connect();
+		if (fd < 0) {
+			CHECK(0, "cannot connect to %s: %s", sockpath,
+			      strerror(errno));
+			return;
+		}
+
+		CHECK(test_send(fd, &cmds[i], 1) == 0,
+		      "the unknown command 0x%02x could not be sent", cmds[i]);
+		CHECK(test_recv(fd, buf, sizeof(buf), TEST_RESPONSE_MS) ==
+			      -EPIPE,
+		      "the unknown command 0x%02x did not close the connection",
+		      cmds[i]);
+
+		close(fd);
 	}
-
-	CHECK(test_send(fd, &cmd, sizeof(cmd)) == 0,
-	      "the unknown command could not be sent");
-	CHECK(test_recv(fd, buf, sizeof(buf), TEST_RESPONSE_MS) == -EPIPE,
-	      "an unknown command did not close the connection");
-
-	close(fd);
 }
 
 /*
@@ -959,6 +979,711 @@ out:
 		close(other);
 }
 
+/****************************
+ * ESDM extension commands
+ ****************************/
+
+/*
+ * A read answered with a count byte and that many bytes - the standard
+ * non-blocking read 0x01 and the ESDM's 0xe0 and 0xe2 alike.
+ */
+static int test_cmd_read_counted(int fd, uint8_t command, uint8_t requested,
+				 uint8_t *buf, uint8_t *delivered,
+				 int timeout_ms)
+{
+	uint8_t cmd[2] = { command, requested };
+	int rc;
+
+	if (test_send(fd, cmd, sizeof(cmd)))
+		return -EIO;
+
+	rc = test_recv(fd, delivered, sizeof(*delivered), timeout_ms);
+	if (rc)
+		return rc;
+
+	if (*delivered > requested)
+		return -EPROTO;
+
+	if (!*delivered)
+		return 0;
+
+	return test_recv(fd, buf, *delivered, timeout_ms);
+}
+
+static uint32_t test_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/*
+ * Command 0xe3: a count byte, then that many 4 byte fields. @fields receives
+ * the first ESDM_EGD_STATE_NUM_FIELDS of them, @count how many there were.
+ */
+static int test_cmd_state(int fd, uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS],
+			  uint8_t *count, int timeout_ms)
+{
+	const uint8_t cmd = ESDM_EGD_CMD_ESDM_GET_STATE;
+	uint8_t resp[4 * UINT8_MAX];
+	unsigned int i;
+	int rc;
+
+	if (test_send(fd, &cmd, sizeof(cmd)))
+		return -EIO;
+
+	rc = test_recv(fd, count, sizeof(*count), timeout_ms);
+	if (rc)
+		return rc;
+
+	/* The answer has to fit into one EGD transfer, see the header */
+	if (1 + 4 * (size_t)*count > 1 + ESDM_EGD_MAX_TRANSFER)
+		return -EPROTO;
+
+	rc = test_recv(fd, resp, 4 * (size_t)*count, timeout_ms);
+	if (rc)
+		return rc;
+
+	for (i = 0; i < ESDM_EGD_STATE_NUM_FIELDS; i++)
+		fields[i] = (i < *count) ? test_be32(resp + 4 * i) : 0;
+
+	return 0;
+}
+
+/*
+ * Commands 0xe4 and 0xe5: a 4 byte length, then the report. Returns it as a
+ * NUL terminated string in @report, to be freed by the caller.
+ */
+static int test_cmd_status(int fd, uint8_t command, char **report,
+			   uint32_t *len, int timeout_ms)
+{
+	uint8_t hdr[4];
+	int rc;
+
+	*report = NULL;
+
+	if (test_send(fd, &command, sizeof(command)))
+		return -EIO;
+
+	rc = test_recv(fd, hdr, sizeof(hdr), timeout_ms);
+	if (rc)
+		return rc;
+
+	*len = test_be32(hdr);
+	if (*len > ESDM_EGD_MAX_STATUS)
+		return -EPROTO;
+
+	*report = calloc(1, (size_t)*len + 1);
+	if (!*report)
+		return -ENOMEM;
+
+	return test_recv(fd, *report, *len, timeout_ms);
+}
+
+/*
+ * Commands 0xe6 to 0xea: the command, the 4 byte argument for those that take
+ * one, and a 4 byte status as answer.
+ */
+static bool test_cmd_has_arg(uint8_t command)
+{
+	return command == ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT ||
+	       command == ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP ||
+	       command == ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS;
+}
+
+static int test_send_priv(int fd, uint8_t command, uint32_t arg)
+{
+	uint8_t cmd[5] = { command, (uint8_t)(arg >> 24), (uint8_t)(arg >> 16),
+			   (uint8_t)(arg >> 8), (uint8_t)arg };
+
+	return test_send(fd, cmd, test_cmd_has_arg(command) ? 5 : 1) ? -EIO :
+								      0;
+}
+
+static int test_cmd_priv(int fd, uint8_t command, uint32_t arg,
+			 int32_t *status, int timeout_ms)
+{
+	uint8_t resp[4];
+	int rc;
+
+	if (test_send_priv(fd, command, arg))
+		return -EIO;
+
+	rc = test_recv(fd, resp, sizeof(resp), timeout_ms);
+	if (rc)
+		return rc;
+
+	*status = (int32_t)test_be32(resp);
+
+	return 0;
+}
+
+static const uint8_t test_priv_cmds[] = {
+	ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, ESDM_EGD_CMD_ESDM_CLEAR_POOL,
+	ESDM_EGD_CMD_ESDM_RESEED, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP,
+	ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS
+};
+
+/*
+ * The ESDM's commands before it is seeded: the state is answered, and every
+ * read - the one with the semantics of /dev/urandom as well, as the ESDM hands
+ * out nothing before it is operational - is answered empty rather than held.
+ */
+static void test_esdm_unseeded(void)
+{
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	uint8_t buf[ESDM_EGD_MAX_TRANSFER];
+	uint8_t count = 0, delivered = 0;
+	int fd;
+
+	printf("EGD raw: ESDM commands before the ESDM is seeded\n");
+
+	if (esdm_state_operational()) {
+		printf("  SKIPPED: the ESDM is operational despite every entropy source being disabled\n");
+		return;
+	}
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+	CHECK(count >= ESDM_EGD_STATE_NUM_FIELDS, "the state has %u fields",
+	      count);
+	CHECK(!(fields[ESDM_EGD_STATE_FLAGS] & ESDM_EGD_STATE_FLAG_OPERATIONAL),
+	      "the state says operational, the ESDM is not");
+	CHECK(!(fields[ESDM_EGD_STATE_FLAGS] &
+		~(ESDM_EGD_STATE_FLAG_OPERATIONAL |
+		  ESDM_EGD_STATE_FLAG_FULLY_SEEDED)),
+	      "the state flags 0x%x carry unknown bits",
+	      fields[ESDM_EGD_STATE_FLAGS]);
+	CHECK(fields[ESDM_EGD_STATE_POOLSIZE] == esdm_avail_poolsize_aux(),
+	      "the state reports a pool size of %u, the ESDM has %u",
+	      fields[ESDM_EGD_STATE_POOLSIZE], esdm_avail_poolsize_aux());
+
+	CHECK(test_cmd_read_counted(fd, ESDM_EGD_CMD_ESDM_READ_UNSEEDED,
+				    sizeof(buf), buf, &delivered,
+				    TEST_RESPONSE_MS) == 0,
+	      "the unseeded read was not answered");
+	CHECK(delivered == 0,
+	      "the unseeded read delivered %u bytes before the ESDM is operational",
+	      delivered);
+
+	CHECK(test_cmd_read_counted(fd, ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 0, buf,
+				    &delivered, TEST_RESPONSE_MS) == 0,
+	      "the unseeded read of nothing was not answered");
+	CHECK(delivered == 0, "the unseeded read of nothing delivered %u bytes",
+	      delivered);
+
+	CHECK(test_cmd_read_counted(fd, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, 32,
+				    buf, &delivered, TEST_RESPONSE_MS) == 0,
+	      "the non-blocking PR read was not answered");
+	CHECK(delivered == 0,
+	      "%u prediction resistant bytes were delivered by an ESDM that is not operational",
+	      delivered);
+
+	close(fd);
+}
+
+/*
+ * The blocking prediction resistant read waits for the entropy it is made of,
+ * like the blocking read waits for the operational state - deferred, with the
+ * commands behind it held back, and everybody else served meanwhile.
+ */
+static void test_esdm_pr_read(void)
+{
+	uint8_t seed[64], buf[32], len = 0, delivered = 0;
+	char pidstr[UINT8_MAX + 1];
+	uint32_t bits = 0;
+	unsigned int i, round;
+	int fd = -1, other = -1, rc = -ETIMEDOUT;
+
+	printf("EGD raw: prediction resistant reads\n");
+
+	if (!esdm_state_operational()) {
+		printf("  SKIPPED: the ESDM is not operational\n");
+		return;
+	}
+
+	fd = test_connect();
+	other = test_connect();
+	if (fd < 0 || other < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		goto out;
+	}
+
+	/* Whatever the PR DRNG had is taken, so the next one has to wait */
+	CHECK(test_cmd_read_counted(fd, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK,
+				    sizeof(buf), buf, &delivered,
+				    TEST_RESPONSE_MS) == 0,
+	      "the non-blocking PR read was not answered");
+	printf("  %u of %zu prediction resistant bytes right away\n", delivered,
+	       sizeof(buf));
+
+	CHECK(test_send(fd, (uint8_t[]){ ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
+					 sizeof(buf) },
+			2) == 0,
+	      "the blocking PR read could not be sent");
+	CHECK(test_send(fd, &(uint8_t){ ESDM_EGD_CMD_GET_PID }, 1) == 0,
+	      "the pipelined PID request could not be sent");
+
+	/* The entropy it waits for, a little at a time */
+	memset(buf, 0, sizeof(buf));
+	for (round = 0; round < TEST_SEED_ROUNDS; round++) {
+		CHECK(test_cmd_entropy_count(other, &bits, TEST_RESPONSE_MS) ==
+			      0,
+		      "another client was not served while a PR read waited");
+
+		for (i = 0; i < sizeof(seed); i++)
+			seed[i] = (uint8_t)(i * 7 + round);
+		esdm_pool_insert_aux(seed, sizeof(seed), 8 * sizeof(seed));
+
+		rc = test_recv(fd, buf, sizeof(buf), TEST_SEED_INTERVAL_MS);
+		if (rc != -ETIMEDOUT)
+			break;
+	}
+
+	CHECK(rc == 0, "the blocking PR read was not answered: %d", rc);
+	if (rc)
+		goto out;
+	CHECK(!test_all_zero(buf, sizeof(buf)),
+	      "the blocking PR read delivered nothing but zeroes");
+
+	/* And only then what was sent behind it */
+	CHECK(test_recv(fd, &len, sizeof(len), TEST_RESPONSE_MS) == 0 && len,
+	      "the command behind the PR read was not answered");
+	if (len) {
+		CHECK(test_recv(fd, pidstr, len, TEST_RESPONSE_MS) == 0,
+		      "the answer behind the PR read is truncated");
+		pidstr[len] = '\0';
+		CHECK((pid_t)strtol(pidstr, NULL, 10) == getpid(),
+		      "the answer behind the PR read is %s, not the PID",
+		      pidstr);
+	}
+
+out:
+	if (fd >= 0)
+		close(fd);
+	if (other >= 0)
+		close(other);
+}
+
+/* The state and the status reports of an operational ESDM, pipelined */
+static void test_esdm_status(void)
+{
+	const uint8_t cmds[] = { ESDM_EGD_CMD_ESDM_STATUS,
+				 ESDM_EGD_CMD_ESDM_GET_STATE,
+				 ESDM_EGD_CMD_ESDM_STATUS_JSON,
+				 ESDM_EGD_CMD_ENTROPY_COUNT };
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS], len = 0, json_len = 0;
+	char *text = NULL, *json = NULL;
+	uint8_t count = 0, hdr[4];
+	uint32_t bits = 0;
+	int fd;
+
+	printf("EGD raw: state and status reports\n");
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	CHECK(test_cmd_status(fd, ESDM_EGD_CMD_ESDM_STATUS, &text, &len,
+			      TEST_RESPONSE_MS) == 0,
+	      "the status was not answered");
+	CHECK(len > 0 && text && strlen(text) == len,
+	      "the status of %u bytes is no text of that length", len);
+	CHECK(text && strstr(text, "DRNG name: ") &&
+		      strstr(text, "Entropy Source 0 properties:"),
+	      "the status lacks its sections: %.200s", text ? text : "");
+	free(text);
+	text = NULL;
+
+	CHECK(test_cmd_status(fd, ESDM_EGD_CMD_ESDM_STATUS_JSON, &json,
+			      &json_len, TEST_RESPONSE_MS) == 0,
+	      "the JSON status was not answered");
+	CHECK(json_len > 0 && json && esdm_status_json_check(json) == 0,
+	      "the JSON status of %u bytes is no well-formed status",
+	      json_len);
+	free(json);
+	json = NULL;
+
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+	CHECK(fields[ESDM_EGD_STATE_FLAGS] & ESDM_EGD_STATE_FLAG_OPERATIONAL,
+	      "the state does not say operational, the ESDM is");
+
+	/* Now the read with the semantics of /dev/urandom delivers in full */
+	{
+		uint8_t buf[ESDM_EGD_MAX_TRANSFER], delivered = 0;
+
+		memset(buf, 0, sizeof(buf));
+		CHECK(test_cmd_read_counted(fd, ESDM_EGD_CMD_ESDM_READ_UNSEEDED,
+					    sizeof(buf), buf, &delivered,
+					    TEST_RESPONSE_MS) == 0,
+		      "the unseeded read was not answered");
+		CHECK(delivered == sizeof(buf),
+		      "the unseeded read delivered %u of %zu bytes", delivered,
+		      sizeof(buf));
+		CHECK(!test_all_zero(buf, delivered),
+		      "the unseeded read delivered nothing but zeroes");
+	}
+	CHECK(fields[ESDM_EGD_STATE_WRITE_WAKEUP] ==
+		      esdm_get_write_wakeup_bits(),
+	      "the state reports a write wakeup threshold of %u, the ESDM has %u",
+	      fields[ESDM_EGD_STATE_WRITE_WAKEUP],
+	      esdm_get_write_wakeup_bits());
+	CHECK(fields[ESDM_EGD_STATE_MIN_RESEED_SECS] ==
+		      esdm_get_reseed_max_time(),
+	      "the state reports %u reseed seconds, the ESDM has %u",
+	      fields[ESDM_EGD_STATE_MIN_RESEED_SECS],
+	      esdm_get_reseed_max_time());
+
+	/*
+	 * All in one write: the large answers are held while they go out, and
+	 * the ones behind them must not overtake them.
+	 */
+	CHECK(test_send(fd, cmds, sizeof(cmds)) == 0,
+	      "the pipelined commands could not be sent");
+	CHECK(test_recv(fd, hdr, sizeof(hdr), TEST_RESPONSE_MS) == 0,
+	      "the pipelined status was not answered");
+	len = test_be32(hdr);
+	CHECK(len > 0 && len <= ESDM_EGD_MAX_STATUS,
+	      "the pipelined status announces %u bytes", len);
+	if (len > 0 && len <= ESDM_EGD_MAX_STATUS) {
+		text = calloc(1, len + 1);
+		CHECK(text && test_recv(fd, text, len, TEST_RESPONSE_MS) == 0,
+		      "the pipelined status is truncated");
+		CHECK(text && strstr(text, "DRNG name: "),
+		      "the pipelined status is no status");
+		free(text);
+		text = NULL;
+	}
+	CHECK(test_recv(fd, &count, sizeof(count), TEST_RESPONSE_MS) == 0 &&
+		      count >= ESDM_EGD_STATE_NUM_FIELDS && count < 64,
+	      "the pipelined state was not answered behind the status");
+	if (count < 64) {
+		uint8_t skip[4 * 64];
+
+		CHECK(test_recv(fd, skip, 4 * (size_t)count,
+				TEST_RESPONSE_MS) == 0,
+		      "the pipelined state is truncated");
+	}
+	CHECK(test_recv(fd, hdr, sizeof(hdr), TEST_RESPONSE_MS) == 0,
+	      "the pipelined JSON status was not answered");
+	json_len = test_be32(hdr);
+	if (json_len > 0 && json_len <= ESDM_EGD_MAX_STATUS) {
+		json = calloc(1, json_len + 1);
+		CHECK(json &&
+			      test_recv(fd, json, json_len, TEST_RESPONSE_MS) ==
+				      0 &&
+			      json[0] == '{',
+		      "the pipelined JSON status is no JSON document");
+		free(json);
+	} else {
+		CHECK(0, "the pipelined JSON status announces %u bytes",
+		      json_len);
+	}
+	CHECK(test_recv(fd, hdr, sizeof(hdr), TEST_RESPONSE_MS) == 0,
+	      "the entropy count behind the reports was not answered");
+
+	/* And the connection is in step still */
+	CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+	      "the server lost the stream over the reports");
+
+	close(fd);
+}
+
+/*
+ * Every privileged command from a peer that is not root: refused with -EPERM,
+ * nothing changed, and the connection usable after it. Returns the failures.
+ */
+static int test_esdm_priv_refused(void)
+{
+	uint32_t before[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t after[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t bits = 0;
+	uint8_t count = 0;
+	int32_t status = 0;
+	unsigned int i;
+	int fd, failed = 0;
+
+	fd = test_connect();
+	if (fd < 0) {
+		printf("  FAIL: cannot connect as UID %u: %s\n", getuid(),
+		       strerror(errno));
+		return 1;
+	}
+
+	if (test_cmd_state(fd, before, &count, TEST_RESPONSE_MS)) {
+		printf("  FAIL: the state was not answered\n");
+		failed++;
+	}
+
+	for (i = 0; i < sizeof(test_priv_cmds); i++) {
+		if (test_cmd_priv(fd, test_priv_cmds[i],
+				  before[ESDM_EGD_STATE_WRITE_WAKEUP] + 8,
+				  &status, TEST_RESPONSE_MS)) {
+			printf("  FAIL: command 0x%02x was not answered\n",
+			       test_priv_cmds[i]);
+			failed++;
+			continue;
+		}
+		if (status != -EPERM) {
+			printf("  FAIL: command 0x%02x of UID %u answered %d, not -EPERM\n",
+			       test_priv_cmds[i], getuid(), status);
+			failed++;
+		}
+		if (test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS)) {
+			printf("  FAIL: the connection was lost over the refusal of 0x%02x\n",
+			       test_priv_cmds[i]);
+			failed++;
+		}
+	}
+
+	if (test_cmd_state(fd, after, &count, TEST_RESPONSE_MS) ||
+	    after[ESDM_EGD_STATE_WRITE_WAKEUP] !=
+		    before[ESDM_EGD_STATE_WRITE_WAKEUP] ||
+	    after[ESDM_EGD_STATE_MIN_RESEED_SECS] !=
+		    before[ESDM_EGD_STATE_MIN_RESEED_SECS]) {
+		printf("  FAIL: a refused command changed the state\n");
+		failed++;
+	}
+
+	close(fd);
+
+	return failed;
+}
+
+/*
+ * The privileged commands. Root has them carried out, anybody else is refused.
+ * Run as root, a child dropping to nobody checks the refusal as well.
+ */
+static void test_esdm_priv(void)
+{
+	uint32_t orig[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t wakeup, secs;
+	uint8_t count = 0;
+	int32_t status = 1;
+	int fd, wstatus;
+	pid_t child;
+
+	printf("EGD raw: privileged commands%s\n",
+	       geteuid() ? " are refused" : "");
+
+	if (geteuid()) {
+		CHECK(test_esdm_priv_refused() == 0,
+		      "the privileged commands were not refused");
+		printf("  not root - the commands carried out are left to a root run\n");
+		return;
+	}
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	CHECK(test_cmd_state(fd, orig, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_CLEAR_POOL, 0, &status,
+			    TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "clearing the pool was not carried out: %d", status);
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
+		      fields[ESDM_EGD_STATE_ENT_CNT] == 0,
+	      "the pool holds %u bits after clearing it",
+	      fields[ESDM_EGD_STATE_ENT_CNT]);
+
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, 64, &status,
+			    TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "crediting entropy was not carried out: %d", status);
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
+		      fields[ESDM_EGD_STATE_ENT_CNT] > 0,
+	      "the pool holds %u bits after crediting 64",
+	      fields[ESDM_EGD_STATE_ENT_CNT]);
+
+	/* A credit beyond the pool is capped, not wrapped around */
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, UINT32_MAX,
+			    &status, TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "crediting the largest count was not carried out: %d", status);
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
+		      fields[ESDM_EGD_STATE_ENT_CNT] > 0 &&
+		      fields[ESDM_EGD_STATE_ENT_CNT] <=
+			      fields[ESDM_EGD_STATE_POOLSIZE],
+	      "the pool holds %u of %u bits after crediting the largest count",
+	      fields[ESDM_EGD_STATE_ENT_CNT], fields[ESDM_EGD_STATE_POOLSIZE]);
+
+	wakeup = (orig[ESDM_EGD_STATE_WRITE_WAKEUP] == 64) ? 128 : 64;
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP, wakeup,
+			    &status, TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "setting the write wakeup threshold was not carried out: %d",
+	      status);
+	secs = (orig[ESDM_EGD_STATE_MIN_RESEED_SECS] == 120) ? 121 : 120;
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS, secs,
+			    &status, TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "setting the reseed seconds was not carried out: %d", status);
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
+		      fields[ESDM_EGD_STATE_WRITE_WAKEUP] == wakeup &&
+		      fields[ESDM_EGD_STATE_MIN_RESEED_SECS] == secs,
+	      "the state reports %u/%u, %u/%u were set",
+	      fields[ESDM_EGD_STATE_WRITE_WAKEUP],
+	      fields[ESDM_EGD_STATE_MIN_RESEED_SECS], wakeup, secs);
+
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_RESEED, 0, &status,
+			    TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "the reseed was not carried out: %d", status);
+
+	/* Back to what it was */
+	test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP,
+		      orig[ESDM_EGD_STATE_WRITE_WAKEUP], &status,
+		      TEST_RESPONSE_MS);
+	test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS,
+		      orig[ESDM_EGD_STATE_MIN_RESEED_SECS], &status,
+		      TEST_RESPONSE_MS);
+	close(fd);
+
+	/* Somebody else: the socket's directory has to be reachable for it */
+	if (chmod(tmpdir, 0711) < 0) {
+		CHECK(0, "cannot open %s to other users: %s", tmpdir,
+		      strerror(errno));
+		return;
+	}
+
+	child = fork();
+	if (child < 0) {
+		CHECK(0, "cannot fork: %s", strerror(errno));
+		return;
+	}
+	if (!child) {
+		alarm(TEST_WATCHDOG_SEC);
+		if (setgid(65534) < 0 || setuid(65534) < 0)
+			_exit(2);
+		_exit(test_esdm_priv_refused() ? 1 : 0);
+	}
+
+	CHECK(waitpid(child, &wstatus, 0) == child && WIFEXITED(wstatus) &&
+		      WEXITSTATUS(wstatus) == 0,
+	      "the privileged commands of an unprivileged peer were not refused (status 0x%x)",
+	      wstatus);
+	chmod(tmpdir, 0700);
+}
+
+/*
+ * An ESDM command arriving in pieces is only acted on once it is complete -
+ * its argument counts as much as the length byte of a read.
+ */
+static void test_esdm_split_command(void)
+{
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t secs;
+	uint8_t count = 0, cmd[5], resp[4];
+	int fd;
+
+	printf("EGD raw: ESDM command split across writes\n");
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+
+	/* Setting what is set already, so the outcome is the same for all */
+	secs = fields[ESDM_EGD_STATE_MIN_RESEED_SECS];
+	cmd[0] = ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS;
+	cmd[1] = (uint8_t)(secs >> 24);
+	cmd[2] = (uint8_t)(secs >> 16);
+	cmd[3] = (uint8_t)(secs >> 8);
+	cmd[4] = (uint8_t)secs;
+
+	CHECK(test_send(fd, cmd, 3) == 0, "the first part could not be sent");
+	CHECK(test_quiet(fd, TEST_SILENCE_MS),
+	      "the server answered a command whose argument it had not seen");
+	CHECK(test_send(fd, cmd + 3, 2) == 0,
+	      "the rest of the command could not be sent");
+	CHECK(test_recv(fd, resp, sizeof(resp), TEST_RESPONSE_MS) == 0,
+	      "the completed command was not answered");
+	CHECK((int32_t)test_be32(resp) == (geteuid() ? -EPERM : 0),
+	      "the completed command answered %d",
+	      (int32_t)test_be32(resp));
+	CHECK(test_quiet(fd, TEST_SILENCE_MS),
+	      "the command was answered with more than its status");
+
+	close(fd);
+}
+
+/*
+ * A privileged command whose sender is gone right after sending it: carried
+ * out all the same, like an insertion, but not answered. Only root's is
+ * carried out, so only a root run can see that it was; anybody's has to leave
+ * the server serving.
+ */
+static void test_esdm_priv_peer_gone(void)
+{
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t orig, secs, bits = 0;
+	uint8_t count = 0;
+	int32_t status;
+	unsigned int i;
+	int fd, other;
+
+	printf("EGD raw: privileged command of a client that is gone\n");
+
+	other = test_connect();
+	if (other < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+	CHECK(test_cmd_state(other, fields, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+	orig = fields[ESDM_EGD_STATE_MIN_RESEED_SECS];
+	secs = (orig == 300) ? 301 : 300;
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		close(other);
+		return;
+	}
+	CHECK(test_send_priv(fd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS, secs) ==
+		      0,
+	      "the command could not be sent");
+	close(fd);
+
+	if (geteuid()) {
+		test_sleep_ms(TEST_SILENCE_MS);
+	} else {
+		for (i = 0; i < TEST_RESPONSE_MS / 50; i++) {
+			if (test_cmd_state(other, fields, &count,
+					   TEST_RESPONSE_MS) ||
+			    fields[ESDM_EGD_STATE_MIN_RESEED_SECS] == secs)
+				break;
+			test_sleep_ms(50);
+		}
+		CHECK(fields[ESDM_EGD_STATE_MIN_RESEED_SECS] == secs,
+		      "the command of a client that is gone was not carried out");
+		test_cmd_priv(other, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS,
+			      orig, &status, TEST_RESPONSE_MS);
+	}
+
+	CHECK(test_cmd_entropy_count(other, &bits, TEST_RESPONSE_MS) == 0,
+	      "the server stopped serving over a client that is gone");
+	close(other);
+}
+
 static uint64_t test_now_ms(void)
 {
 	struct timespec ts;
@@ -1151,9 +1876,15 @@ int main(int argc, char *argv[])
 	 * The deferral first: it is the only test that needs an ESDM without
 	 * entropy, and it is what makes one available to those below.
 	 */
+	test_esdm_unseeded();
 	test_deferred_read();
 
 	test_stateless_commands();
+	test_esdm_pr_read();
+	test_esdm_status();
+	test_esdm_priv();
+	test_esdm_split_command();
+	test_esdm_priv_peer_gone();
 	test_pipelining();
 	test_split_command();
 	test_write_entropy();

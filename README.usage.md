@@ -249,6 +249,10 @@ unprivileged as well:
   mirrors the rule of the RPC interface, where inserting data with an entropy
   claim is reserved for the privileged interface.
 
+* The ESDM's own commands changing the entropy accounting or the DRNGs, see
+  below, are refused to everybody but a privileged (UID 0) caller in the same
+  way.
+
 Note that the EGD protocol transfers data in the clear over the socket and
 caps every single transfer at 255 bytes. It exists for compatibility with
 legacy consumers - new applications should use the ESDM RPC interface, the
@@ -270,6 +274,20 @@ those of EGD; `service-egd/esdm_egd_protocol.h` holds the wire format.
 |---------|---------|--------|
 | `0xe0` PR read non-blocking | length byte | like `0x01`, from the prediction resistance DRNG |
 | `0xe1` PR read blocking | length byte | like `0x02`, from the prediction resistance DRNG |
+| `0xe2` read unseeded | length byte | like `0x01`, `/dev/urandom` semantics; empty before the ESDM is operational |
+| `0xe3` get state | - | count byte, then that many 4 byte fields: flags (operational, fully seeded), entropy count, pool size, write wakeup threshold, reseed seconds |
+| `0xe4` status | - | 4 byte length (at most 65536), the status text |
+| `0xe5` status JSON | - | 4 byte length, the status as JSON document (empty if it does not fit) |
+| `0xe6` add to entropy count | 4 byte bits | 4 byte status - privileged |
+| `0xe7` clear pool | - | 4 byte status - privileged |
+| `0xe8` reseed | - | 4 byte status - privileged |
+| `0xe9` set write wakeup threshold | 4 byte bits | 4 byte status - privileged |
+| `0xea` set reseed seconds | 4 byte seconds | 4 byte status - privileged |
+
+The privileged ones change the entropy accounting or the DRNGs and are only
+carried out for a peer connected with UID 0 - the same rule as for the entropy
+claim of the standard write command. Anybody else is answered `-EPERM`, and the
+connection stays usable. The status is 0 or a negative errno.
 
 ### Own consumers of the EGD interface
 

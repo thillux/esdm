@@ -305,6 +305,46 @@ the standard non\-blocking read 0x01, but by the prediction resistance DRNG.
 Prediction resistant blocking read: a request byte follows, answered like the
 standard blocking read 0x02, but by the prediction resistance DRNG \- the
 answer waits for the entropy it is made of.
+.TP
+.B 0xe2
+Read with the semantics of
+.IR /dev/urandom :
+a request byte follows, answered like 0x01 from the DRNG without waiting for
+all DRNGs to be fully seeded. Before the ESDM is operational it hands out
+nothing, so the answer is empty then.
+.TP
+.B 0xe3
+State: a count byte, followed by that many 4 byte fields \- flags (bit 0
+operational, bit 1 fully seeded), the entropy of the auxiliary pool in bits,
+its size in bits, the write wakeup threshold and the maximum reseed interval in
+seconds. Fields are only ever appended.
+.TP
+.BR 0xe4 ", " 0xe5
+Status report as text and as JSON document: a 4 byte length, at most 65536,
+followed by the report without a terminating NUL. A text report that does not
+fit is sent as far as it got, a JSON document that does not fit is sent empty.
+.PP
+The following change the entropy accounting or the DRNGs. They are carried out
+only for a peer connected with UID 0, as the server learns from the peer
+credentials of the socket \- the same rule as for the entropy claim of the
+standard write command. Each is answered with a 4 byte status, 0 or a negative
+errno, \-EPERM for any other peer, whose connection stays usable. A client
+that is gone when the command is processed still has it carried out, but not
+answered.
+.TP
+.B 0xe6
+Credit the 4 byte number of bits that follows to the auxiliary pool, capped
+at its size (RNDADDTOENTCNT).
+.TP
+.B 0xe7
+Set the entropy of the auxiliary pool to zero (RNDZAPENTCNT, RNDCLEARPOOL).
+.TP
+.B 0xe8
+Reseed the DRNGs at their next use (RNDRESEEDCRNG).
+.TP
+.BR 0xe9 ", " 0xea
+Set the write wakeup threshold in bits, respectively the maximum reseed
+interval in seconds, to the 4 byte number that follows.
 .PP
 The prediction resistant reads are generated within the budget described under
 .BR "CONNECTION LIMITS" .
