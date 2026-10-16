@@ -137,6 +137,7 @@
               ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { inherit (lpsuper) kernel; };
           };
           esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
+          esdm_cdev = lpself.callPackage ./addon/linux_esdm_cdev { };
         };
 
         # 6.1 is the first kernel version supported by ESDM.
@@ -1951,7 +1952,21 @@
             }
           )
         ) kernels
+        # One esdm_cdev module build per defined kernel, e.g. esdm_cdev_6_1 /
+        # esdm_cdev_latest, with the warnings of W=1 as errors. Against the
+        # stock kernels: the module needs no kernel patches.
+        // lib.mapAttrs' (
+          name: kernel:
+          lib.nameValuePair "esdm_cdev_${name}" (
+            pkgs.callPackage ./addon/linux_esdm_cdev {
+              inherit (pkgs) lib;
+              inherit (kernel) kernel;
+              werror = true;
+            }
+          )
+        ) stockKernels
         # The ESDM on a 32-bit system, running the meson test suite as its
+
         # check phase: size_t and long are 32 bits wide there, which none of
         # the packages above sees. The builtin backend, as the Hash DRBG and
         # the other builtin primitives are where the tree computes limits and
