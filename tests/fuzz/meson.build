@@ -260,6 +260,49 @@ rpc_server_conn_test = executable(
 
 test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
 
+# The opportunistic DTLS of the RPC connections: the client library of the test
+# against the server's accept loop and workers serving stand-in services,
+# through a relay on the sockets the client connects to - which are fixed at
+# build time, hence alone. Without DTLS built, what is left is the server
+# refusing it.
+rpc_dtls_test = executable(
+		'rpc_dtls_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, client_rpc_src,
+		  files('rpc_dtls_test.c') ],
+		include_directories: [ include_dirs_server, include_dirs_client,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_c_args,
+	)
+
+test('RPC connections with DTLS', rpc_dtls_test,
+	timeout: 120,
+	is_parallel: false)
+
+# libesdm_getrandom preloaded into a client whose DTLS handshake asks it for
+# random numbers, against rpc_dtls_test serving in a process of its own.
+if get_option('linux-getrandom').enabled()
+	rpc_dtls_getrandom_test = executable(
+			'rpc_dtls_getrandom_test',
+			[ files('rpc_dtls_getrandom_test.c') ],
+			include_directories: [ include_dirs_client,
+					       include_directories('../common') ],
+			dependencies: dependencies_client,
+		)
+
+	test('RPC connections with DTLS in libesdm_getrandom',
+		rpc_dtls_getrandom_test,
+		env: [ 'ESDM_RPC_DTLS_SERVER=' + rpc_dtls_test.full_path(),
+		       'LD_PRELOAD=' + esdm_getrandom_lib.full_path(),
+		       # See tester_getrandom_env in tests/getrandom
+		       'ASAN_OPTIONS=halt_on_error=1:abort_on_error=1' +
+				':print_summary=1:verify_asan_link_order=0' ],
+		depends: [ rpc_dtls_test ],
+		timeout: 120,
+		is_parallel: false)
+endif
+
 # Prediction resistant and seed requests flooding one worker, served by the
 # real unprivileged service and an ESDM of the test's own - in an IPC namespace
 # of its own, as the ESDM claims the fixed status segment names.
