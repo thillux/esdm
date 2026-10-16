@@ -315,6 +315,57 @@ static void test_es_ext_lib_options(void)
 	      "the usage does not mention --es_ext_lib");
 }
 
+/*
+ * The socket of the external entropy source provider, the cap of its credit
+ * and the user it may run as. The socket is only connected to by esdm_init(),
+ * so an unprivileged run accepts any path.
+ */
+static void test_es_ext_socket_options(void)
+{
+	const char *const opts[] = { "--es_ext_socket",
+				     "/nonexistent/esdm-es-ext.socket",
+				     "--es_ext_socket_entropy_rate", "0",
+				     "--es_ext_socket_uid", "1234", NULL };
+	const char *const by_name[] = { "--es_ext_socket_uid", "root", NULL };
+	const char *const empty[] = { "--es_ext_socket", "", NULL };
+	const char *const no_user[] = { "--es_ext_socket_uid",
+					"no-such-user-esdm-test", NULL };
+	const char *const bad_rate[] = { "--es_ext_socket_entropy_rate", "300",
+					 NULL };
+	struct test_run r;
+
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+#ifdef ESDM_ES_EXT
+	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+	      "the --es_ext_socket options were not accepted (output: %.300s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, by_name, NULL), 1);
+	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+	      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
+	      r.err);
+#else
+	(void)by_name;
+	CHECK(strstr(r.err, "not part of this build") != NULL,
+	      "--es_ext_socket was not refused without external ES (output: %.300s)",
+	      r.err);
+#endif
+
+	CHECK_EQ(test_run(&r, empty, NULL), 1);
+	CHECK(strstr(r.err, "must not be empty") != NULL,
+	      "an empty --es_ext_socket was not refused (output: %.300s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, no_user, NULL), 1);
+	CHECK(strstr(r.err, "uid or a user name") != NULL,
+	      "an unknown user was not refused (output: %.300s)", r.err);
+
+	CHECK_EQ(test_run(&r, bad_rate, NULL), 1);
+	CHECK(strstr(r.err, "entropy rate from 0 to 256") != NULL,
+	      "--es_ext_socket_entropy_rate 300 was not refused (output: %.300s)",
+	      r.err);
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
@@ -333,6 +384,7 @@ int main(int argc, char *argv[])
 	test_pid_file_option();
 	test_pkcs11_module_option();
 	test_es_ext_lib_options();
+	test_es_ext_socket_options();
 
 	test_run_fini();
 

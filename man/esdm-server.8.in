@@ -160,6 +160,29 @@ bits of entropy per 256 bits of data, 0 to 256, instead of the rate of the
 build (meson option
 .BR es_ext_lib_entropy_rate ,
 256 by default).
+.TP
+.BR \-\-es_ext_socket " \fIPATH\fR"
+Read the external entropy source a provider process serves on the UNIX domain
+socket
+.I PATH
+instead of the one the build was configured with (meson option
+.BR es_ext_socket_path ),
+see
+.B EXTERNAL ENTROPY SOURCES
+below.
+.TP
+.BR \-\-es_ext_socket_entropy_rate " \fIBITS\fR"
+Credit a block of the provider with at most
+.I BITS
+bits of entropy per 256 bits of data, 0 to 256 (meson option
+.BR es_ext_socket_entropy_rate ,
+256 by default).
+.TP
+.BR \-\-es_ext_socket_uid " \fIUSER\fR"
+Accept a provider running as
+.I USER
+\- a uid or a user name \- next to one running as root (meson option
+.BR es_ext_socket_peer_uid ).
 .SH EXTERNAL ENTROPY SOURCES
 Noise sources that are not part of the ESDM are written against
 .BR libesdm_es_ext (3)
@@ -178,6 +201,27 @@ Each block is credited with the entropy the plugin claims for it, but with at
 most what the configured rate allows. A plugin that fails to deliver, or claims
 more entropy than the block can hold, is credited with nothing until it
 delivers again.
+.PP
+A provider given with
+.B \-\-es_ext_socket
+is a process of its own serving the source with the provider server of
+.BR libesdm_es_ext (3),
+such as
+.BR esdm\-es\-ext\-serve (8).
+The daemon connects to it at start up and whenever the connection was lost,
+at most every 5 seconds after a failed attempt, and sends one request at a time.
+It checks the credentials of the provider on every connection: anybody who can
+create the socket file could otherwise feed the daemon with data credited as
+entropy, so only a provider running as root, or as the user given with
+.BR \-\-es_ext_socket_uid ,
+is accepted. The daemon connects with its privileges dropped once a connection
+was lost, so the socket has to let the user it runs as
+.RB ( \-\-username )
+connect. A provider that does not answer within 2 seconds, or answers what the
+protocol does not allow, is disconnected; one that is not connected, or failed,
+is credited with nothing until it delivers again. The same entropy credit
+applies as for a plugin, with the rate of
+.BR \-\-es_ext_socket_entropy_rate .
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP

@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,7 @@
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
 #include "esdm_es_extlib.h"
+#include "esdm_es_extsock.h"
 #include "esdm_es_pkcs11.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
@@ -152,6 +154,17 @@ static void usage(void)
 		"\t   --es_ext_lib_entropy_rate <BITS>\tCredit the plugin with at\n");
 	fprintf(stderr,
 		"\t\t\tmost BITS of entropy per 256 bits of data (0 to 256)\n");
+	fprintf(stderr,
+		"\t   --es_ext_socket <PATH>\tRead the external entropy source\n");
+	fprintf(stderr,
+		"\t\t\tserved by a provider on the Unix domain socket PATH\n");
+	fprintf(stderr,
+		"\t   --es_ext_socket_entropy_rate <BITS>\tCredit the provider with\n");
+	fprintf(stderr,
+		"\t\t\tat most BITS of entropy per 256 bits of data (0 to 256)\n");
+	fprintf(stderr,
+		"\t   --es_ext_socket_uid <USER>\tAccept a provider running as USER\n");
+	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
 	exit(1);
 }
 
@@ -232,6 +245,71 @@ static void set_es_ext_lib(const char *path)
 	}
 }
 
+/*
+ * The socket of the external entropy source provider, in place of the one the
+ * build names (es_ext_socket_path). It is connected to by esdm_init(), and
+ * again whenever the connection is lost.
+ */
+static void set_es_ext_socket(const char *path)
+{
+	int ret;
+
+	if (path[0] == '\0') {
+		fprintf(stderr,
+			"The external ES provider socket path must not be empty\n");
+		exit(1);
+	}
+
+	ret = esdm_es_ext_socket_set_path(path);
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"External entropy sources are not part of this build (meson option es_ext)\n");
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr,
+			"Cannot set the external ES provider socket %s: %s\n",
+			path, strerror(-ret));
+		exit(1);
+	}
+}
+
+/* The user the provider may run as next to root: a uid or a user name */
+static void set_es_ext_socket_uid(const char *arg)
+{
+	unsigned long val;
+	char *end;
+	int ret;
+
+	errno = 0;
+	val = strtoul(arg, &end, 10);
+	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
+	    val < UINT32_MAX) {
+		ret = esdm_es_ext_socket_set_peer_uid((long)val);
+	} else {
+		struct passwd *pw = getpwnam(arg);
+
+		if (!pw) {
+			fprintf(stderr,
+				"--es_ext_socket_uid takes a uid or a user name, not \"%s\"\n",
+				arg);
+			exit(1);
+		}
+		ret = esdm_es_ext_socket_set_peer_uid((long)pw->pw_uid);
+	}
+
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"External entropy sources are not part of this build (meson option es_ext)\n");
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr, "Cannot accept the uid %s: %s\n", arg,
+			strerror(-ret));
+		exit(1);
+	}
+}
+
 static void parse_opts(int argc, char *argv[])
 {
 	int c = 0;
@@ -261,6 +339,9 @@ static void parse_opts(int argc, char *argv[])
 			{ "pkcs11_module", 1, 0, 0 },
 			{ "es_ext_lib", 1, 0, 0 },
 			{ "es_ext_lib_entropy_rate", 1, 0, 0 },
+			{ "es_ext_socket", 1, 0, 0 },
+			{ "es_ext_socket_entropy_rate", 1, 0, 0 },
+			{ "es_ext_socket_uid", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -369,6 +450,21 @@ static void parse_opts(int argc, char *argv[])
 					parse_entropy_rate(
 						"--es_ext_lib_entropy_rate",
 						optarg));
+				break;
+			case 21:
+				/* es_ext_socket */
+				set_es_ext_socket(optarg);
+				break;
+			case 22:
+				/* es_ext_socket_entropy_rate */
+				esdm_config_es_ext_socket_entropy_rate_set(
+					parse_entropy_rate(
+						"--es_ext_socket_entropy_rate",
+						optarg));
+				break;
+			case 23:
+				/* es_ext_socket_uid */
+				set_es_ext_socket_uid(optarg);
 				break;
 
 			default:

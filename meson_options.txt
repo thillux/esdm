@@ -704,6 +704,38 @@ When configuring this value to 0, the plugin provides data without being
 credited to contain entropy.
 ''')
 
+option('es_ext_socket_path', type: 'string', value: '',
+       description: '''Socket of the external entropy source provider.
+
+Path of the Unix domain socket a provider process serves an external entropy
+source on - with libesdm_es_ext, e.g. esdm-es-ext-serve. The ESDM connects to
+it, and again whenever the connection is lost. esdm-server --es_ext_socket
+PATH names another one. When empty and not given on the command line, no
+provider is used.
+''')
+
+option('es_ext_socket_entropy_rate', type: 'integer', min: 0, max: 256, value: 256,
+       description: '''Entropy rate cap of the external entropy source provider.
+
+A block of data from the provider is credited with the entropy the provider
+claims for it, but with at most what this rate allows: the amount of entropy
+per 256 bits of data. With the default of 256 the claim of the provider is
+taken as it is. esdm-server --es_ext_socket_entropy_rate overrides it.
+
+When configuring this value to 0, the provider delivers data without being
+credited to contain entropy.
+''')
+
+option('es_ext_socket_peer_uid', type: 'integer', min: -1, max: 4294967294,
+       value: -1,
+       description: '''User the external entropy source provider may run as.
+
+The ESDM checks the credentials of the provider it connects to: whoever can
+create the socket file could otherwise feed it with data credited as entropy.
+A provider running as root is accepted, and one running as the uid set here;
+-1 accepts root only. esdm-server --es_ext_socket_uid overrides it.
+''')
+
 ################################################################################
 # Common Options
 ################################################################################

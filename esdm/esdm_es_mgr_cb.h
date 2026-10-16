@@ -73,6 +73,7 @@ enum esdm_external_es {
 #endif
 #ifdef ESDM_ES_EXT
 	esdm_ext_es_extlib, /* External ES: plugin library */
+	esdm_ext_es_extsock, /* External ES: provider socket */
 #endif
 	esdm_ext_es_aux, /* MUST BE LAST ES! */
 	esdm_ext_es_last /* MUST be the last entry */

@@ -41,6 +41,7 @@
 #include "esdm_es_irq.h"
 #include "esdm_es_jent.h"
 #include "esdm_es_extlib.h"
+#include "esdm_es_extsock.h"
 #include "esdm_es_jent_kernel.h"
 #include "esdm_es_krng.h"
 #include "esdm_es_mgr.h"
@@ -156,6 +157,7 @@ struct esdm_es_cb *esdm_es[] = {
 #endif
 #ifdef ESDM_ES_EXT
 	&esdm_es_extlib,
+	&esdm_es_extsock,
 #endif
 	&esdm_es_aux
 };

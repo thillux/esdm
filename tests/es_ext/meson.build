@@ -71,4 +71,21 @@ if get_option('es_ext').enabled()
 	test('External ES plugin library', es_extlib_test,
 		args: es_ext_plugin_args, depends: es_ext_plugins,
 		suite: 'es_ext')
+
+	# The socket source is compiled into the test - see the file header -
+	# against the provider server of the library serving the test plugin.
+	if get_option('esdm-es-ext').enabled()
+		es_extsock_test = executable('es_extsock_test',
+			[ esdm_ipc_ns, 'es_extsock_test.c',
+			  'es_ext_test_plugin.c' ],
+			c_args: [ '-DES_EXT_TEST_PLUGIN_STATIC' ],
+			dependencies: dependencies_server + [ dl_dep ],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			link_with: [ esdm_static_lib,
+				     esdm_es_ext_lib.get_static_lib() ],
+		)
+		test('External ES provider socket', es_extsock_test,
+			suite: 'es_ext', timeout: 60)
+	endif
 endif

@@ -316,6 +316,28 @@ void esdm_config_es_ext_lib_entropy_rate_set(uint32_t ent);
 uint32_t esdm_config_es_ext_lib_entropy_rate(void);
 
 /**
+ * @brief External ES provider configuration: set the entropy rate
+ *
+ * The rate caps the entropy the provider of the external entropy source
+ * socket (esdm-server --es_ext_socket, meson option es_ext_socket_path) is
+ * credited with: a block is credited with what the provider claims for it,
+ * but with no more than this rate allows. See libesdm_es_ext(3).
+ *
+ * NOTE: The ESDM ensures that the entropy rate cannot be set to a value larger
+ *	 than the security strength of the the applied DRNG.
+ *
+ * @param [in] ent Entropy rate in bits.
+ */
+void esdm_config_es_ext_socket_entropy_rate_set(uint32_t ent);
+
+/**
+ * @brief External ES provider configuration: get the entropy rate
+ *
+ * @return Entropy rate in bits
+ */
+uint32_t esdm_config_es_ext_socket_entropy_rate(void);
+
+/**
  * @brief DRNG Manager configuration: get maximum value without successful
  *	  reseed (number of requests)
  *
