@@ -77,6 +77,19 @@ int esdm_rpc_server_init(const char *username, const char *groupname);
 void esdm_rpc_server_fini(void);
 
 /**
+ * @brief Offer DTLS on the RPC interfaces, or refuse it
+ *
+ * With DTLS built (meson option dtls), a client asking for it with STARTDTLS -
+ * see ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h - is served encrypted by
+ * default. Refusing it serves every connection in the clear. Takes effect for
+ * the STARTDTLS requests to come; to be called before esdm_rpc_server_init()
+ * so that the DTLS is not even set up.
+ *
+ * @param [in] enable Offer DTLS (true) or refuse it (false)
+ */
+void esdm_rpc_server_set_dtls(bool enable);
+
+/**
  * @brief Remove a left-over Unix domain socket of a previous server instance
  *
  * The socket is only removed when nothing is listening on it, probed by
@@ -123,6 +136,13 @@ void esdm_rpc_server_signal_exit(void);
 void esdm_rpc_server_signal_exit_safe(void);
 
 #ifdef ESDM_FUZZING
+/**
+ * @brief Is the connection of a request encrypted with DTLS?
+ * @param [in] closure_data What the service receives with the request
+ * @return true if the request came, and its answer goes, as DTLS records
+ */
+bool esdm_rpcs_fuzz_conn_encrypted(void *closure_data);
+
 /**
  * @brief Hand one buffer to the server as if it had just been read off a client
  * 	connection

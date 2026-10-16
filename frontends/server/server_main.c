@@ -172,6 +172,10 @@ static void usage(void)
 		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
 	fprintf(stderr,
 		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
+	fprintf(stderr,
+		"\t   --no_dtls\tServe the RPC interfaces unencrypted only, refusing\n");
+	fprintf(stderr,
+		"\t\t\tthe DTLS clients ask for (offered by default where built)\n");
 	exit(1);
 }
 
@@ -377,6 +381,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "es_ext_socket_entropy_rate", 1, 0, 0 },
 			{ "es_ext_socket_uid", 1, 0, 0 },
 			{ "es_jent_kernel_name", 1, 0, 0 },
+			{ "no_dtls", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -504,6 +509,10 @@ static void parse_opts(int argc, char *argv[])
 			case 24:
 				/* es_jent_kernel_name */
 				set_es_jent_kernel_name(optarg);
+				break;
+			case 25:
+				/* no_dtls */
+				esdm_rpc_server_set_dtls(false);
 				break;
 
 			default:

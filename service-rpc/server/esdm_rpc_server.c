@@ -26,6 +26,7 @@
 #include <linux/sockios.h>
 #include <netinet/in.h>
 #include <protobuf-c/protobuf-c.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -53,6 +54,7 @@
 #include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
+#include "esdm_dtls.h"
 #include "esdm_egd_server.h"
 #include "esdm_peer_account.h"
 #include "esdm_peer_limit.h"
@@ -89,6 +91,21 @@ struct esdm_rpcs {
 	atomic_size_t max_connections;
 };
 
+/*
+ * Where a connection is on its way to DTLS, see ESDM_RPC_PROTO_STARTDTLS in
+ * esdm_rpc_protocol.h
+ */
+enum esdm_rpcs_dtls_state {
+	/* In the clear, as connected */
+	esdm_rpcs_dtls_none,
+	/* STARTDTLS accepted, the probe still to be answered in the clear */
+	esdm_rpcs_dtls_probe,
+	/* The handshake in progress */
+	esdm_rpcs_dtls_handshake,
+	/* Requests and answers as DTLS records */
+	esdm_rpcs_dtls_active,
+};
+
 struct esdm_rpcs_connection {
 	struct esdm_rpcs *proto;
 	int child_fd;
@@ -97,6 +114,18 @@ struct esdm_rpcs_connection {
 	uid_t peer_account;
 	/* Accounted in esdm_rpcs_peer_limit, as peer_account */
 	bool peer_counted;
+	/* enum esdm_rpcs_dtls_state */
+	uint8_t dtls_state;
+	/* Accounted in esdm_rpcs_dtls_limit and esdm_rpcs_worker_dtls */
+	bool dtls_counted;
+	/*
+	 * The DTLS of the connection from STARTDTLS on, NULL in the clear. What
+	 * an idle connection holds of it is the state of the TLS stack - the
+	 * request and answer pass through the buffers of the worker, see
+	 * esdm_rpcs_reqbuf, and a message of several records is collected in
+	 * a buffer only while it arrives.
+	 */
+	struct esdm_dtls *dtls;
 	uint32_t method_index;
 	uint32_t request_id;
 	struct timespec last_used;
@@ -201,6 +230,34 @@ static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
 	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 
 /*
+ * Encrypted connections of one unprivileged user, and of one worker.
+ *
+ * The state the TLS stack keeps for an idle encrypted connection is large next
+ * to the rest of one: with OpenSSL some 130 KiB of heap - of which some 70 KiB
+ * are touched -, against a few hundred bytes for a connection in the clear. So
+ * an unprivileged user could make the server hold a multiple of the memory it
+ * holds for it now, with the connections the bounds above admit. A STARTDTLS
+ * beyond these bounds is refused instead, and the connection goes on in the
+ * clear - DTLS being opportunistic, that is what a client is prepared for.
+ * The bound per user keeps one user from taking the encrypted connections of
+ * everybody else; a busy process holds one connection per node, so it admits a
+ * good number of busy processes. The bound per worker - a fourth of its
+ * connections - bounds the memory over all users, some 32 MiB per worker.
+ * Root is exempt from the first, as from the connection bound.
+ */
+#define ESDM_RPC_DTLS_CONNECTIONS_PER_UID 64
+#define ESDM_RPCS_MAX_WORKER_DTLS (ESDM_RPCS_MAX_WORKER_CONNECTIONS / 4)
+
+static struct esdm_peer_limit esdm_rpcs_dtls_limit = ESDM_PEER_LIMIT_INIT(
+	"RPC server DTLS", ESDM_RPC_DTLS_CONNECTIONS_PER_UID);
+
+/*
+ * Encrypted connections of the calling worker. A connection is set up, served
+ * and closed by the worker that accepted it, so a counter per thread suffices.
+ */
+static __thread unsigned int esdm_rpcs_worker_dtls;
+
+/*
  * Size the per-user bound of the RPC interface. To be called before the first
  * RPC worker thread starts.
  */
@@ -258,6 +315,91 @@ static atomic_bool esdm_rpc_unpriv_running = false;
 
 /* The error the thread serving the unprivileged interface gave up with. */
 static atomic_int esdm_rpc_unpriv_ret = 0;
+
+/*
+ * The DTLS of the RPC interfaces, see ESDM_RPC_PROTO_STARTDTLS in
+ * esdm_rpc_protocol.h: one context for both, holding the ephemeral key and
+ * certificate of this server process.
+ *
+ * esdm_rpc_server_init() sets it up before the privileges are dropped and
+ * before the first worker serves a connection. What the TLS stack loads for it
+ * - its configuration, its providers - is thus read with the privileges of the
+ * starting server rather than with those of the user it drops to, and a
+ * failure shows at startup rather than at the first client. Nothing of the
+ * context depends on the privileges: the key is ephemeral, and nobody verifies
+ * the certificate. The context is shared by all workers of both interfaces and
+ * kept for the lifetime of the process, as the TLS stack keeps its own state:
+ * a worker may still be serving a connection while the server shuts down.
+ *
+ * Without it - not built, switched off, or failing to set up - STARTDTLS is
+ * refused, and every connection served in the clear.
+ */
+static struct esdm_dtls_ctx *esdm_rpcs_dtls_ctx = NULL;
+static pthread_once_t esdm_rpcs_dtls_once = PTHREAD_ONCE_INIT;
+/* Is STARTDTLS accepted? See esdm_rpc_server_set_dtls() */
+static atomic_bool esdm_rpcs_dtls_enabled = true;
+
+static void esdm_rpcs_dtls_ctx_init(void)
+{
+#ifdef ESDM_DTLS
+	int ret = esdm_dtls_ctx_alloc(true, &esdm_rpcs_dtls_ctx);
+
+	if (ret) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_RPC,
+			"DTLS cannot be set up, serving the RPC interfaces unencrypted: %s\n",
+			strerror(-ret));
+	} else {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "DTLS offered on the RPC interfaces\n");
+	}
+#endif
+}
+
+/* The context to accept STARTDTLS with, NULL to refuse it */
+static struct esdm_dtls_ctx *esdm_rpcs_dtls_ctx_get(void)
+{
+	if (!atomic_load(&esdm_rpcs_dtls_enabled))
+		return NULL;
+
+	pthread_once(&esdm_rpcs_dtls_once, esdm_rpcs_dtls_ctx_init);
+
+	return esdm_rpcs_dtls_ctx;
+}
+
+void esdm_rpc_server_set_dtls(bool enable)
+{
+	atomic_store(&esdm_rpcs_dtls_enabled, enable);
+}
+
+/*
+ * Close the socket of a connection, releasing its DTLS with it: the DTLS refers
+ * to the descriptor, whose number the next accept() may hand out again. Nothing
+ * goes out on the connection for it - no closing alert, the client sees the
+ * connection closed as it does in the clear. @shut_down ends the connection for
+ * every other holder of the descriptor as well.
+ */
+static void esdm_rpcs_conn_close(struct esdm_rpcs_connection *rpc_conn,
+				 bool shut_down)
+{
+	esdm_dtls_free(rpc_conn->dtls);
+	rpc_conn->dtls = NULL;
+	rpc_conn->dtls_state = esdm_rpcs_dtls_none;
+
+	if (rpc_conn->dtls_counted) {
+		esdm_peer_limit_put(&esdm_rpcs_dtls_limit,
+				    rpc_conn->peer_account);
+		esdm_rpcs_worker_dtls--;
+		rpc_conn->dtls_counted = false;
+	}
+
+	if (rpc_conn->child_fd >= 0) {
+		if (shut_down)
+			shutdown(rpc_conn->child_fd, SHUT_RDWR);
+		close(rpc_conn->child_fd);
+		rpc_conn->child_fd = -1;
+	}
+}
 
 /* Remove a potentially left-over old Unix Domain socket. */
 void esdm_server_remove_stale_socket(const char *path, int socktype)
@@ -348,6 +490,31 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
 
+	/*
+	 * The same for an encrypted connection, whose answer may span several
+	 * records: the client reads them as they come, and one record that
+	 * does not fit means it does not read. A message cut short is no
+	 * message to the client, and the connection is of no use any more.
+	 */
+	if (rpc_conn->dtls_state == esdm_rpcs_dtls_active) {
+		errsv = -esdm_dtls_send(rpc_conn->dtls, data, len);
+		if (!errsv) {
+			esdm_logger(LOGGER_DEBUG2, LOGGER_C_ANY,
+				    "%zu bytes written encrypted\n", len);
+			return 0;
+		}
+
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Writing of data to file descriptor %d failed: %s\n",
+			rpc_conn->child_fd,
+			errsv == EAGAIN ?
+				"the client does not read its answers" :
+				strerror(errsv));
+		esdm_rpcs_conn_close(rpc_conn, false);
+		return -errsv;
+	}
+
 	do {
 		ret = write(rpc_conn->child_fd, data, len);
 	} while (ret < 0 && errno == EINTR);
@@ -363,8 +530,7 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 				"the client does not read its answers" :
 				strerror(errsv));
 
-		close(rpc_conn->child_fd);
-		rpc_conn->child_fd = -1;
+		esdm_rpcs_conn_close(rpc_conn, false);
 
 		return -errsv;
 	}
@@ -639,6 +805,74 @@ out:
 }
 
 /*
+ * Answer a STARTDTLS request, in the clear - see ESDM_RPC_PROTO_STARTDTLS in
+ * esdm_rpc_protocol.h. Accepted, the connection goes on to the probe, and to
+ * the handshake after it.
+ *
+ * The DTLS is set up before the answer goes out: the client starts the
+ * handshake as soon as it has the answer, and what it sends then is to find
+ * the DTLS there.
+ */
+static int esdm_rpcs_startdtls(struct esdm_rpcs_connection *rpc_conn,
+			       const struct esdm_rpc_proto_cs_header *header)
+{
+	struct {
+		struct esdm_rpc_proto_sc_header header;
+		uint32_t magic;
+	} __attribute__((packed)) answer;
+	struct esdm_dtls_ctx *ctx;
+	struct esdm_dtls *dtls = NULL;
+	int ret;
+
+	/* Once, in the clear, and with nothing but the header */
+	if (rpc_conn->dtls_state != esdm_rpcs_dtls_none ||
+	    header->message_length)
+		return -EINVAL;
+
+	rpc_conn->method_index = header->method_index;
+	rpc_conn->request_id = header->request_id;
+
+	ctx = esdm_rpcs_dtls_ctx_get();
+	if (!ctx || esdm_rpcs_worker_dtls >= ESDM_RPCS_MAX_WORKER_DTLS ||
+	    !esdm_peer_limit_get(&esdm_rpcs_dtls_limit, rpc_conn->peer_account))
+		goto refuse;
+
+	if (esdm_dtls_alloc(ctx, rpc_conn->child_fd, ESDM_RPC_MAX_MSG_SIZE,
+			    &dtls)) {
+		esdm_peer_limit_put(&esdm_rpcs_dtls_limit,
+				    rpc_conn->peer_account);
+		goto refuse;
+	}
+	rpc_conn->dtls_counted = true;
+	esdm_rpcs_worker_dtls++;
+
+	answer.header.status_code =
+		le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SUCCESS);
+	answer.header.method_index = le_bswap32(rpc_conn->method_index);
+	answer.header.message_length = le_bswap32(sizeof(answer.magic));
+	answer.header.request_id = le_bswap32(rpc_conn->request_id);
+	answer.magic = le_bswap32(ESDM_RPC_PROTO_STARTDTLS);
+
+	ret = esdm_rpcs_write_data(rpc_conn, (uint8_t *)&answer,
+				   sizeof(answer));
+	if (ret) {
+		/* The connection is closed, and its accounting undone */
+		esdm_dtls_free(dtls);
+		return ret;
+	}
+
+	rpc_conn->dtls = dtls;
+	rpc_conn->dtls_state = esdm_rpcs_dtls_probe;
+
+	return 0;
+
+refuse:
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Refusing DTLS on client FD %d\n", rpc_conn->child_fd);
+	return esdm_rpcs_send_failure(rpc_conn);
+}
+
+/*
  * Handle one request that was received in full into the per-worker request
  * buffer: validate its header, then unpack and dispatch it.
  */
@@ -685,6 +919,12 @@ static int esdm_rpcs_process(struct esdm_rpcs_connection *rpc_conn,
 		goto out;
 	}
 
+	/* Not a method of the service, but a step towards DTLS */
+	if (header->method_index == ESDM_RPC_PROTO_STARTDTLS) {
+		ret = esdm_rpcs_startdtls(rpc_conn, header);
+		goto out;
+	}
+
 	/*
 	 * We now have a filled buffer that has a header and received
 	 * as much data as the header defined. We also start the
@@ -700,6 +940,50 @@ out:
 	return ret;
 }
 
+static bool esdm_rpcs_handshake_begin(uint64_t *start);
+static void esdm_rpcs_handshake_end(uint64_t start);
+
+/*
+ * Go on with the DTLS handshake of a connection, as far as what the client
+ * sent allows.
+ *
+ * @return 0 when it is complete, -EAGAIN while it waits for the client - or is
+ *	   put off to the next round, see ESDM_RPCS_HANDSHAKE_BUDGET_NS -, another
+ *	   negative errno if it failed
+ */
+static int esdm_rpcs_handshake(struct esdm_rpcs_connection *rpc_conn)
+{
+	uint64_t start;
+	int ret;
+
+	/* Left in the socket, the client's message makes it ready again */
+	if (!esdm_rpcs_handshake_begin(&start))
+		return -EAGAIN;
+
+	ret = esdm_dtls_handshake(rpc_conn->dtls);
+	esdm_rpcs_handshake_end(start);
+	if (ret == -EAGAIN)
+		return -EAGAIN;
+
+	if (ret) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "DTLS handshake with client FD %d failed: %s\n",
+			    rpc_conn->child_fd, strerror(-ret));
+		return ret;
+	}
+
+	rpc_conn->dtls_state = esdm_rpcs_dtls_active;
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Client FD %d of UID %u encrypted with DTLS (%s)\n",
+		    rpc_conn->child_fd, (unsigned int)rpc_conn->peer_uid,
+		    esdm_dtls_cipher(rpc_conn->dtls));
+
+	/* Idle from here on, the handshake counts as an answer */
+	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+
+	return 0;
+}
+
 /* Read data from the RPC connection into a local buffer. */
 static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 {
@@ -709,31 +993,90 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
 
-	/*
-	 * The client uses SOCK_SEQPACKET which ensures that always the full
-	 * message is submitted in one send operation.
-	 */
-	received = read(rpc_conn->child_fd, esdm_rpcs_reqbuf,
-			sizeof(esdm_rpcs_reqbuf));
-	if (received < 0)
-		return -errno;
+	if (rpc_conn->dtls_state == esdm_rpcs_dtls_handshake) {
+		ret = esdm_rpcs_handshake(rpc_conn);
+		/*
+		 * The client sends its first request only once it has the end
+		 * of the handshake - unless the DTLS holds one already, which
+		 * the socket does not signal any more.
+		 */
+		if (ret || !esdm_dtls_pending(rpc_conn->dtls))
+			return ret;
+	}
 
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n", received);
+	do {
+		bool probe = rpc_conn->dtls_state == esdm_rpcs_dtls_probe;
 
-	ret = esdm_rpcs_process(rpc_conn, received);
+		if (rpc_conn->dtls_state == esdm_rpcs_dtls_active) {
+			/*
+			 * A request spanning several records is not complete
+			 * before its last one: no request yet, and no activity
+			 * either - the idle timeout bounds how long the parts
+			 * received so far are kept.
+			 */
+			received =
+				esdm_dtls_recv(rpc_conn->dtls, esdm_rpcs_reqbuf,
+					       sizeof(esdm_rpcs_reqbuf));
+			if (received < 0) {
+				if (received != -EAGAIN)
+					esdm_logger(
+						LOGGER_DEBUG, LOGGER_C_RPC,
+						"Receiving on client FD %d failed: %s\n",
+						rpc_conn->child_fd,
+						strerror((int)-received));
+				return (int)received;
+			}
+		} else {
+			/*
+			 * The client uses SOCK_SEQPACKET which ensures that
+			 * always the full message is submitted in one send
+			 * operation.
+			 */
+			received = read(rpc_conn->child_fd, esdm_rpcs_reqbuf,
+					sizeof(esdm_rpcs_reqbuf));
+			if (received < 0)
+				return -errno;
+		}
 
-	/*
-	 * Idle from the answer on, not from the request: a call that takes
-	 * longer than the idle timeout - a privileged one such as the self
-	 * test - would otherwise have its connection reaped right after its
-	 * answer, failing the next request the client sends on it.
-	 */
-	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n",
+			    received);
+
+		ret = esdm_rpcs_process(rpc_conn, received);
+
+		/* The probe is answered in the clear, the handshake follows */
+		if (!ret && probe)
+			rpc_conn->dtls_state = esdm_rpcs_dtls_handshake;
+
+		/*
+		 * Idle from the answer on, not from the request: a call that
+		 * takes longer than the idle timeout - a privileged one such as
+		 * the self test - would otherwise have its connection reaped
+		 * right after its answer, failing the next request the client
+		 * sends on it.
+		 */
+		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+
+		/*
+		 * A request the DTLS read off the socket already is not
+		 * signalled by it any more. A client sends one at a time and
+		 * reads its answer first, so this is a client not following
+		 * the protocol - which the answers it does not read stop.
+		 */
+	} while (!ret && rpc_conn->dtls_state == esdm_rpcs_dtls_active &&
+		 esdm_dtls_pending(rpc_conn->dtls));
 
 	return ret;
 }
 
 #ifdef ESDM_FUZZING
+/* Documented with its declaration in esdm_rpc_server.h */
+bool esdm_rpcs_fuzz_conn_encrypted(void *closure_data)
+{
+	const struct esdm_rpcs_connection *rpc_conn = closure_data;
+
+	return rpc_conn && rpc_conn->dtls_state == esdm_rpcs_dtls_active;
+}
+
 /* Documented with its declaration in esdm_rpc_server.h */
 int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 			   const uint8_t *data, size_t len, int out_fd)
@@ -770,8 +1113,8 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 
 	ret = esdm_rpcs_process(&rpc_conn, (ssize_t)len);
 
-	if (rpc_conn.child_fd >= 0)
-		close(rpc_conn.child_fd);
+	/* Along with whatever a STARTDTLS request set up */
+	esdm_rpcs_conn_close(&rpc_conn, false);
 
 	return ret;
 }
@@ -781,11 +1124,7 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 {
 	if (!rpc_conn)
 		return;
-	if (rpc_conn->child_fd >= 0) {
-		shutdown(rpc_conn->child_fd, SHUT_RDWR);
-		close(rpc_conn->child_fd);
-		rpc_conn->child_fd = -1;
-	}
+	esdm_rpcs_conn_close(rpc_conn, true);
 	if (rpc_conn->peer_counted)
 		esdm_peer_limit_put(&esdm_rpcs_peer_limit,
 				    rpc_conn->peer_account);
@@ -821,13 +1160,39 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 #define ESDM_RPCS_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
 
 /*
- * Time this worker thread spent in such calls in the current round of its
- * event loop. Only bounded inside a worker's event loop: a request handed to
- * the service any other way - the fuzz harnesses do - is not part of a round.
+ * Time a worker may spend per round of its event loop on DTLS handshakes, see
+ * esdm_rpcs_handshake_begin().
+ *
+ * A handshake costs the server an ECDH key generation, an ECDSA signature and
+ * an ECDH key agreement, which is what a few hundred requests in the clear
+ * cost. The clients reconnect once a connection was idle for half of
+ * ESDM_RPC_IDLE_TIMEOUT_USEC, and every new connection does a handshake: a
+ * burst of them - or a client opening connections for nothing but their
+ * handshakes - would otherwise hold up the requests of every other client of
+ * the worker for as long. Beyond this time, a step of a handshake is put off
+ * to the next round. Its message is left in the socket, which makes the
+ * connection ready again at once, so the step is taken in the next round, after
+ * the requests of the other connections.
+ *
+ * A bound of its own rather than a share of ESDM_RPCS_ROUND_BUDGET_NS: a
+ * handshake put off costs its client a moment, whereas a prediction resistant
+ * or seed request turned away for its budget is retried by the client only
+ * after a pause - handshakes would push those out where they did not before.
+ * The first step of a round is always taken, so handshakes make progress
+ * whatever they cost.
+ */
+#define ESDM_RPCS_HANDSHAKE_BUDGET_NS (10ULL * 1000 * 1000)
+
+/*
+ * Time this worker thread spent in such calls and in handshakes in the current
+ * round of its event loop. Only bounded inside a worker's event loop: a request
+ * handed to the service any other way - the fuzz harnesses do - is not part of
+ * a round.
  */
 static __thread struct {
 	bool in_round;
 	uint64_t spent_ns;
+	uint64_t handshake_ns;
 } esdm_rpcs_round;
 
 static uint64_t esdm_rpcs_now_ns(void)
@@ -844,6 +1209,7 @@ static void esdm_rpcs_round_start(void)
 {
 	esdm_rpcs_round.in_round = true;
 	esdm_rpcs_round.spent_ns = 0;
+	esdm_rpcs_round.handshake_ns = 0;
 }
 
 /*
@@ -871,6 +1237,28 @@ static bool esdm_rpcs_expensive_begin(const char *what, uint64_t *start)
 static void esdm_rpcs_expensive_end(uint64_t start)
 {
 	esdm_rpcs_round.spent_ns += esdm_rpcs_now_ns() - start;
+}
+
+/*
+ * May the calling worker take a step of a DTLS handshake in this round, see
+ * ESDM_RPCS_HANDSHAKE_BUDGET_NS? If so, @start receives the time it starts, to
+ * be handed to esdm_rpcs_handshake_end().
+ */
+static bool esdm_rpcs_handshake_begin(uint64_t *start)
+{
+	if (esdm_rpcs_round.in_round &&
+	    esdm_rpcs_round.handshake_ns >= ESDM_RPCS_HANDSHAKE_BUDGET_NS)
+		return false;
+
+	*start = esdm_rpcs_now_ns();
+
+	return true;
+}
+
+/* Charge a step started with esdm_rpcs_handshake_begin() to the round. */
+static void esdm_rpcs_handshake_end(uint64_t start)
+{
+	esdm_rpcs_round.handshake_ns += esdm_rpcs_now_ns() - start;
 }
 
 ssize_t esdm_rpcs_get_random_bytes_pr(uint8_t *buf, size_t buflen)
@@ -929,8 +1317,16 @@ esdm_rpcs_conn_state(const struct esdm_rpcs_connection *rpc_conn)
 {
 	int inq = 0, outq = 0;
 
-	/* In doubt, the client is further into the call */
-	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) || inq > 0)
+	/*
+	 * In doubt, the client is further into the call. A request read off
+	 * the socket by the DTLS already is one not read yet as well. A
+	 * connection in the middle of its handshake is idle while the server
+	 * waits for the client, and closing it ends the handshake: the client
+	 * goes on in the clear on its next connection then, see
+	 * ESDM_RPC_PROTO_STARTDTLS.
+	 */
+	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) || inq > 0 ||
+	    (rpc_conn->dtls && esdm_dtls_pending(rpc_conn->dtls)))
 		return esdm_rpcs_conn_requested;
 	if (ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq) || outq > 0)
 		return esdm_rpcs_conn_answered;
@@ -2146,6 +2542,12 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 	CKINT(esdm_init());
 
 	esdm_rpcs_peer_limit_init();
+
+	/*
+	 * The DTLS of the RPC interfaces, with the privileges still held and
+	 * before any of their threads starts - see esdm_rpcs_dtls_ctx.
+	 */
+	esdm_rpcs_dtls_ctx_get();
 
 	/* Initialize test pertubation support */
 	CKINT(esdm_test_shm_status_init());
