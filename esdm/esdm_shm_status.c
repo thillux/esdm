@@ -380,15 +380,33 @@ static void esdm_shm_status_delete_shm(void)
 	esdm_shmid = -1;
 }
 
+/*
+ * Attempts at getting a segment of our own under the well-known key before
+ * giving up - see esdm_shm_status_create_shm(). One finds a segment of
+ * another uid and removes it, the next one creates ours: a few more leave room
+ * for a stale segment of the wrong size and for creations that lost a race.
+ */
+#define ESDM_SHM_STATUS_CREATE_TRIES 8
+
+/*
+ * Whether we created the segment @shmid. The creator is the owner that cannot
+ * be changed: IPC_SET lets the creator hand the segment's uid to anybody,
+ * root included, while it keeps the access of a creator.
+ */
+static bool esdm_shm_status_shm_owned(int shmid)
+{
+	struct shmid_ds buf;
+
+	return !shmctl(shmid, IPC_STAT, &buf) && buf.shm_perm.cuid == geteuid();
+}
+
 static int esdm_shm_status_create_shm(void)
 {
+	const int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+	unsigned int tries;
 	int errsv;
 	void *tmp;
 	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
-
-	esdm_shmid = shmget(key, sizeof(struct esdm_shm_status),
-			    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-	errsv = errno;
 
 	/*
 	 * The status segment uses a well-known ftok() key, so any other local
@@ -399,56 +417,80 @@ static int esdm_shm_status_create_shm(void)
 	 * started unprivileged) rather than a hardcoded 0: a segment created by
 	 * a previous instance of this server has our uid and is kept, while a
 	 * segment planted by a different uid is evicted and recreated.
+	 *
+	 * The eviction frees the key for everybody, not just for us: a user
+	 * creating the segment in a loop gets it back before our creation
+	 * runs. So the segment is only ever created with IPC_EXCL, which
+	 * leaves a segment that came into being in between as it is: that one
+	 * goes through the ownership check again, as does the semaphore in
+	 * esdm_shm_status_create_sem(). A user that wins the race every time
+	 * makes the creation fail after ESDM_SHM_STATUS_CREATE_TRIES attempts -
+	 * the server does not start rather than publish into that user's
+	 * segment.
 	 */
-	if (esdm_shmid >= 0) {
-		struct shmid_ds buf;
+	for (tries = 0;; tries++) {
+		if (tries >= ESDM_SHM_STATUS_CREATE_TRIES) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"ESDM shared memory segment creation failed: segment keeps being created by a different uid\n");
+			return -EEXIST;
+		}
 
-		if (shmctl(esdm_shmid, IPC_STAT, &buf) < 0 ||
-		    buf.shm_perm.cuid != geteuid()) {
+		esdm_shmid = shmget(key, sizeof(struct esdm_shm_status), mode);
+		if (esdm_shmid >= 0) {
+			if (esdm_shm_status_shm_owned(esdm_shmid))
+				break;
+
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_SERVER,
 				"ESDM status shared memory segment owned by a different uid - removing and recreating\n");
-			shmctl(esdm_shmid, IPC_RMID, NULL);
+			/* One we cannot remove is there to stay */
+			if (shmctl(esdm_shmid, IPC_RMID, NULL) < 0 &&
+			    errno != EINVAL && errno != EIDRM) {
+				errsv = errno;
+				goto err;
+			}
 			esdm_shmid = -1;
-			errsv = ENOENT;
+			continue;
 		}
-	}
+		errsv = errno;
 
-	/* If we received EINVAL, the memory is too small, force a deletion. */
-	if (esdm_shmid < 0 && errsv == EINVAL) {
-		/* Try to get it with smallest size possible. */
-		esdm_shmid =
-			shmget(key, 1, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-		if (esdm_shmid >= 0) {
+		/* EINVAL: the memory is too small, force a deletion. */
+		if (errsv == EINVAL) {
+			/* Try to get it with smallest size possible. */
+			esdm_shmid = shmget(key, 1, mode);
+			if (esdm_shmid < 0)
+				continue;
+
 			if (shmctl(esdm_shmid, IPC_RMID, NULL) < 0) {
+				errsv = errno;
+				esdm_shmid = -1;
 				esdm_logger(
 					LOGGER_ERR, LOGGER_C_SERVER,
 					"ESDM shared memory segment cannot be deleted: %s\n",
-					strerror(errno));
-			} else {
-				esdm_logger(
-					LOGGER_DEBUG, LOGGER_C_SERVER,
-					"ESDM shared memory segment deleted\n");
-
-				/* Create SHM with the next code block. */
-				esdm_shmid = -1;
+					strerror(errsv));
+				return -errsv;
 			}
-		}
-	}
 
-	/* Create the SHM segment. */
-	if (esdm_shmid < 0) {
-		esdm_shmid = shmget(key, sizeof(struct esdm_shm_status),
-				    IPC_CREAT | S_IRUSR | S_IWUSR | S_IRGRP |
-					    S_IROTH);
-		if (esdm_shmid < 0) {
-			errsv = errno;
-			esdm_logger(
-				LOGGER_ERR, LOGGER_C_ANY,
-				"ESDM shared memory segment creation failed: %s\n",
-				strerror(errsv));
-			return -errsv;
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+				    "ESDM shared memory segment deleted\n");
+			esdm_shmid = -1;
+			continue;
 		}
+
+		if (errsv != ENOENT)
+			goto err;
+
+		/* Create the SHM segment. */
+		esdm_shmid = shmget(key, sizeof(struct esdm_shm_status),
+				    IPC_CREAT | IPC_EXCL | mode);
+		if (esdm_shmid >= 0)
+			break;
+
+		/* Somebody was faster - check whose segment it is */
+		errsv = errno;
+		if (errsv != EEXIST)
+			goto err;
 	}
 
 	tmp = shmat(esdm_shmid, NULL, 0);
@@ -462,6 +504,22 @@ static int esdm_shm_status_create_shm(void)
 		return -errsv;
 	}
 	esdm_shm_status = tmp;
+
+	/*
+	 * The segment attached is the one checked above - an identifier names
+	 * one segment, and one removed and created anew under the key gets
+	 * another identifier. Its creator is checked once more all the same,
+	 * now that nothing can replace it any more: nothing is published into
+	 * a segment that is not ours.
+	 */
+	if (!esdm_shm_status_shm_owned(esdm_shmid)) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"ESDM shared memory segment attached is owned by a different uid\n");
+		esdm_shm_status_delete_shm();
+		return -EPERM;
+	}
+
 	/*
 	 * Mark the segment not-yet-ready until esdm_shm_status_init() has
 	 * populated info/infolen/unpriv_threads. Readers gate on
@@ -476,6 +534,13 @@ static int esdm_shm_status_create_shm(void)
 		    "ESDM shared memory segment initialized\n");
 
 	return 0;
+
+err:
+	esdm_shmid = -1;
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+		    "ESDM shared memory segment creation failed: %s\n",
+		    strerror(errsv));
+	return -errsv;
 }
 
 int esdm_shm_status_init(void)

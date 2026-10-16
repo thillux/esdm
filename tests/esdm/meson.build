@@ -61,6 +61,15 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	# Root only: a second uid plays the user racing for the status segment
+	esdm_shm_status_owner_test = executable(
+		'esdm_shm_status_owner_test',
+		[ esdm_ipc_ns, 'esdm_shm_status_owner_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_version_test = executable(
 		'esdm_version_test',
 		[ esdm_ipc_ns, 'esdm_version_test.c' ],
@@ -368,6 +377,7 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
+	test('ESDM status segment of another user', esdm_shm_status_owner_test)
 	# Both draw some 16 MiB in requests of up to 1 MiB. With the reseeding
 	# caps of an sp80090c, fips140 or ais2031_drg4 build, the DRNG reseeds
 	# every 12 KiB, and each reseed waits for a synchronous Jitter RNG
