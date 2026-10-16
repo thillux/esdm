@@ -67,7 +67,11 @@ esdm_ebpf_health_ok(const struct esdm_ebpf_percpu_state *state)
 	return !esdm_ebpf_cfg.health_enabled || state->startup_done;
 }
 
-/* SP800-90B startup test progress: one APT window completed */
+/*
+ * SP800-90B startup test progress: one APT window completed. The test
+ * completes on the window that takes the count from one to zero and on no
+ * other - a count already at zero stays there, it does not wrap around.
+ */
 static __always_inline void
 esdm_ebpf_sp80090b_startup(struct esdm_ebpf_percpu_state *state)
 {
@@ -120,6 +124,16 @@ esdm_ebpf_health_invalidate(struct esdm_ebpf_percpu_state *state)
  * The failure is recorded in the per-CPU state, from which user space picks it
  * up and invalidates the collected entropy, and in the health epoch, which
  * invalidates the collected events still on their way to user space.
+ *
+ * The RCT and APT counters are left running: the permanent cutoffs count on
+ * the very same counters, and resetting them at the intermittent cutoff would
+ * leave the permanent one unreachable. So the APT window the failure fell into
+ * goes on to its end, and its close must not count as a passed startup block -
+ * it holds the failure. One block more than a startup takes is due therefore,
+ * the first of which that window consumes: the new startup test is the
+ * ESDM_EBPF_STARTUP_BLOCKS full windows after it. A failure the RCT reports on
+ * the very event that closed a window is one window early in that regard and
+ * costs a window more, which errs on the safe side.
  */
 static __always_inline void
 esdm_ebpf_sp80090b_failure(struct esdm_ebpf_percpu_state *state, __u32 test)
@@ -127,7 +141,7 @@ esdm_ebpf_sp80090b_failure(struct esdm_ebpf_percpu_state *state, __u32 test)
 	esdm_ebpf_health_invalidate(state);
 	state->health_failures++;
 	state->health_test = test;
-	state->startup_blocks = ESDM_EBPF_STARTUP_BLOCKS;
+	state->startup_blocks = ESDM_EBPF_STARTUP_BLOCKS + 1;
 	state->startup_done = 0;
 }
 

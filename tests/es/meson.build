@@ -297,6 +297,18 @@ if get_option('es_pkcs11').enabled()
 	endif
 endif
 
+# The health tests the eBPF programs run are plain C, which the test compiles
+# in - see the file header. It needs neither libbpf nor eBPF support, so it is
+# built whether or not an eBPF entropy source is.
+es_ebpf_health_startup_tester = executable(
+	'es_ebpf_health_startup_tester',
+	'es_ebpf_health_startup_test.c',
+	include_directories: [ include_dirs_server,
+			       include_directories('../common') ],
+)
+
+test('ES eBPF health startup after a failure', es_ebpf_health_startup_tester)
+
 if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 	es_ebpf_health_tester = executable(
 		'es_ebpf_health_tester',
