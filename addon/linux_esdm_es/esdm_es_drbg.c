@@ -181,6 +181,25 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	if (requested_bits > ESDM_DRNG_INIT_SEED_SIZE_BITS)
 		return;
 
+	/*
+	 * Each block detects a reset between its own collection and release,
+	 * but one request spans several blocks: a reset between two of them
+	 * leaves earlier blocks derived from invalidated events. Check the
+	 * generation across the whole request, too.
+	 *
+	 * Take it before the startup test checks here and in
+	 * esdm_es_drbg_avail_entropy(): a health test failure re-arms the
+	 * startup test with a fully ordered atomic_xchg() before its reset
+	 * increments the generation under the ring lock. A generation read
+	 * after that increment is ordered by the lock after the re-arming, so
+	 * the checks below see the startup test running again. A generation
+	 * read before it differs from the one read at the end. Taken after
+	 * the checks, a failure in between would go unnoticed: the request
+	 * would be served from events collected after the failure only, while
+	 * the startup test still runs.
+	 */
+	gen = esdm_es_ring_gen(drbg->ring);
+
 	/* Only deliver entropy when SP800-90B self test is completed */
 	if (!esdm_sp80090b_startup_complete_es(drbg->es)) {
 		return;
@@ -198,14 +217,6 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 		    full_blocks * esdm_compress_osr()) {
 		return;
 	}
-
-	/*
-	 * Each block detects a reset between its own collection and release,
-	 * but one request spans several blocks: a reset between two of them
-	 * leaves earlier blocks derived from invalidated events. Check the
-	 * generation across the whole request, too.
-	 */
-	gen = esdm_es_ring_gen(drbg->ring);
 
 	done = 0;
 	while (done < requested_bits) {
