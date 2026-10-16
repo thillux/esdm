@@ -1,4 +1,4 @@
-.TH ESDM\-SERVER 8 "2026-10-09" "ESDM @VERSION@" "ESDM Manual"
+.TH ESDM\-SERVER 8 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 esdm\-server \- Entropy Source and DRNG Manager daemon
 .SH SYNOPSIS
@@ -197,6 +197,13 @@ configured with (meson option
 by default): e.g. that of a jitterentropy kernel module registering its RNG
 under another name. Refused by a build without the source (meson option
 .BR es_jent_kernel ).
+.TP
+.B \-\-no_dtls
+Serve the RPC interfaces in the clear only: a client asking for DTLS is
+refused, and goes on unencrypted on the same connection. Without DTLS in the
+build, that is what the daemon does anyway. See
+.B ENCRYPTION
+below.
 .SH EXTERNAL ENTROPY SOURCES
 Noise sources that are not part of the ESDM are written against
 .BR libesdm_es_ext (3)
@@ -256,6 +263,36 @@ asks the provider to encrypt the connection with DTLS, and uses it unencrypted
 if the provider cannot; the status of the source says which. The DTLS is
 unauthenticated \- the credentials of the provider remain what it is trusted
 for \- and keeps the data credited as entropy from being read off the channel.
+.SH ENCRYPTION
+A daemon built with DTLS (meson option
+.BR dtls )
+offers to encrypt its RPC connections, on both interfaces, unless
+.B \-\-no_dtls
+is given.
+.BR libesdm_rpc_client (3)
+of such a build asks for it on every new connection, with a STARTDTLS request
+in the clear, and the DTLS 1.2 handshake follows when the daemon agrees. The
+DTLS is opportunistic: a client not asking for it, such as one of ESDM 1.2.3
+or before, is served in the clear as before, and a client whose daemon does not
+agree \- or does not know STARTDTLS, as ESDM 1.2.3 and before \- goes on in the
+clear. The DTLS is unauthenticated as well: the daemon presents an ephemeral
+self\-signed certificate the client does not verify, and what it trusts a
+client for are its credentials on the UNIX domain socket, as without DTLS. It
+keeps the random numbers and the data the clients contribute from being read
+off the connections by whoever can observe them.
+.PP
+The DTLS context with its ephemeral key is set up at start up, before the
+privileges are dropped; should that fail, the daemon logs it and serves in the
+clear. A handshake costs the daemon a fraction of a millisecond, so a server
+thread spends at most 10 ms per round of its event loop on handshakes and goes
+on with the others in its next round, after the requests of the other
+connections. An idle encrypted connection holds some 130 KiB of memory of the
+TLS stack, against a few hundred bytes for one in the clear: an unprivileged
+user is agreed to DTLS on at most 64 connections at a time, and a server thread
+on at most 256; a client beyond is refused DTLS and served in the clear.
+Processes running as root are exempt from the bound per user. With debug
+logging, the daemon logs every connection switching to DTLS with its cipher
+suite.
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP
@@ -331,6 +368,10 @@ A worker thread spends at most 25 ms per round of its event loop on generating
 prediction resistant data, one generation per connection, so that the clients
 of the prediction resistant socket cannot hold up the others of that thread;
 a request beyond that waits for the next round, which follows at once.
+.PP
+With DTLS, an unprivileged user is served encrypted on at most 64 of these
+connections at a time; see
+.BR ENCRYPTION .
 .PP
 A connection beyond the limit of its user is accepted and closed at once. The
 daemon logs a warning when a user reaches its limit, and again only after the

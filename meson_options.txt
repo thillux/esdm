@@ -1091,7 +1091,9 @@ option('dtls', type: 'feature', value: 'disabled',
 The RPC connections between the ESDM server and its clients, and the channel
 between the ESDM and an external entropy source provider, are encrypted with
 DTLS 1.2 where both ends support it: the client asks for it after connecting
-and goes on unencrypted if the server does not. The DTLS is unauthenticated -
+and goes on unencrypted if the server does not - a server of ESDM 1.2.3 or
+before, one built without this option, or one started with --no_dtls. A server
+serves a client not asking for it unencrypted. The DTLS is unauthenticated -
 the credentials of the peer on the Unix domain socket remain what it is trusted
 for - and keeps random numbers and seed material from being read off the
 connection.

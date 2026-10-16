@@ -1,4 +1,4 @@
-.TH LIBESDM_RPC_CLIENT 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_RPC_CLIENT 3 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_rpc_client \- client library for the ESDM server RPC interface
 .SH SYNOPSIS
@@ -80,6 +80,44 @@ the application tell its own concurrent requests apart. The plain form is the
 .BR _int ()
 form with a NULL
 .IR int_data .
+.SS Encryption
+A library built with DTLS (meson option
+.BR dtls )
+asks the server to encrypt every new connection with DTLS 1.2, with a STARTDTLS
+request in the clear, and does the handshake when the server agrees. All
+requests and answers then pass encrypted. The DTLS is opportunistic: a server
+that does not agree \- one started with
+.BR \-\-no_dtls ,
+one built without DTLS, or one of ESDM 1.2.3 or before, which does not know the
+request \- is used in the clear, on the same connection or on a new one, without
+the call failing or waiting for it; a connection whose server did not agree
+does not ask again for a minute. Should the handshake fail, the connection is
+used in the clear as well. It is unauthenticated, as described in
+.BR esdm\-server (8).
+With debug logging, every connection is logged with whether it is encrypted.
+.PP
+A new connection costs the handshake, a fraction of a millisecond, and the first
+one of a process a few milliseconds more to set up the TLS stack. As the server
+closes idle connections and the library reconnects after half of that time,
+this cost comes once per call after a second of idleness at the most.
+.PP
+The TLS stack takes random numbers from the operating system during the
+handshake. In a process whose
+.BR getrandom (2)
+or
+.BR getentropy (3)
+is served by this library \- one preloading
+.BR libesdm_getrandom ,
+for instance \- that is a call of this library made while it is in the middle of
+setting up the connection. Such a call fails at once with
+.BR \-EDEADLK ,
+which libesdm_getrandom answers from the kernel, rather than waiting for the
+connection it is called for.
+.PP
+A child created with
+.BR fork (2)
+does not use the connections of its parent, encrypted or not: it closes them in
+its process, leaves the connection of the parent alone, and connects anew.
 .SS Obtaining random data
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes(uint8_t *" buf ", size_t " buflen ");"
@@ -257,6 +295,10 @@ nor the caller should repeat it.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
+.B \-EDEADLK
+means the call was made from inside the DTLS of a connection of the library,
+see
+.BR Encryption .
 .B \-EMSGSIZE
 means the request does not fit into one message of just under 64 KiB, which
 limits the entropy buffer of
