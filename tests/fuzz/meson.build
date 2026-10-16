@@ -260,6 +260,23 @@ rpc_server_conn_test = executable(
 
 test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
 
+# Prediction resistant requests flooding one worker, served by the real
+# unprivileged service and an ESDM of the test's own - in an IPC namespace of
+# its own, as the ESDM claims the fixed status segment names.
+rpc_server_pr_budget_test = executable(
+		'rpc_server_pr_budget_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('../test_ipc_ns.c'),
+		  files('rpc_server_pr_budget_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_c_args,
+	)
+
+test('RPC server prediction resistance budget', rpc_server_pr_budget_test,
+	timeout: 120)
+
 foreach fuzz_target : fuzz_targets
 	target_c_args = fuzz_c_args + fuzz_target.get('c_args', [ ])
 

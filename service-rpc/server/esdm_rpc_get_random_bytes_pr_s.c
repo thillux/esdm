@@ -59,8 +59,11 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 		 */
 		len = min_size(request->len, ESDM_RPC_MAX_PR_REQUEST_SIZE);
 
-		response.ret =
-			(int)esdm_get_random_bytes_pr_noblock(rndval, len);
+		/*
+		 * Within the worker's share of the PR DRNG - each generation
+		 * costs reseeds, and the worker's other clients wait for them.
+		 */
+		response.ret = (int)esdm_rpcs_get_random_bytes_pr(rndval, len);
 
 		if (response.ret > 0) {
 			esdm_test_shm_status_add_rpc_server_written(

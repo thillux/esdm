@@ -784,6 +784,73 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 	free(rpc_conn);
 }
 
+/*
+ * Time a worker may spend per round of its event loop generating prediction
+ * resistant bytes, see esdm_rpcs_get_random_bytes_pr().
+ *
+ * A worker serves the requests of up to ESDM_RPCS_MAX_EVENTS ready connections
+ * per round, one after the other. A prediction resistant request of at most
+ * ESDM_RPC_MAX_PR_REQUEST_SIZE bytes costs a full reseed each - some 6 ms with
+ * the Jitter RNG as the only entropy source, more with slower sources. Unbound,
+ * a client spreading such requests over a few hundred connections holds up
+ * every other client of that worker for seconds per round. The prediction
+ * resistant DRNG serves one caller at a time anyway (esdm_pr_lock), so the
+ * bound costs no throughput of the DRNG, only how long a worker may be tied
+ * to it at a stretch.
+ *
+ * A time rather than a number of requests, as the cost of one depends on the
+ * entropy sources. The first request of a round is always served, so even a
+ * generation longer than this makes progress.
+ */
+#define ESDM_RPCS_PR_BUDGET_NS (25ULL * 1000 * 1000)
+
+/*
+ * Time this worker thread spent in prediction resistant generations in the
+ * current round of its event loop. Only bounded inside a worker's event loop:
+ * a request handed to the service any other way - the fuzz harnesses do - is
+ * not part of a round.
+ */
+static __thread struct {
+	bool in_round;
+	uint64_t spent_ns;
+} esdm_rpcs_pr_round;
+
+static uint64_t esdm_rpcs_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* A new round of this worker's event loop begins. */
+static void esdm_rpcs_pr_round_start(void)
+{
+	esdm_rpcs_pr_round.in_round = true;
+	esdm_rpcs_pr_round.spent_ns = 0;
+}
+
+ssize_t esdm_rpcs_get_random_bytes_pr(uint8_t *buf, size_t buflen)
+{
+	uint64_t start;
+	ssize_t ret;
+
+	if (esdm_rpcs_pr_round.in_round &&
+	    esdm_rpcs_pr_round.spent_ns >= ESDM_RPCS_PR_BUDGET_NS) {
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_RPC,
+			"Prediction resistant generation budget of this round used up - client to retry\n");
+		return -EAGAIN;
+	}
+
+	start = esdm_rpcs_now_ns();
+	ret = esdm_get_random_bytes_pr_noblock(buf, buflen);
+	esdm_rpcs_pr_round.spent_ns += esdm_rpcs_now_ns() - start;
+
+	return ret;
+}
+
 static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 {
 	if (curr == NULL || timeout == NULL)
@@ -1100,6 +1167,9 @@ static int esdm_rpcs_handler(void *args)
 				    "epoll_wait failed: %s\n", strerror(-ret));
 			goto out;
 		}
+
+		/* The events below are this round, see ESDM_RPCS_PR_BUDGET_NS */
+		esdm_rpcs_pr_round_start();
 
 		bool do_cleanup = false;
 
