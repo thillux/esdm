@@ -33,6 +33,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "esdm_es_ext.h"
 #include "memset_secure.h"
@@ -42,6 +43,11 @@
  * a status beyond is no errno, and negating INT32_MIN is undefined.
  */
 #define ESDM_ES_EXT_PROTO_MAX_ERRNO 4095
+
+/* A status fits where the data does: the buffers of both are the same */
+#if ESDM_ES_EXT_STATUS_MAX > ESDM_ES_EXT_PROTO_MAX_DATA
+#error "A status has to fit into the response buffer"
+#endif
 
 static inline void esdm_es_ext_put_le16(uint8_t *p, uint16_t v)
 {
@@ -73,13 +79,17 @@ static inline bool esdm_es_ext_proto_type_valid(uint16_t type)
 {
 	return type == ESDM_ES_EXT_PROTO_GET_ENTROPY ||
 	       type == ESDM_ES_EXT_PROTO_SELFTEST ||
-	       type == ESDM_ES_EXT_PROTO_STARTDTLS;
+	       type == ESDM_ES_EXT_PROTO_STARTDTLS ||
+	       type == ESDM_ES_EXT_PROTO_STATUS;
 }
 
 /* Is @length what a request of @type may ask for? */
 static inline bool esdm_es_ext_proto_length_valid(uint16_t type,
 						  uint32_t length)
 {
+	if (type == ESDM_ES_EXT_PROTO_STATUS)
+		return length >= 1 && length <= ESDM_ES_EXT_STATUS_MAX;
+
 	if (type != ESDM_ES_EXT_PROTO_GET_ENTROPY)
 		return length == 0;
 
@@ -118,10 +128,18 @@ static inline int esdm_es_ext_proto_req_unpack(const uint8_t *in, size_t len,
 	return 0;
 }
 
+/* Does a response of @type with @status carry data? */
+static inline bool esdm_es_ext_proto_rsp_has_data(uint16_t type, int32_t status)
+{
+	return !status && (type == ESDM_ES_EXT_PROTO_GET_ENTROPY ||
+			   type == ESDM_ES_EXT_PROTO_STATUS);
+}
+
 /*
  * Encode a response into @out, which has room for ESDM_ES_EXT_PROTO_RSP_LEN +
  * ESDM_ES_EXT_PROTO_MAX_DATA bytes. @data of @datalen bytes is appended for a
- * GET_ENTROPY answered with @status 0 only.
+ * GET_ENTROPY or a STATUS answered with @status 0 only - for a STATUS, the JSON
+ * text without its NUL. @entropy_bits is sent for a GET_ENTROPY only.
  *
  * @return the size of the message
  */
@@ -135,12 +153,14 @@ static inline size_t esdm_es_ext_proto_rsp_pack(uint8_t *out, uint16_t type,
 	esdm_es_ext_put_le16(out + 4, ESDM_ES_EXT_PROTO_VERSION);
 	esdm_es_ext_put_le16(out + 6, type);
 	esdm_es_ext_put_le32(out + 8, (uint32_t)status);
-	if (status || type != ESDM_ES_EXT_PROTO_GET_ENTROPY) {
+	if (!esdm_es_ext_proto_rsp_has_data(type, status)) {
 		esdm_es_ext_put_le32(out + 12, 0);
 		return ESDM_ES_EXT_PROTO_RSP_LEN;
 	}
 
-	esdm_es_ext_put_le32(out + 12, entropy_bits);
+	esdm_es_ext_put_le32(out + 12, type == ESDM_ES_EXT_PROTO_GET_ENTROPY ?
+					       entropy_bits :
+					       0);
 	memcpy(out + ESDM_ES_EXT_PROTO_RSP_LEN, data, datalen);
 	return ESDM_ES_EXT_PROTO_RSP_LEN + datalen;
 }
@@ -149,7 +169,8 @@ static inline size_t esdm_es_ext_proto_rsp_pack(uint8_t *out, uint16_t type,
  * Decode the response of @len bytes at @in to a request of @type for @length
  * bytes. On success *@status holds the status of the provider; for a
  * GET_ENTROPY with status 0, *@data points to the @length bytes of data in @in
- * and *@entropy_bits holds their entropy.
+ * and *@entropy_bits holds their entropy. The response to a STATUS is decoded
+ * with esdm_es_ext_proto_status_unpack().
  *
  * @return 0 on success, -EPROTO for a message that is no valid response to the
  *	   request
@@ -166,7 +187,8 @@ static inline int esdm_es_ext_proto_rsp_unpack(const uint8_t *in, size_t len,
 	*data = NULL;
 	*entropy_bits = 0;
 
-	if (len < ESDM_ES_EXT_PROTO_RSP_LEN ||
+	if (type == ESDM_ES_EXT_PROTO_STATUS ||
+	    len < ESDM_ES_EXT_PROTO_RSP_LEN ||
 	    esdm_es_ext_get_le32(in) != ESDM_ES_EXT_PROTO_MAGIC ||
 	    esdm_es_ext_get_le16(in + 4) != ESDM_ES_EXT_PROTO_VERSION ||
 	    esdm_es_ext_get_le16(in + 6) != type)
@@ -198,18 +220,121 @@ static inline int esdm_es_ext_proto_rsp_unpack(const uint8_t *in, size_t len,
 }
 
 /*
+ * Decode the response of @len bytes at @in to a STATUS asking for at most
+ * @length bytes. On success *@status holds the status of the provider; with
+ * status 0, *@text points to the *@textlen bytes of the status in @in - not
+ * terminated, and not checked to be JSON, which is the business of the caller.
+ *
+ * @return 0 on success, -EPROTO for a message that is no valid response to the
+ *	   request
+ */
+static inline int esdm_es_ext_proto_status_unpack(const uint8_t *in, size_t len,
+						  uint32_t length,
+						  int32_t *status,
+						  const char **text,
+						  size_t *textlen)
+{
+	int32_t st;
+
+	*text = NULL;
+	*textlen = 0;
+
+	if (len < ESDM_ES_EXT_PROTO_RSP_LEN ||
+	    esdm_es_ext_get_le32(in) != ESDM_ES_EXT_PROTO_MAGIC ||
+	    esdm_es_ext_get_le16(in + 4) != ESDM_ES_EXT_PROTO_VERSION ||
+	    esdm_es_ext_get_le16(in + 6) != ESDM_ES_EXT_PROTO_STATUS ||
+	    /* No entropy in a status */
+	    esdm_es_ext_get_le32(in + 12))
+		return -EPROTO;
+
+	st = (int32_t)esdm_es_ext_get_le32(in + 8);
+	if (st > 0 || st < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
+		return -EPROTO;
+
+	if (st) {
+		if (len != ESDM_ES_EXT_PROTO_RSP_LEN)
+			return -EPROTO;
+		*status = st;
+		return 0;
+	}
+
+	/* Some status, and no more of it than asked for */
+	if (len == ESDM_ES_EXT_PROTO_RSP_LEN ||
+	    len > ESDM_ES_EXT_PROTO_RSP_LEN + (size_t)length)
+		return -EPROTO;
+
+	*status = 0;
+	*text = (const char *)(in + ESDM_ES_EXT_PROTO_RSP_LEN);
+	*textlen = len - ESDM_ES_EXT_PROTO_RSP_LEN;
+	return 0;
+}
+
+/*
  * Is the struct a plugin library exports one this version of the API can use?
+ * Any version up to the one of this header is.
  *
  * @return 0 if so, -EPROTO otherwise
  */
 static inline int
 esdm_es_ext_plugin_check(const struct esdm_es_ext_plugin *plugin)
 {
-	if (!plugin || plugin->version != ESDM_ES_EXT_PLUGIN_VERSION ||
+	if (!plugin || plugin->version < 1 ||
+	    plugin->version > ESDM_ES_EXT_PLUGIN_VERSION ||
 	    !plugin->get_entropy)
 		return -EPROTO;
 
 	return 0;
+}
+
+/*
+ * Does @plugin report a status? Only a plugin of version 2 or later has the
+ * member at all: the struct of one of version 1 ends before it.
+ */
+static inline bool
+esdm_es_ext_plugin_has_status(const struct esdm_es_ext_plugin *plugin)
+{
+	return plugin->version >= 2 && plugin->status_json;
+}
+
+/*
+ * Ask @plugin for its status, the way both sides do: the JSON text, terminated,
+ * into @buf of @buflen bytes. A text that is not terminated within the buffer,
+ * or empty, counts as a failure. Whether it is JSON is left to the ESDM, which
+ * parses it.
+ *
+ * @return the length of the text, -EOPNOTSUPP for a plugin without a status,
+ *	   another negative errno if it failed
+ */
+static inline ssize_t
+esdm_es_ext_plugin_status(const struct esdm_es_ext_plugin *plugin, void *ctx,
+			  char *buf, size_t buflen)
+{
+	size_t len;
+	int ret;
+
+	if (!buflen)
+		return -EINVAL;
+	buf[0] = '\0';
+
+	if (!esdm_es_ext_plugin_has_status(plugin))
+		return -EOPNOTSUPP;
+
+	ret = plugin->status_json(ctx, buf, buflen);
+	/* An errno, or what it stands for */
+	if (ret > 0 || ret < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
+		ret = -EIO;
+
+	len = strnlen(buf, buflen);
+	if (!ret && len >= buflen)
+		ret = -EMSGSIZE;
+	else if (!ret && !len)
+		ret = -ENODATA;
+	if (ret) {
+		buf[0] = '\0';
+		return ret;
+	}
+
+	return (ssize_t)len;
 }
 
 /*

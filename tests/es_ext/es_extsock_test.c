@@ -37,6 +37,11 @@
  *   answering at all is disconnected and credited with nothing, and none of
  *   its data is handed on. It is not connected to again before the retry
  *   interval is over.
+ * - The status of the provider is the "provider" member of the state, if it
+ *   is a JSON object; it is not asked for while a request is in progress. A
+ *   provider that does not know STATUS - it closes the connection on it - or
+ *   does not answer it is connected to again at once, and not asked again on
+ *   that connection.
  *
  * The source is compiled into the test, with a short retry interval and
  * timeout so that the test does not have to wait for long.
@@ -56,6 +61,7 @@
 
 #include "common_test.h"
 #include "../es_state_check.h"
+#include "esdm_status_txt.h"
 #include "es_ext_test_plugin.h"
 
 extern const struct esdm_es_ext_plugin es_ext_test_plugin;
@@ -115,6 +121,24 @@ enum test_evil_mode {
 };
 
 static atomic_int test_evil_mode = TEST_EVIL_GOOD;
+
+/* How the provider answers STATUS, independent of the mode above */
+enum test_evil_status {
+	/* As any other request: data of the length asked for, no JSON */
+	TEST_EVIL_STATUS_DATA,
+	/* With a JSON object */
+	TEST_EVIL_STATUS_JSON,
+	/* Not at all: the connection is closed, as an old provider does */
+	TEST_EVIL_STATUS_OLD,
+	/* With more than asked for */
+	TEST_EVIL_STATUS_TOO_LONG,
+	/* Not at all, keeping the connection */
+	TEST_EVIL_STATUS_SILENT,
+};
+
+#define TEST_EVIL_STATUS_TEXT "{\"evil\":1}"
+
+static atomic_int test_evil_status = TEST_EVIL_STATUS_DATA;
 /* A provider not knowing STARTDTLS: it closes the connection on it */
 static atomic_bool test_evil_old = false;
 static atomic_bool test_evil_stop = false;
@@ -171,6 +195,29 @@ static void *test_evil_run(void *arg)
 					break;
 				continue;
 			}
+			if (type == ESDM_ES_EXT_PROTO_STATUS) {
+				int mode = atomic_load(&test_evil_status);
+
+				if (mode == TEST_EVIL_STATUS_OLD)
+					break;
+				if (mode == TEST_EVIL_STATUS_SILENT)
+					continue;
+				if (mode == TEST_EVIL_STATUS_JSON) {
+					memcpy(data, TEST_EVIL_STATUS_TEXT,
+					       strlen(TEST_EVIL_STATUS_TEXT));
+					length = (uint32_t)strlen(
+						TEST_EVIL_STATUS_TEXT);
+				} else if (mode == TEST_EVIL_STATUS_TOO_LONG) {
+					length++;
+				}
+				len = esdm_es_ext_proto_rsp_pack(
+					rsp, type, 0, 0, data, length);
+				if (send(fd, rsp, len, MSG_NOSIGNAL) !=
+				    (ssize_t)len)
+					break;
+				continue;
+			}
+
 			switch (atomic_load(&test_evil_mode)) {
 			case TEST_EVIL_SILENT:
 				continue;
@@ -251,6 +298,17 @@ static bool test_state_has(const char *key, const char *what)
 		printf("state: %s\n", es_state_print(state));
 	json_object_put(state);
 	return ret;
+}
+
+/* The "provider" member of the state, NULL if there is none */
+static struct json_object *test_provider(struct json_object **state)
+{
+	struct json_object *provider = NULL;
+
+	*state = es_state_get(ES);
+	if (!json_object_object_get_ex(*state, "provider", &provider))
+		return NULL;
+	return provider;
 }
 
 static void test_wait_retry(void)
@@ -414,6 +472,162 @@ static void test_reconnect(void)
 	CHECK(test_state_has("status", "connected (uid"),
 	      "the monitor did not connect to the provider back");
 	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+}
+
+/*
+ * The status of the provider of libesdm_es_ext, as its plugin reports it -
+ * and nothing of one that reports none, or none that is a JSON object.
+ */
+static void test_status(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct json_object *state, *provider;
+	unsigned int calls = ctl->status_calls;
+	char txt[2048];
+
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the state has no status of the provider: %s",
+	      es_state_print(state));
+	CHECK(es_state_str_is(provider, "plugin", "es-ext-test"),
+	      "the status is not the provider's: %s", es_state_print(state));
+	CHECK_EQ(ctl->status_calls, calls + 1);
+	CHECK_EQ(esdm_status_txt(state, NULL, txt, sizeof(txt)), 0);
+	CHECK(strstr(txt, "\nProvider properties:\n Plugin: es-ext-test\n"),
+	      "the text has no status of the provider: %s", txt);
+	json_object_put(state);
+
+	/* Failing, or no JSON object: none, and the connection stays */
+	ctl->status_ret = -EIO;
+	provider = test_provider(&state);
+	CHECK(!provider, "the status of a failing provider is taken");
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "a failing status took the connection");
+	json_object_put(state);
+	ctl->status_ret = 0;
+
+	ctl->status_text = "[\"no object\"]";
+	provider = test_provider(&state);
+	CHECK(!provider, "a status that is no object is taken");
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "an invalid status took the connection");
+	json_object_put(state);
+	ctl->status_text = NULL;
+
+	/* Not asked for while a request is in progress */
+	calls = ctl->status_calls;
+	mutex_reader_lock(&extsock_mutex);
+	provider = test_provider(&state);
+	mutex_reader_unlock(&extsock_mutex);
+	CHECK(!provider, "the status was asked for during a request");
+	CHECK_EQ(ctl->status_calls, calls);
+	json_object_put(state);
+
+	/* And the provider delivers as before */
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the status is gone");
+	json_object_put(state);
+}
+
+/*
+ * A provider that does not know STATUS closes the connection on it: it is
+ * connected to again at once, still credited, and not asked again on that
+ * connection - but on the next one. One answering more than asked for breaks
+ * the protocol, one not answering is connected to again as well.
+ */
+static void test_status_old_provider(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct json_object *state, *provider;
+	struct timespec start, end;
+	unsigned int conns;
+	pthread_t evil;
+
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_JSON);
+	CHECK_EQ(test_evil_start(&evil), 0);
+
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	conns = atomic_load(&test_evil_connections);
+
+	/* Its status, as it sends it */
+	provider = test_provider(&state);
+	CHECK(provider && es_state_int(provider, "evil", 0) == 1,
+	      "the status of the provider is not taken: %s",
+	      es_state_print(state));
+	json_object_put(state);
+
+	/* Data instead of JSON: none, on the same connection */
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_DATA);
+	provider = test_provider(&state);
+	CHECK(!provider, "data is taken for a status");
+	json_object_put(state);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns);
+
+	/* An old provider: connected again at once */
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_OLD);
+	provider = test_provider(&state);
+	CHECK(!provider, "an old provider reports a status");
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "an old provider is not connected to again: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	/* Accepted by the provider by the time it answered */
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
+
+	/* Not asked again on that connection, whatever it would answer */
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_JSON);
+	provider = test_provider(&state);
+	CHECK(!provider, "an old provider was asked again");
+	json_object_put(state);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
+
+	/* On a new connection it is */
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "a new connection was not asked");
+	json_object_put(state);
+	conns = atomic_load(&test_evil_connections);
+
+	/* No answer: waited for no longer than a request, connected again */
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_SILENT);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	provider = test_provider(&state);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	CHECK(!provider, "a silent provider reports a status");
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "a silent provider is not connected to again");
+	json_object_put(state);
+	CHECK(end.tv_sec - start.tv_sec <= 1,
+	      "an unanswered status is waited for too long");
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
+
+	/* More than asked for breaks the protocol: disconnected */
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_TOO_LONG);
+	provider = test_provider(&state);
+	CHECK(!provider, "a status longer than asked for is taken");
+	json_object_put(state);
+	provider = test_provider(&state);
+	CHECK(es_state_str_has(state, "status", "not connected"),
+	      "a provider breaking the protocol stays connected");
+	json_object_put(state);
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_DATA);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	CHECK_EQ(ES->init(), 0);
 }
 
 /* A provider that is not there when the source starts is connected later */
@@ -691,12 +905,14 @@ int main(void)
 		return common_test_result("es_extsock");
 
 	test_credit();
+	test_status();
 	test_peer_check();
 	test_reconnect();
 	test_late_provider();
 	test_eavesdrop(true);
 	test_eavesdrop(false);
 	test_old_provider();
+	test_status_old_provider();
 	test_protocol_breaches();
 
 	if (test_server)

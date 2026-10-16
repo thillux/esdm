@@ -23,7 +23,7 @@
  * correctly and not.
  *
  * Usage: es_ext_lib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> <example plugin>
+ *	  <no plugin> <example plugin> <test plugin of version 1>
  */
 
 #define _GNU_SOURCE
@@ -61,7 +61,8 @@ static struct esdm_es_ext_test_control *test_control(const char *path)
 }
 
 static void test_loader(const char *good, const char *bad_version,
-			const char *no_get, const char *no_plugin)
+			const char *no_get, const char *no_plugin,
+			const char *v1)
 {
 	struct esdm_es_ext_plugin_handle *handle;
 	const struct esdm_es_ext_plugin *plugin;
@@ -82,6 +83,13 @@ static void test_loader(const char *good, const char *bad_version,
 					 &plugin),
 		 -ENOENT);
 	CHECK_EQ(esdm_es_ext_plugin_load(NULL, &handle, &plugin), -EINVAL);
+
+	/* A plugin of version 1, without a status, is loaded all the same */
+	CHECK_EQ(esdm_es_ext_plugin_load(v1, &handle, &plugin), 0);
+	CHECK(plugin && plugin->version == 1 &&
+		      !esdm_es_ext_plugin_has_status(plugin),
+	      "the plugin of version 1 is not taken as one");
+	esdm_es_ext_plugin_unload(handle);
 
 	/* Unloading nothing is fine */
 	esdm_es_ext_plugin_unload(NULL);
@@ -314,6 +322,141 @@ out:
 	esdm_es_ext_plugin_unload(handle);
 }
 
+/* Ask for the status, at most @length bytes of it */
+static ssize_t test_status(int fd, uint32_t length, uint8_t *rsp,
+			   size_t rsp_size, int32_t *status, const char **text,
+			   size_t *textlen)
+{
+	ssize_t n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS, length, rsp,
+				 rsp_size);
+
+	*status = 1;
+	if (n > 0 && esdm_es_ext_proto_status_unpack(rsp, (size_t)n, length,
+						     status, text, textlen))
+		return -EPROTO;
+	return n;
+}
+
+/*
+ * STATUS: the status of the plugin as it reports it, or the error it reports
+ * instead - and none of a plugin of version 1, whose struct has no callback.
+ */
+static void test_server_status(const char *good, const char *v1)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
+	const char *paths[] = { good, v1 };
+	unsigned int i;
+
+	for (i = 0; i < 2; i++) {
+		struct esdm_es_ext_plugin_handle *handle;
+		const struct esdm_es_ext_plugin *plugin;
+		struct esdm_es_ext_test_control *ctl;
+		struct esdm_es_ext_server *server;
+		const char *text = NULL;
+		size_t textlen = 0;
+		pthread_t thread;
+		int32_t status;
+		ssize_t n;
+		int fd;
+
+		CHECK_EQ(esdm_es_ext_plugin_load(paths[i], &handle, &plugin),
+			 0);
+		if (!plugin)
+			continue;
+		ctl = test_control(paths[i]);
+		CHECK(ctl != NULL, "the control of %s was not found", paths[i]);
+		if (!ctl || esdm_es_ext_server_alloc(plugin, test_socket, 0600,
+						     &server)) {
+			esdm_es_ext_plugin_unload(handle);
+			continue;
+		}
+		CHECK_EQ(pthread_create(&thread, NULL, test_server_thread,
+					server),
+			 0);
+
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect to the provider");
+		if (fd < 0)
+			goto stop;
+
+		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
+				&status, &text, &textlen);
+		if (i) {
+			/* Version 1: the callback beyond its struct is not */
+			CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+			CHECK_EQ(status, -EOPNOTSUPP);
+			CHECK_EQ(ctl->status_calls, 0);
+			close(fd);
+			goto stop;
+		}
+
+		/* The status as the plugin writes it, without the NUL */
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN +
+				    strlen(ES_EXT_TEST_STATUS));
+		CHECK_EQ(status, 0);
+		CHECK(text && textlen == strlen(ES_EXT_TEST_STATUS) &&
+			      !memcmp(text, ES_EXT_TEST_STATUS, textlen),
+		      "the status is not the plugin's");
+		CHECK_EQ(ctl->last_status_buflen, ESDM_ES_EXT_STATUS_MAX + 1);
+
+		/* One that does not fit what is asked for is not cut short */
+		n = test_status(fd, 8, rsp, sizeof(rsp), &status, &text,
+				&textlen);
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+		CHECK_EQ(status, -EMSGSIZE);
+
+		/* The error of the plugin */
+		ctl->status_ret = -ENODEV;
+		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
+				&status, &text, &textlen);
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+		CHECK_EQ(status, -ENODEV);
+		ctl->status_ret = 0;
+
+		/* A status without its NUL is no status */
+		ctl->status_unterminated = 1;
+		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
+				&status, &text, &textlen);
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+		CHECK_EQ(status, -EMSGSIZE);
+		ctl->status_unterminated = 0;
+
+		/* Nor is an empty one */
+		ctl->status_text = "";
+		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
+				&status, &text, &textlen);
+		CHECK_EQ(status, -ENODATA);
+		ctl->status_text = NULL;
+
+		/* The connection serves entropy as before */
+		n = test_request(fd, ESDM_ES_EXT_PROTO_GET_ENTROPY, 16, rsp,
+				 sizeof(rsp));
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 16);
+
+		/* A STATUS for more than there can be closes the connection */
+		n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS,
+				 ESDM_ES_EXT_STATUS_MAX + 1, rsp, sizeof(rsp));
+		CHECK(n <= 0, "a STATUS for too much was answered");
+		close(fd);
+
+		/* So does one for nothing */
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect again");
+		if (fd >= 0) {
+			n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS, 0, rsp,
+					 sizeof(rsp));
+			CHECK(n <= 0, "a STATUS for nothing was answered");
+			close(fd);
+		}
+
+stop:
+		esdm_es_ext_server_stop(server);
+		pthread_join(thread, NULL);
+		esdm_es_ext_server_free(server);
+		esdm_es_ext_plugin_unload(handle);
+	}
+}
+
 /*
  * With users allowed, only those and root are served: anybody else who can
  * connect is disconnected before taking a slot.
@@ -479,6 +622,7 @@ static void test_example(const char *path)
 {
 	struct esdm_es_ext_plugin_handle *handle;
 	const struct esdm_es_ext_plugin *plugin;
+	char status[ESDM_ES_EXT_STATUS_MAX + 1];
 	uint8_t buf[32];
 	uint32_t bits;
 	void *ctx = NULL;
@@ -492,6 +636,13 @@ static void test_example(const char *path)
 	CHECK_EQ(esdm_es_ext_plugin_get(plugin, ctx, buf, sizeof(buf), &bits),
 		 0);
 	CHECK_EQ(bits, sizeof(buf));
+
+	/* Its status names the device, and counts the read */
+	CHECK_EQ(esdm_es_ext_plugin_status(plugin, ctx, status, sizeof(status)),
+		 (ssize_t)strlen(status));
+	CHECK(!strcmp(status,
+		      "{\"device\":\"/dev/urandom\",\"reads\":1,\"failures\":0}"),
+	      "unexpected status of the example: %s", status);
 	plugin->fini(ctx);
 
 	esdm_es_ext_plugin_unload(handle);
@@ -499,8 +650,8 @@ static void test_example(const char *path)
 
 int main(int argc, char *argv[])
 {
-	if (argc != 6) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin>\n",
+	if (argc != 7) {
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -515,8 +666,9 @@ int main(int argc, char *argv[])
 	/* The mode is set by the library, not left to the umask */
 	umask(0077);
 
-	test_loader(argv[1], argv[2], argv[3], argv[4]);
+	test_loader(argv[1], argv[2], argv[3], argv[4], argv[6]);
 	test_server(argv[1]);
+	test_server_status(argv[1], argv[6]);
 	test_server_allow(argv[1]);
 	test_server_startdtls(argv[1]);
 	test_example(argv[5]);

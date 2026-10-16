@@ -77,7 +77,7 @@ int esdm_es_ext_plugin_load(const char *path,
 	if (esdm_es_ext_plugin_check(p)) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ANY,
-			"External ES: plugin %s is of version %u, version %u with a get_entropy callback is supported\n",
+			"External ES: plugin %s is of version %u, versions 1 to %u with a get_entropy callback are supported\n",
 			path, p->version, ESDM_ES_EXT_PLUGIN_VERSION);
 		esdm_es_ext_plugin_unload(h);
 		return -EPROTO;

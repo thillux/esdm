@@ -285,6 +285,35 @@ static int esdm_es_ext_server_startdtls(struct esdm_es_ext_server *server,
 }
 
 /*
+ * Answer a STATUS request for at most @length bytes with the status of the
+ * plugin, which goes into @data.
+ *
+ * @return the status of the answer, *@datalen holding the length of the text
+ */
+static int esdm_es_ext_server_status(struct esdm_es_ext_server *server,
+				     uint8_t *data, uint32_t length,
+				     uint32_t *datalen)
+{
+	char text[ESDM_ES_EXT_STATUS_MAX + 1];
+	ssize_t ret;
+
+	*datalen = 0;
+
+	ret = esdm_es_ext_plugin_status(server->plugin, server->ctx, text,
+					sizeof(text));
+	if (ret < 0)
+		return (int)ret;
+
+	/* Not cut short: half a JSON object is none */
+	if ((size_t)ret > length)
+		return -EMSGSIZE;
+
+	memcpy(data, text, (size_t)ret);
+	*datalen = (uint32_t)ret;
+	return 0;
+}
+
+/*
  * Serve what client @i has sent: one request, or the next step of its DTLS
  * handshake.
  *
@@ -296,7 +325,7 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN + 1];
 	uint8_t data[ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
-	uint32_t length, entropy_bits = 0;
+	uint32_t length, datalen, entropy_bits = 0;
 	uint16_t type;
 	size_t rsp_len;
 	ssize_t n;
@@ -322,6 +351,7 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 		goto out;
 	}
 
+	datalen = length;
 	switch (type) {
 	case ESDM_ES_EXT_PROTO_GET_ENTROPY:
 		status = esdm_es_ext_plugin_get(server->plugin, server->ctx,
@@ -329,6 +359,10 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 		break;
 	case ESDM_ES_EXT_PROTO_STARTDTLS:
 		status = esdm_es_ext_server_startdtls(server, i);
+		break;
+	case ESDM_ES_EXT_PROTO_STATUS:
+		status = esdm_es_ext_server_status(server, data, length,
+						   &datalen);
 		break;
 	default:
 		status = server->plugin->selftest ?
@@ -341,7 +375,7 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	}
 
 	rsp_len = esdm_es_ext_proto_rsp_pack(rsp, type, status, entropy_bits,
-					     data, length);
+					     data, datalen);
 	ret = esdm_es_ext_server_send(server, i, rsp, rsp_len);
 
 	/* The answer to STARTDTLS went out in the clear, the handshake follows */

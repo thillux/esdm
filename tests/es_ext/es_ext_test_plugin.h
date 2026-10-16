@@ -33,18 +33,29 @@
  * @init_ret: Return value of init
  * @get_ret: Return value of get_entropy; the buffer is filled anyway
  * @selftest_ret: Return value of selftest
+ * @status_ret: Return value of status_json
+ * @status_text: What status_json writes, NULL for ES_EXT_TEST_STATUS
+ * @status_unterminated: status_json fills its buffer without a NUL
  */
 struct esdm_es_ext_test_control {
 	uint32_t claim_bits;
 	int init_ret;
 	int get_ret;
 	int selftest_ret;
+	int status_ret;
+	const char *status_text;
+	int status_unterminated;
 
 	unsigned int init_calls;
 	unsigned int fini_calls;
 	unsigned int get_calls;
 	unsigned int selftest_calls;
+	unsigned int status_calls;
 	size_t last_buflen;
+	size_t last_status_buflen;
 };
+
+/* The status of the test plugin unless the test sets another one */
+#define ES_EXT_TEST_STATUS "{\"plugin\":\"es-ext-test\",\"healthy\":true}"
 
 #endif /* _ES_EXT_TEST_PLUGIN_H */

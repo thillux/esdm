@@ -81,7 +81,8 @@ endif
 
 if get_option('es_ext').enabled()
 	dependencies_esdm_lib += dl_dep
-	esdm_src += files('esdm_es_extlib.c', 'esdm_es_extsock.c')
+	esdm_src += files('esdm_es_extlib.c', 'esdm_es_extsock.c',
+			  'esdm_es_ext_status.c')
 endif
 
 if get_option('es_jent_kernel').enabled()

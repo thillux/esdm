@@ -92,12 +92,104 @@ static void test_request(void)
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 
+	/* STATUS asks for the largest status it takes */
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS,
+				   ESDM_ES_EXT_STATUS_MAX);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 0);
+	CHECK_EQ(type, ESDM_ES_EXT_PROTO_STATUS);
+	CHECK_EQ(length, ESDM_ES_EXT_STATUS_MAX);
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS, 0);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS,
+				   ESDM_ES_EXT_STATUS_MAX + 1);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+
 	/* Unknown types */
 	esdm_es_ext_proto_req_pack(req, 0, 16);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
-	esdm_es_ext_proto_req_pack(req, 4, 0);
+	esdm_es_ext_proto_req_pack(req, 5, 0);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+}
+
+/*
+ * The answer to STATUS: the JSON text, without its NUL, no entropy, and no
+ * more than asked for.
+ */
+static void test_status_response(void)
+{
+	static const char doc[] = "{\"a\":1}";
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
+	const uint8_t *data;
+	const char *text;
+	size_t len, textlen;
+	int32_t status;
+	uint32_t bits;
+
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_STATUS, 0, 99,
+					 (const uint8_t *)doc, sizeof(doc) - 1);
+	CHECK_EQ(len, ESDM_ES_EXT_PROTO_RSP_LEN + sizeof(doc) - 1);
+	/* No entropy is sent, whatever is handed in */
+	CHECK_EQ(esdm_es_ext_get_le32(rsp + 12), 0);
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 0);
+	CHECK_EQ(status, 0);
+	CHECK(text && textlen == sizeof(doc) - 1 && !memcmp(text, doc, textlen),
+	      "the status is not what was sent");
+
+	/* Not more than asked for, if just as much */
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len, sizeof(doc) - 1,
+						 &status, &text, &textlen),
+		 0);
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len, sizeof(doc) - 2,
+						 &status, &text, &textlen),
+		 -EPROTO);
+
+	/* No status at all is no answer */
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, ESDM_ES_EXT_PROTO_RSP_LEN,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 -EPROTO);
+
+	/* Entropy in it, or the answer to another type, is none either */
+	esdm_es_ext_put_le32(rsp + 12, 8);
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 -EPROTO);
+	esdm_es_ext_put_le32(rsp + 12, 0);
+	esdm_es_ext_put_le16(rsp + 6, ESDM_ES_EXT_PROTO_SELFTEST);
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 -EPROTO);
+
+	/* An error without a status, the way an old one is not */
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_STATUS,
+					 -EOPNOTSUPP, 0, (const uint8_t *)doc,
+					 sizeof(doc) - 1);
+	CHECK_EQ(len, ESDM_ES_EXT_PROTO_RSP_LEN);
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 0);
+	CHECK_EQ(status, -EOPNOTSUPP);
+	CHECK(!text && !textlen, "an error carries a status");
+	CHECK_EQ(esdm_es_ext_proto_status_unpack(rsp, len + 1,
+						 ESDM_ES_EXT_STATUS_MAX,
+						 &status, &text, &textlen),
+		 -EPROTO);
+
+	/* The decoder of the other answers takes none of STATUS */
+	CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+			 rsp, len, ESDM_ES_EXT_PROTO_STATUS,
+			 ESDM_ES_EXT_STATUS_MAX, &status, &bits, &data),
 		 -EPROTO);
 }
 
@@ -208,6 +300,23 @@ static void test_response(void)
 /* What the plugin returns, next to the claim of @ctx */
 static int test_plugin_ret;
 
+/* What the status callback writes, and returns */
+static const char *test_status_text = "{}";
+static int test_status_ret;
+static unsigned int test_status_calls;
+
+static int test_plugin_status_json(void *ctx, char *buf, size_t buflen)
+{
+	(void)ctx;
+
+	test_status_calls++;
+	if (!test_status_text)
+		memset(buf, 'x', buflen);
+	else
+		snprintf(buf, buflen, "%s", test_status_text);
+	return test_status_ret;
+}
+
 static int test_plugin_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 				   uint32_t *entropy_bits)
 {
@@ -232,6 +341,12 @@ static void test_plugin_helpers(void)
 	plugin.version++;
 	CHECK_EQ(esdm_es_ext_plugin_check(&plugin), -EPROTO);
 	plugin.version--;
+	/* Every version up to the one of the header */
+	plugin.version = 1;
+	CHECK_EQ(esdm_es_ext_plugin_check(&plugin), 0);
+	plugin.version = 0;
+	CHECK_EQ(esdm_es_ext_plugin_check(&plugin), -EPROTO);
+	plugin.version = ESDM_ES_EXT_PLUGIN_VERSION;
 	plugin.get_entropy = NULL;
 	CHECK_EQ(esdm_es_ext_plugin_check(&plugin), -EPROTO);
 	plugin.get_entropy = test_plugin_get_entropy;
@@ -268,11 +383,64 @@ static void test_plugin_helpers(void)
 	test_plugin_ret = 0;
 }
 
+static void test_plugin_status(void)
+{
+	struct esdm_es_ext_plugin plugin = {
+		.version = ESDM_ES_EXT_PLUGIN_VERSION,
+		.get_entropy = test_plugin_get_entropy,
+	};
+	char buf[16];
+
+	/* None without the callback */
+	CHECK(!esdm_es_ext_plugin_has_status(&plugin), "a status without one");
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -EOPNOTSUPP);
+
+	/* Nor of a plugin of version 1, whatever lies beyond its struct */
+	plugin.status_json = test_plugin_status_json;
+	plugin.version = 1;
+	CHECK(!esdm_es_ext_plugin_has_status(&plugin),
+	      "a status of a plugin of version 1");
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -EOPNOTSUPP);
+	CHECK_EQ(test_status_calls, 0);
+	plugin.version = ESDM_ES_EXT_PLUGIN_VERSION;
+
+	/* The length of the text */
+	test_status_text = "{\"a\":1}";
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)), 7);
+	CHECK_STR_EQ(buf, "{\"a\":1}");
+
+	/* Not terminated, or empty: no status */
+	test_status_text = NULL;
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -EMSGSIZE);
+	CHECK_EQ(buf[0], '\0');
+	test_status_text = "";
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -ENODATA);
+
+	/* An errno, or what it stands for */
+	test_status_text = "{}";
+	test_status_ret = -ENODEV;
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -ENODEV);
+	CHECK_EQ(buf[0], '\0');
+	test_status_ret = 7;
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
+		 -EIO);
+	test_status_ret = 0;
+
+	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, 0), -EINVAL);
+}
+
 int main(void)
 {
 	test_request();
 	test_response();
+	test_status_response();
 	test_plugin_helpers();
+	test_plugin_status();
 
 	return common_test_result("es_ext_proto");
 }

@@ -52,6 +52,7 @@
 #include "esdm_es_aux.h"
 #include "esdm_es_ext.h"
 #include "esdm_es_ext_proto.h"
+#include "esdm_es_ext_status.h"
 #include "esdm_es_extlib.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
@@ -92,6 +93,9 @@ static time_t extlib_probe_at = 0;
 /* Between init and fini - a new path is loaded at once then */
 static bool extlib_initialized = false;
 
+/* The last status of the plugin was none and logged as such */
+static bool extlib_status_warned = false;
+
 /* Caller must hold extlib_mutex. */
 static const char *esdm_es_extlib_path_locked(void)
 {
@@ -113,6 +117,7 @@ static void esdm_es_extlib_unload_locked(void)
 	extlib_loaded_path[0] = '\0';
 	extlib_read_failed = false;
 	extlib_selftest_failed = false;
+	extlib_status_warned = false;
 }
 
 /*
@@ -204,7 +209,7 @@ static int esdm_es_extlib_load_locked(void)
 	if (esdm_es_ext_plugin_check(p)) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling external ES plugin: %s is of version %u, version %u with a get_entropy callback is supported\n",
+			"Disabling external ES plugin: %s is of version %u, versions 1 to %u with a get_entropy callback are supported\n",
 			path, p->version, ESDM_ES_EXT_PLUGIN_VERSION);
 		dlclose(dl);
 		return -EPROTO;
@@ -352,11 +357,49 @@ out:
 	return 0;
 }
 
+/*
+ * The status the plugin reports of itself, NULL for none. Caller must hold
+ * extlib_mutex (write lock): the callbacks of the plugin are never called
+ * concurrently.
+ */
+static struct json_object *esdm_es_extlib_status_locked(void)
+{
+	char text[ESDM_ES_EXT_STATUS_MAX + 1];
+	ssize_t len;
+
+	if (!extlib_plugin)
+		return NULL;
+
+	len = esdm_es_ext_plugin_status(extlib_plugin, extlib_ctx, text,
+					sizeof(text));
+	if (len < 0) {
+		if (len != -EOPNOTSUPP)
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+				    "External ES plugin: no status: %s\n",
+				    strerror((int)-len));
+		return NULL;
+	}
+
+	return esdm_es_ext_status_parse(text, (size_t)len, "plugin",
+					&extlib_status_warned);
+}
+
 static void esdm_es_extlib_es_state(struct json_object *obj)
 {
 	char path[PATH_MAX], name[64];
+	struct json_object *provider = NULL;
 	uint32_t poolsize, entropy_rate;
 	const char *status;
+
+	/*
+	 * The status of the plugin, unless the plugin is busy - with a
+	 * request of a seeding, which may take a while: the ESDM status is not
+	 * to wait for the noise source.
+	 */
+	if (mutex_trylock(&extlib_mutex)) {
+		provider = esdm_es_extlib_status_locked();
+		mutex_unlock(&extlib_mutex);
+	}
 
 	mutex_reader_lock(&extlib_mutex);
 	poolsize = esdm_es_extlib_entropylevel_locked(esdm_security_strength());
@@ -380,6 +423,8 @@ static void esdm_es_extlib_es_state(struct json_object *obj)
 								"(unset)"));
 	json_object_object_add(obj, "plugin", json_object_new_string(name));
 	json_object_object_add(obj, "status", json_object_new_string(status));
+	if (provider)
+		json_object_object_add(obj, "provider", provider);
 }
 
 static bool esdm_es_extlib_active(void)

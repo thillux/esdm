@@ -54,12 +54,17 @@ struct esdm_es_ext_plugin {
 	int (*get_entropy)(void *ctx, uint8_t *buf, size_t buflen,
 			   uint32_t *entropy_bits);
 	int (*selftest)(void *ctx);
+	/* Version 2 */
+	int (*status_json)(void *ctx, char *buf, size_t buflen);
 };
 .fi
 .PP
 .I version
 is
-.BR ESDM_ES_EXT_PLUGIN_VERSION .
+.BR ESDM_ES_EXT_PLUGIN_VERSION ,
+2. A plugin of version 1, whose struct ends before
+.IR status_json ,
+is loaded all the same.
 .I get_entropy
 fills all
 .I buflen
@@ -77,6 +82,28 @@ returns the context handed to the others,
 .I selftest
 checks the source without consuming the data it delivers and runs on the
 interval of the ESDM self tests.
+.PP
+.I status_json
+writes the status of the source \- whatever helps whoever looks at the ESDM
+status, such as the device read or the health of the noise source \- into
+.I buf
+as one JSON object terminated by a NUL, at most
+.B ESDM_ES_EXT_STATUS_MAX
+= 512 bytes of text, for which
+.I buflen
+leaves room. It returns 0,
+.B \-EMSGSIZE
+if the status does not fit, or another negative errno. The ESDM shows the
+object as the
+.B provider
+member of the state of the source, in
+.BR esdm_status_json ()
+and as a section in the text of
+.BR esdm_status (),
+and leaves out a status that is no well-formed JSON object of up to 512 bytes
+and 8 levels of nesting. It is asked for whenever the ESDM status is, but not
+while a request of the ESDM to the source is in progress, and must not block
+for long.
 .PP
 The callbacks are never called concurrently. Both the ESDM and the provider
 server call
@@ -162,7 +189,9 @@ for a library that cannot be loaded,
 .B \-ENOEXEC
 for one exporting no plugin, and
 .B \-EPROTO
-for a plugin of another version or without
+for a plugin of a version beyond
+.B ESDM_ES_EXT_PLUGIN_VERSION
+or without
 .IR get_entropy .
 .TP
 .BI "void esdm_es_ext_plugin_unload(struct esdm_es_ext_plugin_handle *" handle );
@@ -183,18 +212,41 @@ A request is 12 bytes: the magic
 .B ESDM_ES_EXT_PROTO_VERSION
 (u16, 1), the type (u16:
 .B ESDM_ES_EXT_PROTO_GET_ENTROPY
-= 1 or
+= 1,
 .B ESDM_ES_EXT_PROTO_SELFTEST
-= 2) and the length (u32: the bytes asked for, 1 to
+= 2 or
+.B ESDM_ES_EXT_PROTO_STATUS
+= 4) and the length (u32: the bytes asked for, 1 to
 .B ESDM_ES_EXT_PROTO_MAX_DATA
-= 512, for GET_ENTROPY; 0 for SELFTEST).
+= 512, for GET_ENTROPY; the largest status taken, 1 to
+.B ESDM_ES_EXT_STATUS_MAX
+= 512, for STATUS; 0 for SELFTEST).
 .PP
 A response is 16 bytes: magic, version and type as in the request, the status
 (s32: 0 or a negative errno) and the entropy of the data (u32, at most 8 times
-the length); a GET_ENTROPY answered with status 0 is followed by exactly the
-length bytes of data, any other response by nothing.
+the length for GET_ENTROPY, 0 otherwise); a GET_ENTROPY answered with status 0
+is followed by exactly the length bytes of data, a STATUS answered with status
+0 by the status of the source \- the JSON text of
+.IR status_json ,
+1 to length bytes without the NUL \- and any other response by nothing.
 .PP
-A message that breaks any of this ends the connection.
+A message that breaks any of this ends the connection, and so does a request
+of a type the provider does not know.
+.SS STATUS
+The ESDM asks the provider for its status whenever its own status is asked
+for, and not while another request is in progress. A provider whose plugin has
+no
+.I status_json
+answers
+.BR \-EOPNOTSUPP ,
+one whose status does not fit into the length
+.BR \-EMSGSIZE .
+The ESDM checks that the status is a well-formed JSON object before it shows
+it. A provider older than STATUS closes the connection on it, as on any
+request it does not know: the ESDM connects again at once, still crediting the
+provider, and does not ask again until it connects the next time. A provider
+not answering STATUS within the timeout of a request is connected to again the
+same way.
 .SS DTLS
 An ESDM built with DTLS (meson option
 .BR dtls ,

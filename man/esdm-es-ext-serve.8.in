@@ -47,6 +47,10 @@ hence the default mode 0666. A more restrictive mode needs the ESDM to run with
 a group that is granted access
 .RB ( "esdm\-server \-\-groupname" ).
 .PP
+The status the plugin reports of itself, if it has a
+.I status_json
+callback, is handed to the ESDM, which shows it in its own status.
+.PP
 In turn, only clients running as root or as a user given with
 .B \-\-client_uid
 are served \- by default root and

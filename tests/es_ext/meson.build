@@ -11,6 +11,13 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		build_by_default: true,
 	)
 
+	# The same plugin as one of version 1, which has no status
+	es_ext_test_plugin_v1 = shared_module('esdm_es_ext_test_plugin_v1',
+		'es_ext_test_plugin.c',
+		c_args: [ '-DES_EXT_TEST_PLUGIN_V1' ],
+		include_directories: include_dirs_es_ext_test,
+	)
+
 	es_ext_bad_version_plugin = shared_module('esdm_es_ext_bad_version',
 		'es_ext_bad_plugin.c',
 		c_args: [ '-DES_EXT_BAD_VERSION' ],
@@ -34,18 +41,32 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 	)
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
-			   es_ext_example_plugin ]
+			   es_ext_example_plugin, es_ext_test_plugin_v1 ]
 	es_ext_plugin_args = [ es_ext_test_plugin.full_path(),
 			       es_ext_bad_version_plugin.full_path(),
 			       es_ext_bad_no_get_plugin.full_path(),
 			       es_ext_bad_no_plugin.full_path(),
-			       es_ext_example_plugin.full_path() ]
+			       es_ext_example_plugin.full_path(),
+			       es_ext_test_plugin_v1.full_path() ]
 
 	es_ext_proto_test = executable('es_ext_proto_test',
 		'es_ext_proto_test.c',
 		include_directories: include_dirs_es_ext_test,
 	)
 	test('External ES protocol', es_ext_proto_test, suite: 'es_ext')
+
+	# The status of a plugin or a provider, as the ESDM takes it
+	if get_option('es_ext').enabled()
+		es_ext_status_test = executable('es_ext_status_test',
+			[ '../../esdm/esdm_es_ext_status.c',
+			  'es_ext_status_test.c' ],
+			include_directories: [ include_dirs_server,
+					       include_dirs_es_ext_test ],
+			dependencies: [ json_c_dep ],
+			link_with: esdm_common_static_lib,
+		)
+		test('External ES status', es_ext_status_test, suite: 'es_ext')
+	endif
 endif
 
 if get_option('esdm-es-ext').enabled()

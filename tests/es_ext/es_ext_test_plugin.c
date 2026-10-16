@@ -24,10 +24,14 @@
  * tell which call delivered a buffer.
  *
  * Built as a plugin library (shared_module) and, with ES_EXT_TEST_PLUGIN_STATIC
- * defined, compiled into a test that serves it in process.
+ * defined, compiled into a test that serves it in process. With
+ * ES_EXT_TEST_PLUGIN_V1 defined, it is a plugin of version 1, which has no
+ * status - the status callback it sets all the same stands for whatever lies
+ * beyond the struct of such a plugin, which must not be called.
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "es_ext_test_plugin.h"
@@ -83,16 +87,43 @@ static int es_ext_test_selftest(void *ctx)
 	return ctl->selftest_ret;
 }
 
+static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
+{
+	struct esdm_es_ext_test_control *ctl = ctx;
+	int len;
+
+	ctl->status_calls++;
+	ctl->last_status_buflen = buflen;
+
+	if (ctl->status_unterminated) {
+		memset(buf, '{', buflen);
+		return 0;
+	}
+
+	if (ctl->status_ret)
+		return ctl->status_ret;
+
+	len = snprintf(buf, buflen, "%s",
+		       ctl->status_text ? ctl->status_text :
+					  ES_EXT_TEST_STATUS);
+	return len >= 0 && (size_t)len < buflen ? 0 : -EMSGSIZE;
+}
+
 #ifdef ES_EXT_TEST_PLUGIN_STATIC
 const struct esdm_es_ext_plugin es_ext_test_plugin = {
 #else
 ESDM_ES_EXT_PLUGIN_EXPORT
 const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 #endif
+#ifdef ES_EXT_TEST_PLUGIN_V1
+	.version = 1,
+#else
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
+#endif
 	.name = "es-ext-test",
 	.init = es_ext_test_init,
 	.fini = es_ext_test_fini,
 	.get_entropy = es_ext_test_get_entropy,
 	.selftest = es_ext_test_selftest,
+	.status_json = es_ext_test_status_json,
 };

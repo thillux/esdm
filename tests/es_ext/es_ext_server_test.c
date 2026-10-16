@@ -145,6 +145,10 @@ static void test_plugin(const char *server, const char *plugin)
 		      "the plugin was not loaded (%.400s)", es);
 		CHECK(strstr(es, "Status: delivering") != NULL,
 		      "the plugin does not deliver (%.400s)", es);
+		/* The status of the plugin, a section of the source */
+		CHECK(strstr(es, "\n Provider properties:\n"
+				 "  Plugin: es-ext-test\n") != NULL,
+		      "the status of the plugin is not shown (%.400s)", es);
 	}
 
 	/* Asked for its data with the privileges of the daemon dropped */
@@ -186,6 +190,10 @@ static void test_socket_provider(const char *server, const char *serve,
 	es = test_es_section(status, "ExternalSocket");
 	CHECK(es && strstr(es, "Status: connected (uid 0)") != NULL,
 	      "the provider was not connected to (%.400s)", es ? es : "");
+	/* Its status, which esdm-es-ext-serve fetches from the plugin */
+	CHECK(es && strstr(es, "\n Provider properties:\n"
+			       "  Plugin: es-ext-test\n") != NULL,
+	      "the status of the provider is not shown (%.400s)", es ? es : "");
 
 	/* The provider goes, and comes back */
 	test_terminate(provider);

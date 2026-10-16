@@ -63,6 +63,17 @@ static inline void mutex_lock(mutex_t *mutex)
 }
 
 /**
+ * Mutual exclusion lock, if nobody holds the lock (neither as writer nor as
+ * reader) - for a caller that rather goes without than waits.
+ * @param [in] mutex lock variable to lock
+ * @return 1 if the lock is taken now, 0 otherwise
+ */
+static inline int mutex_trylock(mutex_t *mutex)
+{
+	return pthread_rwlock_trywrlock(mutex) == 0;
+}
+
+/**
  * Unlock the lock
  * @param [in] mutex lock variable to lock
  */

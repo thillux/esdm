@@ -240,6 +240,16 @@ it delivers again, which the daemon finds out on its own. The same entropy credi
 applies as for a plugin, with the rate of
 .BR \-\-es_ext_socket_entropy_rate .
 .PP
+A plugin, or a provider, may report a status of its own, a JSON object: the
+status of the daemon shows it as the
+.B provider
+member of the state of the source, a section of its own in the text form
+.RB ( "esdm\-tool \-\-status" ).
+It is not asked for while the source serves a request, and left out when it is
+no well-formed JSON object of up to 512 bytes. A provider that does not know
+the request closes the connection on it; the daemon connects again at once and
+does not ask again until the connection is lost.
+.PP
 A daemon built with DTLS (meson option
 .BR dtls )
 asks the provider to encrypt the connection with DTLS, and uses it unencrypted

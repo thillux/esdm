@@ -62,6 +62,7 @@
 #include "esdm_es_ext.h"
 #include "esdm_dtls.h"
 #include "esdm_es_ext_proto.h"
+#include "esdm_es_ext_status.h"
 #include "esdm_es_extsock.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
@@ -119,6 +120,15 @@ static bool extsock_was_connected = false;
  * every connection attempt
  */
 static int extsock_last_logged = 0;
+
+/*
+ * The provider connected to answered no STATUS - it closed the connection on
+ * it, as a provider does on a request it does not know, or did not answer in
+ * time - and is not asked again on this connection. The last status it sent
+ * was none and logged as such.
+ */
+static bool extsock_status_refused = false;
+static bool extsock_status_warned = false;
 
 /* Caller must hold extsock_mutex. */
 static const char *esdm_es_extsock_path_locked(void)
@@ -237,6 +247,8 @@ static int esdm_es_extsock_open_locked(void)
 
 	extsock_fd = fd;
 	extsock_connected_uid = cred.uid;
+	/* A provider restarted may be one that knows STATUS now */
+	extsock_status_refused = false;
 	return 0;
 
 err:
@@ -542,6 +554,7 @@ static int esdm_es_extsock_init(void)
 	extsock_was_connected = false;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
+	extsock_status_warned = false;
 	/* A provider not there yet is connected to on demand */
 	if (esdm_es_extsock_configured_locked())
 		(void)esdm_es_extsock_connect_locked();
@@ -702,11 +715,95 @@ out:
 	return 0;
 }
 
+/*
+ * The status the provider reports of itself, NULL for none. Caller must hold
+ * extsock_mutex (write lock).
+ *
+ * A provider connected to only: the ESDM status does not wait for a provider
+ * to be connected to. A provider that closes the connection on the request -
+ * one older than it - or does not answer in time is connected to again right
+ * away, as for STARTDTLS, rather than being given up on for the retry
+ * interval, and not asked again on that connection.
+ */
+static struct json_object *esdm_es_extsock_status_locked(void)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	struct json_object *obj = NULL;
+	const char *text;
+	size_t textlen;
+	int32_t status;
+	ssize_t n;
+
+	if (extsock_fd < 0 || extsock_status_refused)
+		return NULL;
+
+	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_STATUS,
+					    ESDM_ES_EXT_STATUS_MAX, rsp);
+	/* An answer larger than any: disconnected as for any other request */
+	if (n == -EPROTO || n == -EMSGSIZE) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider: invalid answer to STATUS, disconnected\n");
+		goto out;
+	}
+	if (n < 0) {
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ES,
+			"External ES provider: no answer to STATUS (%s), connecting again\n",
+			strerror((int)-n));
+		if (esdm_es_extsock_connect_locked())
+			extsock_retry_at = esdm_es_extsock_now() +
+					   ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+		else
+			extsock_retry_at = 0;
+		extsock_status_refused = true;
+		goto out;
+	}
+
+	if (esdm_es_ext_proto_status_unpack(rsp, (size_t)n,
+					    ESDM_ES_EXT_STATUS_MAX, &status,
+					    &text, &textlen)) {
+		/* A connection that brings such things is not used again */
+		esdm_es_extsock_drop_locked();
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider: invalid answer to STATUS, disconnected\n");
+		goto out;
+	}
+
+	if (status) {
+		if (status != -EOPNOTSUPP)
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+				    "External ES provider: no status: %s\n",
+				    strerror(-status));
+		goto out;
+	}
+
+	obj = esdm_es_ext_status_parse(text, textlen, "provider",
+				       &extsock_status_warned);
+
+out:
+	memset_secure(rsp, 0, sizeof(rsp));
+	return obj;
+}
+
 static void esdm_es_extsock_es_state(struct json_object *obj)
 {
 	uint32_t poolsize, entropy_rate;
 	char path[PATH_MAX], status[64], accepted[48];
+	struct json_object *provider = NULL;
 	long peer_uid;
+
+	/*
+	 * The status of the provider, unless a request is in progress on the
+	 * connection - one of a seeding, which may take up to the timeout: the
+	 * ESDM status is not to wait for it. Before the state of the
+	 * connection is taken, which asking for it may change.
+	 */
+	if (mutex_trylock(&extsock_mutex)) {
+		provider = esdm_es_extsock_status_locked();
+		mutex_unlock(&extsock_mutex);
+	}
 
 	mutex_reader_lock(&extsock_mutex);
 	poolsize =
@@ -742,6 +839,8 @@ static void esdm_es_extsock_es_state(struct json_object *obj)
 	json_object_object_add(obj, "provider_accepted",
 			       json_object_new_string(accepted));
 	json_object_object_add(obj, "status", json_object_new_string(status));
+	if (provider)
+		json_object_object_add(obj, "provider", provider);
 }
 
 /*
@@ -837,6 +936,7 @@ int esdm_es_ext_socket_set_path(const char *path)
 	extsock_was_connected = false;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
+	extsock_status_warned = false;
 	mutex_unlock(&extsock_mutex);
 
 	free(old);

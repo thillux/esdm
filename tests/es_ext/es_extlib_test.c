@@ -53,6 +53,7 @@
 
 #include "common_test.h"
 #include "../es_state_check.h"
+#include "esdm_status_txt.h"
 #include "es_ext_test_plugin.h"
 
 #define ES (&esdm_es_extlib)
@@ -201,6 +202,133 @@ static void test_credit(const char *path)
 	CHECK_EQ(ctl->selftest_calls, 3);
 }
 
+/* The "provider" member of the state, NULL if there is none */
+static struct json_object *test_provider(struct json_object **state)
+{
+	struct json_object *provider = NULL;
+
+	*state = es_state_get(ES);
+	if (!json_object_object_get_ex(*state, "provider", &provider))
+		return NULL;
+	return provider;
+}
+
+/*
+ * The status of the plugin is the "provider" member of the state, as the
+ * plugin reports it - or not there at all for a plugin that reports none,
+ * reports what is no JSON object of up to ESDM_ES_EXT_STATUS_MAX bytes, or is
+ * busy. The rest of the state is there either way.
+ */
+static void test_status(const char *good, const char *v1)
+{
+	static const char *const bad[] = {
+		"{\"a\":",
+		"[1,2]",
+		"\"text\"",
+		"{\"a\":1} x",
+		"{\"a\":1}{}",
+		"{\"a\":1,}",
+		"not json",
+		"{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":{\"h\":{\"i\":1}}}}}}}}}",
+	};
+	char text[ESDM_ES_EXT_STATUS_MAX + 2], txt[2048];
+	struct esdm_es_ext_test_control *ctl_v1 = NULL;
+	struct json_object *state, *provider, *val;
+	unsigned int calls, i;
+	void *dl;
+
+	provider = test_provider(&state);
+	CHECK(provider && json_object_is_type(provider, json_type_object),
+	      "the state has no status of the plugin: %s",
+	      es_state_print(state));
+	CHECK(es_state_str_is(provider, "plugin", "es-ext-test"),
+	      "the status is not the plugin's: %s", es_state_print(state));
+	CHECK(json_object_object_get_ex(provider, "healthy", &val) &&
+		      json_object_is_type(val, json_type_boolean) &&
+		      json_object_get_boolean(val),
+	      "the status lost its boolean: %s", es_state_print(state));
+
+	/* And in the text status, a section of the source */
+	CHECK_EQ(esdm_status_txt(state, NULL, txt, sizeof(txt)), 0);
+	CHECK(strstr(txt, "\nProvider properties:\n Plugin: es-ext-test\n"
+			  " Healthy: true\n"),
+	      "the text has no status of the plugin: %s", txt);
+	json_object_put(state);
+
+	/* What is no JSON object is left out */
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		ctl->status_text = bad[i];
+		provider = test_provider(&state);
+		CHECK(!provider, "the status %s is taken", bad[i]);
+		CHECK(test_state_has("status", "delivering"),
+		      "the state is gone with the status %s", bad[i]);
+		json_object_put(state);
+	}
+
+	/* The largest status there may be, and one byte more */
+	memset(text, 'a', sizeof(text));
+	memcpy(text, "{\"x\":\"", 6);
+	memcpy(text + ESDM_ES_EXT_STATUS_MAX - 2, "\"}", 3);
+	ctl->status_text = text;
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the largest status is not taken");
+	json_object_put(state);
+
+	memcpy(text + ESDM_ES_EXT_STATUS_MAX - 2, "a\"}", 4);
+	provider = test_provider(&state);
+	CHECK(!provider, "a status beyond the largest is taken");
+	json_object_put(state);
+	ctl->status_text = NULL;
+
+	/* Not terminated within the buffer, or failing */
+	ctl->status_unterminated = 1;
+	provider = test_provider(&state);
+	CHECK(!provider, "an unterminated status is taken");
+	json_object_put(state);
+	ctl->status_unterminated = 0;
+
+	ctl->status_ret = -EIO;
+	provider = test_provider(&state);
+	CHECK(!provider, "the status of a failing status callback is taken");
+	json_object_put(state);
+	ctl->status_ret = 0;
+
+	/* Not asked while the plugin is busy */
+	calls = ctl->status_calls;
+	mutex_reader_lock(&extlib_mutex);
+	provider = test_provider(&state);
+	mutex_reader_unlock(&extlib_mutex);
+	CHECK(!provider, "a busy plugin was asked for its status");
+	CHECK_EQ(ctl->status_calls, calls);
+	CHECK(test_state_has("status", "delivering"),
+	      "the state of a busy plugin is gone");
+	json_object_put(state);
+
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the status is gone after a valid one");
+	json_object_put(state);
+
+	/* A plugin of version 1 has none, whatever lies beyond its struct */
+	CHECK_EQ(esdm_es_ext_lib_set_path(v1), 0);
+	dl = dlopen(v1, RTLD_NOW | RTLD_NOLOAD);
+	if (dl) {
+		ctl_v1 = dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL);
+		dlclose(dl);
+	}
+	CHECK(ctl_v1 != NULL, "the plugin of version 1 has no control");
+	CHECK(ES->active(), "the plugin of version 1 is not used");
+	provider = test_provider(&state);
+	CHECK(!provider, "a plugin of version 1 reports a status");
+	CHECK(test_state_has("status", "delivering"),
+	      "the plugin of version 1 does not deliver");
+	json_object_put(state);
+	if (ctl_v1)
+		CHECK_EQ(ctl_v1->status_calls, 0);
+
+	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
+	CHECK(ES->active(), "the test plugin is not back");
+}
+
 static void test_reinit(void)
 {
 	unsigned int init_calls = ctl->init_calls;
@@ -260,9 +388,9 @@ int main(int argc, char *argv[])
 {
 	void *ref;
 
-	/* The plugins the tests of this directory share; more may follow */
-	if (argc < 5) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin>\n",
+	/* The plugins the tests of this directory share */
+	if (argc < 7) {
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -284,6 +412,7 @@ int main(int argc, char *argv[])
 
 	test_unconfigured();
 	test_credit(argv[1]);
+	test_status(argv[1], argv[6]);
 	test_reinit();
 	test_bad_plugins(argv[1], argv[2], argv[3], argv[4]);
 

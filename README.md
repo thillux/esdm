@@ -236,7 +236,9 @@ in `addon/es_ebpf_testing/` before crediting the sources, see its
 
 Noise sources that are not part of the ESDM are written against
 `esdm_es_ext.h` of `libesdm_es_ext` as a `struct esdm_es_ext_plugin`: an
-`init`, `fini`, `get_entropy` and `selftest` callback - see
+`init`, `fini`, `get_entropy` and `selftest` callback, and a `status_json`
+callback reporting a status of its own as a JSON object, which the ESDM
+status shows as the `provider` member of the source - see
 `libesdm_es_ext(3)` and the example in `es-ext/example/`. Such a plugin is
 handed to the ESDM in one of two ways:
 

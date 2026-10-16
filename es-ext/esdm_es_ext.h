@@ -56,8 +56,18 @@ extern "C" {
  * Plugin API
  ******************************************************************************/
 
-/* Version of struct esdm_es_ext_plugin a plugin is written against */
-#define ESDM_ES_EXT_PLUGIN_VERSION 1
+/*
+ * Version of struct esdm_es_ext_plugin a plugin is written against. Version 2
+ * added @status_json; a plugin of version 1, which does not have it, is
+ * loaded all the same.
+ */
+#define ESDM_ES_EXT_PLUGIN_VERSION 2
+
+/*
+ * The largest status @status_json may report: bytes of JSON text, the
+ * terminating NUL not counted
+ */
+#define ESDM_ES_EXT_STATUS_MAX 512
 
 /* The name a plugin library exports its struct esdm_es_ext_plugin under */
 #define ESDM_ES_EXT_PLUGIN_SYMBOL "esdm_es_ext_plugin"
@@ -99,6 +109,16 @@ extern "C" {
  * @selftest: Check that the source still works, without consuming the data
  *	      the ESDM is handed. Returns 0 or a negative errno. Run at start up
  *	      and on the interval of the ESDM self tests. May be NULL.
+ * @status_json: Write the status of the source - whatever helps whoever looks
+ *		 at the ESDM status, e.g. the device read or the health of the
+ *		 noise source - into @buf of @buflen bytes as one JSON object,
+ *		 terminated by a NUL: { "device": "/dev/hwrng", "reads": 42 }.
+ *		 @buflen leaves room for ESDM_ES_EXT_STATUS_MAX bytes of text.
+ *		 Returns 0, -EMSGSIZE if the status does not fit, or another
+ *		 negative errno. The ESDM shows it as the "provider" member of
+ *		 the state of the source, and leaves out a status that is no
+ *		 JSON object. Asked for whenever the ESDM status is, so it must
+ *		 not block for long. Version 2 and later only; may be NULL.
  */
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -108,6 +128,8 @@ struct esdm_es_ext_plugin {
 	int (*get_entropy)(void *ctx, uint8_t *buf, size_t buflen,
 			   uint32_t *entropy_bits);
 	int (*selftest)(void *ctx);
+	/* Version 2 */
+	int (*status_json)(void *ctx, char *buf, size_t buflen);
 };
 
 /******************************************************************************
@@ -122,22 +144,36 @@ struct esdm_es_ext_plugin {
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
  *	u16 type		ESDM_ES_EXT_PROTO_GET_ENTROPY,
- *				ESDM_ES_EXT_PROTO_SELFTEST or
- *				ESDM_ES_EXT_PROTO_STARTDTLS
+ *				ESDM_ES_EXT_PROTO_SELFTEST,
+ *				ESDM_ES_EXT_PROTO_STARTDTLS or
+ *				ESDM_ES_EXT_PROTO_STATUS
  *	u32 length		bytes asked for, 1 to ESDM_ES_EXT_PROTO_MAX_DATA
- *				for GET_ENTROPY, 0 otherwise
+ *				for GET_ENTROPY; the largest status taken, 1 to
+ *				ESDM_ES_EXT_STATUS_MAX, for STATUS; 0 otherwise
  *
  * Response, ESDM_ES_EXT_PROTO_RSP_LEN bytes followed by the data:
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
  *	u16 type		type of the request answered
  *	s32 status		0, or a negative errno
- *	u32 entropy_bits	entropy of the data, at most 8 * length
+ *	u32 entropy_bits	entropy of the data, at most 8 * length for a
+ *				GET_ENTROPY, 0 otherwise
  *	u8  data[]		exactly length bytes for a GET_ENTROPY answered
- *				with status 0, nothing otherwise
+ *				with status 0; the status, 1 to length bytes of
+ *				JSON text without a NUL, for a STATUS answered
+ *				with status 0; nothing otherwise
  *
  * A response that breaks any of this is discarded and the connection closed.
- * A provider closes a connection on a request that breaks it.
+ * A provider closes a connection on a request that breaks it - including one
+ * of a type it does not know.
+ *
+ * STATUS: the status of the source, as @status_json of a plugin reports it -
+ * one JSON object, which the ESDM shows in its own status. A provider without
+ * one answers -EOPNOTSUPP, one whose status does not fit into the length
+ * -EMSGSIZE. The ESDM asks for it whenever its own status is asked for, and
+ * not while a request is in progress. A provider older than STATUS closes the
+ * connection on it: the ESDM connects again at once, and reports no status
+ * of the provider until the connection is lost the next time.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
  * first request. A provider answering it with status 0 expects a DTLS 1.2
@@ -162,6 +198,7 @@ struct esdm_es_ext_plugin {
 #define ESDM_ES_EXT_PROTO_GET_ENTROPY 1
 #define ESDM_ES_EXT_PROTO_SELFTEST 2
 #define ESDM_ES_EXT_PROTO_STARTDTLS 3
+#define ESDM_ES_EXT_PROTO_STATUS 4
 #define ESDM_ES_EXT_PROTO_MAX_DATA 512
 #define ESDM_ES_EXT_PROTO_REQ_LEN 12
 #define ESDM_ES_EXT_PROTO_RSP_LEN 16
@@ -268,8 +305,8 @@ struct esdm_es_ext_plugin_handle;
  * @brief Load a plugin library
  *
  * Loads the shared library @path and checks the struct esdm_es_ext_plugin it
- * exports: its version has to be ESDM_ES_EXT_PLUGIN_VERSION and it has to have
- * a @get_entropy callback. The @init callback is not called - the plugin is
+ * exports: its version has to be 1 to ESDM_ES_EXT_PLUGIN_VERSION and it has to
+ * have a @get_entropy callback. The @init callback is not called - the plugin is
  * meant to be handed to esdm_es_ext_server_alloc(), which does.
  *
  * @param [in] path Path of the plugin library

@@ -23,7 +23,8 @@
  * It reads a character device delivering noise, /dev/hwrng unless
  * ESDM_ES_EXT_EXAMPLE_DEVICE names another one at build time, and claims one
  * bit of entropy per byte read. A real plugin claims what the assessment of its
- * noise source supports.
+ * noise source supports. Its status, shown in the ESDM status, names the device
+ * and counts the reads.
  *
  * Build it as a shared library:
  *
@@ -39,6 +40,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -50,6 +52,8 @@
 
 struct example_ctx {
 	int fd;
+	unsigned long reads;
+	unsigned long failures;
 };
 
 /*
@@ -63,6 +67,8 @@ static int example_init(void **ctx)
 	if (!c)
 		return -ENOMEM;
 
+	c->reads = 0;
+	c->failures = 0;
 	c->fd = open(ESDM_ES_EXT_EXAMPLE_DEVICE, O_RDONLY | O_CLOEXEC);
 	if (c->fd < 0) {
 		int ret = -errno;
@@ -95,11 +101,14 @@ static int example_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 
 		if (ret < 0 && errno == EINTR)
 			continue;
-		if (ret <= 0)
+		if (ret <= 0) {
+			c->failures++;
 			return ret < 0 ? -errno : -EIO;
+		}
 		done += (size_t)ret;
 	}
 
+	c->reads++;
 	*entropy_bits = (uint32_t)buflen;
 	return 0;
 }
@@ -112,6 +121,22 @@ static int example_selftest(void *ctx)
 	return fcntl(c->fd, F_GETFD) < 0 ? -EBADF : 0;
 }
 
+/*
+ * One JSON object. The device name is a constant of the build without
+ * anything JSON would have to escape.
+ */
+static int example_status_json(void *ctx, char *buf, size_t buflen)
+{
+	struct example_ctx *c = ctx;
+	int len = snprintf(buf, buflen,
+			   "{\"device\":\"%s\",\"reads\":%lu,\"failures\":%lu}",
+			   ESDM_ES_EXT_EXAMPLE_DEVICE, c->reads, c->failures);
+
+	if (len < 0)
+		return -EIO;
+	return (size_t)len < buflen ? 0 : -EMSGSIZE;
+}
+
 ESDM_ES_EXT_PLUGIN_EXPORT
 const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
@@ -120,4 +145,5 @@ const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 	.fini = example_fini,
 	.get_entropy = example_get_entropy,
 	.selftest = example_selftest,
+	.status_json = example_status_json,
 };
