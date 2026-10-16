@@ -200,7 +200,9 @@ reason is logged.
 Each block is credited with the entropy the plugin claims for it, but with at
 most what the configured rate allows. A plugin that fails to deliver, or claims
 more entropy than the block can hold, is credited with nothing until it
-delivers again.
+delivers again; the daemon asks it again on its own, at most every 5 seconds,
+to find out. A plugin failing its self test is credited with nothing until a
+self test passes.
 .PP
 A provider given with
 .B \-\-es_ext_socket
@@ -218,8 +220,9 @@ is accepted. The daemon connects with its privileges dropped once a connection
 was lost, so the socket has to let the user it runs as
 .RB ( \-\-username )
 connect. A provider that does not answer within 2 seconds, or answers what the
-protocol does not allow, is disconnected; one that is not connected, or failed,
-is credited with nothing until it delivers again. The same entropy credit
+protocol does not allow, is disconnected and not connected to again for 5
+seconds; one that is not connected, or failed, is credited with nothing until
+it delivers again, which the daemon finds out on its own. The same entropy credit
 applies as for a plugin, with the rate of
 .BR \-\-es_ext_socket_entropy_rate .
 .SH SIGNALS

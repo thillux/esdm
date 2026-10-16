@@ -27,11 +27,16 @@
  *   provider that fails, or fails its self test, is credited with nothing
  *   until it delivers again.
  * - A provider running as a user that is not accepted is not used.
- * - A provider that goes away is connected to again once it is back.
+ * - A provider that goes away is connected to again once it is back - by a
+ *   seeding, or by the monitor of the source when no seeding asks; the same
+ *   for a provider that was not there at start up.
+ * - A provider failing its self test is credited with nothing until a self
+ *   test passes, whatever it delivers meanwhile.
  * - A provider answering what the protocol does not allow - a wrong magic,
  *   more data than asked for, more entropy than the data holds - or not
  *   answering at all is disconnected and credited with nothing, and none of
- *   its data is handed on.
+ *   its data is handed on. It is not connected to again before the retry
+ *   interval is over.
  *
  * The source is compiled into the test, with a short retry interval and
  * timeout so that the test does not have to wait for long.
@@ -303,12 +308,33 @@ static void test_credit(void)
 	ctl->get_ret = 0;
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 
-	/* Its self test */
+	/* A failure is noticed by the monitor, without a seeding asking */
+	ctl->get_ret = -EIO;
+	CHECK_EQ(test_get(bits, NULL), 0);
+	ctl->get_ret = 0;
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+	/* Nothing to probe for a provider that delivers */
+	{
+		unsigned int calls = ctl->get_calls;
+
+		CHECK_EQ(ES->monitor_es(), 0);
+		CHECK_EQ(ctl->get_calls, calls);
+	}
+
+	/* Its self test: no data delivered makes up for a failed one */
 	CHECK_EQ(ES->selftest(), 0);
 	ctl->selftest_ret = -ENODEV;
 	CHECK_EQ(ES->selftest(), -EFAULT);
 	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK(test_state_has("failing its self test"),
+	      "the state does not say the self test fails");
+	CHECK_EQ(test_get(bits, &first), 0);
+	CHECK_EQ(first, ctl->get_calls & 0xff);
+	CHECK_EQ(test_get(bits, NULL), 0);
 	ctl->selftest_ret = 0;
+	CHECK_EQ(ES->selftest(), 0);
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 }
 
@@ -346,6 +372,39 @@ static void test_reconnect(void)
 	test_wait_retry();
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 	CHECK(test_state_has("connected (uid"), "the provider is not back");
+
+	/*
+	 * Once more, with nothing but the monitor to find out: a provider not
+	 * connected is credited with nothing, which keeps an unforced reseed
+	 * from asking it.
+	 */
+	test_server_stop();
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	test_wait_retry();
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK(test_state_has("connected (uid"),
+	      "the monitor did not connect to the provider back");
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+}
+
+/* A provider that is not there when the source starts is connected later */
+static void test_late_provider(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+
+	test_server_stop();
+	ES->fini();
+	CHECK_EQ(ES->init(), 0);
+	CHECK(test_state_has("not connected"), "connected to nothing");
+	CHECK_EQ(ES->max_entropy(), 0);
+
+	CHECK_EQ(test_server_start(), 0);
+	test_wait_retry();
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
 }
 
 static void test_protocol_breaches(void)
@@ -381,8 +440,15 @@ static void test_protocol_breaches(void)
 		      "an unanswered request (mode %d) is waited for too long",
 		      modes[i]);
 
-		/* A new connection, at once, delivers again */
+		/*
+		 * Not connected again at once - a provider failing that way
+		 * would cost a connection, and a timeout, per seeding - but
+		 * once the retry interval is over
+		 */
 		atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+		CHECK_EQ(test_get(bits, NULL), 0);
+		CHECK_EQ(atomic_load(&test_evil_connections), conns);
+		test_wait_retry();
 		CHECK_EQ(test_get(bits, NULL), 8);
 		CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
 	}
@@ -416,6 +482,7 @@ int main(void)
 	test_credit();
 	test_peer_check();
 	test_reconnect();
+	test_late_provider();
 	test_protocol_breaches();
 
 	if (test_server)

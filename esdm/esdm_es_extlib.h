@@ -28,6 +28,14 @@
 
 #ifdef ESDM_ES_EXT
 
+/*
+ * A plugin whose request failed is asked by the ES monitor again, at most once
+ * per this many seconds, to find out whether it recovered.
+ */
+#ifndef ESDM_EXT_LIB_PROBE_INTERVAL_SEC
+#define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 5
+#endif
+
 extern struct esdm_es_cb esdm_es_extlib;
 
 /**

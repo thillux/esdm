@@ -31,9 +31,10 @@
  * A block is credited with what the plugin claims for it, at most with what
  * the configured rate allows (esdm_config_es_ext_lib_entropy_rate()). A
  * plugin that fails to deliver - or claims more than the data can hold, which
- * counts as a failure - is credited with nothing until it delivers again; it
- * is asked on every seeding all the same, its data then going into the
- * additional data, so that its recovery is noticed.
+ * counts as a failure - is credited with nothing until it delivers again: on
+ * a seeding that asks it, its data then going into the additional data, or on
+ * a probe of the ES monitor. A plugin failing its self test is credited with
+ * nothing until a self test passes.
  */
 
 #include <dlfcn.h>
@@ -42,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "build_bug_on.h"
 #include "esdm_config.h"
@@ -74,10 +76,17 @@ static void *extlib_ctx = NULL;
 static char extlib_loaded_path[PATH_MAX];
 
 /*
- * The last request to the plugin, or its last self test, failed. Set and
- * cleared under the write lock, read under the reader lock.
+ * The last request to the plugin failed, or its last self test did. They are
+ * kept apart: data delivered says nothing about the noise source a self test
+ * found broken, so only a self test that passes clears its failure, and only
+ * data delivered clears a failed request. Set and cleared under the write
+ * lock, read under the reader lock.
  */
-static bool extlib_failed = false;
+static bool extlib_read_failed = false;
+static bool extlib_selftest_failed = false;
+
+/* Earliest time to probe a plugin whose request failed, monotonic seconds */
+static time_t extlib_probe_at = 0;
 
 /* Between init and fini - a new path is loaded at once then */
 static bool extlib_initialized = false;
@@ -101,7 +110,8 @@ static void esdm_es_extlib_unload_locked(void)
 	extlib_dl = NULL;
 
 	extlib_loaded_path[0] = '\0';
-	extlib_failed = false;
+	extlib_read_failed = false;
+	extlib_selftest_failed = false;
 }
 
 /*
@@ -129,7 +139,8 @@ static int esdm_es_extlib_init_plugin_locked(const struct esdm_es_ext_plugin *p)
 
 	extlib_plugin = p;
 	extlib_ctx = ctx;
-	extlib_failed = false;
+	extlib_read_failed = false;
+	extlib_selftest_failed = false;
 	return 0;
 }
 
@@ -207,9 +218,11 @@ static int esdm_es_extlib_load_locked(void)
 		return ret;
 	}
 
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-		    "External ES plugin %s loaded from %s\n",
-		    p->name ? p->name : "(unnamed)", path);
+	/* Its claims are not assessed by the ESDM, which is worth a line */
+	esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
+		    "External ES plugin %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
+		    p->name ? p->name : "(unnamed)", path,
+		    esdm_config_es_ext_lib_entropy_rate());
 
 	return 0;
 }
@@ -240,7 +253,7 @@ static void esdm_es_extlib_fini(void)
 /* Caller must hold extlib_mutex. */
 static uint32_t esdm_es_extlib_entropylevel_locked(uint32_t requested_bits)
 {
-	if (!extlib_plugin || extlib_failed)
+	if (!extlib_plugin || extlib_read_failed || extlib_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -283,16 +296,16 @@ static void esdm_es_extlib_get(struct entropy_es *eb_es,
 	ret = esdm_es_ext_plugin_get(extlib_plugin, extlib_ctx, eb_es->e, len,
 				     &claimed);
 	if (ret) {
-		if (!extlib_failed)
+		if (!extlib_read_failed)
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
 				"External ES plugin: no entropy delivered: %s\n",
 				strerror(-ret));
-		extlib_failed = true;
+		extlib_read_failed = true;
 		goto out;
 	}
 
-	extlib_failed = false;
+	extlib_read_failed = false;
 	eb_es->e_bits = min_uint32(
 		claimed, esdm_es_extlib_entropylevel_locked(requested_bits));
 
@@ -302,6 +315,40 @@ static void esdm_es_extlib_get(struct entropy_es *eb_es,
 
 out:
 	mutex_unlock(&extlib_mutex);
+}
+
+/*
+ * A plugin whose request failed is credited with nothing, which keeps it out
+ * of what an unforced reseed waits for - and such a reseed asks no source at
+ * all while too little entropy is available. The monitor asks it instead, at
+ * most every ESDM_EXT_LIB_PROBE_INTERVAL_SEC seconds, and discards what it
+ * delivers: data it delivers again makes it credited again.
+ */
+static int esdm_es_extlib_monitor(void)
+{
+	uint8_t probe[ESDM_DRNG_SECURITY_STRENGTH_BYTES];
+	struct timespec now;
+	uint32_t claimed;
+
+	mutex_lock(&extlib_mutex);
+
+	if (!extlib_plugin || !extlib_read_failed ||
+	    clock_gettime(CLOCK_MONOTONIC, &now) ||
+	    now.tv_sec < extlib_probe_at)
+		goto out;
+	extlib_probe_at = now.tv_sec + ESDM_EXT_LIB_PROBE_INTERVAL_SEC;
+
+	if (!esdm_es_ext_plugin_get(extlib_plugin, extlib_ctx, probe,
+				    sizeof(probe), &claimed)) {
+		extlib_read_failed = false;
+		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
+			    "External ES plugin: delivering again\n");
+	}
+
+out:
+	mutex_unlock(&extlib_mutex);
+	memset_secure(probe, 0, sizeof(probe));
+	return 0;
 }
 
 static void esdm_es_extlib_es_state(char *buf, size_t buflen)
@@ -317,9 +364,10 @@ static void esdm_es_extlib_es_state(char *buf, size_t buflen)
 	snprintf(name, sizeof(name), "%s",
 		 extlib_plugin && extlib_plugin->name ? extlib_plugin->name :
 							"(none)");
-	status = !extlib_plugin ? "not loaded" :
-		 extlib_failed	? "failing" :
-				  "delivering";
+	status = !extlib_plugin		 ? "not loaded" :
+		 extlib_selftest_failed ? "failing its self test" :
+		 extlib_read_failed	 ? "failing" :
+					   "delivering";
 	mutex_reader_unlock(&extlib_mutex);
 
 	snprintf(buf, buflen,
@@ -364,10 +412,12 @@ static int esdm_es_extlib_selftest(void)
 				LOGGER_ERR, LOGGER_C_ES,
 				"External ES plugin: self test failed: %d\n",
 				ret);
-			extlib_failed = true;
+			extlib_selftest_failed = true;
 			ret = -EFAULT;
+			goto out;
 		}
 	}
+	extlib_selftest_failed = false;
 
 out:
 	mutex_unlock(&extlib_mutex);
@@ -414,7 +464,7 @@ struct esdm_es_cb esdm_es_extlib = {
 	.name = "ExternalLib",
 	.init = esdm_es_extlib_init,
 	.fini = esdm_es_extlib_fini,
-	.monitor_es = NULL,
+	.monitor_es = esdm_es_extlib_monitor,
 	.get_ent = esdm_es_extlib_get,
 	.curr_entropy = esdm_es_extlib_entropylevel,
 	.max_entropy = esdm_es_extlib_poolsize,

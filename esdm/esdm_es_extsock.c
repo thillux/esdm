@@ -28,7 +28,8 @@
  * error, a provider that does not answer in time, an answer breaking the
  * protocol - closes it: an answer arriving late would otherwise be taken for
  * the one to the next request. A new connection is made on demand, at most
- * every ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC seconds after a failed attempt.
+ * every ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC seconds after a failed attempt or a
+ * connection given up on.
  *
  * Whoever can create the socket file at the configured path could feed the
  * ESDM with data credited as entropy, so the credentials of the provider are
@@ -36,8 +37,9 @@
  *
  * A block is credited with what the provider claims for it, at most with what
  * the configured rate allows (esdm_config_es_ext_socket_entropy_rate()). A
- * provider that fails is credited with nothing until it delivers again; it is
- * asked on every seeding all the same.
+ * provider that fails is credited with nothing until it delivers again, on a
+ * seeding that asks it or on a probe of the ES monitor; one failing its self
+ * test is credited with nothing until a self test passes.
  */
 
 #define _GNU_SOURCE
@@ -83,13 +85,24 @@ static int extsock_fd = -1;
 static uid_t extsock_connected_uid = 0;
 
 /*
- * The last request to the provider, or its last self test, failed. Set and
- * cleared under the write lock, read under the reader lock.
+ * The last request to the provider failed, or its last self test did. Kept
+ * apart as for the plugin source: only data delivered clears a failed request,
+ * only a self test that passes clears a failed self test - not a new
+ * connection either. Set and cleared under the write lock, read under the
+ * reader lock.
  */
-static bool extsock_failed = false;
+static bool extsock_read_failed = false;
+static bool extsock_selftest_failed = false;
 
-/* Earliest time to connect again, monotonic seconds */
+/*
+ * Earliest time to connect again, and to probe a provider whose request
+ * failed, monotonic seconds
+ */
 static time_t extsock_retry_at = 0;
+static time_t extsock_probe_at = 0;
+
+/* Connected once since the source was set up - the first one is logged */
+static bool extsock_was_connected = false;
 
 /*
  * What was logged last, so that a provider away for long is not logged on
@@ -125,6 +138,19 @@ static time_t esdm_es_extsock_now(void)
 	if (clock_gettime(CLOCK_MONOTONIC, &now))
 		return 0;
 	return now.tv_sec;
+}
+
+/*
+ * Give up on a connection that failed. It is not made again before the retry
+ * interval is over: a provider accepting and failing every request, or always
+ * answering just too late, must not cost a connection - and a timeout - per
+ * seeding. Caller must hold extsock_mutex (write lock).
+ */
+static void esdm_es_extsock_drop_locked(void)
+{
+	esdm_es_extsock_disconnect_locked();
+	extsock_retry_at =
+		esdm_es_extsock_now() + ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
 }
 
 /* Log @msg unless it was the last thing logged about the connection */
@@ -193,11 +219,15 @@ static int esdm_es_extsock_connect_locked(void)
 
 	extsock_fd = fd;
 	extsock_connected_uid = cred.uid;
-	extsock_failed = false;
 	extsock_last_logged = 0;
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-		    "External ES provider %s connected (uid %u)\n", path,
-		    (unsigned int)cred.uid);
+	/* Its claims are not assessed by the ESDM, which is worth a line */
+	esdm_logger(
+		extsock_was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
+		LOGGER_C_ES,
+		"External ES provider %s connected (uid %u), its entropy claims credited with up to %u bits per 256 bits\n",
+		path, (unsigned int)cred.uid,
+		esdm_config_es_ext_socket_entropy_rate());
+	extsock_was_connected = true;
 	return 0;
 
 err:
@@ -310,7 +340,7 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 	}
 
 err:
-	esdm_es_extsock_disconnect_locked();
+	esdm_es_extsock_drop_locked();
 	return n;
 }
 
@@ -322,8 +352,11 @@ static int esdm_es_extsock_init(void)
 
 	mutex_lock(&extsock_mutex);
 	extsock_retry_at = 0;
+	extsock_probe_at = 0;
 	extsock_last_logged = 0;
-	extsock_failed = false;
+	extsock_was_connected = false;
+	extsock_read_failed = false;
+	extsock_selftest_failed = false;
 	/* A provider not there yet is connected to on demand */
 	if (esdm_es_extsock_configured_locked())
 		(void)esdm_es_extsock_connect_locked();
@@ -336,14 +369,15 @@ static void esdm_es_extsock_fini(void)
 {
 	mutex_lock(&extsock_mutex);
 	esdm_es_extsock_disconnect_locked();
-	extsock_failed = false;
+	extsock_read_failed = false;
+	extsock_selftest_failed = false;
 	mutex_unlock(&extsock_mutex);
 }
 
 /* Caller must hold extsock_mutex. */
 static uint32_t esdm_es_extsock_entropylevel_locked(uint32_t requested_bits)
 {
-	if (extsock_fd < 0 || extsock_failed)
+	if (extsock_fd < 0 || extsock_read_failed || extsock_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -398,7 +432,7 @@ static void esdm_es_extsock_get(struct entropy_es *eb_es,
 					 ESDM_ES_EXT_PROTO_GET_ENTROPY, len,
 					 &status, &claimed, &data)) {
 		/* A connection that brings such things is not used again */
-		esdm_es_extsock_disconnect_locked();
+		esdm_es_extsock_drop_locked();
 		why = "invalid answer, disconnected";
 		goto fail;
 	}
@@ -409,7 +443,7 @@ static void esdm_es_extsock_get(struct entropy_es *eb_es,
 	}
 
 	memcpy(eb_es->e, data, len);
-	extsock_failed = false;
+	extsock_read_failed = false;
 	eb_es->e_bits = min_uint32(
 		claimed, esdm_es_extsock_entropylevel_locked(requested_bits));
 
@@ -419,15 +453,66 @@ static void esdm_es_extsock_get(struct entropy_es *eb_es,
 	goto out;
 
 fail:
-	if (!extsock_failed)
+	if (!extsock_read_failed)
 		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 			    "External ES provider: no entropy delivered: %s\n",
 			    why);
-	extsock_failed = true;
+	extsock_read_failed = true;
 
 out:
 	mutex_unlock(&extsock_mutex);
 	memset_secure(rsp, 0, sizeof(rsp));
+}
+
+/*
+ * A provider not connected, or whose request failed, is credited with
+ * nothing, which keeps it out of what an unforced reseed waits for - and such
+ * a reseed asks no source at all while too little entropy is available. The
+ * monitor connects to it instead, at most every retry interval, and probes one
+ * whose request failed by asking it for data it discards: data it delivers
+ * again makes it credited again.
+ */
+static int esdm_es_extsock_monitor(void)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	const uint8_t *data;
+	uint32_t claimed;
+	int32_t status;
+	time_t now;
+	ssize_t n;
+
+	mutex_lock(&extsock_mutex);
+
+	if (!esdm_es_extsock_ensure_locked() || !extsock_read_failed)
+		goto out;
+
+	now = esdm_es_extsock_now();
+	if (now < extsock_probe_at)
+		goto out;
+	extsock_probe_at = now + ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+
+	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_GET_ENTROPY,
+					    ESDM_DRNG_SECURITY_STRENGTH_BYTES,
+					    rsp);
+	if (n < 0)
+		goto out;
+	if (esdm_es_ext_proto_rsp_unpack(rsp, (size_t)n,
+					 ESDM_ES_EXT_PROTO_GET_ENTROPY,
+					 ESDM_DRNG_SECURITY_STRENGTH_BYTES,
+					 &status, &claimed, &data)) {
+		esdm_es_extsock_drop_locked();
+		goto out;
+	}
+	if (!status) {
+		extsock_read_failed = false;
+		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
+			    "External ES provider: delivering again\n");
+	}
+
+out:
+	mutex_unlock(&extsock_mutex);
+	memset_secure(rsp, 0, sizeof(rsp));
+	return 0;
 }
 
 static void esdm_es_extsock_es_state(char *buf, size_t buflen)
@@ -446,7 +531,9 @@ static void esdm_es_extsock_es_state(char *buf, size_t buflen)
 	else
 		snprintf(status, sizeof(status), "connected (uid %u)%s",
 			 (unsigned int)extsock_connected_uid,
-			 extsock_failed ? ", failing" : "");
+			 extsock_selftest_failed ? ", failing its self test" :
+			 extsock_read_failed	 ? ", failing" :
+						   "");
 	peer_uid = extsock_peer_uid;
 	mutex_reader_unlock(&extsock_mutex);
 
@@ -502,10 +589,11 @@ static int esdm_es_extsock_selftest(void)
 	if (n < 0 || esdm_es_ext_proto_rsp_unpack(rsp, (size_t)n,
 						  ESDM_ES_EXT_PROTO_SELFTEST, 0,
 						  &status, &bits, &data)) {
-		esdm_es_extsock_disconnect_locked();
+		/* No verdict on the noise source, but no working connection */
+		esdm_es_extsock_drop_locked();
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "External ES provider: self test not answered\n");
-		extsock_failed = true;
+		extsock_read_failed = true;
 		ret = -EFAULT;
 		goto out;
 	}
@@ -514,9 +602,11 @@ static int esdm_es_extsock_selftest(void)
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "External ES provider: self test failed: %s\n",
 			    strerror(-status));
-		extsock_failed = true;
+		extsock_selftest_failed = true;
 		ret = -EFAULT;
+		goto out;
 	}
+	extsock_selftest_failed = false;
 
 out:
 	mutex_unlock(&extsock_mutex);
@@ -546,8 +636,11 @@ int esdm_es_ext_socket_set_path(const char *path)
 	/* The provider of the new path is connected to on demand */
 	esdm_es_extsock_disconnect_locked();
 	extsock_retry_at = 0;
+	extsock_probe_at = 0;
 	extsock_last_logged = 0;
-	extsock_failed = false;
+	extsock_was_connected = false;
+	extsock_read_failed = false;
+	extsock_selftest_failed = false;
 	mutex_unlock(&extsock_mutex);
 
 	free(old);
@@ -573,7 +666,7 @@ struct esdm_es_cb esdm_es_extsock = {
 	.name = "ExternalSocket",
 	.init = esdm_es_extsock_init,
 	.fini = esdm_es_extsock_fini,
-	.monitor_es = NULL,
+	.monitor_es = esdm_es_extsock_monitor,
 	.get_ent = esdm_es_extsock_get,
 	.curr_entropy = esdm_es_extsock_entropylevel,
 	.max_entropy = esdm_es_extsock_poolsize,

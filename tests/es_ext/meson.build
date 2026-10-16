@@ -94,6 +94,7 @@ if get_option('esdm-es-ext').enabled()
 endif
 
 if get_option('es_ext').enabled()
+	# The source is compiled into the test - see the file header.
 	es_extlib_test = executable('es_extlib_test',
 		[ esdm_ipc_ns, 'es_extlib_test.c' ],
 		dependencies: dependencies_server + [ dl_dep ],

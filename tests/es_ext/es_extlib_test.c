@@ -26,9 +26,12 @@
  *   and the path outlives its fini.
  * - A block is credited with what the plugin claims, at most with what the
  *   configured rate allows. A plugin claiming more than the block holds, or
- *   failing, or failing its self test, is credited with nothing - not by what
- *   it delivers, not by what it reports as available - until it delivers
- *   again, and the data of a refused block is not handed on.
+ *   failing, is credited with nothing - not by what it delivers, not by what
+ *   it reports as available - until it delivers again, and the data of a
+ *   refused block is not handed on. The monitor of the source finds out on
+ *   its own that it delivers again.
+ * - A plugin failing its self test is credited with nothing until a self test
+ *   passes, whatever it delivers meanwhile.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
@@ -36,20 +39,22 @@
  *	  <no plugin> [...]
  */
 
+#include "config.h"
+
+/* Every monitor pass probes a failed plugin, so the test need not wait */
+#define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 0
+
+/* The unit under test */
+#include "esdm_es_extlib.c"
+
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "common_test.h"
 #include "es_ext_test_plugin.h"
-#include "esdm_config.h"
-#include "esdm_definitions.h"
-#include "esdm_es_aux.h"
-#include "esdm_es_extlib.h"
-#include "esdm_es_mgr.h"
-#include "esdm_logger.h"
 
-#define ES esdm_es[esdm_ext_es_extlib]
+#define ES (&esdm_es_extlib)
 
 static struct esdm_es_ext_test_control *ctl;
 
@@ -153,14 +158,39 @@ static void test_credit(const char *path)
 	ctl->get_ret = 0;
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 
-	/* Its self test */
+	/* A failure is noticed by the monitor, without a seeding asking */
+	ctl->get_ret = -EIO;
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	ctl->get_ret = 0;
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+	/* Nothing to probe for a plugin that delivers */
+	{
+		unsigned int calls = ctl->get_calls;
+
+		CHECK_EQ(ES->monitor_es(), 0);
+		CHECK_EQ(ctl->get_calls, calls);
+	}
+
+	/* Its self test: no data delivered makes up for a failed one */
 	CHECK_EQ(ES->selftest(), 0);
 	ctl->selftest_ret = -ENODEV;
 	CHECK_EQ(ES->selftest(), -EFAULT);
 	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK(test_state_has("failing its self test"),
+	      "the state does not say the self test fails");
+	CHECK_EQ(test_get(bits, &first), 0);
+	CHECK_EQ(first, ctl->get_calls & 0xff);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), 0);
 	ctl->selftest_ret = 0;
+	CHECK_EQ(ES->selftest(), 0);
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
-	CHECK_EQ(ctl->selftest_calls, 2);
+	CHECK_EQ(ctl->selftest_calls, 3);
 }
 
 static void test_reinit(void)
