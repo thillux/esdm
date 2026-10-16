@@ -292,6 +292,42 @@ addon/es_ebpf_testing
 
 * tests: the security tests (renamed to *_security_test) print their test plan as STEP, REQUIRE, CHECK and RUNUNTIL lines that can be parsed from the JUnit output; a new security test follows the DRNG seed generation through the reseed interval and the request threshold
 
+* fix: TPM2, PKCS#11 and kernel Jitter RNG ES: a failed self test discards the block cache and serves cached blocks without entropy, instead of crediting them in full until the cache is used up
+
+* fix: the prediction resistance DRNG is seeded from entropy collected for the request, bypassing the block caches of the asynchronous entropy sources
+
+* fix: the block cache: a block filled across a reset is never served, and a block is credited at most at the rate configured when it is served, also when the rate changed in the middle of its fill
+
+* fix: the kernel RNG's entropy rate is reduced whenever the interrupt ES kernel add-on is in use, as it takes the interrupts away from the kernel RNG whatever its own rate
+
+* fix: Jitter RNG ES: a collector the library dropped after a failed health test no longer leaves the ES reporting entropy and passing its self test; the self test allocates it anew
+
+* fix: SP800-90B startup test after a health test failure (Linux kernel addon and eBPF ES): the window in which the failure happened no longer counts as one of the passed startup windows
+
+* fix: eBPF ES: the conditioning state is set up before the programs are attached, so raw samples are wiped when the setup fails
+
+* fix: FIPS mode: an unreadable /proc/sys/crypto/fips_enabled counts as FIPS mode, and the decision is kept for the life time of the process
+
+* fix: a non-blocking esdm_get_seed() without enough entropy no longer hands back the content of the caller's buffer
+
+* fix: GnuTLS backend: the conditioning hash runs on a nettle SHA-512 state owned by the ESDM, which is wiped, instead of leaving input in freed GnuTLS memory
+
+* Self tests: the ChaCha20 DRNG test covers the key update after a generate, the leancrypto XDRBG test the condensed additional input and a reseed
+
+* fix: Linux kernel addon: a high resolution timer is detected by sampling it repeatedly, and a coarse timer is not credited; the interrupt ES registration no longer races module unload or the extraction ioctl
+
+* fix: EGD server: when all slots are taken, a new client is served by closing a connection of the UID holding the most connections, and idle connections are closed only for those UIDs - a user with subordinate UIDs can no longer lock everybody else out or have their idle connections closed
+
+* fix: EGD and RPC servers: the socket mode is set when the socket is created instead of by a chmod() of its path afterwards
+
+* fix: RPC server: a worker serves prediction resistant requests for at most 25 ms per round and answers further ones with -EAGAIN, so pipelined requests no longer stall the other clients of the worker
+
+* fix: libesdm_getrandom and CUSE: a non-blocking read no longer waits for the ESDM to be fully seeded again if it lost that state after the check
+
+* fix: CUSE and the aux client trust a status shared memory segment only if it was created by root, the owner of the unprivileged RPC socket or the caller
+
+* fix: esdm-tool wipes the random numbers and seeds it handled; esdm-server removes its PID file with --pid_namespace and empties it otherwise
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 
