@@ -48,6 +48,20 @@ addon/es_ebpf_testing
 
 * PKCS#11 ES: esdm-server --pkcs11_module PATH selects the provider module in place of es_pkcs11_module_path
 
+* External entropy sources: a provider can report a JSON status of its own - the plugin callback status_json (plugin API version 2, version 1 plugins load as before) and the STATUS request of the socket protocol, which esdm-es-ext-serve answers from the plugin; the ESDM accepts a JSON object of at most 512 bytes and shows it as the "provider" member of the ExternalLib and ExternalSocket ES status, skipping it rather than waiting while the source is read
+
+* Add opportunistic DTLS to the connections between the processes of the ESDM (meson option dtls, disabled by default): DTLS 1.2 of the TLS stack of the crypto backend - OpenSSL, GnuTLS or Botan - with an ephemeral, unauthenticated key, protecting the data against reading on the socket path rather than the peer's identity; a client asks for it on every new connection and goes on in the clear with a server that does not know or refuses it, so old and new clients and servers keep working together
+  * RPC: both interfaces of esdm-server, the RPC client library and with it the getrandom(2) shim, which uses the kernel instead while the DTLS itself asks for random numbers; esdm-server --no_dtls serves in the clear only; at most 64 encrypted connections per unprivileged user and 256 per worker
+  * External entropy sources: the ExternalSocket ES asks esdm-es-ext-serve for it (STARTDTLS request of the protocol), esdm-es-ext-serve --no_dtls refuses it
+
+* Kernel Jitter RNG ES: the kernel crypto API RNG it reads is configurable - meson option es_jent_kernel_name (jitterentropy_rng by default) and esdm-server --es_jent_kernel_name, e.g. for a jitterentropy kernel module registering its RNG under another name; the status names it
+
+* Auxiliary pool: each pool is an XDRBG-256 - the XDRBG over SHAKE256 with a state of 512 bits - instead of a pair of conditioning hashes; whatever is inserted is the seed of the next reseed and an extraction reseeds and generates; the SHAKE256 is that of the crypto backend (nettle >= 3.6 for the GnuTLS backend, Botan >= 3.2), the crypto self test covers it with a known-answer test of the XDRBG, and esdm_get_digestsize() reports the size of the state
+
+* Status: the status is built as JSON only, the entropy sources report their state as a JSON object, and every text status - esdm_status(), RPC, shared memory, CUSE, esdm-tool - is the JSON status printed as text; numbers are JSON numbers, the eBPF ES reports a permanent health test failure as a member of its own, and the ExternalSocket ES no longer reports "root0" for a provider accepted only as root
+
+* The shell scripts of the repository run with set -euxo pipefail and bash
+
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
 * SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
