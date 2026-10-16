@@ -78,8 +78,32 @@
  * alone would let one client pipeline seconds of work into a single round and
  * hold up everybody else on the worker. The ordinary generator is cheap enough
  * for the read budget to bound it.
+ *
+ * This shares a round among the connections, but does not bound it: a client
+ * with a request on each of a few hundred connections would still have the
+ * worker generate for seconds per round, see ESDM_EGD_ROUND_BUDGET_NS.
  */
 #define ESDM_EGD_PR_BUDGET 1
+
+/*
+ * Time a worker may spend per round of its event loop generating prediction
+ * resistant bytes, over all of its connections - the same bound as
+ * ESDM_RPCS_ROUND_BUDGET_NS of the RPC server, for the same reason: a worker
+ * serves every client it accepted, on both sockets, and none of them is served
+ * while it generates. Beyond it, a command is left for the next round - a
+ * deferred request stays deferred, a new one waits in the input buffer - which
+ * follows at once, after the events of the other clients were collected and
+ * served, see deferred_progress in esdm_egd_handler().
+ *
+ * A time rather than a number of generations, as the cost of one depends on
+ * the entropy sources. The first generation of a round is always made, so even
+ * one longer than this makes progress - a round runs over by the generation
+ * it is in at most, which for a request of ESDM_EGD_MAX_TRANSFER bytes may
+ * take several reseeds. The next round begins where this one ran out of
+ * budget, see esdm_egd_handler() - otherwise the connections at the head of
+ * the list would get all of it.
+ */
+#define ESDM_EGD_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
 
 /*
  * Upper bound of concurrently served clients. EGD clients may hold their
@@ -336,6 +360,26 @@ static struct esdm_egd_listener esdm_egd_listeners[] = {
 	     listener++)
 
 static atomic_int esdm_egd_exit = 0;
+
+/*
+ * Time this worker thread spent generating prediction resistant bytes in the
+ * current round of its event loop, see ESDM_EGD_ROUND_BUDGET_NS, and whether a
+ * generation was left for the next round for want of it (denied). Only bounded
+ * inside a worker's event loop: the fuzz harness feeding a stream to a
+ * connection of its own is not part of a round.
+ *
+ * Once a round ran out of budget, the generations of the next one are all left
+ * to the pass over the connections that follows its events (hold), which
+ * serves them in turn: connections with an event of their own would otherwise
+ * take the budget of every round, with nothing left for a request deferred
+ * before.
+ */
+static __thread struct {
+	bool in_round;
+	bool hold;
+	bool denied;
+	uint64_t spent_ns;
+} esdm_egd_round;
 
 /* PID reported by the get PID command, see esdm_egd_server_set_pid() */
 static pid_t esdm_egd_pid = 0;
@@ -608,6 +652,16 @@ static uint64_t esdm_egd_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+/* Nanoseconds on the monotonic clock. */
+static uint64_t esdm_egd_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 /* Is a response waiting to be accepted by the client? */
 static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
 {
@@ -763,9 +817,12 @@ static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
 	*generated = 0;
 
 	if (pr) {
+		uint64_t start = esdm_egd_now_ns();
+
 		if (conn->pr_budget)
 			conn->pr_budget--;
 		ret = esdm_get_random_bytes_pr_noblock(buf, len);
+		esdm_egd_round.spent_ns += esdm_egd_now_ns() - start;
 	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
 
@@ -950,10 +1007,42 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 	return esdm_egd_write(conn, resp, 1 + (size_t)len);
 }
 
-/* May the connection generate once more in this round? */
+/*
+ * May the connection generate once more in this round? Within its own budget,
+ * ESDM_EGD_PR_BUDGET, and within that of the worker, ESDM_EGD_ROUND_BUDGET_NS.
+ */
 static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn)
 {
-	return !conn->listener->prediction_resistance || conn->pr_budget;
+	if (!conn->listener->prediction_resistance)
+		return true;
+
+	if (!conn->pr_budget)
+		return false;
+
+	if (!esdm_egd_round.in_round)
+		return true;
+
+	if (esdm_egd_round.hold)
+		return false;
+
+	if (esdm_egd_round.spent_ns >= ESDM_EGD_ROUND_BUDGET_NS) {
+		esdm_egd_round.denied = true;
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * A new round of this worker's event loop begins - with its events held from
+ * generating if the previous round ran out of budget, see esdm_egd_round.
+ */
+static void esdm_egd_round_start(void)
+{
+	esdm_egd_round.in_round = true;
+	esdm_egd_round.hold = esdm_egd_round.denied;
+	esdm_egd_round.denied = false;
+	esdm_egd_round.spent_ns = 0;
 }
 
 /* Grant the connection its budget once per round of the event loop. */
@@ -1667,7 +1756,7 @@ static int esdm_egd_handler(void *args)
 {
 	uint32_t id = (uint32_t)(uintptr_t)args;
 	struct esdm_egd_conn_list conn_list;
-	struct esdm_egd_conn *conn, *tmp;
+	struct esdm_egd_conn *conn, *tmp, *rotate_at;
 	struct esdm_egd_listener *listener;
 	struct epoll_event events[ESDM_EGD_MAX_EVENTS];
 	size_t deferred_requests = 0;
@@ -1760,6 +1849,7 @@ static int esdm_egd_handler(void *args)
 		int nfds, i;
 
 		round++;
+		esdm_egd_round_start();
 
 		if (want_armed != listen_armed) {
 			bool armed_all = true;
@@ -1925,10 +2015,13 @@ static int esdm_egd_handler(void *args)
 		 */
 		deferred_requests = 0;
 		deferred_progress = false;
+		rotate_at = NULL;
+		/* The turn of what the events of this round were held from */
+		esdm_egd_round.hold = false;
 		TAILQ_FOREACH_SAFE (conn, &conn_list, tailq, tmp) {
 			uint8_t collected, deferred;
 			uint64_t out_since = conn->out_since;
-			bool stuck;
+			bool stuck, denied = esdm_egd_round.denied;
 
 			if (atomic_load(&esdm_egd_exit))
 				break;
@@ -1991,7 +2084,25 @@ static int esdm_egd_handler(void *args)
 			if (conn->yielded)
 				deferred_progress = true;
 
+			/* The first one the worker's budget did not cover */
+			if (!denied && esdm_egd_round.denied && !rotate_at)
+				rotate_at = conn;
+
 			esdm_egd_conn_arm(epfd, conn);
+		}
+
+		/*
+		 * The budget of the round ran out: the next one starts with the
+		 * connection it ran out at, see ESDM_EGD_ROUND_BUDGET_NS, and
+		 * follows at once - a deferred request left without its turn
+		 * made no progress, but has to have it.
+		 */
+		if (esdm_egd_round.denied)
+			deferred_progress = true;
+		while (rotate_at &&
+		       (conn = TAILQ_FIRST(&conn_list)) != rotate_at) {
+			TAILQ_REMOVE(&conn_list, conn, tailq);
+			TAILQ_INSERT_TAIL(&conn_list, conn, tailq);
 		}
 
 		/*

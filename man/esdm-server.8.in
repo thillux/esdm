@@ -203,6 +203,10 @@ connection to the others, or turns it away.
 .BR libesdm_egd_client (3)
 reconnects transparently, which a client confined by seccomp after it connected
 may not survive.
+A worker thread spends at most 25 ms per round of its event loop on generating
+prediction resistant data, one generation per connection, so that the clients
+of the prediction resistant socket cannot hold up the others of that thread;
+a request beyond that waits for the next round, which follows at once.
 .PP
 A connection beyond the limit of its user is accepted and closed at once. The
 daemon logs a warning when a user reaches its limit, and again only after the

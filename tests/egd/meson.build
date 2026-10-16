@@ -118,6 +118,20 @@ if get_option('esdm-server').enabled()
 	test('EGD server with all slots taken', egd_server_evict_test,
 		timeout: 300)
 
+	# The same setup with an operational ESDM, which the Jitter RNG makes
+	# it, and prediction resistant requests on many connections.
+	egd_server_pr_budget_test = executable(
+			'egd_server_pr_budget_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_pr_budget_test.c' ],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server prediction resistance budget',
+		egd_server_pr_budget_test, timeout: 300)
+
 	# The per-UID connection accounting shared by the RPC and EGD servers,
 	# compiled into the test to inspect its table. Needs no server.
 	egd_peer_limit_test = executable(
