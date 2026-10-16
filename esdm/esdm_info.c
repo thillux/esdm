@@ -36,15 +36,9 @@
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "esdm_selftest.h"
+#include "esdm_status_txt.h"
 #include "test_pertubation.h"
 #include "visibility.h"
-
-static inline size_t esdm_used_buf_len(char *buf, size_t buflen)
-{
-	size_t len = strlen(buf);
-
-	return min_size(len, buflen);
-}
 
 /*
  * The DRNGs serving: the published node array, the initial DRNG being its
@@ -77,181 +71,6 @@ static void esdm_time_str(long long wtime, char *buf, size_t buflen)
 
 	if (!strftime(buf, buflen, "%Y-%m-%dT%H:%M:%SZ", &tm))
 		buf[0] = '\0';
-}
-
-/* Rendering state of the DRNG section of the status text */
-struct esdm_drng_txt_state {
-	char *buf;
-	size_t buflen;
-	uint32_t idx;
-};
-
-/* Render the statistics of one DRNG instance into the status text */
-static void esdm_drng_status_txt(const struct esdm_drng_stats *stats,
-				 void *priv)
-{
-	struct esdm_drng_txt_state *txt = priv;
-	size_t len = esdm_used_buf_len(txt->buf, txt->buflen);
-	char node[16] = "";
-	char stamp[32] = "";
-	char reseed[32] = "";
-
-	/*
-	 * A value the DRNG does not have - the node of the DRNG that is not
-	 * bound to one, the seeding time of one that was never seeded - is
-	 * reported as N/A.
-	 */
-	if (stats->node_valid)
-		snprintf(node, sizeof(node), "%u", stats->node);
-	if (stats->seeded_wtime_valid)
-		esdm_time_str(stats->seeded_wtime, stamp, sizeof(stamp));
-	if (stats->seeded_time_valid)
-		snprintf(reseed, sizeof(reseed), "%lld",
-			 stats->seconds_since_reseed);
-
-	if (!node[0])
-		snprintf(node, sizeof(node), "N/A");
-	if (!stamp[0])
-		snprintf(stamp, sizeof(stamp), "N/A");
-	if (!reseed[0])
-		snprintf(reseed, sizeof(reseed), "N/A");
-
-	snprintf(txt->buf + len, txt->buflen - len,
-		 "DRNG instance %u properties:\n"
-		 " Type: %s\n"
-		 " Node: %s\n"
-		 " Name: %s\n"
-		 " Fully seeded: %s\n"
-		 " Initiated: %s\n"
-		 " Force reseed: %s\n"
-		 " Reseed pending: %s\n"
-		 " Requests until reseed: %d\n"
-		 " Seconds until reseed: %lld\n"
-		 " Requests since fully seeded: %u\n"
-		 " Generated bits since fully seeded: %u\n"
-		 " Seed generation: %lld\n"
-		 " Last seeding time: %s\n"
-		 " Seconds since last reseed: %s\n",
-		 txt->idx++, stats->type, node,
-		 stats->drng_name ? stats->drng_name : "N/A",
-		 stats->fully_seeded ? "true" : "false",
-		 stats->initiated ? "true" : "false",
-		 stats->force_reseed ? "true" : "false",
-		 stats->reseed_pending ? "true" : "false",
-		 stats->requests_until_reseed, stats->seconds_until_reseed,
-		 stats->requests_since_fully_seeded,
-		 stats->bits_since_fully_seeded, stats->seed_generation, stamp,
-		 reseed);
-}
-
-DSO_PUBLIC
-int esdm_status(char *buf, size_t buflen)
-{
-	struct esdm_drng *drng = esdm_drng_init_instance();
-	size_t len;
-	struct esdm_drng_txt_state txt;
-	uint32_t i;
-
-	if (!buf || !buflen) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "Status information cannot be created\n");
-		return -EINVAL;
-	}
-
-	snprintf(buf, buflen, "ESDM %slibrary version: %s\n", TESTMODE_STR,
-		 VERSION);
-	len = esdm_used_buf_len(buf, buflen);
-
-	snprintf(buf + len, buflen - len,
-		 "DRNG name: %s\n"
-		 "ESDM security strength in bits: %d\n"
-		 "Number of DRNG instances: %u\n"
-		 "Standards compliance: %s%s%s%s%s%s\n"
-		 "ESDM fully seeded: %s\n"
-		 "ESDM entropy level: %u\n",
-		 /* The callbacks are only installed by esdm_init() */
-		 drng->drng_cb ? drng->drng_cb->drng_name() : "N/A",
-		 esdm_security_strength(), esdm_drng_instances(),
-		 esdm_config_fips_enabled() ? "FIPS 140 " : "",
-		 /* A DRG.4 build satisfies DRG.3 and reports both */
-		 esdm_drg3_compliant() ? "DRG.3 " : "",
-		 esdm_drg4_compliant() ? "DRG.4 " : "",
-		 esdm_sp80090c_compliant() ? "SP800-90C " : "",
-		 esdm_ntg1_compliant() ? "NTG.1(2011) " : "",
-		 /*
-		  * Only the NTG.1 seeding strategy makes the ESDM NTG.1(2024)
-		  * compliant: without it a DRNG is seeded from 256/384 bits of
-		  * any sources, whatever NTG.1 mode the Jitter RNG runs in.
-		  * That mode is a property of the Jitter RNG, which its own
-		  * entropy source section reports.
-		  */
-		 esdm_ntg1_2024_compliant() ? "NTG.1(2024)" : "",
-		 esdm_state_fully_seeded() ? "true" : "false",
-		 esdm_avail_entropy());
-
-	/* Concatenate the output of the entropy sources. */
-	for_each_esdm_es (i) {
-		len = esdm_used_buf_len(buf, buflen);
-		snprintf(buf + len, buflen - len,
-			 "Entropy Source %u properties:\n"
-			 " Name: %s\n",
-			 i, esdm_es[i]->name);
-
-		len = esdm_used_buf_len(buf, buflen);
-		esdm_es[i]->state(buf + len, buflen - len);
-	}
-
-	/* The initial and the prediction resistance DRNG only. */
-	txt.buf = buf;
-	txt.buflen = buflen;
-	txt.idx = 0;
-	esdm_drng_stats_summary(esdm_drng_status_txt, &txt);
-
-	/*
-	 * The thread that reseeds the DRNGs before a request runs into their
-	 * reseed condition.
-	 */
-	len = esdm_used_buf_len(buf, buflen);
-	snprintf(buf + len, buflen - len,
-		 "Reseed worker properties:\n"
-		 " Running: %s\n"
-		 " Reseed interval in seconds: %u\n",
-		 esdm_drng_mgr_reseed_worker_running() ? "true" : "false",
-		 esdm_get_reseed_max_time());
-
-	/*
-	 * The self tests of the hash and the DRNG implementation and of the
-	 * entropy sources.
-	 */
-	len = esdm_used_buf_len(buf, buflen);
-	snprintf(buf + len, buflen - len,
-		 "Periodic self test properties:\n"
-		 " State: %s\n"
-		 " Running: %s\n"
-		 " Completed self tests: %lld\n"
-		 " Self test interval in seconds: %u\n"
-		 " Entropy source state: %s\n"
-		 " Entropy sources tested: %u\n"
-		 " Entropy sources failed: %u\n",
-		 esdm_selftest_crypto_state_name(),
-		 esdm_selftest_periodic_running() ? "true" : "false",
-		 esdm_selftest_passes(), esdm_selftest_periodic_interval(),
-		 esdm_selftest_es_state_name(), esdm_selftest_es_sources(),
-		 esdm_selftest_es_failures());
-
-	/*
-	 * Every section above appends with snprintf(), which stops where the
-	 * buffer ends.
-	 */
-	if (esdm_used_buf_len(buf, buflen) + 1 >= buflen) {
-		esdm_logger(
-			LOGGER_WARN, LOGGER_C_ANY,
-			"Status report does not fit into the buffer of %zu bytes\n",
-			buflen);
-		return -EMSGSIZE;
-	}
-
-	return 0;
 }
 
 /****************************** JSON status ***********************************/
@@ -552,21 +371,19 @@ int esdm_status_drng_pr_json(char *buf, size_t buflen)
 	return esdm_drng_status_json_write(obj, buf, buflen);
 }
 
-DSO_PUBLIC
-int esdm_status_json(char *buf, size_t buflen)
+/*
+ * The status of the ESDM, as one JSON object. Everything that reports the
+ * status takes it from here: esdm_status_json() serializes it, esdm_status()
+ * prints it as text.
+ *
+ * @return the object, NULL if it cannot be allocated
+ */
+static struct json_object *esdm_status_obj(void)
 {
 	struct esdm_drng *drng = esdm_drng_init_instance();
 	struct json_object *root, *compliance, *sources, *drngs, *worker,
 		*selftest;
-	int ret = -ENOMEM;
 	uint32_t i;
-
-	if (!buf || !buflen) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "Status information cannot be created\n");
-		return -EINVAL;
-	}
-	buf[0] = '\0';
 
 	root = json_object_new_object();
 	compliance = json_object_new_array();
@@ -576,8 +393,8 @@ int esdm_status_json(char *buf, size_t buflen)
 	selftest = json_object_new_object();
 	if (!root || !compliance || !sources || !drngs || !worker ||
 	    !selftest) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "Status information cannot be created\n");
+		json_object_put(root);
+		root = NULL;
 		goto out;
 	}
 
@@ -613,7 +430,12 @@ int esdm_status_json(char *buf, size_t buflen)
 	if (esdm_ntg1_compliant())
 		json_object_array_add(compliance,
 				      json_object_new_string("NTG.1(2011)"));
-	/* The Jitter RNG's NTG.1 mode is in its own section - see above */
+	/*
+	 * Only the NTG.1 seeding strategy makes the ESDM NTG.1(2024)
+	 * compliant: without it a DRNG is seeded from 256/384 bits of any
+	 * sources, whatever NTG.1 mode the Jitter RNG runs in. That mode is a
+	 * property of the Jitter RNG, which its own entropy source reports.
+	 */
 	if (esdm_ntg1_2024_compliant())
 		json_object_array_add(compliance,
 				      json_object_new_string("NTG.1(2024)"));
@@ -643,11 +465,20 @@ int esdm_status_json(char *buf, size_t buflen)
 	json_object_object_add(root, "entropy_sources", sources);
 	sources = NULL;
 
-	/* The initial and the prediction resistance DRNG - see esdm_status() */
+	/*
+	 * The initial and the prediction resistance DRNG only: there is one
+	 * node instance per CPU, so a status carrying them grows with the size
+	 * of the machine and runs into the buffers it travels in. They are
+	 * reported one at a time by esdm_status_drng_json().
+	 */
 	esdm_drng_stats_summary(esdm_drng_status_json, drngs);
 	json_object_object_add(root, "drngs", drngs);
 	drngs = NULL;
 
+	/*
+	 * The thread that reseeds the DRNGs before a request runs into their
+	 * reseed condition.
+	 */
 	json_object_object_add(
 		worker, "running",
 		json_object_new_boolean(esdm_drng_mgr_reseed_worker_running()));
@@ -657,6 +488,10 @@ int esdm_status_json(char *buf, size_t buflen)
 	json_object_object_add(root, "reseed_worker", worker);
 	worker = NULL;
 
+	/*
+	 * The self tests of the hash and the DRNG implementation and of the
+	 * entropy sources.
+	 */
 	json_object_object_add(
 		selftest, "state",
 		json_object_new_string(esdm_selftest_crypto_state_name()));
@@ -680,17 +515,111 @@ int esdm_status_json(char *buf, size_t buflen)
 	json_object_object_add(root, "periodic_self_test", selftest);
 	selftest = NULL;
 
-	ret = esdm_json_write(
-		json_object_to_json_string_ext(root, JSON_C_TO_STRING_PRETTY),
-		buf, buflen);
-
 out:
-	json_object_put(root);
 	json_object_put(compliance);
 	json_object_put(sources);
 	json_object_put(drngs);
 	json_object_put(worker);
 	json_object_put(selftest);
+
+	return root;
+}
+
+/*
+ * The labels of the text status where the member name does not make one - see
+ * esdm_status_txt(). A member not listed is labelled with its name.
+ */
+static const struct esdm_status_txt_label esdm_status_labels[] = {
+	{ "", "library_version", "ESDM library version" },
+	{ "", "drng_name", "DRNG name" },
+	{ "", "security_strength_bits", "ESDM security strength in bits" },
+	{ "", "drng_instances", "Number of DRNG instances" },
+	{ "", "fully_seeded", "ESDM fully seeded" },
+	{ "", "entropy_level_bits", "ESDM entropy level" },
+	{ "", "entropy_sources", "Entropy Source" },
+	{ "", "drngs", "DRNG instance" },
+	/* The index of the section says it already */
+	{ "entropy_sources", "id", NULL },
+	{ "reseed_worker", "reseed_interval_seconds",
+	  "Reseed interval in seconds" },
+	{ "periodic_self_test", "self_test_interval_seconds",
+	  "Self test interval in seconds" },
+
+	/* Members of the entropy sources, and of the kernel add-on */
+	{ NULL, "entropy_rate_per_256_data_bits",
+	  "Entropy Rate per 256 data bits" },
+	{ NULL, "oversampling_rate", "Oversampling Rate" },
+	{ NULL, "ebpf_programs_loaded", "eBPF programs loaded" },
+	{ NULL, "kernel_rng", "Kernel RNG" },
+	{ NULL, "drbg_for_operating_entropy_pool",
+	  "DRBG for operating entropy pool" },
+	{ NULL, "per_cpu_interrupt_collection_size",
+	  "per-CPU interrupt collection size" },
+	{ NULL, "per_cpu_scheduler_event_collection_size",
+	  "per-CPU scheduler event collection size" },
+	{ NULL, "fips_mode_enabled", "FIPS mode enabled" },
+	{ NULL, "high_resolution_timer", "High-resolution timer" },
+
+	{ NULL, NULL, NULL }
+};
+
+DSO_PUBLIC
+int esdm_status(char *buf, size_t buflen)
+{
+	struct json_object *root;
+	int ret;
+
+	if (!buf || !buflen) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Status information cannot be created\n");
+		return -EINVAL;
+	}
+	buf[0] = '\0';
+
+	root = esdm_status_obj();
+	if (!root) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Status information cannot be created\n");
+		return -ENOMEM;
+	}
+
+	/* A report that does not fit stays in the buffer as far as it got */
+	ret = esdm_status_txt(root, esdm_status_labels, buf, buflen);
+	json_object_put(root);
+
+	if (ret == -EMSGSIZE)
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ANY,
+			"Status report does not fit into the buffer of %zu bytes\n",
+			buflen);
+
+	return ret;
+}
+
+DSO_PUBLIC
+int esdm_status_json(char *buf, size_t buflen)
+{
+	struct json_object *root;
+	int ret;
+
+	if (!buf || !buflen) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Status information cannot be created\n");
+		return -EINVAL;
+	}
+	buf[0] = '\0';
+
+	root = esdm_status_obj();
+	if (!root) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Status information cannot be created\n");
+		return -ENOMEM;
+	}
+
+	ret = esdm_json_write(
+		json_object_to_json_string_ext(root, JSON_C_TO_STRING_PRETTY),
+		buf, buflen);
+	json_object_put(root);
 
 	return ret;
 }

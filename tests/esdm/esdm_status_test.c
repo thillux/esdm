@@ -138,6 +138,28 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	/*
+	 * The text is printed from the JSON status: these are the labels and
+	 * section headers it has had all along, which readers of it look for.
+	 */
+	if (strncmp(buf, "ESDM library version: ", 22) ||
+	    !strstr(buf, "\nDRNG name: ") ||
+	    !strstr(buf, "\nESDM security strength in bits: ") ||
+	    !strstr(buf, "\nESDM fully seeded: ") ||
+	    !strstr(buf, "\nESDM entropy level: ") ||
+	    !strstr(buf, "\nEntropy Source 0 properties:\n Name: ") ||
+	    !strstr(buf, "\n Available entropy: ") ||
+	    !strstr(buf, "\nReseed worker properties:\n Running: ") ||
+	    !strstr(buf, "\nPeriodic self test properties:\n State: ") ||
+	    !strstr(buf, "\n Reseed interval in seconds: ") ||
+	    !strstr(buf, "\n Self test interval in seconds: ") ||
+	    /* The index of an entropy source is its section's */
+	    strstr(buf, " Id: ")) {
+		printf("Unexpected status labels: %s\n", buf);
+		ret = 1;
+		goto out;
+	}
+
 	if (!strstr(buf, "DRNG name") ||
 	    !strstr(buf, "ESDM security strength") ||
 	    !strstr(buf, "Number of DRNG instances") ||

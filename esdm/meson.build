@@ -10,6 +10,7 @@ esdm_src = files([
 	'esdm_lib.c',
 	'esdm_selftest.c',
 	'esdm_shm_status.c',
+	'esdm_status_txt.c',
 ])
 
 dependencies_esdm_lib = [ json_c_dep ]

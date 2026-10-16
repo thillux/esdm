@@ -18,6 +18,18 @@ esdm_es_buf_test = executable(
 
 test('ESDM per-ES block cache', esdm_es_buf_test)
 
+# The text form of the JSON status, on documents of the test's own: the printer
+# is compiled into the test, which needs nothing of the ESDM beyond it.
+esdm_status_txt_test = executable(
+	'esdm_status_txt_test',
+	[ files('../../esdm/esdm_status_txt.c'), 'esdm_status_txt_test.c' ],
+	include_directories: [ include_dirs_server,
+			       include_directories('../common') ],
+	dependencies: [ json_c_dep ],
+)
+
+test('ESDM status text printer', esdm_status_txt_test)
+
 # fips.c only exists in a FIPS build. Like the block cache above it is compiled
 # into the test rather than linked from the library, so the configuration probe
 # its constructor calls can be stubbed out - a failing power-on self test would
