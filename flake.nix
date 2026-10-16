@@ -1051,8 +1051,9 @@
                   "-Des_pkcs11=enabled"
 
                   # Point the PKCS#11 source at SoftHSM, which needs no
-                  # hardware. The path is compile-time only, so without it the
-                  # source disables itself at startup. Label and PIN stay unset
+                  # hardware. Without a module path - given here at compile
+                  # time, or with --pkcs11_module - the source disables itself
+                  # at startup. Label and PIN stay unset
                   # - the test installs both at runtime, as the server does from
                   # its RPC handler.
                   "-Des_pkcs11_module_path=${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
@@ -1619,6 +1620,9 @@
                     "-Dbotan_drng_type=chacha20"
                     "-Dais2031_ntg1=false"
                     "-Dais2031_drg4=false"
+                    # Opportunistic DTLS of the RPC and external entropy
+                    # source connections, by the TLS stack of Botan
+                    "-Ddtls=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
@@ -1988,6 +1992,8 @@
                     && (!lib.hasInfix "max_threads" x)
                     && (!lib.hasInfix "term-on-signal" x)
                     && (!lib.hasInfix "ais2031" x)
+                    # The builtin backend has no TLS stack for the DTLS
+                    && (x != "-Ddtls=enabled")
                   ) prev.mesonFlags)
                   ++ [
                     "-Dcrypto_backend=builtin"
@@ -2009,7 +2015,11 @@
             buildInputs = prev.buildInputs ++ [ pkgs.pkgsi686Linux.openssl ];
             mesonFlags =
               (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
-              ++ [ "-Dcrypto_backend=openssl" ];
+              ++ [
+                "-Dcrypto_backend=openssl"
+                # The DTLS by OpenSSL, which the builtin backend has not
+                "-Ddtls=enabled"
+              ];
             meta = prev.meta // {
               description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
             };
