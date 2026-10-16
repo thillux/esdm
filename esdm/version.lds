@@ -100,6 +100,8 @@ LIBESDM_1.0 {
 		esdm_config_es_jent_entropy_rate_set;
 		esdm_config_es_jent_kernel_entropy_rate;
 		esdm_config_es_jent_kernel_entropy_rate_set;
+		esdm_config_es_ext_lib_entropy_rate;
+		esdm_config_es_ext_lib_entropy_rate_set;
 		esdm_config_es_krng_entropy_rate;
 		esdm_config_es_krng_entropy_rate_set;
 		esdm_config_es_pkcs11_entropy_rate;
@@ -136,6 +138,12 @@ LIBESDM_PRIVATE_1.0 {
 
 		/* esdm_es_jent.h */
 		esdm_jent_status;
+
+		/*
+		 * esdm_es_extlib.h - the plugin library the server sets from
+		 * its command line. Only built when es_ext is enabled.
+		 */
+		esdm_es_ext_lib_set_path;
 
 		/*
 		 * esdm_es_pkcs11.h - the module the server sets from its

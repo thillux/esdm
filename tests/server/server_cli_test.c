@@ -271,6 +271,50 @@ static void test_pkcs11_module_option(void)
 	      "the usage does not mention --pkcs11_module");
 }
 
+/*
+ * The plugin library of the external entropy source and the cap of its
+ * credit. The library is only loaded by esdm_init(), so an unprivileged run
+ * accepts any path; the rate is checked while parsing.
+ */
+static void test_es_ext_lib_options(void)
+{
+	const char *const opts[] = { "--es_ext_lib",
+				     "/nonexistent/libesdm-es-ext-test.so",
+				     "--es_ext_lib_entropy_rate", "128", NULL };
+	const char *const empty[] = { "--es_ext_lib", "", NULL };
+	static const char *const bad_rates[] = { "257", "-1", "12x", "", NULL };
+	struct test_run r;
+	unsigned int i;
+
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+#ifdef ESDM_ES_EXT
+	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+	      "--es_ext_lib was not accepted (output: %.300s)", r.err);
+#else
+	CHECK(strstr(r.err, "not part of this build") != NULL,
+	      "--es_ext_lib was not refused without external ES (output: %.300s)",
+	      r.err);
+#endif
+
+	CHECK_EQ(test_run(&r, empty, NULL), 1);
+	CHECK(strstr(r.err, "must not be empty") != NULL,
+	      "an empty --es_ext_lib was not refused (output: %.300s)", r.err);
+
+	for (i = 0; bad_rates[i]; i++) {
+		const char *const rate[] = { "--es_ext_lib_entropy_rate",
+					     bad_rates[i], NULL };
+
+		CHECK_EQ(test_run(&r, rate, NULL), 1);
+		CHECK(strstr(r.err, "entropy rate from 0 to 256") != NULL,
+		      "--es_ext_lib_entropy_rate %s was not refused (output: %.300s)",
+		      bad_rates[i], r.err);
+	}
+
+	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
+	CHECK(strstr(r.err, "--es_ext_lib") != NULL,
+	      "the usage does not mention --es_ext_lib");
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
@@ -288,6 +332,7 @@ int main(int argc, char *argv[])
 	test_syslog();
 	test_pid_file_option();
 	test_pkcs11_module_option();
+	test_es_ext_lib_options();
 
 	test_run_fini();
 

@@ -239,6 +239,11 @@ else
 	conf_data.set('ESDM_PKCS11_ENTROPY_BLOCKS', 0)
 endif
 
+conf_data.set('ESDM_ES_EXT', get_option('es_ext').enabled())
+conf_data.set_quoted('ESDM_EXT_LIB_PATH', get_option('es_ext_lib_path'))
+conf_data.set('ESDM_EXT_LIB_ENTROPY_RATE',
+	      get_option('es_ext_lib_entropy_rate'))
+
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())
 conf_data.set('ESDM_JENT_KERNEL_ENTROPY_RATE',
 	      get_option('es_jent_kernel_entropy_rate'))

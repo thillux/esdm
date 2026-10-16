@@ -55,6 +55,7 @@ struct esdm_config {
 	_Atomic uint32_t esdm_es_tpm2_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_pkcs11_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_jent_kernel_entropy_rate_bits;
+	_Atomic uint32_t esdm_es_ext_lib_entropy_rate_bits;
 	_Atomic uint32_t esdm_drng_max_wo_reseed;
 	_Atomic uint32_t esdm_drng_max_wo_reseed_bits;
 	_Atomic uint32_t esdm_drng_reseed_thresh;
@@ -141,6 +142,11 @@ static struct esdm_config esdm_config = {
 	 * See documentation of ESDM_JENT_KERNEL_ENTROPY_RATE
 	*/
 	.esdm_es_jent_kernel_entropy_rate_bits = ESDM_JENT_KERNEL_ENTROPY_RATE,
+	/*
+	 * See documentation of ESDM_EXT_LIB_ENTROPY_RATE: the cap of what an
+	 * external entropy source plugin is credited with for its claims
+	 */
+	.esdm_es_ext_lib_entropy_rate_bits = ESDM_EXT_LIB_ENTROPY_RATE,
 
 	/*
 	 * See documentation of ESDM_DRNG_MAX_WITHOUT_RESEED.
@@ -423,6 +429,21 @@ void esdm_config_es_jent_kernel_entropy_rate_set(uint32_t ent)
 }
 
 DSO_PUBLIC
+uint32_t esdm_config_es_ext_lib_entropy_rate(void)
+{
+	return esdm_config.esdm_es_ext_lib_entropy_rate_bits;
+}
+
+DSO_PUBLIC
+void esdm_config_es_ext_lib_entropy_rate_set(uint32_t ent)
+{
+	uint32_t val = esdm_config_entropy_rate_max(ent);
+
+	esdm_config.esdm_es_ext_lib_entropy_rate_bits = val;
+	esdm_es_add_entropy();
+}
+
+DSO_PUBLIC
 uint32_t esdm_config_drng_max_wo_reseed(void)
 {
 	/* If DRNG operated without proper reseed for too long, block ESDM */
@@ -585,6 +606,10 @@ int esdm_config_init(void)
 			esdm_config.esdm_es_jent_kernel_entropy_rate_bits);
 	complete_entropy_rate +=
 		esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
+	esdm_config.esdm_es_ext_lib_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_ext_lib_entropy_rate_bits);
+	complete_entropy_rate += esdm_config.esdm_es_ext_lib_entropy_rate_bits;
 
 	if (!complete_entropy_rate) {
 		esdm_logger_status(

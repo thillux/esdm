@@ -36,6 +36,7 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_es_extlib.h"
 #include "esdm_es_pkcs11.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
@@ -142,6 +143,15 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tthe PKCS#11 entropy source instead of the one the build\n");
 	fprintf(stderr, "\t\t\tconfigured (es_pkcs11_module_path)\n");
+	fprintf(stderr,
+		"\t   --es_ext_lib <PATH>\tLoad the plugin library PATH as external\n");
+	fprintf(stderr,
+		"\t\t\tentropy source instead of the one the build configured\n");
+	fprintf(stderr, "\t\t\t(es_ext_lib_path)\n");
+	fprintf(stderr,
+		"\t   --es_ext_lib_entropy_rate <BITS>\tCredit the plugin with at\n");
+	fprintf(stderr,
+		"\t\t\tmost BITS of entropy per 256 bits of data (0 to 256)\n");
 	exit(1);
 }
 
@@ -168,6 +178,56 @@ static void set_pkcs11_module(const char *path)
 	if (ret) {
 		fprintf(stderr, "Cannot set the PKCS#11 module %s: %s\n", path,
 			strerror(-ret));
+		exit(1);
+	}
+}
+
+/*
+ * An entropy rate in bits per 256 bits of data, as the meson options take it:
+ * a decimal number from 0 to 256 and nothing else.
+ */
+static uint32_t parse_entropy_rate(const char *opt, const char *arg)
+{
+	unsigned long val;
+	char *end;
+
+	errno = 0;
+	val = strtoul(arg, &end, 10);
+	if (errno || end == arg || *end != '\0' || arg[0] == '-' || val > 256) {
+		fprintf(stderr,
+			"%s takes an entropy rate from 0 to 256, not \"%s\"\n",
+			opt, arg);
+		exit(1);
+	}
+
+	return (uint32_t)val;
+}
+
+/*
+ * The plugin library of the external entropy source, in place of the one the
+ * build names (es_ext_lib_path). It is loaded and initialized by esdm_init(),
+ * while the daemon still has its privileges.
+ */
+static void set_es_ext_lib(const char *path)
+{
+	int ret;
+
+	if (path[0] == '\0') {
+		fprintf(stderr,
+			"The external ES plugin library path must not be empty\n");
+		exit(1);
+	}
+
+	ret = esdm_es_ext_lib_set_path(path);
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"External entropy sources are not part of this build (meson option es_ext)\n");
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr,
+			"Cannot set the external ES plugin library %s: %s\n",
+			path, strerror(-ret));
 		exit(1);
 	}
 }
@@ -199,6 +259,8 @@ static void parse_opts(int argc, char *argv[])
 			{ "egd_socket", 1, 0, 0 },
 			{ "egd_socket_pr", 1, 0, 0 },
 			{ "pkcs11_module", 1, 0, 0 },
+			{ "es_ext_lib", 1, 0, 0 },
+			{ "es_ext_lib_entropy_rate", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -296,6 +358,17 @@ static void parse_opts(int argc, char *argv[])
 			case 18:
 				/* pkcs11_module */
 				set_pkcs11_module(optarg);
+				break;
+			case 19:
+				/* es_ext_lib */
+				set_es_ext_lib(optarg);
+				break;
+			case 20:
+				/* es_ext_lib_entropy_rate */
+				esdm_config_es_ext_lib_entropy_rate_set(
+					parse_entropy_rate(
+						"--es_ext_lib_entropy_rate",
+						optarg));
 				break;
 
 			default:

@@ -669,6 +669,41 @@ compiled which implies a synchronous generation of data from the kernel jitter
 entropy source.
 ''')
 
+option('es_ext', type: 'feature', value: 'enabled',
+       description: '''Enable support for external entropy sources.
+
+An external entropy source is noise source code that is not part of the ESDM,
+developed against esdm_es_ext.h - see libesdm_es_ext(3). It is either a plugin
+library the ESDM loads into its own process (es_ext_lib_path, or esdm-server
+--es_ext_lib), or a provider process the ESDM reads from over a Unix domain
+socket (es_ext_socket_path, or esdm-server --es_ext_socket).
+
+Compiled in, an external entropy source does nothing until a plugin library or
+a provider socket is configured.
+''')
+
+option('es_ext_lib_path', type: 'string', value: '',
+       description: '''Plugin library of the external entropy source.
+
+Path of a shared library exporting a struct esdm_es_ext_plugin, loaded into
+the ESDM as external entropy source. esdm-server --es_ext_lib PATH loads
+another one in its place. When empty and not given on the command line, no
+plugin is loaded.
+''')
+
+option('es_ext_lib_entropy_rate', type: 'integer', min: 0, max: 256, value: 256,
+       description: '''Entropy rate cap of the external entropy source plugin.
+
+A block of data from the plugin library is credited with the entropy the
+plugin claims for it, but with at most what this rate allows: the amount of
+entropy per 256 bits of data. With the default of 256 the claim of the plugin
+is taken as it is - the plugin is chosen by whoever configures the ESDM, and it
+knows its noise source. esdm-server --es_ext_lib_entropy_rate overrides it.
+
+When configuring this value to 0, the plugin provides data without being
+credited to contain entropy.
+''')
+
 ################################################################################
 # Common Options
 ################################################################################

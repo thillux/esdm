@@ -142,6 +142,42 @@ with (meson option
 The module is loaded while the daemon still has its privileges. Refused by a
 build without the PKCS#11 entropy source (meson option
 .BR es_pkcs11 ).
+.TP
+.BR \-\-es_ext_lib " \fIPATH\fR"
+Load the plugin library
+.I PATH
+as external entropy source instead of the one the build was configured with
+(meson option
+.BR es_ext_lib_path ),
+see
+.B EXTERNAL ENTROPY SOURCES
+below.
+.TP
+.BR \-\-es_ext_lib_entropy_rate " \fIBITS\fR"
+Credit a block of the plugin with at most
+.I BITS
+bits of entropy per 256 bits of data, 0 to 256, instead of the rate of the
+build (meson option
+.BR es_ext_lib_entropy_rate ,
+256 by default).
+.SH EXTERNAL ENTROPY SOURCES
+Noise sources that are not part of the ESDM are written against
+.BR libesdm_es_ext (3)
+as a plugin and handed to the daemon in one of two ways.
+.PP
+A plugin library given with
+.B \-\-es_ext_lib
+is loaded into the daemon and its initialization callback run while the daemon
+still has its privileges \- a device the plugin reads is opened there.
+Afterwards the plugin runs with the privileges and in the namespaces of the
+daemon. A library that cannot be loaded, exports no plugin of the supported
+version, or fails its initialization leaves the source switched off; the
+reason is logged.
+.PP
+Each block is credited with the entropy the plugin claims for it, but with at
+most what the configured rate allows. A plugin that fails to deliver, or claims
+more entropy than the block can hold, is credited with nothing until it
+delivers again.
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP
