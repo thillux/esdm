@@ -9,6 +9,8 @@ esdm\-es\-ext\-serve \- serve an external entropy source plugin to the ESDM
 .I PATH
 .RB [ \-\-mode
 .IR MODE ]
+.RB [ \-\-client_uid
+.IR USER ]...
 .RB [ \-v ]
 .SH DESCRIPTION
 .B esdm\-es\-ext\-serve
@@ -44,6 +46,14 @@ socket has to let the user the ESDM runs as connect \- by default
 hence the default mode 0666. A more restrictive mode needs the ESDM to run with
 a group that is granted access
 .RB ( "esdm\-server \-\-groupname" ).
+.PP
+In turn, only clients running as root or as a user given with
+.B \-\-client_uid
+are served \- by default root and
+.BR nobody ,
+the user the ESDM runs as unless told otherwise. Any other client is
+disconnected at once, so that it can neither take the few client slots the
+ESDM needs nor drain the noise source.
 .SH OPTIONS
 .TP
 .BR \-l ", " \-\-plugin " \fILIBRARY\fR"
@@ -55,6 +65,16 @@ replaced, any other file is not.
 .TP
 .BR \-m ", " \-\-mode " \fIMODE\fR"
 Access mode of the socket, octal. The default is 0666.
+.TP
+.BR \-u ", " \-\-client_uid " \fIUSER\fR"
+Serve clients running as
+.I USER
+\- a uid or a user name \- next to root. May be given up to 8 times; the
+default is
+.BR nobody .
+Give the user of
+.B esdm\-server \-\-username
+if the ESDM runs as another one.
 .TP
 .BR \-v ", " \-\-verbose
 Verbose logging; repeat for more.

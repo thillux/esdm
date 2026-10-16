@@ -176,6 +176,24 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 			     struct esdm_es_ext_server **server);
 
 /**
+ * @brief Serve only clients running as root and as @uid
+ *
+ * By default, any client that can connect to the socket is served. Once a user
+ * is allowed, only clients running as root or as an allowed user are; any
+ * other is disconnected right away, before it can take one of the few client
+ * slots the server has - or drain the noise source. Allow the user the ESDM
+ * runs as (user nobody by default): it connects as root at start up, but with
+ * its privileges dropped once it reconnects. Up to 8 users can be allowed.
+ *
+ * @param [in] server The server, not running yet
+ * @param [in] uid The user to allow
+ *
+ * @return 0 on success, -EINVAL for an invalid uid, -ENOSPC if 8 users are
+ *	   allowed already
+ */
+int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid);
+
+/**
  * @brief Serve requests until esdm_es_ext_server_stop() is called
  *
  * Serves the clients connected at a time one request after the other. A

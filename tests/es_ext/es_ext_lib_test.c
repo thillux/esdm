@@ -313,6 +313,75 @@ out:
 	esdm_es_ext_plugin_unload(handle);
 }
 
+/*
+ * With users allowed, only those and root are served: anybody else who can
+ * connect is disconnected before taking a slot.
+ */
+static void test_server_allow(const char *good)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
+	struct esdm_es_ext_plugin_handle *handle;
+	const struct esdm_es_ext_plugin *plugin;
+	struct esdm_es_ext_server *server;
+	unsigned int round, i;
+	pthread_t thread;
+	int fd;
+
+	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
+	if (!plugin)
+		return;
+
+	/* Round 0 allows another user than the test's, round 1 the test's */
+	for (round = 0; round < 2; round++) {
+		/* As root, the client is always allowed */
+		if (!round && !getuid())
+			continue;
+
+		CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0666,
+						  &server),
+			 0);
+		if (!server)
+			break;
+
+		CHECK_EQ(esdm_es_ext_server_allow_uid(server, (uid_t)-1),
+			 -EINVAL);
+		CHECK_EQ(esdm_es_ext_server_allow_uid(
+				 server, round ? getuid() : getuid() + 1),
+			 0);
+
+		CHECK_EQ(pthread_create(&thread, NULL, test_server_thread,
+					server),
+			 0);
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect to the provider");
+		if (fd >= 0) {
+			ssize_t n = test_request(fd,
+						 ESDM_ES_EXT_PROTO_GET_ENTROPY,
+						 16, rsp, sizeof(rsp));
+
+			if (round)
+				CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 16);
+			else
+				CHECK(n <= 0,
+				      "a client of a user not allowed was served");
+			close(fd);
+		}
+		esdm_es_ext_server_stop(server);
+		pthread_join(thread, NULL);
+
+		/* Up to 8 users, allowing one twice takes no room */
+		for (i = 0; i < 7; i++)
+			CHECK_EQ(esdm_es_ext_server_allow_uid(server, 5000 + i),
+				 0);
+		CHECK_EQ(esdm_es_ext_server_allow_uid(server, 5000), 0);
+		CHECK_EQ(esdm_es_ext_server_allow_uid(server, 6000), -ENOSPC);
+
+		esdm_es_ext_server_free(server);
+	}
+
+	esdm_es_ext_plugin_unload(handle);
+}
+
 /* The example plugin of es-ext/example, built to read /dev/urandom */
 static void test_example(const char *path)
 {
@@ -356,6 +425,7 @@ int main(int argc, char *argv[])
 
 	test_loader(argv[1], argv[2], argv[3], argv[4]);
 	test_server(argv[1]);
+	test_server_allow(argv[1]);
 	test_example(argv[5]);
 
 	unlink(test_socket);

@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +49,26 @@ static void serve_stop(int sig)
 	esdm_es_ext_server_stop(serve_server);
 }
 
+/* Clients to be served next to root */
+#define SERVE_MAX_CLIENT_UIDS 8
+
+/* A uid, or the uid of a user name; (uid_t)-1 if it is neither */
+static uid_t serve_parse_uid(const char *arg)
+{
+	struct passwd *pw;
+	unsigned long val;
+	char *end;
+
+	errno = 0;
+	val = strtoul(arg, &end, 10);
+	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
+	    val < (unsigned long)(uid_t)-1)
+		return (uid_t)val;
+
+	pw = getpwnam(arg);
+	return pw ? pw->pw_uid : (uid_t)-1;
+}
+
 static void usage(void)
 {
 	fprintf(stderr, "\nESDM external entropy source provider\n\n");
@@ -60,6 +81,10 @@ static void usage(void)
 	fprintf(stderr,
 		"\t-m --mode <MODE>\tAccess mode of the socket, octal (default 0666)\n");
 	fprintf(stderr,
+		"\t-u --client_uid <USER>\tServe clients running as USER (uid or name)\n");
+	fprintf(stderr,
+		"\t\t\tnext to root; may be repeated (default: nobody)\n");
+	fprintf(stderr,
 		"\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t-h --help\tThis help information\n");
 	fprintf(stderr, "\t   --version\tPrint version\n");
@@ -71,6 +96,7 @@ int main(int argc, char *argv[])
 		{ "plugin", required_argument, NULL, 'l' },
 		{ "socket", required_argument, NULL, 's' },
 		{ "mode", required_argument, NULL, 'm' },
+		{ "client_uid", required_argument, NULL, 'u' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
@@ -80,10 +106,12 @@ int main(int argc, char *argv[])
 	const struct esdm_es_ext_plugin *plugin;
 	const char *plugin_path = NULL, *socket_path = NULL;
 	struct sigaction sa;
+	uid_t client_uids[SERVE_MAX_CLIENT_UIDS];
+	unsigned int client_uids_num = 0, i;
 	mode_t mode = 0666;
 	int c, ret;
 
-	while ((c = getopt_long(argc, argv, "l:s:m:vh", opts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "l:s:m:u:vh", opts, NULL)) != -1) {
 		switch (c) {
 		case 'l':
 			plugin_path = optarg;
@@ -105,6 +133,24 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			mode = (mode_t)val;
+			break;
+		}
+		case 'u': {
+			uid_t uid = serve_parse_uid(optarg);
+
+			if (uid == (uid_t)-1) {
+				fprintf(stderr,
+					"--client_uid takes a uid or a user name, not \"%s\"\n",
+					optarg);
+				return 1;
+			}
+			if (client_uids_num >= SERVE_MAX_CLIENT_UIDS) {
+				fprintf(stderr,
+					"--client_uid may be given %u times at most\n",
+					SERVE_MAX_CLIENT_UIDS);
+				return 1;
+			}
+			client_uids[client_uids_num++] = uid;
 			break;
 		}
 		case 'v':
@@ -144,6 +190,30 @@ int main(int argc, char *argv[])
 			strerror(-ret));
 		esdm_es_ext_plugin_unload(handle);
 		return 1;
+	}
+
+	/*
+	 * The ESDM runs as nobody unless told otherwise - see esdm-server
+	 * --username. Without a user of that name, root alone is served.
+	 */
+	if (!client_uids_num) {
+		uid_t nobody = serve_parse_uid("nobody");
+
+		if (nobody != (uid_t)-1)
+			client_uids[client_uids_num++] = nobody;
+		else
+			client_uids[client_uids_num++] = 0;
+	}
+	for (i = 0; i < client_uids_num; i++) {
+		ret = esdm_es_ext_server_allow_uid(serve_server,
+						   client_uids[i]);
+		if (ret) {
+			fprintf(stderr, "Cannot serve uid %u: %s\n",
+				(unsigned int)client_uids[i], strerror(-ret));
+			esdm_es_ext_server_free(serve_server);
+			esdm_es_ext_plugin_unload(handle);
+			return 1;
+		}
 	}
 
 	memset(&sa, 0, sizeof(sa));

@@ -114,6 +114,14 @@ The ESDM connects with its privileges dropped (user
 .B nobody
 by default), so the mode has to let that user connect.
 .TP
+.BI "int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *" server ", uid_t " uid );
+Serve only clients running as root or as an allowed user, up to 8 of them;
+any other client is disconnected before it can take one of the few client
+slots of the server, or drain the noise source. Without a user allowed, any
+client that can connect is served. Allow the user the ESDM runs as: it
+connects as root at start up, but with its privileges dropped once it
+reconnects.
+.TP
 .BI "int esdm_es_ext_server_run(struct esdm_es_ext_server *" server );
 Serve the connected clients, one request after the other, until
 .BR esdm_es_ext_server_stop ()

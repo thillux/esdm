@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <pwd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -108,9 +109,11 @@ static int test_connect(void)
 
 static void test_serve(const char *serve, const char *plugin)
 {
-	char *const argv[] = { (char *)serve,  "--plugin",  (char *)plugin,
-			       "--socket",     test_socket, "--mode",
-			       (char *)"0640", NULL };
+	char uid[16];
+	char *const argv[] = { (char *)serve, "--plugin",	(char *)plugin,
+			       "--socket",    test_socket,	"--mode",
+			       "0640",	      "--client_uid", uid,
+			       NULL };
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	const uint8_t *data;
@@ -121,6 +124,8 @@ static void test_serve(const char *serve, const char *plugin)
 	ssize_t n;
 	int fd;
 
+	/* The test's own user is served */
+	snprintf(uid, sizeof(uid), "%u", (unsigned int)getuid());
 	pid = test_spawn(argv);
 	CHECK(pid > 0, "cannot start %s", serve);
 	if (pid <= 0)
@@ -164,6 +169,45 @@ static void test_serve(const char *serve, const char *plugin)
 	CHECK(lstat(test_socket, &sb) < 0, "the socket was left behind");
 }
 
+/*
+ * Without --client_uid, root and nobody are served - the ESDM as it runs by
+ * default - and nobody else.
+ */
+static void test_default_clients(const char *serve, const char *plugin)
+{
+	char *const argv[] = { (char *)serve, "--plugin", (char *)plugin,
+			       "--socket", test_socket, NULL };
+	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN], rsp[64];
+	struct passwd *pw = getpwnam("nobody");
+	pid_t pid;
+	int fd;
+
+	if (!getuid() || (pw && pw->pw_uid == getuid())) {
+		printf("running as root or nobody - skipping the client check\n");
+		return;
+	}
+
+	pid = test_spawn(argv);
+	CHECK(pid > 0, "cannot start %s", serve);
+	if (pid <= 0)
+		return;
+	CHECK(test_wait_socket(), "the provider did not create its socket");
+
+	fd = test_connect();
+	CHECK(fd >= 0, "cannot connect to the provider");
+	if (fd >= 0) {
+		esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_GET_ENTROPY,
+					   16);
+		(void)send(fd, req, sizeof(req), MSG_NOSIGNAL);
+		CHECK(recv(fd, rsp, sizeof(rsp), 0) <= 0,
+		      "a client of another user was served by default");
+		close(fd);
+	}
+
+	CHECK_EQ(kill(pid, SIGTERM), 0);
+	CHECK_EQ(test_wait(pid), 0);
+}
+
 static void test_refusals(const char *serve, const char *plugin,
 			  const char *bad_version)
 {
@@ -181,6 +225,9 @@ static void test_refusals(const char *serve, const char *plugin,
 				   "--socket",	  test_socket, "--mode",
 				   "0999",	  NULL };
 	char *const version[] = { (char *)serve, "--version", NULL };
+	char *const bad_uid[] = { (char *)serve,  "--plugin", (char *)plugin,
+				  "--socket",	  test_socket, "--client_uid",
+				  "no-such-user-esdm-test", NULL };
 	struct stat sb;
 
 	CHECK_EQ(test_run(no_args), 1);
@@ -188,6 +235,7 @@ static void test_refusals(const char *serve, const char *plugin,
 	CHECK_EQ(test_run(bad_plugin), 1);
 	CHECK_EQ(test_run(missing), 1);
 	CHECK_EQ(test_run(bad_mode), 1);
+	CHECK_EQ(test_run(bad_uid), 1);
 	CHECK(lstat(test_socket, &sb) < 0,
 	      "a refused start left a socket behind");
 	CHECK_EQ(test_run(version), 0);
@@ -210,6 +258,7 @@ int main(int argc, char *argv[])
 
 	test_refusals(argv[1], argv[2], argv[3]);
 	test_serve(argv[1], argv[2]);
+	test_default_clients(argv[1], argv[2]);
 
 	unlink(test_socket);
 	rmdir(test_dir);

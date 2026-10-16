@@ -58,6 +58,9 @@
 
 #define ESDM_ES_EXT_SERVER_BACKLOG 8
 
+/* Users that may be allowed with esdm_es_ext_server_allow_uid() */
+#define ESDM_ES_EXT_SERVER_MAX_UIDS 8
+
 struct esdm_es_ext_server {
 	const struct esdm_es_ext_plugin *plugin;
 	void *ctx;
@@ -67,6 +70,10 @@ struct esdm_es_ext_server {
 	/* Written to by esdm_es_ext_server_stop() */
 	int stop_pipe[2];
 	int clients[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
+
+	/* Clients accepted next to root; none set accepts any client */
+	uid_t allowed_uids[ESDM_ES_EXT_SERVER_MAX_UIDS];
+	unsigned int allowed_uids_num;
 
 	char *path;
 	/* The socket file created, so that only that one is removed again */
@@ -82,6 +89,36 @@ static void esdm_es_ext_server_close_client(struct esdm_es_ext_server *server,
 
 	close(server->clients[i]);
 	server->clients[i] = -1;
+}
+
+/*
+ * May the client on @fd be served? With users allowed, only those and root
+ * are - anybody else who can connect could otherwise take the slots the ESDM
+ * needs, and drain the noise source.
+ */
+static bool esdm_es_ext_server_client_allowed(struct esdm_es_ext_server *server,
+					      int fd)
+{
+	struct ucred cred;
+	socklen_t len = sizeof(cred);
+	unsigned int i;
+
+	if (!server->allowed_uids_num)
+		return true;
+
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
+		return false;
+	if (cred.uid == 0)
+		return true;
+	for (i = 0; i < server->allowed_uids_num; i++) {
+		if (cred.uid == server->allowed_uids[i])
+			return true;
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "External ES provider: client of uid %u refused\n",
+		    (unsigned int)cred.uid);
+	return false;
 }
 
 static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
@@ -102,6 +139,12 @@ static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
 
 			nanosleep(&pace, NULL);
 		}
+		return;
+	}
+
+	/* Refused before it takes a slot */
+	if (!esdm_es_ext_server_client_allowed(server, fd)) {
+		close(fd);
 		return;
 	}
 
@@ -287,6 +330,25 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 err:
 	esdm_es_ext_server_free(s);
 	return ret;
+}
+
+DSO_PUBLIC
+int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid)
+{
+	unsigned int i;
+
+	if (!server || uid == (uid_t)-1)
+		return -EINVAL;
+
+	for (i = 0; i < server->allowed_uids_num; i++) {
+		if (server->allowed_uids[i] == uid)
+			return 0;
+	}
+	if (server->allowed_uids_num >= ESDM_ES_EXT_SERVER_MAX_UIDS)
+		return -ENOSPC;
+
+	server->allowed_uids[server->allowed_uids_num++] = uid;
+	return 0;
 }
 
 DSO_PUBLIC
