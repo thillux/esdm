@@ -35,7 +35,11 @@ attaches to them once it has created them, and again after it replaced them,
 e.g. when it was restarted. A segment is only taken for the daemon's when root,
 the owner of the daemon's unprivileged RPC socket or the caller's own user
 created it: another user may create one under the well\-known key while the
-daemon is not running. Returns 0 on success and a negative errno value on
+daemon is not running. The caller's own user does not count for a set\-user\-ID
+or set\-group\-ID program, or any other one the kernel marks with
+.BR AT_SECURE ,
+nor for one whose real and effective user IDs differ: the user who invoked it
+could create the segment. Returns 0 on success and a negative errno value on
 error.
 .TP
 .BI "void esdm_aux_fini_wait_for_need_entropy(void);"

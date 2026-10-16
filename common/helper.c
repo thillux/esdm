@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -163,14 +164,29 @@ int esdm_fd_at_path(int fd, const char *path)
 }
 
 /*
- * Root, the server's uid, or the real uid of the caller: a segment the latter
- * created can only be planted by somebody who controls the caller anyway. The
- * real one, as the CUSE daemon checks with its effective uid dropped to an
- * unprivileged user, whose segments are not the server's.
+ * Whether the caller's own uid is one to trust: only when the caller runs with
+ * no more privileges than its user has anyway. A set-uid or set-gid program
+ * linking the aux client runs on behalf of whoever invoked it, who would
+ * otherwise create the segment while no server runs and tell the program what
+ * it likes - AT_SECURE covers those, file capabilities and security module
+ * transitions alike. A real uid other than the effective one is a program that
+ * changed its identity: the CUSE daemon, which dropped only its effective uid,
+ * keeps root as real uid, which is trusted anyway.
+ */
+static bool esdm_shm_caller_uid_trusted(void)
+{
+	return getauxval(AT_SECURE) == 0 && getuid() == geteuid();
+}
+
+/*
+ * Root, the server's uid, or the uid of an unprivileged caller: a segment the
+ * latter created can only be planted by somebody who controls the caller
+ * anyway.
  */
 static bool esdm_shm_uid_trusted(uid_t uid, uid_t server_uid)
 {
-	return uid == 0 || uid == server_uid || uid == getuid();
+	return uid == 0 || uid == server_uid ||
+	       (uid == getuid() && esdm_shm_caller_uid_trusted());
 }
 
 bool esdm_shm_created_by_server(const struct shmid_ds *buf,

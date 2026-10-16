@@ -38,6 +38,7 @@
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -502,8 +503,72 @@ static int bind_socket(const char *path)
 }
 
 /*
+ * A caller whose real uid is not its effective one runs with privileges its
+ * user does not have, like a set-uid program: the user could have created the
+ * segment, which is not taken for the server's. Only root can switch the real
+ * uid alone, and does so in a child, as there is no way back.
+ */
+static void test_shm_created_by_server_privileged(uid_t other)
+{
+	struct shmid_ds buf;
+	pid_t pid;
+	int status;
+
+	if (geteuid()) {
+		printf("esdm_shm_created_by_server: privileged caller not covered, needs root\n");
+		return;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		CHECK(0, "fork failed: %s", strerror(errno));
+		return;
+	}
+
+	if (pid == 0) {
+		int failed = 0;
+
+		if (setresuid(other, 0, 0) || getuid() != other)
+			_exit(2);
+
+		/* The invoking user's segment is not the server's */
+		buf = shm_with(other, other);
+		if (esdm_shm_created_by_server(&buf, NULL))
+			failed |= 4;
+
+		/* Root's still is */
+		buf = shm_with(0, 0);
+		if (!esdm_shm_created_by_server(&buf, NULL))
+			failed |= 8;
+
+		_exit(failed);
+	}
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+		CHECK(0, "the privileged caller did not terminate normally");
+		return;
+	}
+
+	switch (WEXITSTATUS(status)) {
+	case 0:
+		break;
+	case 2:
+		printf("esdm_shm_created_by_server: privileged caller not covered, cannot switch the real uid to %u\n",
+		       (unsigned int)other);
+		break;
+	default:
+		CHECK(!(WEXITSTATUS(status) & 4),
+		      "a caller of real uid %u and effective uid 0 accepts the segment of uid %u",
+		      (unsigned int)other, (unsigned int)other);
+		CHECK(!(WEXITSTATUS(status) & 8),
+		      "a caller of real uid %u and effective uid 0 rejects the segment of root",
+		      (unsigned int)other);
+	}
+}
+
+/*
  * Which status segments a client takes for the server's: those of root, of the
- * owner of the server's socket and of its own real uid - not one another user
+ * owner of the server's socket and of its own uid - not one another user
  * created while no server ran, whatever it was handed over to afterwards.
  */
 static void test_shm_created_by_server(void)
@@ -583,6 +648,8 @@ static void test_shm_created_by_server(void)
 		close(fd);
 	unlink(sock_path);
 	rmdir(dir);
+
+	test_shm_created_by_server_privileged(other);
 }
 
 int main(int argc, char *argv[])

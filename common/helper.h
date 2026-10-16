@@ -104,8 +104,11 @@ struct shmid_ds;
  * before the privileges are dropped, or by systemd as root, in a directory
  * other users cannot write to. Whoever owns it is the one a client receives
  * its random numbers from, so a segment of that uid is no less trustworthy.
- * So is one of the caller's own real uid, whose creator controls the caller
- * anyway - e.g. a server and a client run by the same unprivileged user.
+ * So is one of the caller's own uid, whose creator controls the caller anyway -
+ * e.g. a server and a client run by the same unprivileged user. Not so for a
+ * caller running with privileges its user does not have - a set-uid or set-gid
+ * program, or one whose real and effective uids differ: the user that invoked
+ * it could plant the segment, so only root and the socket owner count there.
  *
  * @param [in] buf Status of the segment as obtained with IPC_STAT
  * @param [in] server_socket Path of the server's RPC socket, may be NULL to
