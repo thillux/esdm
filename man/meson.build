@@ -42,7 +42,7 @@ if get_option('esdm-aux-client').enabled()
 endif
 
 if get_option('esdm-es-ext').enabled()
-	man_pages += [ 'libesdm_es_ext.3' ]
+	man_pages += [ 'libesdm_es_ext.3', 'esdm-es-ext-serve.8' ]
 endif
 
 if get_option('openssl-rand-provider').enabled()

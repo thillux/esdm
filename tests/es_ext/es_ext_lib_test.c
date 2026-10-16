@@ -142,8 +142,8 @@ static void test_server(const char *good)
 	const uint8_t *data;
 	pthread_t thread;
 	struct stat sb;
-	uint32_t bits;
-	int32_t status;
+	uint32_t bits = 0;
+	int32_t status = -1;
 	ssize_t n;
 	void *res;
 	int fd, fd2;

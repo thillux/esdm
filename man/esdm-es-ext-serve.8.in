@@ -1,0 +1,77 @@
+.TH ESDM\-ES\-EXT\-SERVE 8 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-es\-ext\-serve \- serve an external entropy source plugin to the ESDM
+.SH SYNOPSIS
+.B esdm\-es\-ext\-serve
+.B \-\-plugin
+.I LIBRARY
+.B \-\-socket
+.I PATH
+.RB [ \-\-mode
+.IR MODE ]
+.RB [ \-v ]
+.SH DESCRIPTION
+.B esdm\-es\-ext\-serve
+loads the external entropy source plugin library
+.I LIBRARY
+\- see
+.BR libesdm_es_ext (3)
+\- and serves it on the UNIX domain socket
+.IR PATH ,
+which
+.B esdm\-server \-\-es_ext_socket
+.I PATH
+connects to. The plugin that
+.B esdm\-server \-\-es_ext_lib
+would load into the daemon runs in a process of its own this way: with its
+own privileges, in its own address space, and restarted on its own.
+.PP
+The plugin is loaded and initialized before the socket is served; a plugin
+library that cannot be loaded, exports no plugin of the supported version or
+fails its initialization ends the program with exit status 1. It serves until
+it receives
+.BR SIGTERM ,
+.B SIGINT
+or
+.BR SIGHUP ,
+then removes the socket and exits with status 0.
+.PP
+The ESDM accepts a provider running as root, or as the user given with
+.BR "esdm\-server \-\-es_ext_socket_uid" .
+It connects with its privileges dropped once a connection was lost, so the
+socket has to let the user the ESDM runs as connect \- by default
+.BR nobody ,
+hence the default mode 0666. A more restrictive mode needs the ESDM to run with
+a group that is granted access
+.RB ( "esdm\-server \-\-groupname" ).
+.SH OPTIONS
+.TP
+.BR \-l ", " \-\-plugin " \fILIBRARY\fR"
+Plugin library of the entropy source.
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR"
+Socket to serve it on. A socket left at the path by an earlier instance is
+replaced, any other file is not.
+.TP
+.BR \-m ", " \-\-mode " \fIMODE\fR"
+Access mode of the socket, octal. The default is 0666.
+.TP
+.BR \-v ", " \-\-verbose
+Verbose logging; repeat for more.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.SH EXAMPLE
+.nf
+esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/my_es.so \\
+	\-\-socket /run/esdm\-es\-ext.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-ext.socket
+.fi
+.SH SEE ALSO
+.BR libesdm_es_ext (3),
+.BR esdm\-server (8)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

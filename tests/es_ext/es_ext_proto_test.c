@@ -97,8 +97,8 @@ static void test_response(void)
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint8_t data[32];
 	const uint8_t *got;
-	uint32_t bits;
-	int32_t status;
+	uint32_t bits = 0;
+	int32_t status = -1;
 	size_t len;
 
 	memset(data, 0x5a, sizeof(data));

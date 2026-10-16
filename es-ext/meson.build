@@ -36,3 +36,14 @@ pkgconfig.generate(esdm_es_ext_lib,
 include_user_files += files([
 	'esdm_es_ext.h'
 ])
+
+# A provider for any plugin library: what esdm-server --es_ext_lib loads into
+# the daemon, served in a process of its own - see esdm-es-ext-serve(8).
+esdm_es_ext_serve = executable('esdm-es-ext-serve',
+	[ 'serve/esdm_es_ext_serve.c' ],
+	c_args: [ '-DESDM_ES_EXT_SERVE_VERSION="' + meson.project_version() + '"' ],
+	include_directories: include_dirs_es_ext,
+	link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
+	dependencies: [ dependency('threads'), dl_dep ],
+	install: true
+	)

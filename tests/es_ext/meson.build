@@ -58,6 +58,18 @@ if get_option('esdm-es-ext').enabled()
 	test('External ES library', es_ext_lib_test,
 		args: es_ext_plugin_args, depends: es_ext_plugins,
 		suite: 'es_ext')
+
+	es_ext_serve_test = executable('es_ext_serve_test',
+		'es_ext_serve_test.c',
+		include_directories: include_dirs_es_ext_test,
+	)
+	test('esdm-es-ext-serve', es_ext_serve_test,
+		args: [ esdm_es_ext_serve.full_path(),
+			es_ext_test_plugin.full_path(),
+			es_ext_bad_version_plugin.full_path() ],
+		depends: [ esdm_es_ext_serve, es_ext_test_plugin,
+			   es_ext_bad_version_plugin ],
+		suite: 'es_ext', timeout: 60)
 endif
 
 if get_option('es_ext').enabled()
