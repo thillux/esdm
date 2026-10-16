@@ -247,11 +247,16 @@ static void test_pkcs11_module_option(void)
 	const char *const empty[] = { "--pkcs11_module", "", NULL };
 	struct test_run r;
 
-	CHECK_EQ(test_run(&r, opts, NULL), 1);
 #ifdef ESDM_ES_PKCS11
-	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-	      "--pkcs11_module was not accepted (output: %.300s)", r.err);
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run(&r, opts, NULL), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "--pkcs11_module was not accepted (output: %.300s)",
+		      r.err);
+	}
 #else
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
 	      "--pkcs11_module was not refused without the PKCS#11 ES (output: %.300s)",
 	      r.err);
@@ -286,11 +291,15 @@ static void test_es_ext_lib_options(void)
 	struct test_run r;
 	unsigned int i;
 
-	CHECK_EQ(test_run(&r, opts, NULL), 1);
 #ifdef ESDM_ES_EXT
-	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-	      "--es_ext_lib was not accepted (output: %.300s)", r.err);
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run(&r, opts, NULL), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "--es_ext_lib was not accepted (output: %.300s)", r.err);
+	}
 #else
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
 	      "--es_ext_lib was not refused without external ES (output: %.300s)",
 	      r.err);
@@ -334,18 +343,22 @@ static void test_es_ext_socket_options(void)
 					 NULL };
 	struct test_run r;
 
-	CHECK_EQ(test_run(&r, opts, NULL), 1);
 #ifdef ESDM_ES_EXT
-	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-	      "the --es_ext_socket options were not accepted (output: %.300s)",
-	      r.err);
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run(&r, opts, NULL), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "the --es_ext_socket options were not accepted (output: %.300s)",
+		      r.err);
 
-	CHECK_EQ(test_run(&r, by_name, NULL), 1);
-	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-	      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
-	      r.err);
+		CHECK_EQ(test_run(&r, by_name, NULL), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
+		      r.err);
+	}
 #else
 	(void)by_name;
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
 	      "--es_ext_socket was not refused without external ES (output: %.300s)",
 	      r.err);
