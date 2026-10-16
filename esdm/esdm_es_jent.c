@@ -55,6 +55,18 @@ static struct rand_data *esdm_jent_state = NULL;
  */
 static atomic_bool esdm_jent_health_failed = false;
 
+/*
+ * Whether the synchronous collector is gone. jent_read_entropy_safe() answers
+ * a failed health test of a collector by freeing it and allocating a new one
+ * once the startup test passes again - and when either does not work out, it
+ * leaves the collector NULL behind. The Jitter RNG is initialized all the same
+ * then, but delivers nothing, and is credited with nothing until the periodic
+ * self test brings a collector back (esdm_jent_selftest()). Kept apart from
+ * esdm_jent_state, which is only read under esdm_jent_lock, so that the
+ * lock-free readers can ask.
+ */
+static atomic_bool esdm_jent_collector_lost = false;
+
 #if (ESDM_JENT_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf esdm_jent_buf;
 static struct rand_data *esdm_jent_state_thread = NULL;
@@ -110,6 +122,7 @@ static uint32_t esdm_jent_entropylevel(uint32_t requested_bits)
 {
 	return esdm_fast_noise_entropylevel(
 		(atomic_load(&esdm_jent_initialized) &&
+		 !atomic_load(&esdm_jent_collector_lost) &&
 		 !atomic_load(&esdm_jent_health_failed)) ?
 			esdm_config_es_jent_entropy_rate() :
 			0,
@@ -137,6 +150,19 @@ static void esdm_jent_get(struct rand_data **ec, struct entropy_es *eb_es,
 		goto err;
 
 	ret = jent_read_entropy_safe(ec, (char *)eb_es->e, requested_bits >> 3);
+
+	/*
+	 * The synchronous collector, which the caller reads under
+	 * esdm_jent_lock: see esdm_jent_collector_lost. The asynchronous one
+	 * fills blocks without entropy then, which esdm_es_buf_try_get() takes
+	 * for misses, sending the requests to the synchronous collector.
+	 */
+	if (!*ec && ec == &esdm_jent_state &&
+	    !atomic_exchange(&esdm_jent_collector_lost, true)) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ES,
+			"JitterRNG ES: the collector could not be recovered after a failed health test, no entropy until the next self test\n");
+	}
 
 	if (ret < 0) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
@@ -524,6 +550,7 @@ static int esdm_jent_initialize(void)
 
 	/* The startup health test above passed, which supersedes an old run */
 	atomic_store(&esdm_jent_health_failed, false);
+	atomic_store(&esdm_jent_collector_lost, false);
 	atomic_store(&esdm_jent_initialized, 1);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "Jitter RNG working on current system\n");
@@ -574,9 +601,14 @@ static void esdm_jent_es_state(char *buf, size_t buflen)
 		 esdm_jent_entropylevel(256), ESDM_JENT_OSR);
 }
 
+/*
+ * Initialized with a collector to read from. Not esdm_jent_state itself, which
+ * jent_read_entropy_safe() rewrites under esdm_jent_lock.
+ */
 static bool esdm_jent_active(void)
 {
-	return (esdm_jent_state != NULL);
+	return atomic_load(&esdm_jent_initialized) &&
+	       !atomic_load(&esdm_jent_collector_lost);
 }
 
 /*
@@ -626,6 +658,33 @@ static int esdm_jent_selftest(void)
 #else
 	ret = jent_entropy_init_ex(ESDM_JENT_OSR, esdm_jent_flags());
 #endif
+
+	/*
+	 * A collector jent_read_entropy_safe() could not bring back after a
+	 * failed health test (esdm_jent_collector_lost): nothing to bind the
+	 * known answer tests above to, and nothing that would deliver. The
+	 * startup test just passed, so it is allocated anew - which is what
+	 * the library would have done - and the run fails if that does not
+	 * work out either, instead of passing a source that serves nothing.
+	 *
+	 * Asked under the lock: esdm_jent_finalize_internal() clears the
+	 * initialized flag before it takes the lock to free the collector, so
+	 * a source being torn down is not handed a new one here.
+	 */
+	if (!ret && !esdm_jent_state && atomic_load(&esdm_jent_initialized)) {
+		esdm_jent_state = jent_entropy_collector_alloc(
+			ESDM_JENT_OSR, esdm_jent_flags());
+		if (esdm_jent_state) {
+			atomic_store(&esdm_jent_collector_lost, false);
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+				    "JitterRNG ES: collector reallocated\n");
+		} else {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ES,
+				"JitterRNG ES: no collector, and none can be allocated\n");
+			ret = -ENOMEM;
+		}
+	}
 
 	/*
 	 * A failed run takes the credit away until a later one passes, the

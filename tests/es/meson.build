@@ -62,6 +62,17 @@ if get_option('es_jent').enabled()
 
 	test('ES Jitter RNG failing periodic health test',
 	     es_jent_selftest_fail_tester, timeout: 120)
+
+	es_jent_collector_lost_tester = executable(
+		'es_jent_collector_lost_tester',
+		[ esdm_ipc_ns, 'es_jent_collector_lost_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
+	test('ES Jitter RNG collector lost to a failed recovery',
+	     es_jent_collector_lost_tester, timeout: 120)
 endif
 
 if get_option('es_cpu').enabled()
