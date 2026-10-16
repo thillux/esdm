@@ -93,4 +93,42 @@ struct esdm_hash_cb {
 	void (*hash_dealloc)(void *ctx);
 };
 
+/**
+ * struct esdm_xof_cb - cryptographic callback functions defining SHAKE256,
+ *			the extendable-output function the XDRBG-256 operating
+ *			the auxiliary pool is built on
+ * @xof_name		Name of the XOF
+ * @xof_init:		Start a new message, discarding the previous one
+ *			xof: is pointer to data structure allocated with
+ *			     xof_alloc
+ *			return: 0 on success, < 0 on error
+ * @xof_update:		Absorb data into the message
+ *			xof: is pointer to data structure allocated with
+ *			     xof_alloc
+ *			return: 0 on success, < 0 on error
+ * @xof_final:		Squeeze outlen bytes of output of the message in one
+ *			go. The context takes no further data or output until
+ *			it is initialized again.
+ *			xof: is pointer to data structure allocated with
+ *			     xof_alloc
+ *			return: 0 on success, < 0 on error
+ * @xof_alloc		Allocate an XOF context
+ *			return: 0 on success, < 0 on error
+ * @xof_dealloc		Zeroize and deallocate an XOF context
+ *
+ * The known-answer test of the XDRBG-256 is the self test of the XOF.
+ *
+ * Assumptions:
+ *
+ * 1. XOF operation will not sleep
+ */
+struct esdm_xof_cb {
+	const char *(*xof_name)(void);
+	int (*xof_init)(void *xof);
+	int (*xof_update)(void *xof, const uint8_t *inbuf, size_t inbuflen);
+	int (*xof_final)(void *xof, uint8_t *out, size_t outlen);
+	int (*xof_alloc)(void **ctx);
+	void (*xof_dealloc)(void *ctx);
+};
+
 #endif /* _ESDM_CRYPTO_H */

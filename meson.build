@@ -252,7 +252,9 @@ if get_option('crypto_backend') == 'gnutls'
 	# The SP800-90A Block_Cipher_df in front of GnuTLS' CTR DRBG uses the
 	# AES-256 core directly. GnuTLS only lists nettle in Requires.private,
 	# so it has to be linked explicitly.
-	nettle_dep = dependency('nettle', required: true)
+	# The SHAKE256 of the auxiliary pool is nettle's as well, which has it
+	# since 3.6.
+	nettle_dep = dependency('nettle', version: '>= 3.6', required: true)
 
 	# The CTR DRBG this backend drives (drbg_aes_init/reseed/generate) is
 	# not part of the regular GnuTLS ABI: those three live in the
@@ -274,7 +276,8 @@ endif
 
 if get_option('crypto_backend') == 'botan'
 	add_languages('cpp', required: true)
-	botan_dep = dependency('botan-3', version: '>= 3.0', required: true)
+	# Botan::XOF, the SHAKE256 of the auxiliary pool, came with 3.2
+	botan_dep = dependency('botan-3', version: '>= 3.2', required: true)
 endif
 
 if get_option('crypto_backend') == 'openssl' or get_option('openssl-rand-provider').enabled()
