@@ -15,6 +15,7 @@
 
 #include "esdm_es_drbg.h"
 #include "esdm_es_ring.h"
+#include "esdm_es_timer_common.h"
 #include "esdm_drbg_kcapi.h"
 #include "esdm_health.h"
 
@@ -25,6 +26,10 @@ u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg)
 
 	/* Only deliver entropy when SP800-90B self test is completed */
 	if (!esdm_sp80090b_startup_complete_es(drbg->es))
+		return 0;
+
+	/* A timer found too coarse after registration delivers no entropy */
+	if (!esdm_highres_timer())
 		return 0;
 
 	events = esdm_es_ring_avail_events(drbg->ring);

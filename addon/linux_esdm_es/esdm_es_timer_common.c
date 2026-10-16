@@ -24,6 +24,11 @@ static bool esdm_highres_timer_val = false;
 
 /* Number of time stamps analyzed to calculate a GCD */
 #define ESDM_GCD_WINDOW_SIZE 100
+/*
+ * A GCD of at least this value means the time stamps lack variations in their
+ * low bits: no high-resolution timer.
+ */
+#define ESDM_GCD_MAX 1000
 static u64 esdm_gcd_history[ESDM_GCD_WINDOW_SIZE];
 static atomic_t esdm_gcd_history_ptr = ATOMIC_INIT(-1);
 
@@ -58,7 +63,7 @@ static u64 esdm_gcd_capped;
 
 static void esdm_gcd_warn_func(struct irq_work *work)
 {
-	pr_warn("calculated GCD is larger than expected: %llu\n",
+	pr_warn("calculated GCD is larger than expected: %llu - no high-resolution timer, no entropy credited\n",
 		READ_ONCE(esdm_gcd_capped));
 }
 
@@ -142,13 +147,15 @@ void esdm_gcd_add_value(u64 time)
 
 		/*
 		 * Ensure that we have variations in the time stamp below the
-		 * given value. This is just a safety measure to prevent the GCD
-		 * becoming too large.
+		 * given value. Otherwise the timer is too coarse to deliver
+		 * entropy: stop crediting any, also after a later GCD
+		 * recalculation.
 		 */
-		if (gcd >= 1000) {
+		if (gcd >= ESDM_GCD_MAX) {
+			WRITE_ONCE(esdm_highres_timer_val, false);
 			WRITE_ONCE(esdm_gcd_capped, gcd);
 			irq_work_queue(&esdm_gcd_warn_work);
-			gcd = 1000;
+			gcd = ESDM_GCD_MAX;
 		}
 
 		/*  Adjust all deltas by the observed (small) common factor. */
@@ -223,17 +230,48 @@ void esdm_time_source_exit(void)
 /* Return boolean whether ESDM identified presence of high-resolution timer */
 bool esdm_highres_timer(void)
 {
-	return esdm_highres_timer_val;
+	return READ_ONCE(esdm_highres_timer_val);
+}
+
+/*
+ * Number of back-to-back time stamps taken to detect a high-resolution timer
+ * and how many of them must differ from their predecessor.
+ */
+#define ESDM_HIGHRES_TRIAL_SAMPLES 1024
+#define ESDM_HIGHRES_MIN_CHANGES (ESDM_HIGHRES_TRIAL_SAMPLES / 64)
+
+static bool __init esdm_highres_timer_detect(void)
+{
+	unsigned long last = random_get_entropy(), now;
+	unsigned int i, changes = 0;
+
+	/*
+	 * A non-zero time stamp does not imply a high-resolution timer: since
+	 * Linux 5.18 random_get_entropy() falls back to the raw clocksource
+	 * counter on systems without a cycle counter, which may be jiffies.
+	 * Like try_to_generate_entropy() in drivers/char/random.c, read the
+	 * timer back-to-back and count how often it changed. A jiffies-based
+	 * counter changes once or twice at most during the loop, a cycle
+	 * counter or a fine-grained clocksource every few reads at least. On
+	 * older kernels random_get_entropy() returns 0 without a cycle counter,
+	 * which never changes either.
+	 */
+	for (i = 0; i < ESDM_HIGHRES_TRIAL_SAMPLES; i++) {
+		now = random_get_entropy();
+		if (now != last)
+			changes++;
+		last = now;
+	}
+
+	pr_debug("time stamp changed %u times in %u back-to-back reads\n",
+		 changes, ESDM_HIGHRES_TRIAL_SAMPLES);
+
+	return changes >= ESDM_HIGHRES_MIN_CHANGES;
 }
 
 int __init esdm_init_time_source(void)
 {
-	static const u64 ESDM_DATA_WORD_MASK = 0xFFFFFFFF;
-
-	/* check if the lower 32 bit of the timestamp
-	 * already sufficiently change */
-	if ((random_get_entropy() & ESDM_DATA_WORD_MASK) ||
-	    (random_get_entropy() & ESDM_DATA_WORD_MASK)) {
+	if (esdm_highres_timer_detect()) {
 		/*
 		 * As the highres timer is identified here, previous interrupts
 		 * obtained during boot time are treated like a lowres-timer
