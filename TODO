@@ -1,3 +1,1 @@
 - replace double-hash operations maintaining the different pools in favor of an XDRBG construction
-
-- set -euxo pipefail in alle Skripte

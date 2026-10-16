@@ -25,7 +25,7 @@
 #   EXTRACTLSB         Path to esdm-extractlsb (default: from PATH)
 #   EA_NON_IID         Path to ea_non_iid (default: from PATH)
 
-set -eu
+set -euxo pipefail
 
 SOURCE="sched"
 CPU=0

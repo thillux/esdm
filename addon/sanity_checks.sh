@@ -1,15 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euxo pipefail
 
 CHANGESFILE="CHANGES.md"
 
 
-if [ ! -d "$MESON_SOURCE_ROOT" ]
+if [ ! -d "${MESON_SOURCE_ROOT:-}" ]
 then
 	echo "Source directory not found"
 	exit 1
 fi
 
-VERSION=$1
+VERSION=${1:-}
 if [ -z "$VERSION" ]
 then
 	echo "Version missing"
@@ -17,13 +19,8 @@ then
 fi
 
 check_git_blockchain() {
+	# set -e ends the script with the status of a failing fsck
 	git fsck --full --strict
-	local ret=$?
-
-	if [ $ret -ne 0 ]
-	then
-		exit $ret
-	fi
 }
 
 # Check that there all changes are checked in
@@ -37,7 +34,7 @@ require_clean_work_tree() {
 	# Disallow unstaged changes in the working tree
 	if ! git diff-files --quiet --ignore-submodules --
 	then
-		echo >&2 "cannot $1: you have unstaged changes."
+		echo >&2 "cannot ${1:-}: you have unstaged changes."
 		git diff-files --name-status -r --ignore-submodules -- >&2
 		err=1
 	fi
@@ -45,7 +42,7 @@ require_clean_work_tree() {
 	# Disallow uncommitted changes in the index
 	if ! git diff-index --cached --quiet HEAD --ignore-submodules --
 	then
-		echo >&2 "cannot $1: your index contains uncommitted changes."
+		echo >&2 "cannot ${1:-}: your index contains uncommitted changes."
 		git diff-index --cached --name-status -r --ignore-submodules HEAD -- >&2
 		err=1
 	fi
@@ -59,7 +56,8 @@ require_clean_work_tree() {
 
 check_copyright_date() {
 	local file=$1
-	local year=$(date "+%Y")
+	local year
+	year=$(date "+%Y")
 	local numentries=0
 	local searchyear
 	local newyear
@@ -69,7 +67,9 @@ check_copyright_date() {
 		return
 	fi
 
-	local fileyear=$(grep "Copyright" $file | grep "Stephan" | grep -o -E '[0-9]+')
+	local fileyear
+	# No copyright line of Stephan is no error - the file is skipped below
+	fileyear=$(grep "Copyright" $file | grep "Stephan" | grep -o -E '[0-9]+' || true)
 	if [ -z "$fileyear" ]
 	then
 		return
@@ -117,9 +117,9 @@ code_cleanup() {
 
 		skip=0
 
-		for j in $@
+		for j in "$@"
 		do
-			if (echo $i | grep -q $j)
+			if grep -q "$j" <<<"$i"
 			then
 				skip=1
 				break
@@ -136,7 +136,8 @@ code_cleanup() {
 # Check for a clean code using cppcheck
 # $@ files to check
 check_codesanity() {
-	local res=$(cppcheck -q --enable=performance --enable=warning --enable=portability $@ 2>/dev/null)
+	local res
+	res=$(cppcheck -q --enable=performance --enable=warning --enable=portability "$@" 2>/dev/null)
 
 	if [ -n "$res" ]
 	then
@@ -162,7 +163,7 @@ check_reposanity() {
 
 	check_existence ${CHANGESFILE}
 	check_existence README.md
-	if ! $(head -n1 ${CHANGESFILE} | grep -q "$version" )
+	if ! head -n1 ${CHANGESFILE} | grep -q "$version"
 	then
 		#git log --pretty=format"%h %an %s" ${OLDVER}..HEAD
 		echo "Forgot to add $version changes to ${CHANGESFILE}" >&2
@@ -172,7 +173,7 @@ check_reposanity() {
 
 # Check whether we have a preliminary code drop
 check_preliminary() {
-	if $(head -n1 ${CHANGESFILE} | grep -q "prerelease" )
+	if head -n1 ${CHANGESFILE} | grep -q "prerelease"
 	then
 		echo "Preliminary release - skipping full release validation" >&2
 		exit 0
@@ -182,13 +183,14 @@ check_preliminary() {
 # Check that only signed commits are present
 check_only_signed_commits() {
 	# Git preparation
-	local oldver=$(git tag --sort="v:refname" | tail -n1)
+	local oldver
+	oldver=$(git tag --sort="v:refname" | tail -n1)
 
 	# Check for only signed check-ins since old release
 	if [ "$(git log --pretty=%G? ${oldver}..HEAD | grep -v G)" != "" ]
 	then
 		echo "ERROR: Unsigned check-ins found" >&2
-		git log --pretty='format:%H|%aN|%s|%G?' $@ | awk -F '|' '{ if($4 != "G"){print $1;} }'
+		git log --pretty='format:%H|%aN|%s|%G?' "$@" | awk -F '|' '{ if($4 != "G"){print $1;} }'
 		exit 1
 	fi
 }
@@ -223,10 +225,11 @@ push() {
 prepare_gitrepo() {
 	local target=$1
 	local version=$2
-	local nopush=$3
+	local nopush=${3:-}
 
 	local version
-	local dir=$(pwd)
+	local dir
+	dir=$(pwd)
 
 	if [ -d $target ]
 	then
@@ -234,29 +237,22 @@ prepare_gitrepo() {
 	fi
 
 	check_reposanity $version
-	[ $? -ne 0 ] && exit 1
 
 	code_cleanup $(pwd) ".git" build $0 ".pdf"
-	[ $? -ne 0 ] && exit 1
 
 	check_only_signed_commits
-	[ $? -ne 0 ] && exit 1
 
 	require_clean_work_tree
-	[ $? -ne 0 ] && exit 1
 
 	check_git_blockchain
-	[ $? -ne 0 ] && exit 1
 
 	check_preliminary
 
 	tag $(basename $(pwd)) $version
-	[ $? -ne 0 ] && exit 1
 
 	if [ -z "$nopush" ]
 	then
 		push
-		[ $? -ne 0 ] && exit 1
 	fi
 
 	cd $dir

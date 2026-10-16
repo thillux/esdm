@@ -30,7 +30,7 @@
 #   EXTRACTLSB         Path to esdm-extractlsb (default: from PATH)
 #   EA_RESTART         Path to ea_restart (default: from PATH)
 
-set -eu
+set -euxo pipefail
 
 SOURCE="sched"
 CPU=0
@@ -124,7 +124,9 @@ printf '\r  %d/%d restarts\n' "${RESTARTS}" "${RESTARTS}"
 
 echo ""
 echo "=== ea_restart, ${BITS} bit symbols, H_I = ${H_I} ==="
-"${EA_RESTART}" "${MATRIX}" "${BITS}" "${H_I}" 2>&1 | tee "${LOG}"
+# ea_restart exits non-zero when the validation fails - the verdict is taken
+# from its log below, which explains it, rather than from the exit status.
+"${EA_RESTART}" "${MATRIX}" "${BITS}" "${H_I}" 2>&1 | tee "${LOG}" || true
 
 echo ""
 echo "Matrix: ${MATRIX}"
