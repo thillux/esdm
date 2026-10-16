@@ -919,6 +919,173 @@
             '';
           };
 
+        # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
+        # /proc/esdm served by the ESDM over its EGD socket. On the stock
+        # rolling kernel - the module needs no kernel patches - and once only,
+        # the per kernel builds below check that it compiles everywhere.
+        mkEsdmCdevCheck =
+          kernel:
+          let
+            esdm = self.packages.${system}.esdm;
+            check = "python3 ${./addon/linux_esdm_cdev/tests/esdm_cdev_check.py}";
+          in
+          pkgs.testers.nixosTest {
+            name = "esdm_cdev character devices";
+
+            nodes.machine =
+              { config, ... }:
+              {
+                boot.kernelPackages = kernel;
+                boot.extraModulePackages = [
+                  (config.boot.kernelPackages.callPackage ./addon/linux_esdm_cdev { })
+                ];
+
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                # The module talks to the EGD socket, which is opt-in.
+                systemd.sockets."esdm-server-egd".wantedBy = [ "sockets.target" ];
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.python3
+                ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import time
+
+              def bounded(cmd, limit):
+                  start = time.monotonic()
+                  out = machine.succeed(cmd)
+                  took = time.monotonic() - start
+                  assert took < limit, f"{cmd} took {took:.1f} s"
+                  return out
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-server-egd.socket")
+              machine.wait_for_unit("esdm-server.service")
+              machine.wait_until_succeeds(
+                  "journalctl -b -u esdm-server.service | grep -q 'EGD server: serving'", 30
+              )
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              with subtest("devices and proc files with the ESDM running"):
+                  machine.succeed("modprobe esdm_cdev")
+                  for dev in ["esdm_random", "esdm_urandom"]:
+                      machine.succeed(f"test -c /dev/{dev}")
+                      mode = machine.succeed(f"stat -c %a /dev/{dev}").strip()
+                      assert mode == "666", f"/dev/{dev} has mode {mode}"
+                  # The kernel's own devices stay as they are
+                  machine.succeed("test \"$(stat -c %t:%T /dev/urandom)\" = 1:9")
+                  machine.succeed("test \"$(stat -c %t:%T /dev/random)\" = 1:8")
+                  print(machine.succeed("cat /proc/esdm/status"))
+
+              with subtest("reads, poll, O_NONBLOCK, O_SYNC and writes"):
+                  machine.succeed("${check} reads")
+                  machine.succeed("${check} reads sync")
+                  machine.succeed("${check} nonblock")
+                  machine.succeed("${check} poll")
+                  machine.succeed("${check} writes")
+                  print(machine.succeed("${check} throughput"))
+
+              with subtest("/proc/esdm"):
+                  machine.succeed("${check} proc")
+
+              with subtest("ioctls as root, as nobody and without CAP_SYS_ADMIN"):
+                  machine.succeed("${check} ioctl-priv")
+                  machine.succeed(
+                      "setpriv --reuid=nobody --regid=nogroup --clear-groups "
+                      "--inh-caps=-all ${check} ioctl-unpriv"
+                  )
+                  machine.succeed(
+                      "setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin "
+                      "${check} ioctl-unpriv"
+                  )
+
+              with subtest("reconnect after a restart of the ESDM"):
+                  machine.succeed(
+                      "nohup ${check} loop /dev/esdm_urandom 20 > /tmp/loop.log 2>&1 &"
+                  )
+                  machine.sleep(3)
+                  machine.succeed("systemctl restart esdm-server.service")
+                  machine.wait_until_succeeds("grep -q 'loop reads' /tmp/loop.log", 90)
+                  print(machine.succeed("cat /tmp/loop.log"))
+                  machine.succeed("grep -q 'errors=0' /tmp/loop.log")
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+                  machine.succeed("${check} proc")
+
+              with subtest("unloading is refused while a reader blocks"):
+                  # A frozen ESDM keeps the reader waiting for its answer
+                  machine.succeed("systemctl kill -s SIGSTOP esdm-server.service")
+                  machine.succeed(
+                      "nohup ${check} block /dev/esdm_random > /tmp/block.log 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q blocking /tmp/block.log", 30)
+                  machine.sleep(1)
+                  machine.fail("rmmod esdm_cdev")
+                  machine.succeed("systemctl kill -s SIGCONT esdm-server.service")
+                  machine.succeed("pkill -f 'esdm_cdev_check.py [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm_cdev_check.py [b]lock'", 30)
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+
+              with subtest("the ESDM unreachable: the kernel's RNG serves"):
+                  machine.succeed("systemctl stop esdm-server-egd.socket esdm-server.service")
+                  bounded("${check} reads", 120)
+                  machine.succeed("${check} nonblock")
+                  machine.succeed("${check} writes")
+                  machine.succeed("${check} proc-empty")
+                  machine.succeed("${check} ioctl-unreachable")
+                  machine.succeed("dmesg | grep -q 'esdm_cdev: cannot connect to the ESDM'")
+
+              with subtest("loading with the ESDM stopped returns at once"):
+                  machine.succeed("rmmod esdm_cdev")
+                  bounded("modprobe esdm_cdev", 10)
+                  machine.succeed("test -c /dev/esdm_random")
+                  machine.succeed(
+                      "cmp /proc/esdm/boot_id /proc/sys/kernel/random/boot_id"
+                  )
+                  bounded("head -c 4096 /dev/esdm_random > /dev/null", 30)
+
+              with subtest("the ESDM comes back"):
+                  machine.succeed("systemctl start esdm-server-egd.socket esdm-server.service")
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+                  machine.succeed("${check} reads")
+                  machine.succeed("${check} ioctl-priv")
+
+              with subtest("unloading once the reader is gone"):
+                  machine.succeed(
+                      "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q blocking /tmp/block2.log", 30)
+                  machine.fail("rmmod esdm_cdev")
+                  machine.succeed("pkill -f 'esdm_cdev_check.py [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm_cdev_check.py [b]lock'", 30)
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.fail("test -e /dev/esdm_random")
+                  machine.fail("test -e /proc/esdm")
+
+              with subtest("no oops, BUG or WARN"):
+                  kmsg = machine.succeed("dmesg")
+                  for bad in ["BUG:", "WARNING:", "Oops", "Call Trace", "general protection"]:
+                      assert bad not in kmsg, f"dmesg holds {bad}:\n{kmsg}"
+            '';
+          };
+
       in
       {
         # nix fmt
@@ -940,6 +1107,10 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # The character device module, on the rolling kernel - see
+            # mkEsdmCdevCheck.
+            esdm_cdev = mkEsdmCdevCheck stockKernels.latest;
 
             # The test suite in a build without fips140 - see esdm-plain.
             plain = self.packages.${system}.esdm-plain;
