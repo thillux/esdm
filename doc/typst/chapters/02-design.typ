@@ -244,9 +244,11 @@ interface can be selectively enabled and disabled at compile time:
   obtain and process the raw noise data of the internal entropy sources for
   their entropy assessment, see section @sec:test-interfaces.
 
-// TODO(linux-esdm-cdev): describe the kernel module addon/linux_esdm_cdev
-// (/dev/esdm_random, /dev/esdm_urandom, /proc/esdm/*, talking EGD to the
-// ESDM) next to the CUSE daemons once it is merged.
+- `esdm_cdev` (`addon/linux_esdm_cdev`): A kernel module serving the random
+  numbers of the ESDM through the character devices `/dev/esdm_random` and
+  `/dev/esdm_urandom` and the directory `/proc/esdm` - the counterpart of the
+  CUSE daemons in the kernel, which leaves the kernel's own devices untouched.
+  It talks to the ESDM over the EGD interface, see section @sec:egd.
 
 == ESDM Components <sec:components>
 
@@ -1626,7 +1628,17 @@ The following ESDM interfaces are provided:
   OpenSSL, `libesdm-rng-provider-pr.so` serves all requests from the
   prediction resistance DRNG, `libesdm-seed-src-provider.so` provides the ESDM
   as seed source, and `libesdm-egd-provider.so` and
-  `libesdm-egd-provider-pr.so` obtain the data over the EGD interface.
+  `libesdm-egd-provider-pr.so` obtain the data over the EGD interface - the
+  former honors the prediction resistance flag of OpenSSL with the prediction
+  resistance read of the ESDM, the latter serves all requests with it.
+
+- Kernel character devices (kernel module `esdm_cdev`, section @sec:egd):
+  `/dev/esdm_random` is served from `esdm_get_random_bytes_full`, waiting until
+  the ESDM is operational, `/dev/esdm_urandom` from `esdm_get_random_bytes`;
+  opened with `O_SYNC`, either one is served from the prediction resistance
+  DRNG. `/proc/esdm` offers the files of `/proc/sys/kernel/random` and the
+  status. When the ESDM is not reachable, the module serves from the kernel's
+  RNG.
 
 - Status: See section @sec:status.
 
@@ -1673,12 +1685,6 @@ entropy source to its provider.]
 
 === EGD Interface <sec:egd>
 
-// TODO(egd-esdm-commands): the EGD interface gets ESDM-specific commands,
-// among them one for prediction resistance reads, and loses its separate
-// prediction resistance socket - update this section, the interface list of
-// section sec:interfaces, figure fig:interfaces and the OpenSSL provider list
-// once that change is merged.
-
 The ESDM server optionally serves the protocol of the Entropy Gathering Daemon
 on a Unix domain socket of the type `SOCK_STREAM`, enabled with the systemd
 socket unit `esdm-server-egd.socket` or the option `--egd_socket` of the
@@ -1694,13 +1700,39 @@ offers the commands of the EGD protocol (`service-egd/esdm_egd_protocol.h`):
 - 0x04: the PID of the server.
 
 #par(first-line-indent: 0pt)[A transfer is limited to 255 bytes. The random
-numbers are served from `esdm_get_random_bytes_full_noblock`. A second EGD
-socket (`esdm-server-egd-pr.socket` or `--egd_socket_pr`,
-`/run/esdm-egd-pr.socket` per default) serves the random numbers from the
-prediction resistance DRNG with `esdm_get_random_bytes_pr_noblock`, as the
-protocol cannot ask for prediction resistance per request. The client library
-`libesdm_egd_client` owns one connection, serializes the requests on it and
-reconnects after a restart of the server or a `fork()` of the caller.]
+numbers are served from `esdm_get_random_bytes_full_noblock`. What the EGD
+protocol cannot express, the ESDM offers with commands of its own on the same
+socket, far away from the standard ones so that no EGD client sends one by
+accident; a peer that does not know them closes the connection, which a client
+takes for "not supported". They are framed like EGD - a command byte, fixed
+size big endian arguments, an answer whose size is known from the request or
+announced by a length prefix:]
+
+- 0xe0 and 0xe1: reading as 0x01 and 0x02, but from the prediction resistance
+  DRNG (`esdm_get_random_bytes_pr_noblock`); a server worker generates
+  prediction resistant bytes within a budget per connection and round of its
+  event loop,
+- 0xe2: reading as 0x01, but without waiting for all DRNGs to be fully seeded
+  - the semantics of `/dev/urandom`,
+- 0xe3: the state - flags (operational, fully seeded), the entropy and the
+  size of the auxiliary pool, `write_wakeup_threshold` and
+  `urandom_min_reseed_secs`, as a count of 4 byte fields to which new ones are
+  only ever appended,
+- 0xe4 and 0xe5: the status report as text and as JSON document, with a 4 byte
+  length of at most 64 KiB,
+- 0xe6 to 0xea, only for a caller with the user ID 0 and refused with -EPERM
+  otherwise: crediting entropy to the auxiliary pool, clearing its entropy,
+  reseeding the DRNGs, setting `write_wakeup_threshold` and setting
+  `urandom_min_reseed_secs`.
+
+#par(first-line-indent: 0pt)[The commands are defined in
+`service-egd/esdm_egd_protocol.h`. The client library `libesdm_egd_client`
+offers the prediction resistance reads with `esdm_egd_client_get_random_pr`;
+it owns one connection, serializes the requests on it and reconnects after a
+restart of the server or a `fork()` of the caller. The kernel module
+`esdm_cdev` uses the extensions to serve `/dev/esdm_random`,
+`/dev/esdm_urandom` and `/proc/esdm` together with the ioctls of the kernel's
+random devices.]
 
 === ESDM Status <sec:status>
 

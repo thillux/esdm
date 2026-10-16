@@ -377,17 +377,12 @@ It is permissible to use the ESDM DRBG output to seed another DRBG when using
 the prediction resistance DRNG via the RPC API calls
 `esdm_rpcc_get_random_bytes_pr` or `esdm_rpcc_get_random_bytes_pr_nonblock`,
 using `getrandom(2)` with the `GRND_RANDOM` flag, opening /dev/random (or
-/dev/urandom) of the CUSE daemons with the `O_SYNC` flag, reading from the
-prediction resistance socket of the EGD interface (section @sec:egd), or
+/dev/urandom) of the CUSE daemons or /dev/esdm_random (or /dev/esdm_urandom)
+of the kernel module `esdm_cdev` with the `O_SYNC` flag, the prediction
+resistance reads 0xe0 and 0xe1 of the EGD interface (section @sec:egd), or
 using the OpenSSL providers `libesdm-rng-provider-pr.so` and
 `libesdm-egd-provider-pr.so`. See the details given for the API call
 `esdm_get_random_bytes_pr` in section @sec:components.
-// TODO(egd-esdm-commands): the EGD interface gets ESDM specific commands
-// including a prediction resistance read and loses its separate prediction
-// resistance socket - name the new command here instead of the PR socket.
-// TODO(linux-esdm-cdev): list the devices of the kernel module
-// addon/linux_esdm_cdev (/dev/esdm_random, /dev/esdm_urandom) here once it is
-// merged, as far as they serve the prediction resistance DRNG.
 
 === FIPS 140 Compliant Configuration <sec:fips140-config>
 
@@ -509,8 +504,6 @@ configuration:]
   `GRND_RANDOM`, the `esdm_rpcc_get_random_bytes_pr` or
   `esdm_rpcc_get_random_bytes_pr_nonblock` RPC API calls, or the other
   interfaces listed in section @sec:90c-config.
-  // TODO(egd-esdm-commands): replace the prediction resistance EGD socket
-  // referenced through section 5.1.2 with the new EGD command.
 
 #par(first-line-indent: 0pt)[The status of the ESDM always lists "NTG.1(2011)".
 The NTG.1 compliant is ensured only for the respectively marked ESDM interfaces

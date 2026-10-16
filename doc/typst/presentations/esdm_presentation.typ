@@ -118,16 +118,13 @@
   112pt, 730pt, 305pt))
 
 // ---------------------------------------------------------------- slide 6
-// TODO(linux-esdm-cdev): the kernel module addon/linux_esdm_cdev
-// (/dev/esdm_random, /dev/esdm_urandom, /proc/esdm/*, talking EGD to the
-// ESDM) is not part of ESDM 1.2.4 - add it to the components once merged.
 #slide(6, title: [ESDM Components], scale: 0.44, width: 270pt, items: (
   [ESDM Server], (
     [Using ESDM library],
     [RPC: Protobuf-C messages on Unix domain sockets],
     [Opportunistic DTLS 1.2 (option dtls)],
     [Sensitive operations require privilege],
-    [Optional EGD interface: plain and prediction resistance socket],
+    [Optional EGD interface with ESDM commands: prediction resistance, status, entropy accounting],
   ),
   [ESDM RPC library], (
     [API for other clients],
@@ -143,10 +140,11 @@
     [Fall back to the kernel device when the ESDM is unavailable],
   ),
   [/proc/sys/kernel/random FUSE daemon],
+  [Kernel module esdm_cdev: /dev/esdm_random, /dev/esdm_urandom, /proc/esdm – over EGD],
   [libesdm-getrandom.so: getrandom(2) / getentropy(3)],
   [OpenSSL 3 providers], (
     [RNG, RNG with prediction resistance, SEED-SRC – over RPC],
-    [EGD, EGD with prediction resistance – over the EGD sockets],
+    [EGD, EGD with prediction resistance – over the EGD socket],
   ),
   [esdm-kernel-seeder: reseeds the kernel RNG every 120 seconds],
   [esdm-tool: status (text / JSON), self test, wait until fully seeded],
@@ -155,21 +153,19 @@
 ))
 
 // ---------------------------------------------------------------- slide 8
-// TODO(egd-esdm-commands): the EGD interface gets ESDM-specific commands,
-// among them a prediction resistance read, and loses its separate
-// prediction resistance socket - update the EGD items once merged.
 #slide(8, title: [DRNG Output APIs], scale: 0.375, items: (
   [Blocking APIs – deliver data only after fully initialized and fully seeded], (
     [When Linux compliant interfaces enabled:], (
       [/dev/random],
       [getrandom() system call],
     ),
+    [/dev/esdm_random of the kernel module esdm_cdev],
   ),
   [Prediction Resistance API – deliver data only after fully initialized and successful reseed returning at most \ data equal to the amount of entropy], (
     [ESDM RPC client API (blocking and non-blocking)],
-    [Using /dev/random or /dev/urandom with O_SYNC],
+    [Using /dev/random, /dev/urandom, /dev/esdm_random or /dev/esdm_urandom with O_SYNC],
     [Using getrandom(2) with flag GRND_RANDOM],
-    [EGD prediction resistance socket],
+    [EGD prediction resistance reads (ESDM commands 0xe0, 0xe1)],
     [Compliant with:], (
       [FIPS IG 7.19 / D.K to use DRBG as conditioning component for seeding other DRBGs],
       [SP800-90C RBG3(RS) when oversampling is in effect],

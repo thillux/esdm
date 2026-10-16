@@ -139,11 +139,10 @@ operations and must not be enabled for production code.
 
 Beyond the test suite, the following testing is provided with the code:
 
-// TODO(egd-esdm-commands): the EGD harnesses cover the EGD commands of
-// eb39546; extend once the ESDM-specific EGD commands are merged.
 - Fuzz harnesses for the RPC requests, responses and wire codec, the RPC
-  server, both sides of the EGD interface, the library API and the OpenSSL
-  RAND providers (build option `fuzzing`, tests/fuzz/README.md).
+  server, both sides of the EGD interface including the ESDM-specific EGD
+  commands, the library API and the OpenSSL RAND providers (build option
+  `fuzzing`, tests/fuzz/README.md).
 
 - The nix flake builds the ESDM with the address and undefined behavior
   sanitizers for coverage reports (`esdm-coverage` and its variants) and with
