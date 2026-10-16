@@ -178,7 +178,12 @@ UID. A connection
 that has received no command and owes no response for 60 seconds is closed
 only when its slot is wanted: at most 256 slots are left, an accept ran out of
 descriptors within that time, or its UID was refused a connection and is still
-at its limit.
+at its limit. While slots are short, only the idle connections of the UIDs
+holding the most connections are closed. Once all slots are taken, a new
+connection is not left waiting but a connection is closed to make room for it
+\- one of the UID holding the most connections, the least recently active one
+with nothing owed to its client if there is one, and never one of root or of a
+UID holding fewer connections than that of the new client.
 .BR libesdm_egd_client (3)
 reconnects transparently, which a client confined by seccomp after it connected
 may not survive.

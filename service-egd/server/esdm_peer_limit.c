@@ -133,3 +133,44 @@ bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t uid)
 
 	return exhausted;
 }
+
+unsigned int esdm_peer_limit_count(struct esdm_peer_limit *limit, uid_t uid)
+{
+	struct esdm_peer_limit_entry *entry;
+	unsigned int count;
+
+	if (!uid)
+		return 0;
+
+	pthread_mutex_lock(&limit->lock);
+
+	entry = *esdm_peer_limit_slot(limit, uid);
+	count = entry ? entry->count : 0;
+
+	pthread_mutex_unlock(&limit->lock);
+
+	return count;
+}
+
+unsigned int esdm_peer_limit_max_count(struct esdm_peer_limit *limit)
+{
+	struct esdm_peer_limit_entry *entry;
+	unsigned int i, max = 0;
+
+	pthread_mutex_lock(&limit->lock);
+
+	/*
+	 * Entries only exist while their UID has connections, so the walk is
+	 * bounded by the connections, not by the UIDs ever seen.
+	 */
+	for (i = 0; i < ESDM_PEER_LIMIT_BUCKETS; i++) {
+		for (entry = limit->buckets[i]; entry; entry = entry->next) {
+			if (entry->count > max)
+				max = entry->count;
+		}
+	}
+
+	pthread_mutex_unlock(&limit->lock);
+
+	return max;
+}

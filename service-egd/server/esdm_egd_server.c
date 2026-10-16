@@ -89,14 +89,29 @@
  * accept failing for want of a descriptor leaves the client queued, and the
  * server stops listening for a moment rather than being woken for it over and
  * over.
+ *
+ * Once all slots are taken, a new client is not left queued behind whoever
+ * holds them - that would lock it out for as long as they care to - but a
+ * connection is closed to make room for it, see esdm_egd_evict_candidate().
  */
+#ifndef ESDM_EGD_MAX_CONNECTIONS
 #define ESDM_EGD_MAX_CONNECTIONS 2048
+#endif
 
 /*
- * Concurrent connections of one unprivileged UID - root is exempt. Without it,
- * any local user could take all ESDM_EGD_MAX_CONNECTIONS slots and lock every
- * other EGD consumer out. A process that uses the EGD client library holds one
- * connection, so this leaves room for many such consumers per user.
+ * Concurrent connections of one unprivileged UID - root is exempt. A process
+ * that uses the EGD client library holds one connection, so this leaves room
+ * for many such consumers per user.
+ *
+ * It does not bound a user, though: one can map the UIDs of its /etc/subuid
+ * range in a user namespace and connect as each of them - eight of them fill
+ * all ESDM_EGD_MAX_CONNECTIONS slots, and a cheap request now and then keeps
+ * every one of them from ever being idle. What does set such a user apart is
+ * that each of its UIDs holds many connections, where the consumers of
+ * everybody else hold a few: when connections have to be closed - to make
+ * room for a new one, or because slots or descriptors run short - those of the
+ * UID holding the most are closed first, see esdm_egd_evict_candidate() and
+ * esdm_egd_idle_reapable().
  */
 #ifndef ESDM_EGD_MAX_CONNECTIONS_PER_UID
 #define ESDM_EGD_MAX_CONNECTIONS_PER_UID 256
@@ -115,7 +130,9 @@
  * connection after a minute of silence would trade an idle descriptor for a
  * dead consumer. As long as slots and descriptors are plentiful, the
  * connection costs nobody anything, and the protection against clients that
- * hog them takes effect exactly when they become scarce.
+ * hog them takes effect exactly when they become scarce - and even then it is
+ * aimed at those holding the most, so that a user filling the slots cannot have
+ * the idle connections of everybody else closed.
  */
 #ifndef ESDM_EGD_IDLE_TIMEOUT_MS
 #define ESDM_EGD_IDLE_TIMEOUT_MS 60000
@@ -123,9 +140,16 @@
 
 /*
  * Connections in use from which on idle ones are closed: once fewer slots are
- * left than a single unprivileged UID may hold. One local user can thus not
- * make the server close the idle connections of everybody else on its own, and
- * the slots are reclaimed before a peer can be turned away for want of them.
+ * left than a single unprivileged UID may hold, so the slots are reclaimed
+ * before a new client has to make room for itself.
+ *
+ * Reaching it says nothing about who is to blame: a user can get there on its
+ * own with the UIDs of its subordinate range, see
+ * ESDM_EGD_MAX_CONNECTIONS_PER_UID. The idle connections closed from here on
+ * are therefore only those of the UIDs holding the most connections, see
+ * esdm_egd_idle_reapable() - closing everybody's would let that user have the
+ * long lived consumers of everybody else closed, the sandboxed ones among them
+ * that cannot connect again.
  */
 #ifndef ESDM_EGD_IDLE_REAP_CONNECTIONS
 #define ESDM_EGD_IDLE_REAP_CONNECTIONS                                         \
@@ -1295,10 +1319,153 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 	free(conn);
 }
 
-/* Accept one client and register it with the event loop. */
+/*
+ * Is something owed to the client, or is it in the middle of a command? Its
+ * connection is then closed to make room only when no other one is left, see
+ * esdm_egd_evict_candidate().
+ */
+static bool esdm_egd_conn_busy(const struct esdm_egd_conn *conn)
+{
+	return conn->deferred || conn->yielded || conn->in_len ||
+	       esdm_egd_out_pending(conn);
+}
+
+/*
+ * May this worker close one of its connections for a new one? Only those of
+ * unprivileged UIDs are ever closed for that: root is exempt from the per-UID
+ * bound as it is the owner of the daemon, and a root consumer is the last one
+ * to be turned into collateral damage.
+ */
+static bool esdm_egd_can_make_room(const struct esdm_egd_conn_list *list)
+{
+	const struct esdm_egd_conn *conn;
+
+	TAILQ_FOREACH (conn, list, tailq) {
+		if (conn->peer_counted)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * The connection to close for a new one once all ESDM_EGD_MAX_CONNECTIONS slots
+ * are taken, chosen among the connections of this worker - each worker owns its
+ * connections, and closing one of another worker would race with that worker
+ * serving it.
+ *
+ * It is a connection of the UID holding the most connections over all workers:
+ * whoever fills the slots - by the UIDs of a subordinate range, see
+ * ESDM_EGD_MAX_CONNECTIONS_PER_UID - holds many per UID, so this takes the
+ * slots from that user and leaves the consumers of everybody else alone. A new
+ * connection of that user then only ever costs it one of its own, and service
+ * goes on for everybody, at the price of churn under attack.
+ *
+ * Within that UID, the least recently active connection with nothing owed to
+ * its client is closed, else the least recently active one at all: sparing
+ * busy connections altogether would let a client that always keeps a request
+ * in flight hold its slots forever. Root's connections are never closed, see
+ * esdm_egd_can_make_room().
+ *
+ * @count receives the number of connections the UID of the candidate holds.
+ *
+ * @return the connection to close, NULL if this worker holds none that may be
+ */
+static struct esdm_egd_conn *
+esdm_egd_evict_candidate(struct esdm_egd_conn_list *list, unsigned int *count)
+{
+	struct esdm_egd_conn *conn, *victim = NULL;
+	unsigned int victim_count = 0;
+	bool victim_busy = false;
+
+	TAILQ_FOREACH (conn, list, tailq) {
+		unsigned int held;
+		bool busy;
+
+		if (!conn->peer_counted)
+			continue;
+
+		held = esdm_peer_limit_count(&esdm_egd_peer_limit,
+					     conn->peer_uid);
+		busy = esdm_egd_conn_busy(conn);
+
+		if (victim) {
+			if (held < victim_count)
+				continue;
+			if (held == victim_count) {
+				if (busy && !victim_busy)
+					continue;
+				if (busy == victim_busy &&
+				    conn->last_active >= victim->last_active)
+					continue;
+			}
+		}
+
+		victim = conn;
+		victim_count = held;
+		victim_busy = busy;
+	}
+
+	*count = victim_count;
+
+	return victim;
+}
+
+/*
+ * Close a connection of this worker to make room for a new one, see
+ * esdm_egd_evict_candidate(). Its slot is handed on to the new connection
+ * rather than given back: another worker would otherwise be free to take it in
+ * between. The events still to be handled in this round, @num of @pending, are
+ * voided for the closed connection.
+ *
+ * The new connection never costs a UID holding fewer connections than its own
+ * does with the new one, @newcomer_count: a worker chooses among the
+ * connections it serves, and one that happens to serve none of the UIDs
+ * filling the slots would otherwise close the connection of somebody else
+ * whenever one of those UIDs connects again. Such a newcomer is turned away
+ * instead - at no cost to anybody but the UID holding the most.
+ *
+ * @return true when a connection was closed and its slot is the caller's
+ */
+static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
+			       struct epoll_event *pending, int num,
+			       unsigned int newcomer_count)
+{
+	unsigned int victim_count;
+	struct esdm_egd_conn *victim =
+		esdm_egd_evict_candidate(list, &victim_count);
+	int i;
+
+	if (!victim || victim_count < newcomer_count)
+		return false;
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+		    "EGD server: closing connection on FD %d of UID %u to make room\n",
+		    victim->fd, (unsigned int)victim->peer_uid);
+
+	for (i = 0; i < num; i++) {
+		if (pending[i].data.ptr == victim)
+			pending[i].data.ptr = NULL;
+	}
+
+	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->fd, NULL);
+	TAILQ_REMOVE(list, victim, tailq);
+	victim->slot_counted = false;
+	esdm_egd_release_conn(victim);
+
+	return true;
+}
+
+/*
+ * Accept one client and register it with the event loop. @list holds the
+ * connections of this worker, and the events of this round still to be handled
+ * are @num of @pending - one of the connections may be closed to make room for
+ * the new one.
+ */
 static struct esdm_egd_conn *
 esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
-		bool *out_of_resources)
+		bool *out_of_resources, struct esdm_egd_conn_list *list,
+		struct epoll_event *pending, int num)
 {
 	struct esdm_egd_conn *conn;
 	struct ucred cred;
@@ -1364,18 +1531,25 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 	conn->peer_counted = true;
 
 	/*
-	 * Several workers accept from the same listener, and each saw room
-	 * before it accepted - which one of them takes the last slot is decided
-	 * here.
+	 * Several workers accept from the same listener - which one of them
+	 * takes the last slot is decided here. Without a free one, this worker
+	 * makes room by closing one of its connections, whose slot the new one
+	 * takes over, see esdm_egd_make_room().
 	 */
 	if (atomic_fetch_add(&esdm_egd_connections, 1) >=
 	    ESDM_EGD_MAX_CONNECTIONS) {
 		atomic_fetch_sub(&esdm_egd_connections, 1);
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
-			    "EGD server: no room for a connection on FD %d\n",
-			    fd);
-		esdm_egd_release_conn(conn);
-		return NULL;
+		if (!esdm_egd_make_room(epfd, list, pending, num,
+					esdm_peer_limit_count(
+						&esdm_egd_peer_limit,
+						conn->peer_uid))) {
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_SERVER,
+				"EGD server: no room for a connection on FD %d\n",
+				fd);
+			esdm_egd_release_conn(conn);
+			return NULL;
+		}
 	}
 	conn->slot_counted = true;
 	conn->last_active = esdm_egd_now_ms();
@@ -1432,20 +1606,32 @@ static bool esdm_egd_scarce(uint64_t now)
  * May the idle connection be closed? See ESDM_EGD_IDLE_TIMEOUT_MS.
  *
  * Only when nothing is owed to it, it was silent for the idle timeout, and its
- * slot or descriptor is wanted: the server is short of them (@scarce), or the
- * connection's own UID is being refused further connections - which reclaims
- * the slots of a client that abandons its connections without closing them
- * for that client's own UID, at no cost to anybody else's.
+ * slot or descriptor is wanted:
+ *
+ *   - the server is short of them (@scarce) and the connection's UID is among
+ *     those holding the most connections, @top as told by
+ *     esdm_peer_limit_max_count(). Whoever fills the slots does so with many
+ *     connections per UID, so its idle ones go first, and the consumers of
+ *     everybody else are left alone - a user keeping its own connections
+ *     from ever being idle gains nothing but its own slots. Where no UID
+ *     stands out, all of them hold the most, and any idle connection may go.
+ *     Root is not accounted and holds none by that count.
+ *   - the connection's own UID is being refused further connections - which
+ *     reclaims the slots of a client that abandons its connections without
+ *     closing them for that client's own UID, at no cost to anybody else's.
  */
 static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
-				   uint64_t now, bool scarce)
+				   uint64_t now, bool scarce, unsigned int top)
 {
 	if (conn->deferred || conn->yielded || esdm_egd_out_pending(conn) ||
 	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
 		return false;
 
-	return scarce ||
-	       esdm_peer_limit_exhausted(&esdm_egd_peer_limit, conn->peer_uid);
+	if (scarce &&
+	    esdm_peer_limit_count(&esdm_egd_peer_limit, conn->peer_uid) >= top)
+		return true;
+
+	return esdm_peer_limit_exhausted(&esdm_egd_peer_limit, conn->peer_uid);
 }
 
 /*
@@ -1536,8 +1722,15 @@ static int esdm_egd_handler(void *args)
 	}
 
 	while (atomic_load(&esdm_egd_exit) == 0) {
+		/*
+		 * With all slots taken, a worker goes on accepting as long as
+		 * it can make room by closing one of its connections, see
+		 * esdm_egd_make_room(). One that cannot leaves the client to a
+		 * worker that can, rather than taking it only to turn it away.
+		 */
 		bool want_armed = (atomic_load(&esdm_egd_connections) <
-				   ESDM_EGD_MAX_CONNECTIONS) &&
+					   ESDM_EGD_MAX_CONNECTIONS ||
+				   esdm_egd_can_make_room(&conn_list)) &&
 				  !accept_paused;
 		int nfds, i;
 
@@ -1602,6 +1795,10 @@ static int esdm_egd_handler(void *args)
 		for (i = 0; i < nfds; i++) {
 			bool more_input;
 
+			/* Closed to make room earlier in this round */
+			if (!events[i].data.ptr)
+				continue;
+
 			/*
 			 * Tell the two apart by the pointer itself: the
 			 * listeners live in a static array of their own, so a
@@ -1613,7 +1810,10 @@ static int esdm_egd_handler(void *args)
 					    esdm_egd_listeners)]) {
 				conn = esdm_egd_accept(epfd,
 						       events[i].data.ptr,
-						       &accept_paused);
+						       &accept_paused,
+						       &conn_list,
+						       events + i + 1,
+						       nfds - i - 1);
 				if (!conn) {
 					paused_connections = atomic_load(
 						&esdm_egd_connections);
@@ -1780,19 +1980,42 @@ static int esdm_egd_handler(void *args)
 		if (esdm_egd_now_ms() - last_idle_scan >= ESDM_EGD_IDLE_SCAN_MS) {
 			uint64_t now = esdm_egd_now_ms();
 			bool scarce = esdm_egd_scarce(now);
+			unsigned int top =
+				scarce ? esdm_peer_limit_max_count(
+						 &esdm_egd_peer_limit) :
+					 0;
 
 			last_idle_scan = now;
 			TAILQ_FOREACH_SAFE (conn, &conn_list, tailq, tmp) {
-				if (!esdm_egd_idle_reapable(conn, now, scarce))
+				if (!esdm_egd_idle_reapable(conn, now, scarce,
+							    top))
 					continue;
 
 				esdm_logger(
 					LOGGER_DEBUG, LOGGER_C_SERVER,
-					"EGD server: closing idle connection on FD %d\n",
-					conn->fd);
+					"EGD server: closing idle connection on FD %d of UID %u\n",
+					conn->fd, (unsigned int)conn->peer_uid);
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
+
+				/*
+				 * The slot may have been the one wanted, and
+				 * the UID has one connection less - it may no
+				 * longer be alone at the top, or still be: the
+				 * rest of its idle ones go in this same scan as
+				 * long as it holds the most and slots are
+				 * short. Neither is decided once for the whole
+				 * scan, or the connections of the UID next in
+				 * line would follow as soon as it caught up.
+				 */
+				if (scarce) {
+					scarce = esdm_egd_scarce(now);
+					top = scarce ?
+						      esdm_peer_limit_max_count(
+							      &esdm_egd_peer_limit) :
+						      0;
+				}
 			}
 		}
 	}

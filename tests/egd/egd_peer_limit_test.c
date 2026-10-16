@@ -215,6 +215,66 @@ static void test_warning(void)
 	CHECK(test_empty(&limit), "entries remain after all were released");
 }
 
+/*
+ * What a UID holds, and what the UID holding the most holds - the latter is
+ * what picks the connections to close first. Root holds none by that count.
+ */
+static void test_counts(void)
+{
+	struct esdm_peer_limit limit = ESDM_PEER_LIMIT_INIT("test", TEST_MAX);
+	unsigned int i;
+
+	printf("peer limit: connections held per UID and at most\n");
+
+	CHECK(esdm_peer_limit_max_count(&limit) == 0,
+	      "an empty table reports a UID holding %u",
+	      esdm_peer_limit_max_count(&limit));
+
+	for (i = 0; i < 5; i++)
+		esdm_peer_limit_get(&limit, 0);
+	CHECK(esdm_peer_limit_count(&limit, 0) == 0,
+	      "root is reported holding %u", esdm_peer_limit_count(&limit, 0));
+	CHECK(esdm_peer_limit_max_count(&limit) == 0,
+	      "root's connections count towards the most held: %u",
+	      esdm_peer_limit_max_count(&limit));
+
+	/* Two UIDs in the same bucket must not be mixed up. */
+	esdm_peer_limit_get(&limit, TEST_UID);
+	for (i = 0; i < TEST_MAX; i++)
+		esdm_peer_limit_get(&limit, TEST_UID_SAME_BUCKET);
+	CHECK(esdm_peer_limit_count(&limit, TEST_UID) == 1,
+	      "UID holds %u, not 1", esdm_peer_limit_count(&limit, TEST_UID));
+	CHECK(esdm_peer_limit_count(&limit, TEST_UID_SAME_BUCKET) == TEST_MAX,
+	      "UID holds %u, not %u",
+	      esdm_peer_limit_count(&limit, TEST_UID_SAME_BUCKET), TEST_MAX);
+	CHECK(esdm_peer_limit_count(&limit, TEST_UID + 1) == 0,
+	      "a UID without connections holds %u",
+	      esdm_peer_limit_count(&limit, TEST_UID + 1));
+	CHECK(esdm_peer_limit_max_count(&limit) == TEST_MAX,
+	      "the most held is %u, not %u", esdm_peer_limit_max_count(&limit),
+	      TEST_MAX);
+
+	/* A refusal is not held. */
+	CHECK(!esdm_peer_limit_get(&limit, TEST_UID_SAME_BUCKET),
+	      "a connection beyond the limit was admitted");
+	CHECK(esdm_peer_limit_max_count(&limit) == TEST_MAX,
+	      "a refused connection counts towards the most held: %u",
+	      esdm_peer_limit_max_count(&limit));
+
+	/* The most held follows the releases. */
+	for (i = 0; i < TEST_MAX; i++)
+		esdm_peer_limit_put(&limit, TEST_UID_SAME_BUCKET);
+	CHECK(esdm_peer_limit_max_count(&limit) == 1,
+	      "the most held is %u after the releases, not 1",
+	      esdm_peer_limit_max_count(&limit));
+
+	esdm_peer_limit_put(&limit, TEST_UID);
+	CHECK(esdm_peer_limit_max_count(&limit) == 0,
+	      "the most held is %u with nothing held",
+	      esdm_peer_limit_max_count(&limit));
+	CHECK(test_empty(&limit), "entries remain after all were released");
+}
+
 static struct esdm_peer_limit test_shared =
 	ESDM_PEER_LIMIT_INIT("test", TEST_THREADS * TEST_MAX);
 
@@ -271,6 +331,7 @@ int main(int argc, char *argv[])
 	test_limit();
 	test_no_leak();
 	test_warning();
+	test_counts();
 	test_threads();
 
 	printf("peer limit: %s\n", ret ? "FAILED" : "passed");

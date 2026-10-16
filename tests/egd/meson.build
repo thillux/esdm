@@ -93,6 +93,31 @@ if get_option('esdm-server').enabled()
 	test('EGD server connection lifecycle', egd_server_conn_test,
 		timeout: 300)
 
+	# The same setup with all connection slots taken. The server is cut
+	# down to a few slots, more of them per UID than in all - a single UID
+	# stands for a user connecting under each UID of its subordinate range
+	# - and slots are short from three quarters of them on. Idle
+	# connections time out after three seconds, well above how long the
+	# tests not about them take. Several UIDs, and the tests needing them,
+	# take root.
+	egd_server_evict_test = executable(
+			'egd_server_evict_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_evict_test.c' ],
+			c_args: [
+				'-DESDM_EGD_MAX_CONNECTIONS=16',
+				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=24',
+				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=12',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+			],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server with all slots taken', egd_server_evict_test,
+		timeout: 300)
+
 	# The per-UID connection accounting shared by the RPC and EGD servers,
 	# compiled into the test to inspect its table. Needs no server.
 	egd_peer_limit_test = executable(
