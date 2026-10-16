@@ -49,6 +49,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -327,6 +328,37 @@ static void test_server_alive(const char *after)
 /****************************
  * Tests
  ****************************/
+
+/* The umask the server's socket is created under, see test_socket_mode(). */
+#define TEST_UMASK 0077
+
+/*
+ * The socket is everybody's, whatever the umask of the process creating it -
+ * and without a chmod(2) of its path after the fact, which runs as root and
+ * would follow a symlink swapped in meanwhile. That is only seen in the mode
+ * coming out right under a umask that would strip it, and in the umask of the
+ * process being the one it had before: the server clears the umask for the
+ * bind in a thread of its own, not for the process.
+ */
+static void test_socket_mode(void)
+{
+	struct stat sb;
+	mode_t mask;
+
+	printf("EGD conn: the socket is created accessible to all\n");
+
+	CHECK(lstat(sockpath, &sb) == 0, "cannot stat %s: %s", sockpath,
+	      strerror(errno));
+	CHECK(S_ISSOCK(sb.st_mode), "%s is not a socket", sockpath);
+	CHECK((sb.st_mode & 07777) == 0666,
+	      "the socket was created with mode %04o, not 0666, under umask %04o",
+	      (unsigned int)(sb.st_mode & 07777), (unsigned int)TEST_UMASK);
+
+	mask = umask(TEST_UMASK);
+	CHECK(mask == TEST_UMASK,
+	      "creating the socket changed the umask of the process to %04o",
+	      (unsigned int)mask);
+}
 
 /*
  * A feeder that hands over its data and exits - writing and closing back to
@@ -771,6 +803,9 @@ int main(int argc, char *argv[])
 	}
 	snprintf(sockpath, sizeof(sockpath), "%s/egd.sock", tmpdir);
 
+	/* See test_socket_mode() */
+	umask(TEST_UMASK);
+
 	if (esdm_egd_server_enable(sockpath) ||
 	    esdm_egd_server_socket_init() || esdm_egd_server_start()) {
 		printf("Cannot serve the EGD socket %s\n", sockpath);
@@ -778,6 +813,7 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	test_socket_mode();
 	test_hangup_deferred();
 	test_hangup_after_write();
 	test_hangup_after_pipelined_request();

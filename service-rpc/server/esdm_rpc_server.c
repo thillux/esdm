@@ -59,6 +59,7 @@
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_server.h"
+#include "esdm_server_socket.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
 #include "linux_support.h"
@@ -1537,9 +1538,13 @@ out:
 	return ret;
 }
 
-/* Open the socket that we want to use for receiving data. */
-static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
-			   ProtobufCService *service, struct esdm_rpcs *proto)
+/*
+ * Open the socket that we want to use for receiving data. A Unix domain socket
+ * file is created with @mode, see esdm_server_bind_unix().
+ */
+static int esdm_rpcs_start(const char *unix_socket, mode_t mode,
+			   uint16_t tcp_port, ProtobufCService *service,
+			   struct esdm_rpcs *proto)
 {
 	struct sockaddr_un addr_un;
 	struct sockaddr_in addr_in;
@@ -1583,8 +1588,16 @@ static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
 		return -errsv;
 	}
 
-	if (bind(fd, address, address_len) < 0) {
-		errsv = errno;
+	/*
+	 * The socket file gets its access mode as it is created: setting it
+	 * with a chmod(2) of the path afterwards would follow a symlink swapped
+	 * in for the socket meanwhile - and run as root.
+	 */
+	if (unix_socket)
+		errsv = -esdm_server_bind_unix(fd, &addr_un, mode);
+	else
+		errsv = bind(fd, address, address_len) < 0 ? errno : 0;
+	if (errsv) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "RPC Server: cannot bind to socket: %s\n",
 			    strerror(errsv));
@@ -1685,24 +1698,21 @@ static atomic_bool esdm_rpcs_self_bound_socket = false;
 /*
  * Obtain the listening socket, preferring one handed over by systemd.
  *
- * @systemd_socket is set to true when systemd owns the socket, in which case
- * its lifecycle and its access mode are systemd's business, not ours.
+ * A socket bound here is created with @mode. One handed over by systemd is
+ * left as it is: its lifecycle and its access mode are systemd's business, not
+ * ours.
  */
 static int esdm_rpcs_start_socket(const char *socket_name,
-				  const char *socket_path,
+				  const char *socket_path, mode_t mode,
 				  ProtobufCService *service,
-				  struct esdm_rpcs *proto, bool *systemd_socket)
+				  struct esdm_rpcs *proto)
 {
 	int ret;
 
-	*systemd_socket = false;
-
 	if (systemd_listen_fds() > 0) {
 		ret = esdm_rpcs_start_systemd(socket_name, service, proto);
-		if (!ret) {
-			*systemd_socket = true;
+		if (!ret)
 			return 0;
-		}
 
 		/*
 		 * A socket that was handed over but is unusable is a hard
@@ -1725,7 +1735,7 @@ static int esdm_rpcs_start_socket(const char *socket_name,
 		atomic_store(&esdm_rpcs_self_bound_socket, true);
 	}
 
-	return esdm_rpcs_start(socket_path, 0, service, proto);
+	return esdm_rpcs_start(socket_path, mode, 0, service, proto);
 }
 
 /* Terminating the RPC server. */
@@ -1743,7 +1753,6 @@ static int esdm_rpcs_unpriv_init(void *args)
 	struct esdm_rpcs unpriv_proto;
 	ProtobufCService *unpriv_service =
 		(ProtobufCService *)&unpriv_access_service;
-	bool systemd_socket;
 	int ret;
 
 	(void)args;
@@ -1754,29 +1763,17 @@ static int esdm_rpcs_unpriv_init(void *args)
 	unpriv_proto.server_listening_fd = -1;
 	unpriv_proto.privileged = false;
 
-	/* Create server handler for privileged interface in main thread */
-	CKINT(esdm_rpcs_start_socket("ESDM_RPC_UNPRIV_SOCKET",
-				     ESDM_RPC_UNPRIV_SOCKET, unpriv_service,
-				     &unpriv_proto, &systemd_socket));
-
 	/*
-	 * Make unprivileged socket available for all users. A socket handed
-	 * over by systemd carries the access mode of its .socket unit
-	 * (SocketMode=); overriding that here would silently ignore the
-	 * administrator's configuration.
+	 * Create the server handler for the unprivileged interface, its socket
+	 * available for all users. A socket handed over by systemd carries the
+	 * access mode of its .socket unit (SocketMode=), which is left alone:
+	 * overriding it would silently ignore the administrator's
+	 * configuration.
 	 */
-	if (!systemd_socket && chmod(ESDM_RPC_UNPRIV_SOCKET,
-				     S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
-					     S_IROTH | S_IWOTH) == -1) {
-		ret = -errno;
-
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"Failed to set permissions for Unix domain socket %s: %s\n",
-			ESDM_RPC_UNPRIV_SOCKET, strerror(errno));
-
-		goto out;
-	}
+	CKINT(esdm_rpcs_start_socket(
+		"ESDM_RPC_UNPRIV_SOCKET", ESDM_RPC_UNPRIV_SOCKET,
+		S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH,
+		unpriv_service, &unpriv_proto));
 
 	/* Notify the mother that the unprivileged thread is initialized. */
 	atomic_store(&esdm_rpc_init_state, esdm_rpcs_state_unpriv_init);
@@ -1843,7 +1840,8 @@ int esdm_rpcs_fuzz_serve(const char *socket_path, ProtobufCService *service,
 	 * socket activated, and a stray LISTEN_FDS in its environment would
 	 * otherwise take it to a descriptor that is not its own.
 	 */
-	CKINT(esdm_rpcs_start(socket_path, 0, service, &proto));
+	CKINT(esdm_rpcs_start(socket_path, S_IRUSR | S_IWUSR, 0, service,
+			      &proto));
 
 	/*
 	 * What is skipped compared to the interface initialization below is the
@@ -1871,7 +1869,6 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	struct esdm_rpcs priv_proto;
 	ProtobufCService *priv_service =
 		(ProtobufCService *)&priv_access_service;
-	bool systemd_socket;
 	int ret;
 
 	thread_set_name(rpc_priv_server, 0);
@@ -1880,24 +1877,16 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	priv_proto.server_listening_fd = -1;
 	priv_proto.privileged = true;
 
-	/* Create server handler for privileged interface in main thread */
+	/*
+	 * Create the server handler for the privileged interface in the main
+	 * thread, its socket available for root only - from its creation on,
+	 * so the file never has a looser mode for somebody else to connect
+	 * through, not even for a moment. See above on the socket activation
+	 * case.
+	 */
 	CKINT(esdm_rpcs_start_socket("ESDM_RPC_PRIV_SOCKET",
-				     ESDM_RPC_PRIV_SOCKET, priv_service,
-				     &priv_proto, &systemd_socket));
-
-	/* Make privileged socket available for root only - see above on the
-	 * socket activation case. */
-	if (!systemd_socket &&
-	    chmod(ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR) == -1) {
-		int errsv = errno;
-
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"Failed to set permissions for Unix domain socket %s: %s\n",
-			ESDM_RPC_PRIV_SOCKET, strerror(errsv));
-		ret = -errsv;
-		goto out;
-	}
+				     ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR,
+				     priv_service, &priv_proto));
 
 	/*
 	 * Create the optional EGD compatibility socket while the privileges to

@@ -44,6 +44,7 @@
 #include "esdm_peer_limit.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
+#include "esdm_server_socket.h"
 #include "helper.h"
 #include "memset_secure.h"
 #include "systemd_support.h"
@@ -508,32 +509,27 @@ static int esdm_egd_listener_socket_init(struct esdm_egd_listener *listener)
 		return -errsv;
 	}
 
-	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		errsv = errno;
+	/*
+	 * EGD clients are ordinary applications, so both sockets - the
+	 * prediction resistant one as well - are available to everybody: like
+	 * the unprivileged RPC socket, and everything reachable through them is
+	 * equally unprivileged (data from unprivileged callers is inserted
+	 * without entropy credit, see esdm_egd_cmd_write_entropy()). The mode
+	 * is the file's from its creation on, as this runs as root and a
+	 * chmod(2) of the path afterwards would follow whatever was swapped in
+	 * for the socket meanwhile, see esdm_server_bind_unix(). A socket
+	 * handed over by systemd never reaches this point: its mode comes from
+	 * the SocketMode= of its .socket unit.
+	 */
+	ret = esdm_server_bind_unix(fd, &addr,
+				    S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
+					    S_IROTH | S_IWOTH);
+	if (ret < 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
 			    "EGD server: cannot bind to socket %s: %s\n",
-			    listener->socket_path, strerror(errsv));
+			    listener->socket_path, strerror(-ret));
 		close(fd);
-		return -errsv;
-	}
-
-	/*
-	 * EGD clients are ordinary applications, so the socket is available to
-	 * everybody - like the unprivileged RPC socket, and everything reachable
-	 * through it is equally unprivileged (data from unprivileged callers is
-	 * inserted without entropy credit, see esdm_egd_cmd_write_entropy()).
-	 * A socket handed over by systemd never reaches this point: its mode
-	 * comes from the SocketMode= of its .socket unit.
-	 */
-	if (chmod(listener->socket_path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
-						  S_IROTH | S_IWOTH) < 0) {
-		errsv = errno;
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_SERVER,
-			"EGD server: cannot set permissions of socket %s: %s\n",
-			listener->socket_path, strerror(errsv));
-		close(fd);
-		return -errsv;
+		return ret;
 	}
 
 	if (listen(fd, ESDM_EGD_LISTEN_BACKLOG) < 0) {
