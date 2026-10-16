@@ -63,6 +63,17 @@ option implies
 .BR \-p ", " \-\-pid " \fIFILE\fR"
 Write the PID of the daemon to
 .IR FILE .
+The daemon keeps the file locked for as long as it runs. It writes the file
+before it drops its privileges, and can then no longer remove it from a
+directory only root may write to, such as
+.IR /run .
+So at shutdown it empties the file instead, which then names no process; the
+next start reuses it, and systemd removes the file of a service configured with
+.B PIDFile=
+itself. With
+.BR \-\-pid_namespace ,
+the file names the supervisor, which keeps its privileges and removes the file
+when it exits.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 Unprivileged user to switch to after the privileged initialization. Defaults
