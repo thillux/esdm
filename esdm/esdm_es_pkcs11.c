@@ -528,9 +528,13 @@ static int esdm_es_pkcs11_monitor(void)
 static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
 			       uint32_t requested_bits, bool allow_cached)
 {
+	/*
+	 * A block the token delivered before a self test saw it repeat itself
+	 * is credited no more than what it reads now.
+	 */
 	if (allow_cached &&
 	    esdm_es_buf_try_get(&pkcs11_buf, eb_es, requested_bits,
-				!!esdm_config_es_pkcs11_entropy_rate()))
+				!!esdm_es_pkcs11_buf_credit(requested_bits)))
 		return;
 
 	esdm_es_pkcs11_get_sync(eb_es, requested_bits);
@@ -616,6 +620,14 @@ static int esdm_es_pkcs11_selftest(void)
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "PKCS11 ES: the token repeated its output\n");
 		pkcs11_selftest_failed = true;
+#if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
+		/*
+		 * What the cache holds was read before this test, from a token
+		 * that has shown it repeats itself - not to be handed out as
+		 * entropy, as esdm_jent_selftest() does with its cache.
+		 */
+		esdm_es_buf_reset(&pkcs11_buf);
+#endif
 		ret = -EFAULT;
 		goto out;
 	}

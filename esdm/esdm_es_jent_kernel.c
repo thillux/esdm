@@ -219,9 +219,13 @@ static int esdm_jent_kernel_monitor(void)
 static void esdm_jent_kernel_get(struct entropy_es *eb_es,
 				 uint32_t requested_bits, bool allow_cached)
 {
+	/*
+	 * A block the RNG delivered before a self test saw it repeat itself is
+	 * credited no more than what it reads now.
+	 */
 	if (allow_cached &&
 	    esdm_es_buf_try_get(&jent_kernel_buf, eb_es, requested_bits,
-				!!esdm_config_es_jent_kernel_entropy_rate()))
+				!!esdm_jent_kernel_buf_credit(requested_bits)))
 		return;
 
 	esdm_jent_kernel_get_sync(eb_es, requested_bits);
@@ -298,6 +302,14 @@ static int esdm_jent_kernel_selftest(void)
 			LOGGER_ERR, LOGGER_C_ES,
 			"KernelJitterRNG ES: the kernel jitterentropy RNG repeated its output\n");
 		jent_kernel_selftest_failed = true;
+#if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
+		/*
+		 * What the cache holds was read before this test, from an RNG
+		 * that has shown it repeats itself - not to be handed out as
+		 * entropy, as esdm_jent_selftest() does with its cache.
+		 */
+		esdm_es_buf_reset(&jent_kernel_buf);
+#endif
 		ret = -EFAULT;
 		goto out;
 	}

@@ -558,9 +558,13 @@ static int esdm_es_tpm2_monitor(void)
 static void esdm_es_tpm2_get(struct entropy_es *eb_es, uint32_t requested_bits,
 			     bool allow_cached)
 {
+	/*
+	 * A block the TPM delivered before a self test saw it repeat itself is
+	 * credited no more than what it reads now.
+	 */
 	if (allow_cached &&
 	    esdm_es_buf_try_get(&tpm2_buf, eb_es, requested_bits,
-				!!esdm_config_es_tpm2_entropy_rate()))
+				!!esdm_es_tpm2_buf_credit(requested_bits)))
 		return;
 
 	esdm_es_tpm2_get_sync(eb_es, requested_bits);
@@ -643,6 +647,14 @@ static int esdm_es_tpm2_selftest(void)
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "TPM2 ES: the TPM repeated its output\n");
 		tpm2_selftest_failed = true;
+#if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
+		/*
+		 * What the cache holds was read before this test, from a TPM
+		 * that has shown it repeats itself - not to be handed out as
+		 * entropy, as esdm_jent_selftest() does with its cache.
+		 */
+		esdm_es_buf_reset(&tpm2_buf);
+#endif
 		ret = -EFAULT;
 		goto out;
 	}
