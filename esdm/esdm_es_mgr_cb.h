@@ -32,6 +32,8 @@
 #include "esdm_definitions.h"
 #include "esdm_drng_mgr.h"
 
+struct json_object;
+
 enum esdm_internal_es {
 #ifdef ESDM_ES_IRQ
 	esdm_int_es_irq, /* IRQ-based entropy source */
@@ -127,7 +129,14 @@ struct entropy_buf {
  * @curr_entropy: Return amount of currently available entropy in bits.
  * @max_entropy: Maximum amount of entropy the entropy source is able to
  *		 maintain.
- * @state: Buffer with human-readable ES state.
+ * @state: Add the state of the ES to the JSON object @obj, one member each
+ *	   with json_object_object_add(): numbers as integers, flags as
+ *	   booleans, and a value the ES does not have as null. The ESDM status
+ *	   (esdm_status_json(), and its text form esdm_status()) carries them
+ *	   in the section of the ES, next to its "id" and "name" members. The
+ *	   member names are lower case words separated by underscores, which
+ *	   the text status turns into its labels. Must not block for long: the
+ *	   status is asked for while the ES serves requests.
  * @reset: Reset entropy source (drop all entropy and reinitialize).
  *	   This callback may be NULL.
  * @active: Is ES active.
@@ -155,15 +164,7 @@ struct esdm_es_cb {
 			bool allow_cached);
 	uint32_t (*curr_entropy)(uint32_t requested_bits);
 	uint32_t (*max_entropy)(void);
-	void (*state)(char *buf, size_t buflen);
-	/*
-	 * State of the entropy source as a JSON object, used by
-	 * esdm_status_json(). The member names are the labels of ->state,
-	 * lower-cased with every run of non-alphanumeric characters replaced by
-	 * one underscore. This callback may be NULL, in which case the members
-	 * are derived from the ->state text.
-	 */
-	void (*state_json)(char *buf, size_t buflen);
+	void (*state)(struct json_object *obj);
 	void (*reset)(void);
 	bool (*active)(void);
 	int (*selftest)(void);
@@ -178,6 +179,14 @@ void esdm_es_add_entropy(void);
 /* Read entropy from in-kernel entroy sources */
 void esdm_kernel_read(struct entropy_es *eb_es, int fd, unsigned int ioctl_cmd,
 		      enum esdm_es_data_size data_size, const char *name);
+
+/*
+ * Add the state the kernel add-on reports for an entropy source to @obj: its
+ * JSON status (@ioctl_json), or for an add-on older than that, its status text
+ * (@ioctl_txt) turned into members.
+ */
+void esdm_kernel_state(struct json_object *obj, int fd, unsigned int ioctl_json,
+		       unsigned int ioctl_txt);
 
 /* Set the requested bit size */
 void esdm_kernel_set_requested_bits(uint32_t *configured_bits,

@@ -50,6 +50,8 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+
+#include "../es_state_check.h"
 #include "helper.h"
 
 #define ES_IDX esdm_ext_es_tpm2
@@ -69,21 +71,27 @@ static int es_tpm2_name(void)
 
 static int es_tpm2_state(void)
 {
-	char buf[512];
+	struct json_object *obj;
+	int ret = 0;
 
 	/* state is optional; nothing to check if absent */
-	if (!esdm_es[ES_IDX]->state)
+	obj = es_state_get(esdm_es[ES_IDX]);
+	if (!obj)
 		return 0;
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	if (!strstr(buf, "Available entropy")) {
-		printf("ES %s - fail: state string malformed: %s\n", ES_NAME,
-		       buf);
-		return 1;
+	if (!es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int)) {
+		printf("ES %s - fail: state malformed: %s\n", ES_NAME,
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES %s - pass: state:\n%s\n", ES_NAME,
+		       es_state_print(obj));
 	}
-	printf("ES %s - pass: state:\n%s\n", ES_NAME, buf);
-	return 0;
+
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_tpm2_poolsize(void)
@@ -324,7 +332,7 @@ static int es_tpm2_buffered(void)
 static int es_tpm2_absent_after_fini(void)
 {
 	struct entropy_es eb_es;
-	char buf[512];
+	struct json_object *state;
 	int ret = 0;
 
 	esdm_config_es_tpm2_entropy_rate_set(ESDM_DRNG_SECURITY_STRENGTH_BITS);
@@ -350,13 +358,13 @@ static int es_tpm2_absent_after_fini(void)
 		ret++;
 	}
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	if (!strstr(buf, "Available entropy: 0")) {
+	state = es_state_get(esdm_es[ES_IDX]);
+	if (es_state_int(state, "available_entropy", -1) != 0) {
 		printf("ES %s - fail: state after fini does not report an empty source:\n%s\n",
-		       ES_NAME, buf);
+		       ES_NAME, es_state_print(state));
 		ret++;
 	}
+	json_object_put(state);
 
 	if (!ret)
 		printf("ES %s - pass: source is inert after fini\n", ES_NAME);

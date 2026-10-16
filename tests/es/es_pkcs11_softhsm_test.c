@@ -48,6 +48,8 @@
 #include "esdm_es_pkcs11.h"
 #include "esdm_logger.h"
 
+#include "../es_state_check.h"
+
 #define ES_IDX esdm_ext_es_pkcs11
 
 /* Must match what the token below is initialized with */
@@ -314,17 +316,18 @@ static void test_get_entropy_differs(void)
 /* The status report has to name the token that is actually in use */
 static void test_state(void)
 {
-	char buf[512];
+	struct json_object *state = es_state_get(esdm_es[ES_IDX]);
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
+	CHECK(es_state_has(state, "available_entropy", json_type_int),
+	      "state malformed: %s", es_state_print(state));
+	CHECK(es_state_str_is(state, "token", TOKEN_LABEL),
+	      "state does not name the bound token: %s", es_state_print(state));
+	CHECK(es_state_str(state, "module") &&
+		      !es_state_str_is(state, "module", "(unset)"),
+	      "state reports no module although one is configured: %s",
+	      es_state_print(state));
 
-	CHECK(strstr(buf, "Available entropy") != NULL,
-	      "state string malformed: %s", buf);
-	CHECK(strstr(buf, TOKEN_LABEL) != NULL,
-	      "state does not name the bound token: %s", buf);
-	CHECK(strstr(buf, "(unset)") == NULL,
-	      "state reports no module although one is configured: %s", buf);
+	json_object_put(state);
 }
 
 /*
@@ -334,7 +337,7 @@ static void test_state(void)
  */
 static void test_clear_overrides(void)
 {
-	char buf[512];
+	struct json_object *state;
 
 	CHECK(esdm_es_pkcs11_set_pin("") == 0, "clearing the PIN failed");
 
@@ -346,10 +349,11 @@ static void test_clear_overrides(void)
 	 */
 	(void)esdm_es_pkcs11_set_token_label("");
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	CHECK(strstr(buf, "Available entropy") != NULL,
-	      "state string malformed after clearing the overrides: %s", buf);
+	state = es_state_get(esdm_es[ES_IDX]);
+	CHECK(es_state_has(state, "available_entropy", json_type_int),
+	      "state malformed after clearing the overrides: %s",
+	      es_state_print(state));
+	json_object_put(state);
 }
 
 /*
@@ -366,7 +370,7 @@ static void test_token_appears(void)
 			 (char *)TOKEN_SO_PIN,	   (char *)"--pin",
 			 (char *)TOKEN_PIN,	   NULL };
 	struct entropy_es eb_es;
-	char buf[512];
+	struct json_object *state;
 
 	CHECK(esdm_es_pkcs11_set_token_label(LATE_TOKEN_LABEL) != 0,
 	      "a token label nobody carries yet was accepted");
@@ -381,20 +385,21 @@ static void test_token_appears(void)
 
 	/* Within the retry interval it is not looked for */
 	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	CHECK(strstr(buf, LATE_TOKEN_LABEL) == NULL,
+	state = es_state_get(esdm_es[ES_IDX]);
+	CHECK(!es_state_str_is(state, "token", LATE_TOKEN_LABEL),
 	      "the token was looked for again within the retry interval: %s",
-	      buf);
+	      es_state_print(state));
+	json_object_put(state);
 
 	sleep(ESDM_PKCS11_RETRY_INTERVAL_SEC + 1);
 
 	memset(&eb_es, 0, sizeof(eb_es));
 	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	CHECK(strstr(buf, LATE_TOKEN_LABEL) != NULL,
-	      "the token that turned up was not picked up: %s", buf);
+	state = es_state_get(esdm_es[ES_IDX]);
+	CHECK(es_state_str_is(state, "token", LATE_TOKEN_LABEL),
+	      "the token that turned up was not picked up: %s",
+	      es_state_print(state));
+	json_object_put(state);
 	if (esdm_config_es_pkcs11_entropy_rate())
 		CHECK(eb_es.e_bits > 0,
 		      "the token that turned up delivered no entropy");

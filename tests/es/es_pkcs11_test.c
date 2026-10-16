@@ -38,6 +38,8 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+
+#include "../es_state_check.h"
 #include "esdm_es_pkcs11.h"
 
 #define ES_IDX esdm_ext_es_pkcs11
@@ -57,21 +59,27 @@ static int es_pkcs11_name(void)
 
 static int es_pkcs11_state(void)
 {
-	char buf[512];
+	struct json_object *obj;
+	int ret = 0;
 
 	/* state is optional; nothing to check if absent */
-	if (!esdm_es[ES_IDX]->state)
+	obj = es_state_get(esdm_es[ES_IDX]);
+	if (!obj)
 		return 0;
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	if (!strstr(buf, "Available entropy")) {
-		printf("ES %s - fail: state string malformed: %s\n", ES_NAME,
-		       buf);
-		return 1;
+	if (!es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int)) {
+		printf("ES %s - fail: state malformed: %s\n", ES_NAME,
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES %s - pass: state:\n%s\n", ES_NAME,
+		       es_state_print(obj));
 	}
-	printf("ES %s - pass: state:\n%s\n", ES_NAME, buf);
-	return 0;
+
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_pkcs11_poolsize(void)
@@ -134,7 +142,7 @@ static int es_pkcs11_getdata(void)
  */
 static int es_pkcs11_module_path(void)
 {
-	char buf[512];
+	struct json_object *state;
 	int ret = 0;
 
 	if (esdm_es_pkcs11_set_module_path(NULL) != -EINVAL) {
@@ -152,13 +160,13 @@ static int es_pkcs11_module_path(void)
 	for (unsigned int i = 0; i < 2; i++) {
 		(void)esdm_es[ES_IDX]->init();
 
-		memset(buf, 0, sizeof(buf));
-		esdm_es[ES_IDX]->state(buf, sizeof(buf));
-		if (!strstr(buf, ES_TEST_MODULE)) {
+		state = es_state_get(esdm_es[ES_IDX]);
+		if (!es_state_str_is(state, "module", ES_TEST_MODULE)) {
 			printf("ES %s - fail: the state does not report the module set (%s)\n",
-			       ES_NAME, buf);
+			       ES_NAME, es_state_print(state));
 			ret++;
 		}
+		json_object_put(state);
 		if (!esdm_es[ES_IDX]->active()) {
 			printf("ES %s - fail: a module set at runtime does not configure the source\n",
 			       ES_NAME);
@@ -176,13 +184,13 @@ static int es_pkcs11_module_path(void)
 	/* Back to the module of the build */
 	(void)esdm_es[ES_IDX]->init();
 	(void)esdm_es_pkcs11_set_module_path("");
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	if (strstr(buf, ES_TEST_MODULE)) {
+	state = es_state_get(esdm_es[ES_IDX]);
+	if (es_state_str_is(state, "module", ES_TEST_MODULE)) {
 		printf("ES %s - fail: clearing the module path kept it (%s)\n",
-		       ES_NAME, buf);
+		       ES_NAME, es_state_print(state));
 		ret++;
 	}
+	json_object_put(state);
 	if (esdm_es[ES_IDX]->active() != (ESDM_PKCS11_MODULE_PATH[0] != '\0')) {
 		printf("ES %s - fail: without a module set the source does not follow the build\n",
 		       ES_NAME);

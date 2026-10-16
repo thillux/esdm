@@ -55,6 +55,7 @@
 #include <sys/stat.h>
 
 #include "common_test.h"
+#include "../es_state_check.h"
 #include "es_ext_test_plugin.h"
 
 extern const struct esdm_es_ext_plugin es_ext_test_plugin;
@@ -240,13 +241,16 @@ static uint32_t test_level(uint32_t rate, uint32_t bits)
 	return esdm_fast_noise_entropylevel(rate, bits);
 }
 
-static bool test_state_has(const char *what)
+/* Does the string member @key of the state contain @what? */
+static bool test_state_has(const char *key, const char *what)
 {
-	char buf[1024];
+	struct json_object *state = es_state_get(ES);
+	bool ret = es_state_str_has(state, key, what);
 
-	memset(buf, 0, sizeof(buf));
-	ES->state(buf, sizeof(buf));
-	return strstr(buf, what) != NULL;
+	if (!ret)
+		printf("state: %s\n", es_state_print(state));
+	json_object_put(state);
+	return ret;
 }
 
 static void test_wait_retry(void)
@@ -265,7 +269,8 @@ static void test_unconfigured(void)
 	CHECK_EQ(ES->max_entropy(), 0);
 	CHECK_EQ(test_get(ESDM_DRNG_SECURITY_STRENGTH_BITS, NULL), 0);
 	CHECK_EQ(ES->selftest(), 0);
-	CHECK(test_state_has("(unset)"), "the state names a socket");
+	CHECK(test_state_has("provider_socket", "(unset)"),
+	      "the state names a socket");
 	ES->fini();
 }
 
@@ -291,7 +296,7 @@ static void test_credit(void)
 	CHECK_EQ(esdm_es_ext_socket_set_path(test_good), 0);
 	CHECK_EQ(ES->init(), 0);
 	CHECK(ES->active(), "the source is not active with a provider");
-	CHECK(test_state_has("connected (uid"),
+	CHECK(test_state_has("status", "connected (uid"),
 	      "the provider is not connected");
 
 	esdm_config_es_ext_socket_entropy_rate_set(256);
@@ -323,7 +328,8 @@ static void test_credit(void)
 	ctl->get_ret = -EIO;
 	CHECK_EQ(test_get(bits, NULL), 0);
 	CHECK_EQ(ES->max_entropy(), 0);
-	CHECK(test_state_has("failing"), "the state does not say it fails");
+	CHECK(test_state_has("status", "failing"),
+	      "the state does not say it fails");
 	ctl->get_ret = 0;
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 
@@ -347,7 +353,7 @@ static void test_credit(void)
 	ctl->selftest_ret = -ENODEV;
 	CHECK_EQ(ES->selftest(), -EFAULT);
 	CHECK_EQ(ES->curr_entropy(bits), 0);
-	CHECK(test_state_has("failing its self test"),
+	CHECK(test_state_has("status", "failing its self test"),
 	      "the state does not say the self test fails");
 	CHECK_EQ(test_get(bits, &first), 0);
 	CHECK_EQ(first, ctl->get_calls & 0xff);
@@ -369,7 +375,7 @@ static void test_peer_check(void)
 	CHECK_EQ(esdm_es_ext_socket_set_peer_uid(-1), 0);
 	CHECK_EQ(esdm_es_ext_socket_set_path(test_good), 0);
 	CHECK_EQ(test_get(bits, NULL), 0);
-	CHECK(test_state_has("not connected"),
+	CHECK(test_state_has("status", "not connected"),
 	      "a provider of another user was connected to");
 
 	/* Accepted again, once the retry interval is over */
@@ -390,7 +396,8 @@ static void test_reconnect(void)
 	CHECK_EQ(test_server_start(), 0);
 	test_wait_retry();
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
-	CHECK(test_state_has("connected (uid"), "the provider is not back");
+	CHECK(test_state_has("status", "connected (uid"),
+	      "the provider is not back");
 
 	/*
 	 * Once more, with nothing but the monitor to find out: a provider not
@@ -404,7 +411,7 @@ static void test_reconnect(void)
 	CHECK_EQ(ES->curr_entropy(bits), 0);
 	test_wait_retry();
 	CHECK_EQ(ES->monitor_es(), 0);
-	CHECK(test_state_has("connected (uid"),
+	CHECK(test_state_has("status", "connected (uid"),
 	      "the monitor did not connect to the provider back");
 	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
 }
@@ -417,7 +424,8 @@ static void test_late_provider(void)
 	test_server_stop();
 	ES->fini();
 	CHECK_EQ(ES->init(), 0);
-	CHECK(test_state_has("not connected"), "connected to nothing");
+	CHECK(test_state_has("status", "not connected"),
+	      "connected to nothing");
 	CHECK_EQ(ES->max_entropy(), 0);
 
 	CHECK_EQ(test_server_start(), 0);
@@ -452,7 +460,7 @@ static void test_protocol_breaches(void)
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		CHECK(first != 0xee, "data of a breach (mode %d) handed on",
 		      modes[i]);
-		CHECK(test_state_has("not connected"),
+		CHECK(test_state_has("status", "not connected"),
 		      "a provider breaking the protocol (mode %d) stays connected",
 		      modes[i]);
 		CHECK(end.tv_sec - start.tv_sec <= 1,
@@ -605,14 +613,14 @@ static void test_eavesdrop(bool dtls)
 
 #ifdef ESDM_DTLS
 	if (dtls) {
-		CHECK(test_state_has("DTLS"),
+		CHECK(test_state_has("status", "DTLS"),
 		      "the connection is not encrypted");
 		CHECK(!atomic_load(&test_relay_saw_plaintext),
 		      "the data delivered can be read off the channel");
 	} else
 #endif
 	{
-		CHECK(test_state_has("unencrypted"),
+		CHECK(test_state_has("status", "unencrypted"),
 		      "the state does not say the connection is unencrypted");
 		CHECK(atomic_load(&test_relay_saw_plaintext),
 		      "the relay does not see the data of an unencrypted channel");
@@ -646,7 +654,7 @@ static void test_old_provider(void)
 	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
 	CHECK_EQ(test_get(bits, NULL), 8);
 	CHECK_EQ(atomic_load(&test_evil_connections), conns + 2);
-	CHECK(test_state_has("unencrypted"),
+	CHECK(test_state_has("status", "unencrypted"),
 	      "an old provider is not used unencrypted");
 
 	atomic_store(&test_evil_stop, true);

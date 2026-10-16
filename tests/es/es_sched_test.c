@@ -31,6 +31,7 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+#include "../es_state_check.h"
 #include "esdm_es_sched.h"
 #include "helper.h"
 #include "test_pertubation.h"
@@ -59,37 +60,41 @@ static void create_sched_entropy(void)
 
 static int es_sched_getstate(void)
 {
-	char buf[500];
+	struct json_object *obj = es_state_get(esdm_es[esdm_int_es_sched]);
+	int ret = 0;
 
-	if (!esdm_es[esdm_int_es_sched]->state) {
+	if (!obj) {
 		printf("ES Scheduler - fail: state callback missing\n");
 		return 1;
 	}
 
-	memset(buf, 0, sizeof(buf));
-
-	esdm_es[esdm_int_es_sched]->state(buf, sizeof(buf));
-
-	if (!strncmp(buf, "disabled", 8))
+	if (es_state_has(obj, "disabled", json_type_string)) {
+		json_object_put(obj);
 		return -ENOENT;
+	}
 
 	/*
-	 * The labels come from the kernel module (esdm_sched_es_state() of
-	 * addon/linux_esdm_es/esdm_es_sched.c), which post-processes with a
+	 * The members come from the kernel module (esdm_sched_es_state_json()
+	 * of addon/linux_esdm_es/esdm_es_sched.c), which post-processes with a
 	 * DRBG rather than a hash since commit 1dd63ca.
 	 */
-	if (!strstr(buf, "DRBG for operating entropy pool") ||
-	    !strstr(buf, "Available entropy") ||
-	    !strstr(buf, "per-CPU scheduler event collection size") ||
-	    !strstr(buf, "Standards compliance") ||
-	    !strstr(buf, "High-resolution timer")) {
+	if (!es_state_has(obj, "drbg_for_operating_entropy_pool",
+			  json_type_string) ||
+	    !es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "per_cpu_scheduler_event_collection_size",
+			  json_type_int) ||
+	    !es_state_has(obj, "standards_compliance", json_type_string) ||
+	    !es_state_has(obj, "high_resolution_timer", json_type_boolean)) {
 		printf("ES Scheduler - fail: state information contains unexpected content: %s\n",
-		       buf);
-		return 1;
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES Scheduler - pass: state information found:\n%s\n",
+		       es_state_print(obj));
 	}
-	printf("ES Scheduler - pass: state information found:\n%s\n", buf);
 
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_sched_getdata(void)

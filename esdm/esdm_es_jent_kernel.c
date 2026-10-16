@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -295,7 +296,7 @@ static void esdm_jent_kernel_get(struct entropy_es *eb_es,
 
 #endif
 
-static void esdm_jent_kernel_es_state(char *buf, size_t buflen)
+static void esdm_jent_kernel_es_state(struct json_object *obj)
 {
 	uint32_t poolsize, entropy_rate;
 	/* Copied, as a new name frees the old one */
@@ -308,11 +309,11 @@ static void esdm_jent_kernel_es_state(char *buf, size_t buflen)
 	snprintf(name, sizeof(name), "%s", esdm_jent_kernel_name_locked());
 	mutex_reader_unlock(&jent_rng_mutex);
 
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Entropy Rate per 256 data bits: %u\n"
-		 " Kernel RNG: %s\n",
-		 poolsize, entropy_rate, name);
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(poolsize));
+	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
+			       json_object_new_int64(entropy_rate));
+	json_object_object_add(obj, "kernel_rng", json_object_new_string(name));
 }
 
 static bool esdm_jent_kernel_active(void)

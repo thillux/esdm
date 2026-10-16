@@ -20,6 +20,7 @@
  */
 
 #include <jitterentropy.h>
+#include <json-c/json.h>
 #include <stdio.h>
 
 #include <stdatomic.h>
@@ -584,21 +585,28 @@ out:
 	return 0;
 }
 
-static void esdm_jent_es_state(char *buf, size_t buflen)
+static void esdm_jent_es_state(struct json_object *obj)
 {
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Library version: %u\n"
-		 " Standards compliance: %s%s\n"
-		 " Entropy Rate per 256 data bits: %u\n"
-		 " Oversampling Rate: %u\n",
-		 esdm_jent_poolsize(), jent_version(),
-		 (esdm_es_oversampling() || esdm_config_fips_enabled() ||
-		  esdm_ntg1_2024_compliant() || esdm_jent_ntg1()) ?
-			 "SP800-90B " :
-			 "",
-		 esdm_jent_ntg1() ? "NTG.1(2024)" : "",
-		 esdm_jent_entropylevel(256), ESDM_JENT_OSR);
+	const char *compliance = "";
+
+	/* The NTG.1 mode of the Jitter RNG is an SP800-90B one as well */
+	if (esdm_jent_ntg1())
+		compliance = "SP800-90B NTG.1(2024)";
+	else if (esdm_es_oversampling() || esdm_config_fips_enabled() ||
+		 esdm_ntg1_2024_compliant())
+		compliance = "SP800-90B";
+
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(esdm_jent_poolsize()));
+	json_object_object_add(obj, "library_version",
+			       json_object_new_int64(jent_version()));
+	json_object_object_add(obj, "standards_compliance",
+			       json_object_new_string(compliance));
+	json_object_object_add(
+		obj, "entropy_rate_per_256_data_bits",
+		json_object_new_int64(esdm_jent_entropylevel(256)));
+	json_object_object_add(obj, "oversampling_rate",
+			       json_object_new_int64(ESDM_JENT_OSR));
 }
 
 /*

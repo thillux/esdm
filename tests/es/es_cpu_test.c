@@ -26,28 +26,36 @@
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 
+#include "../es_state_check.h"
+
 static int es_cpu_getstate(void)
 {
-	char buf[500];
+	struct json_object *obj = es_state_get(esdm_es[esdm_ext_es_cpu]);
+	int ret = 0;
 
-	if (!esdm_es[esdm_ext_es_cpu]->state) {
+	if (!obj) {
 		printf("ES CPU - fail: state callback missing\n");
 		return 1;
 	}
 
-	memset(buf, 0, sizeof(buf));
-
-	esdm_es[esdm_ext_es_cpu]->state(buf, sizeof(buf));
-	if (!strstr(buf, "Hash for compressing data") ||
-	    !strstr(buf, "Available entropy") ||
-	    !strstr(buf, "Data multiplier")) {
+	/* No conditioning hash without a multiplier, which the null says */
+	if ((!es_state_has(obj, "hash_for_compressing_data",
+			   json_type_string) &&
+	     !es_state_has(obj, "hash_for_compressing_data", json_type_null)) ||
+	    !es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "data_multiplier", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int)) {
 		printf("ES CPU: state information contains unexpected content: %s\n",
-		       buf);
-		return 1;
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES CPU - pass: state information found:\n%s\n",
+		       es_state_print(obj));
 	}
-	printf("ES CPU - pass: state information found:\n%s\n", buf);
 
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_cpu_getdata(uint32_t expected_ent_level)
@@ -133,35 +141,31 @@ static int es_cpu_poolsize(uint32_t expected_ent_level)
 }
 
 /*
- * The state string is written with snprintf into whatever the caller offers,
- * and the JSON status document hands it a share of a fixed buffer. Check that a
- * buffer too small for the full text is truncated rather than run over, and
- * that what is written stays a NUL terminated string.
+ * The state is added to the section the status has for the entropy source
+ * already, next to its "id" and "name": what is there has to stay.
  */
-static int es_cpu_getstate_truncated(void)
+static int es_cpu_getstate_adds(void)
 {
-	char buf[sizeof(" Hash for compressing data: ") + 8];
-	char canary[16];
+	struct json_object *obj = json_object_new_object();
+	int ret = 0;
 
-	memset(buf, 0x5a, sizeof(buf));
-	memset(canary, 0x5a, sizeof(canary));
-
-	esdm_es[esdm_ext_es_cpu]->state(buf, sizeof(buf) - sizeof(canary));
-
-	if (memcmp(buf + sizeof(buf) - sizeof(canary), canary,
-		   sizeof(canary))) {
-		printf("ES CPU - fail: state wrote past the end of the buffer\n");
+	if (!obj)
 		return 1;
+
+	json_object_object_add(obj, "name", json_object_new_string("CPU"));
+	esdm_es[esdm_ext_es_cpu]->state(obj);
+
+	if (!es_state_str_is(obj, "name", "CPU") ||
+	    !es_state_has(obj, "available_entropy", json_type_int)) {
+		printf("ES CPU - fail: state replaced the members it was added to: %s\n",
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES CPU - pass: state is added to the section\n");
 	}
 
-	if (buf[sizeof(buf) - sizeof(canary) - 1] != '\0') {
-		printf("ES CPU - fail: state did not terminate the truncated string\n");
-		return 1;
-	}
-
-	printf("ES CPU - pass: state truncates into a short buffer: %s\n", buf);
-
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 /*
@@ -355,7 +359,7 @@ int main(int argc, char *argv[])
 	ret += es_cpu_getdata_differs();
 	ret += es_cpu_getdata_partial();
 	ret += es_cpu_getstate();
-	ret += es_cpu_getstate_truncated();
+	ret += es_cpu_getstate_adds();
 
 	/* A count of failures, which the exit status would take modulo 256 */
 	return ret ? 1 : 0;

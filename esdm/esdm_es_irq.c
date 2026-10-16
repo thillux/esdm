@@ -475,56 +475,20 @@ static void esdm_irq_get(struct entropy_es *eb_es, uint32_t requested_bits,
 
 #endif
 
-static void esdm_irq_es_state(char *buf, size_t buflen)
-{
-	char status[250], *status_p = (buflen < sizeof(status)) ? status : buf;
-
-	mutex_lock(&irq_mutex);
-
-	if (esdm_irq_entropy_fd >= 0) {
-		ssize_t ret;
-
-		esdm_irq_set_entropy_rate_locked(esdm_irq_requested_bits_set);
-
-		ret = ioctl(esdm_irq_entropy_fd, ESDM_IRQ_STATUS, status_p);
-		if (ret < 0) {
-			snprintf(buf, buflen,
-				 " failure in reading kernel status\n");
-		} else if (buflen < sizeof(status)) {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-			snprintf(buf, buflen, "%s", status_p);
-#pragma GCC diagnostic pop
-		}
-	} else {
-		snprintf(buf, buflen, " disabled - missing kernel support\n");
-	}
-
-	mutex_unlock(&irq_mutex);
-}
-
 /*
  * The kernel add-on renders its state as a JSON object itself
  * (ESDM_IRQ_STATUS_JSON), so the properties of this entropy source enter the
- * JSON status document without being derived from the status text.
+ * status as the add-on has them - see esdm_kernel_state().
  */
-static void esdm_irq_es_state_json(char *buf, size_t buflen)
+static void esdm_irq_es_state(struct json_object *obj)
 {
-	char status[ESDM_STATUS_JSON_BUFLEN];
-
 	mutex_lock(&irq_mutex);
 
-	if (esdm_irq_entropy_fd < 0) {
-		snprintf(buf, buflen,
-			 "{ \"disabled\": \"missing kernel support\" }");
-	} else if (ioctl(esdm_irq_entropy_fd, ESDM_IRQ_STATUS_JSON, status) <
-		   0) {
-		snprintf(buf, buflen,
-			 "{ \"error\": \"failure in reading kernel status\" }");
-	} else {
-		status[sizeof(status) - 1] = '\0';
-		snprintf(buf, buflen, "%s", status);
-	}
+	if (esdm_irq_entropy_fd >= 0)
+		esdm_irq_set_entropy_rate_locked(esdm_irq_requested_bits_set);
+
+	esdm_kernel_state(obj, esdm_irq_entropy_fd, ESDM_IRQ_STATUS_JSON,
+			  ESDM_IRQ_STATUS);
 
 	mutex_unlock(&irq_mutex);
 }
@@ -602,7 +566,6 @@ struct esdm_es_cb esdm_es_irq = {
 	.curr_entropy = esdm_irq_entropylevel,
 	.max_entropy = esdm_irq_poolsize,
 	.state = esdm_irq_es_state,
-	.state_json = esdm_irq_es_state_json,
 	.reset = esdm_irq_reset,
 	.active = esdm_irq_active,
 	.selftest = esdm_irq_selftest,

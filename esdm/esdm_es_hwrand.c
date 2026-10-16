@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <json-c/json.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -356,7 +357,7 @@ static void esdm_hwrand_get(struct entropy_es *eb_es, uint32_t requested_bits,
 
 #endif
 
-static void esdm_hwrand_es_state(char *buf, size_t buflen)
+static void esdm_hwrand_es_state(struct json_object *obj)
 {
 	uint32_t poolsize, entropy_rate;
 
@@ -365,10 +366,10 @@ static void esdm_hwrand_es_state(char *buf, size_t buflen)
 	entropy_rate = esdm_hwrand_entropylevel_locked(256);
 	mutex_reader_unlock(&hwrand_mutex);
 
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Entropy Rate per 256 data bits: %u\n",
-		 poolsize, entropy_rate);
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(poolsize));
+	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
+			       json_object_new_int64(entropy_rate));
 }
 
 static bool esdm_hwrand_active(void)

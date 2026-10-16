@@ -21,6 +21,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <json-c/json.h>
 #include <stdatomic.h>
 #include <sys/random.h>
 #include <sys/stat.h>
@@ -159,12 +160,13 @@ static void esdm_krng_get(struct entropy_es *eb_es, uint32_t requested_bits,
 	}
 }
 
-static void esdm_krng_es_state(char *buf, size_t buflen)
+static void esdm_krng_es_state(struct json_object *obj)
 {
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Entropy Rate per 256 data bits: %u\n",
-		 esdm_krng_poolsize(), esdm_krng_entropylevel(256));
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(esdm_krng_poolsize()));
+	json_object_object_add(
+		obj, "entropy_rate_per_256_data_bits",
+		json_object_new_int64(esdm_krng_entropylevel(256)));
 }
 
 static bool esdm_krng_active(void)

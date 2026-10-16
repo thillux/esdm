@@ -32,6 +32,7 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+#include "../es_state_check.h"
 #include "esdm_logger.h"
 
 static void create_sched_events(void)
@@ -57,22 +58,28 @@ static void consume_events(void)
 
 static int es_sched_ebpf_getstate(void)
 {
-	char buf[500];
+	struct json_object *obj = es_state_get(esdm_es[esdm_int_es_sched_ebpf]);
+	struct json_object *loaded = NULL;
+	int ret = 0;
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[esdm_int_es_sched_ebpf]->state(buf, sizeof(buf));
-
-	if (!strstr(buf, "eBPF programs loaded: true") ||
-	    !strstr(buf, "Available entropy") ||
-	    !strstr(buf, "Oversampling Rate") ||
-	    !strstr(buf, "Entropy Rate per 256 data bits")) {
+	if (!json_object_object_get_ex(obj, "ebpf_programs_loaded", &loaded) ||
+	    !json_object_get_boolean(loaded) ||
+	    !es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "oversampling_rate", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int) ||
+	    !es_state_has(obj, "health_test_failures", json_type_int) ||
+	    !es_state_has(obj, "permanent_failure", json_type_boolean)) {
 		printf("ES SchedulerEBPF - fail: state information contains unexpected content: %s\n",
-		       buf);
-		return 1;
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES SchedulerEBPF - pass: state information found:\n%s\n",
+		       es_state_print(obj));
 	}
-	printf("ES SchedulerEBPF - pass: state information found:\n%s\n", buf);
 
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_sched_ebpf_poolsize(void)

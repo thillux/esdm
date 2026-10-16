@@ -39,6 +39,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -351,7 +352,7 @@ out:
 	return 0;
 }
 
-static void esdm_es_extlib_es_state(char *buf, size_t buflen)
+static void esdm_es_extlib_es_state(struct json_object *obj)
 {
 	char path[PATH_MAX], name[64];
 	uint32_t poolsize, entropy_rate;
@@ -370,14 +371,15 @@ static void esdm_es_extlib_es_state(char *buf, size_t buflen)
 					   "delivering";
 	mutex_reader_unlock(&extlib_mutex);
 
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Entropy Rate per 256 data bits: %u\n"
-		 " Plugin library: %s\n"
-		 " Plugin: %s\n"
-		 " Status: %s\n",
-		 poolsize, entropy_rate, path[0] ? path : "(unset)", name,
-		 status);
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(poolsize));
+	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
+			       json_object_new_int64(entropy_rate));
+	json_object_object_add(obj, "plugin_library",
+			       json_object_new_string(path[0] ? path :
+								"(unset)"));
+	json_object_object_add(obj, "plugin", json_object_new_string(name));
+	json_object_object_add(obj, "status", json_object_new_string(status));
 }
 
 static bool esdm_es_extlib_active(void)

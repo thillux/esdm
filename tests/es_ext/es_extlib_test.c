@@ -52,6 +52,7 @@
 #include <string.h>
 
 #include "common_test.h"
+#include "../es_state_check.h"
 #include "es_ext_test_plugin.h"
 
 #define ES (&esdm_es_extlib)
@@ -75,13 +76,16 @@ static uint32_t test_level(uint32_t rate, uint32_t bits)
 	return esdm_fast_noise_entropylevel(rate, bits);
 }
 
-static bool test_state_has(const char *what)
+/* Does the string member @key of the state contain @what? */
+static bool test_state_has(const char *key, const char *what)
 {
-	char buf[1024];
+	struct json_object *state = es_state_get(ES);
+	bool ret = es_state_str_has(state, key, what);
 
-	memset(buf, 0, sizeof(buf));
-	ES->state(buf, sizeof(buf));
-	return strstr(buf, what) != NULL;
+	if (!ret)
+		printf("state: %s\n", es_state_print(state));
+	json_object_put(state);
+	return ret;
 }
 
 static void test_unconfigured(void)
@@ -92,8 +96,10 @@ static void test_unconfigured(void)
 	CHECK_EQ(ES->max_entropy(), 0);
 	CHECK_EQ(test_get(ESDM_DRNG_SECURITY_STRENGTH_BITS, NULL), 0);
 	CHECK_EQ(ES->selftest(), 0);
-	CHECK(test_state_has("not loaded"), "the state does not say so");
-	CHECK(test_state_has("(unset)"), "the state names a plugin library");
+	CHECK(test_state_has("status", "not loaded"),
+	      "the state does not say so");
+	CHECK(test_state_has("plugin_library", "(unset)"),
+	      "the state names a plugin library");
 	ES->fini();
 }
 
@@ -107,8 +113,9 @@ static void test_credit(const char *path)
 	CHECK_EQ(ES->init(), 0);
 	CHECK(ES->active(), "the plugin was not loaded");
 	CHECK_EQ(ctl->init_calls, 1);
-	CHECK(test_state_has(path), "the state does not name the library");
-	CHECK(test_state_has("es-ext-test"),
+	CHECK(test_state_has("plugin_library", path),
+	      "the state does not name the library");
+	CHECK(test_state_has("plugin", "es-ext-test"),
 	      "the state does not name the plugin");
 
 	/* The claim of the plugin, all of the block, at the full rate */
@@ -143,7 +150,8 @@ static void test_credit(const char *path)
 	CHECK_EQ(test_get(bits, &first), 0);
 	CHECK_EQ(first, 0);
 	CHECK_EQ(ES->curr_entropy(bits), 0);
-	CHECK(test_state_has("failing"), "the state does not say it fails");
+	CHECK(test_state_has("status", "failing"),
+	      "the state does not say it fails");
 	ctl->claim_bits = UINT32_MAX;
 
 	/* Asked again all the same, the source recovers */
@@ -180,7 +188,7 @@ static void test_credit(const char *path)
 	ctl->selftest_ret = -ENODEV;
 	CHECK_EQ(ES->selftest(), -EFAULT);
 	CHECK_EQ(ES->curr_entropy(bits), 0);
-	CHECK(test_state_has("failing its self test"),
+	CHECK(test_state_has("status", "failing its self test"),
 	      "the state does not say the self test fails");
 	CHECK_EQ(test_get(bits, &first), 0);
 	CHECK_EQ(first, ctl->get_calls & 0xff);
@@ -236,13 +244,14 @@ static void test_bad_plugins(const char *good, const char *bad_version,
 	CHECK_EQ(esdm_es_ext_lib_set_path("/nonexistent/libnothing.so"),
 		 -ENOENT);
 	CHECK(!ES->active(), "a missing library is used");
-	CHECK(test_state_has("/nonexistent/libnothing.so"),
+	CHECK(test_state_has("plugin_library", "/nonexistent/libnothing.so"),
 	      "the state does not name the library configured");
 
 	/* Back to the build's, which names none */
 	CHECK_EQ(esdm_es_ext_lib_set_path(""), 0);
 	CHECK(!ES->active(), "a plugin is used without one configured");
-	CHECK(test_state_has("(unset)"), "the state names a plugin library");
+	CHECK(test_state_has("plugin_library", "(unset)"),
+	      "the state names a plugin library");
 
 	ES->fini();
 }

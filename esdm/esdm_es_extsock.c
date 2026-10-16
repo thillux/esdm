@@ -44,6 +44,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <json-c/json.h>
 #include <limits.h>
 #include <poll.h>
 #include <stdio.h>
@@ -701,10 +702,10 @@ out:
 	return 0;
 }
 
-static void esdm_es_extsock_es_state(char *buf, size_t buflen)
+static void esdm_es_extsock_es_state(struct json_object *obj)
 {
 	uint32_t poolsize, entropy_rate;
-	char path[PATH_MAX], status[64];
+	char path[PATH_MAX], status[64], accepted[48];
 	long peer_uid;
 
 	mutex_reader_lock(&extsock_mutex);
@@ -725,15 +726,22 @@ static void esdm_es_extsock_es_state(char *buf, size_t buflen)
 	peer_uid = extsock_peer_uid;
 	mutex_reader_unlock(&extsock_mutex);
 
-	snprintf(buf, buflen,
-		 " Available entropy: %u\n"
-		 " Entropy Rate per 256 data bits: %u\n"
-		 " Provider socket: %s\n"
-		 " Provider accepted: root%s%ld\n"
-		 " Status: %s\n",
-		 poolsize, entropy_rate, path[0] ? path : "(unset)",
-		 peer_uid >= 0 ? " and uid " : "", peer_uid >= 0 ? peer_uid : 0,
-		 status);
+	if (peer_uid >= 0)
+		snprintf(accepted, sizeof(accepted), "root and uid %ld",
+			 peer_uid);
+	else
+		snprintf(accepted, sizeof(accepted), "root");
+
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(poolsize));
+	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
+			       json_object_new_int64(entropy_rate));
+	json_object_object_add(obj, "provider_socket",
+			       json_object_new_string(path[0] ? path :
+								"(unset)"));
+	json_object_object_add(obj, "provider_accepted",
+			       json_object_new_string(accepted));
+	json_object_object_add(obj, "status", json_object_new_string(status));
 }
 
 /*
