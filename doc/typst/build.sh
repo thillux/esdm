@@ -48,5 +48,5 @@ compile() {
 }
 
 compile esdm.typ "$OUT_DIR/esdm.pdf"
-compile presentations/esdm_presentation_v1.0.0.typ \
-	"$OUT_DIR/esdm_presentation_v1.0.0.pdf"
+compile presentations/esdm_presentation.typ \
+	"$OUT_DIR/esdm_presentation.pdf"
