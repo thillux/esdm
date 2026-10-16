@@ -624,15 +624,18 @@ int esdm_config_init(void)
 			esdm_config.esdm_es_jent_kernel_entropy_rate_bits);
 	complete_entropy_rate +=
 		esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
+	/*
+	 * The rates of the external entropy sources cap what an external
+	 * provider claims - and it may not be configured at all. They do not
+	 * tell whether the sources the ESDM manages can seed it, which is what
+	 * the check below is about.
+	 */
 	esdm_config.esdm_es_ext_lib_entropy_rate_bits =
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_ext_lib_entropy_rate_bits);
-	complete_entropy_rate += esdm_config.esdm_es_ext_lib_entropy_rate_bits;
 	esdm_config.esdm_es_ext_socket_entropy_rate_bits =
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_ext_socket_entropy_rate_bits);
-	complete_entropy_rate +=
-		esdm_config.esdm_es_ext_socket_entropy_rate_bits;
 
 	if (!complete_entropy_rate) {
 		esdm_logger_status(
