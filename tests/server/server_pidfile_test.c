@@ -29,6 +29,11 @@
  * empties it, and in PID namespace mode the supervisor, which kept the
  * privileges, removes it.
  *
+ * An instance that removes the file while another one starts must not leave
+ * the latter with a lock on a file at no path: a third one would create the
+ * file anew and run alongside it. A preloaded lockf() removes the file before
+ * the server takes the lock, and the server has to open the path again.
+ *
  * The server refuses to run unprivileged, so this skips (77) when not started
  * as root.
  */
@@ -52,7 +57,7 @@
 #define TEST_SERVER_START_SEC 30
 
 /* Backstop below the timeout the test harness applies to the whole run */
-#define TEST_WATCHDOG_SEC 150
+#define TEST_WATCHDOG_SEC 210
 
 static char tmpdir[] = "/tmp/esdm-server-pidfile-test-XXXXXX";
 static char pidpath[sizeof(tmpdir) + 32];
@@ -199,7 +204,12 @@ static int server_run(bool pid_namespace, char **envp)
 int main(int argc, char *argv[])
 {
 	char *server_envp[TEST_ENV_MAX_VARS + 1];
+	/* Those of server_envp, the preload and the sanitizer options */
+	char *unlink_envp[TEST_ENV_MAX_VARS + 3];
+	char preload_var[FILENAME_MAX + 16];
 	const char *server = getenv("ESDM_SERVER");
+	const char *preload = getenv("ESDM_PIDFILE_UNLINK_PRELOAD");
+	unsigned int i;
 	struct stat sb;
 	long pid;
 
@@ -216,6 +226,11 @@ int main(int argc, char *argv[])
 
 	if (server == NULL || stat(server, &sb) < 0 || !S_ISREG(sb.st_mode)) {
 		printf("ESDM_SERVER does not point at the esdm-server binary\n");
+		return 1;
+	}
+
+	if (test_env_check_file(preload)) {
+		printf("ESDM_PIDFILE_UNLINK_PRELOAD does not point at the preload library\n");
 		return 1;
 	}
 
@@ -243,11 +258,38 @@ int main(int argc, char *argv[])
 	test_env_daemon_envp(server_envp, TEST_ENV_MAX_VARS + 1);
 
 	/*
+	 * The preload is built without the sanitizers and comes ahead of their
+	 * runtime, which ASan refuses unless told otherwise.
+	 */
+	for (i = 0; server_envp[i]; i++)
+		unlink_envp[i] = server_envp[i];
+	snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload);
+	unlink_envp[i++] = preload_var;
+	unlink_envp[i++] = (char *)"ASAN_OPTIONS=verify_asan_link_order=0";
+	unlink_envp[i] = NULL;
+
+	/*
 	 * Without a privileged process left, the file stays. Emptied, it names
 	 * no process any more.
 	 */
 	printf("PID file: plain daemon\n");
 	if (!server_run(false, server_envp)) {
+		pid = pidfile_pid();
+		CHECK(pid <= 0,
+		      "the terminated daemon left its PID file naming %ld",
+		      pid);
+	} else {
+		ret = 1;
+	}
+	unlink(pidpath);
+
+	/*
+	 * The file removed between its open and its lock: the server locks
+	 * and writes the file at the path, not the one it opened first -
+	 * server_run() checks that the file names it.
+	 */
+	printf("PID file: removed while the daemon opens it\n");
+	if (!server_run(false, unlink_envp)) {
 		pid = pidfile_pid();
 		CHECK(pid <= 0,
 		      "the terminated daemon left its PID file naming %ld",

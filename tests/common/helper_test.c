@@ -401,6 +401,74 @@ out:
 	close(fds[1]);
 }
 
+/*
+ * Whether a descriptor still is the file at its path: the esdm-server takes the
+ * lock of its PID file only for good when the path still names the file it
+ * opened. One its previous holder removed meanwhile, or replaced, is not.
+ */
+static void test_fd_at_path(void)
+{
+	char dir[] = "/tmp/esdm-helper-test-XXXXXX";
+	char path[64], other_path[64];
+	int fd, other_fd;
+
+	CHECK_EQ(esdm_fd_at_path(-1, "/"), -EBADF);
+
+	if (!mkdtemp(dir)) {
+		CHECK(0, "mkdtemp failed: %s", strerror(errno));
+		return;
+	}
+	snprintf(path, sizeof(path), "%s/file", dir);
+	snprintf(other_path, sizeof(other_path), "%s/other", dir);
+
+	fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		CHECK(0, "cannot create %s: %s", path, strerror(errno));
+		rmdir(dir);
+		return;
+	}
+	CHECK_EQ(esdm_fd_at_path(fd, NULL), -EINVAL);
+
+	/* The file it was opened at */
+	CHECK_EQ(esdm_fd_at_path(fd, path), 1);
+
+	/* Another file is not */
+	other_fd = open(other_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	CHECK(other_fd >= 0, "cannot create %s: %s", other_path,
+	      strerror(errno));
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+
+	/* A symbolic link at the path is not the file it points to */
+	unlink(other_path);
+	CHECK_EQ(symlink(path, other_path), 0);
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+	unlink(other_path);
+
+	/* Removed after it was opened, the file is at no path */
+	CHECK_EQ(unlink(path), 0);
+	CHECK_EQ(esdm_fd_at_path(fd, path), 0);
+
+	/* Nor once another file was created in its place */
+	if (other_fd >= 0)
+		close(other_fd);
+	other_fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(other_fd >= 0, "cannot create %s again: %s", path,
+	      strerror(errno));
+	CHECK_EQ(esdm_fd_at_path(fd, path), 0);
+	if (other_fd >= 0) {
+		CHECK_EQ(esdm_fd_at_path(other_fd, path), 1);
+		close(other_fd);
+	}
+
+	/* A path below a file names nothing */
+	snprintf(other_path, sizeof(other_path), "%s/file/below", dir);
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+
+	close(fd);
+	unlink(path);
+	rmdir(dir);
+}
+
 /* A segment status as IPC_STAT reports it, with only the uids of interest */
 static struct shmid_ds shm_with(uid_t cuid, uid_t uid)
 {
@@ -534,6 +602,7 @@ int main(int argc, char *argv[])
 	test_safe_read_eintr();
 	test_safe_read_write_errors();
 	test_safe_read_write_partial_error();
+	test_fd_at_path();
 	test_shm_created_by_server();
 
 	return common_test_result("helper");

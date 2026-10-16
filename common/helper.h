@@ -70,6 +70,22 @@ ssize_t esdm_safe_read(int fd, uint8_t *buf, size_t buflen);
 ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen);
 void may_enable_memory_debugging(void);
 
+/**
+ * @brief Whether the file open at a descriptor still is the one at its path
+ *
+ * A file that was removed or replaced after it was opened is no longer the one
+ * its path names, e.g. a lock file that its holder unlinked while another
+ * process opened it. The path is not followed: a symbolic link at @path names
+ * no file that was opened with O_NOFOLLOW.
+ *
+ * @param [in] fd Open descriptor of the file
+ * @param [in] path Path the file was opened at
+ *
+ * @return 1 if @path names the file open at @fd, 0 if it names another file or
+ *	   none, a negative errno if that cannot be told
+ */
+int esdm_fd_at_path(int fd, const char *path);
+
 struct shmid_ds;
 
 /**

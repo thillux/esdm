@@ -142,6 +142,26 @@ out:
 	return bytes_written;
 }
 
+int esdm_fd_at_path(int fd, const char *path)
+{
+	struct stat fd_sb, path_sb;
+
+	if (!path)
+		return -EINVAL;
+
+	if (fstat(fd, &fd_sb) == -1)
+		return -errno;
+
+	/* lstat(): a symbolic link is not the file it points to */
+	if (lstat(path, &path_sb) == -1) {
+		if (errno == ENOENT || errno == ENOTDIR)
+			return 0;
+		return -errno;
+	}
+
+	return fd_sb.st_dev == path_sb.st_dev && fd_sb.st_ino == path_sb.st_ino;
+}
+
 /*
  * Root, the server's uid, or the real uid of the caller: a segment the latter
  * created can only be planted by somebody who controls the caller anyway. The

@@ -23,7 +23,19 @@ if get_option('esdm-server').enabled()
 			[ 'server_pidfile_test.c' ],
 		)
 
+	# Preloaded into the daemon to remove the PID file between its open
+	# and its lock. Built without the sanitizers, whose runtime it is
+	# loaded ahead of - the test tells them to accept that.
+	pidfile_unlink_preload = shared_module(
+			'pidfile_unlink_preload',
+			[ 'pidfile_unlink_preload.c' ],
+			dependencies: cc.find_library('dl', required: false),
+			override_options: [ 'b_sanitize=none' ],
+		)
+
 	test('esdm-server PID file', server_pidfile_test,
-		env: [ 'ESDM_SERVER=' + esdm_server.full_path() ],
-		timeout: 180)
+		env: [ 'ESDM_SERVER=' + esdm_server.full_path(),
+		       'ESDM_PIDFILE_UNLINK_PRELOAD=' +
+				pidfile_unlink_preload.full_path() ],
+		timeout: 240)
 endif
