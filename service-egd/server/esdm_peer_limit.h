@@ -18,15 +18,16 @@
  */
 
 /*
- * Per-UID connection accounting of the server sockets.
+ * Per-user connection accounting of the server sockets.
  *
  * All interfaces of the esdm-server share one RLIMIT_NOFILE. Without a bound
  * per peer, a single unprivileged user could open connections until the
  * interface's own connection cap - or the descriptor limit - is reached and
  * shut everybody else out. Each interface therefore admits only so many
- * concurrent connections per peer UID, as told by SO_PEERCRED. Root is exempt:
- * it can take the daemon down anyway, and the privileged interface is its
- * alone.
+ * concurrent connections per account - the user a peer acts for, which is not
+ * necessarily the UID SO_PEERCRED tells, see esdm_peer_account.h. Root is
+ * exempt: it can take the daemon down anyway, and the privileged interface is
+ * its alone.
  *
  * Interfaces served by several threads share one accounting instance, which is
  * thread safe.
@@ -51,7 +52,7 @@ struct esdm_peer_limit {
 	pthread_mutex_t lock;
 	/* Name of the interface for the log */
 	const char *name;
-	/* Concurrent connections admitted per unprivileged UID */
+	/* Concurrent connections admitted per unprivileged account */
 	unsigned int max_per_uid;
 	struct esdm_peer_limit_entry *buckets[ESDM_PEER_LIMIT_BUCKETS];
 };
@@ -62,46 +63,48 @@ struct esdm_peer_limit {
 	  .max_per_uid = _max }
 
 /**
- * @brief Account one more connection of @uid
+ * @brief Account one more connection of @account
+ *
+ * @param [in] account Account of the peer, see esdm_peer_account()
  *
  * @return true when the connection is admitted - and then has to be released
- *	   with esdm_peer_limit_put() -, false when @uid is at its limit (or the
- *	   accounting is out of memory) and the connection has to be refused
+ *	   with esdm_peer_limit_put() -, false when @account is at its limit (or
+ *	   the accounting is out of memory) and the connection has to be refused
  */
-bool esdm_peer_limit_get(struct esdm_peer_limit *limit, uid_t uid);
+bool esdm_peer_limit_get(struct esdm_peer_limit *limit, uid_t account);
 
 /**
  * @brief Release a connection admitted by esdm_peer_limit_get()
  */
-void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t uid);
+void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t account);
 
 /**
- * @brief Is @uid being refused connections?
+ * @brief Is @account being refused connections?
  *
- * @return true when a connection of @uid was refused for its limit and none of
- *	   its connections has been released since - the UID wants more than
- *	   its share right now. Never true for root.
+ * @return true when a connection of @account was refused for its limit and
+ *	   none of its connections has been released since - the account wants
+ *	   more than its share right now. Never true for root.
  */
-bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t uid);
+bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t account);
 
 /**
- * @brief Connections @uid holds right now
+ * @brief Connections @account holds right now
  *
- * @return the number of connections admitted for @uid and not released yet,
- *	   0 for root, which is not accounted
+ * @return the number of connections admitted for @account and not released
+ *	   yet, 0 for root, which is not accounted
  */
-unsigned int esdm_peer_limit_count(struct esdm_peer_limit *limit, uid_t uid);
+unsigned int esdm_peer_limit_count(struct esdm_peer_limit *limit,
+				   uid_t account);
 
 /**
- * @brief Connections the UID holding the most of them holds right now
+ * @brief Connections the account holding the most of them holds right now
  *
- * The per-UID bound does not bound a user, who can connect under each UID of
- * its subordinate range (/etc/subuid) from a user namespace. What sets a user
- * hogging the connections apart from everybody else is what its UIDs hold,
- * which is what this tells - a UID with fewer connections than this is not the
- * one to take connections from first.
+ * What sets a user hogging the connections apart from everybody else is what
+ * it holds - over all the UIDs of its subordinate range it may connect under,
+ * which the account comprises. An account with fewer connections than this is
+ * not the one to take connections from first.
  *
- * @return the largest count of any unprivileged UID, 0 when none holds a
+ * @return the largest count of any unprivileged account, 0 when none holds a
  *	   connection
  */
 unsigned int esdm_peer_limit_max_count(struct esdm_peer_limit *limit);

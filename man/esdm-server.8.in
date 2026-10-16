@@ -149,11 +149,23 @@ All interfaces share the file descriptor limit of the daemon (the shipped
 sets
 .BR LimitNOFILE=8192 ).
 So that no single local user can exhaust it and lock every other consumer out,
-the daemon bounds the connections of each unprivileged peer, identified by the
-UID of the connecting process. Processes running as root are exempt.
+the daemon bounds the connections of each unprivileged user. Processes running
+as root are exempt. A user is not simply the UID of the connecting process: an
+unprivileged user may map the UIDs of its subordinate range in a user
+namespace and connect as each of them, and these count as the user's own. A
+process in a user namespace other than the daemon's is counted as the owner of
+the outermost user namespace between the two that is not owned by root, as far
+as the kernel shows the daemon that namespace \- which, once the daemon
+dropped its privileges, it does only for processes it may trace. Otherwise, a
+UID within a range of
+.I /etc/subuid
+counts as the user owning the range, unless that is root or does not resolve
+to a UID; changes of the file take effect within a second. Any other UID is a
+user of its own, and so is each UID of a user namespace that root created and
+filled itself, such as that of a container.
 .TP
 .B RPC interface
-At most 16 concurrent connections per online CPU and UID, counted over all
+At most 16 concurrent connections per online CPU and user, counted over all
 RPC connections of all server threads - a client process holds up to one
 connection per online CPU. The bound is at least 512 and at most half of the
 file descriptor limit of the daemon; it is logged at startup. A connection that has been idle for the period set by the
@@ -166,7 +178,7 @@ at most half of the limit, to the EGD and privileged interfaces. This bound is
 split evenly over the server threads, at most 1024 connections each, and logged
 at startup. A thread whose share is taken leaves new connections to the others.
 Once all shares are taken, a thread does not refuse a new connection but
-closes one of its idle ones \- the least recently used one of the UID holding
+closes one of its idle ones \- the least recently used one of the user holding
 the most connections in that thread. A connection with a request not read yet
 is never closed for that, nor is one of the privileged interface. One with an
 answer its client has not read yet is closed only when no idle one is left; the
@@ -175,23 +187,25 @@ client still reads that answer.
 .B EGD interface
 Served by one worker thread per online CPU, at most four, each serving the
 clients it accepted. At most 2048 concurrent connections in total and 256 per
-UID. A connection
+user. A connection
 that has received no command and owes no response for 60 seconds is closed
 only when its slot is wanted: at most 256 slots are left, an accept ran out of
-descriptors within that time, or its UID was refused a connection and is still
-at its limit. While slots are short, only the idle connections of the UIDs
+descriptors within that time, or its user was refused a connection and is still
+at its limit. While slots are short, only the idle connections of the users
 holding the most connections are closed. Once all slots are taken, a new
 connection is not left waiting but a connection is closed to make room for it
-\- one of the UID holding the most connections, the least recently active one
-with nothing owed to its client if there is one, and never one of root or of a
-UID holding fewer connections than that of the new client.
+\- one of a user holding the most connections of all, preferably of the user
+of the new connection, the least recently active one with nothing owed to its
+client if there is one, and never one of root or of a user holding fewer. A
+server thread that serves no connection of such a user leaves the new
+connection to the others, or turns it away.
 .BR libesdm_egd_client (3)
 reconnects transparently, which a client confined by seccomp after it connected
 may not survive.
 .PP
-A connection beyond the limit of its UID is accepted and closed at once. The
-daemon logs a warning when a UID reaches its limit, and again only after the
-UID has dropped below its limit in between. Apart from the scaling of the RPC bound, these limits are compile\-time
+A connection beyond the limit of its user is accepted and closed at once. The
+daemon logs a warning when a user reaches its limit, and again only after the
+user has dropped below its limit in between. Apart from the scaling of the RPC bound, these limits are compile\-time
 constants.
 .SH FILES
 .TP

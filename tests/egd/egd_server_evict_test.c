@@ -32,7 +32,11 @@
  *     the server,
  *   - with slots short, the idle connections closed are those of the UID
  *     holding the most (root only) - a UID keeping its connections busy does
- *     not get the idle ones of everybody else closed instead.
+ *     not get the idle ones of everybody else closed instead,
+ *   - both with a user connecting under a UID of its subordinate range for
+ *     each connection (root only), from a user namespace of its own: its UIDs
+ *     are one user, the one holding the most, and not each a UID holding one
+ *     next to a UID holding two, which would make the latter the first to go.
  *
  * Like egd_server_conn_test, the server runs in this process, so no daemon is
  * needed. Its build bounds it to a handful of connections, and it runs a single
@@ -49,6 +53,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -113,6 +118,13 @@ int set_fd_nonblocking(int fd)
 /* Unprivileged UIDs the clients take on when the test runs as root. */
 #define TEST_UID_A 60001
 #define TEST_UID_B 60002
+
+/*
+ * The subordinate range of TEST_UID_B, which it maps in a user namespace of its
+ * own to connect under each of its UIDs, see test_client_start_userns().
+ */
+#define TEST_SUB_BASE 61000
+#define TEST_SUB_COUNT (TEST_SLOTS + 8)
 
 static char tmpdir[] = "/tmp/esdm-egd-evict-test-XXXXXX";
 static char sockpath[sizeof(tmpdir) + 32];
@@ -272,6 +284,11 @@ struct test_client {
 enum test_client_cmd {
 	/* Open @arg more connections, each served once; result: 0 or 1 */
 	test_client_open = 'o',
+	/*
+	 * The same, each under a UID of the user namespace of its own the
+	 * client runs in, see test_client_start_userns(); result: 0 or 1
+	 */
+	test_client_open_sub = 's',
 	/* Send a blocking read on connection @arg; result: 0 or 1 */
 	test_client_block = 'b',
 	/* A request on every connection from @arg on; result: failures */
@@ -287,10 +304,71 @@ struct test_client_msg {
 	uint32_t arg;
 };
 
+/*
+ * Open a connection as @uid of the client's user namespace: from a process of
+ * its own, which hands it over once it was served - by then the server has
+ * accounted it, as the process it asked about - and is gone.
+ *
+ * @return the connection, < 0 on error
+ */
+static int test_connect_as(uid_t uid)
+{
+	char data = 0, cbuf[CMSG_SPACE(sizeof(int))];
+	struct iovec iov = { .iov_base = &data, .iov_len = 1 };
+	struct msghdr msg = { .msg_iov = &iov,
+			      .msg_iovlen = 1,
+			      .msg_control = cbuf,
+			      .msg_controllen = sizeof(cbuf) };
+	struct cmsghdr *cmsg;
+	int sv[2], fd = -1;
+	pid_t pid;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0)
+		return -1;
+
+	pid = fork();
+	if (pid < 0) {
+		close(sv[0]);
+		close(sv[1]);
+		return -1;
+	}
+
+	if (!pid) {
+		close(sv[0]);
+		if (setresuid(uid, uid, uid))
+			_exit(1);
+		fd = test_connect();
+		if (fd < 0 || test_cmd_entropy_count(fd, TEST_RESPONSE_MS))
+			_exit(2);
+
+		memset(cbuf, 0, sizeof(cbuf));
+		cmsg = CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+		_exit(sendmsg(sv[1], &msg, 0) == 1 ? 0 : 3);
+	}
+
+	close(sv[1]);
+	if (recvmsg(sv[0], &msg, MSG_CMSG_CLOEXEC) == 1) {
+		cmsg = CMSG_FIRSTHDR(&msg);
+		if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
+		    cmsg->cmsg_type == SCM_RIGHTS)
+			memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+	}
+	close(sv[0]);
+	waitpid(pid, NULL, 0);
+
+	return fd;
+}
+
 static void test_client_main(int ctl, uid_t uid)
 {
 	int fds[TEST_SLOTS + 1];
 	unsigned int n = 0, i;
+	/* The next UID of its user namespace to connect as, see above */
+	uid_t sub = 1;
 	struct test_client_msg msg;
 
 	if (uid != getuid()) {
@@ -319,6 +397,24 @@ static void test_client_main(int ctl, uid_t uid)
 						      fd, TEST_RESPONSE_MS)) {
 					if (fd >= 0)
 						close(fd);
+					result = 1;
+					break;
+				}
+				fds[n++] = fd;
+			}
+			break;
+		case test_client_open_sub:
+			for (i = 0; i < msg.arg; i++) {
+				int fd;
+
+				if (n >= sizeof(fds) / sizeof(fds[0]) ||
+				    sub >= TEST_SUB_COUNT) {
+					result = 1;
+					break;
+				}
+
+				fd = test_connect_as(sub++);
+				if (fd < 0) {
 					result = 1;
 					break;
 				}
@@ -383,6 +479,67 @@ static int test_client_start(struct test_client *client, uid_t uid)
 
 	close(sv[1]);
 	client->ctl = sv[0];
+
+	return 0;
+}
+
+/*
+ * Start a client as @owner, the user, in a user namespace of its own, mapped to
+ * @owner and to its subordinate range from TEST_SUB_BASE on - what newuidmap(1)
+ * does for a user with that range in /etc/subuid. The map is written here: only
+ * root may map a range. The client is root of its namespace and connects under
+ * the UIDs of its range, one connection each, see test_client_open_sub. Needs
+ * root.
+ */
+static int test_client_start_userns(struct test_client *client, uid_t owner)
+{
+	char map[64], path[64], b = 1;
+	int sv[2], fd;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0)
+		return -errno;
+
+	client->pid = fork();
+	if (client->pid < 0) {
+		close(sv[0]);
+		close(sv[1]);
+		return -errno;
+	}
+
+	if (!client->pid) {
+		close(sv[0]);
+		if (setgroups(0, NULL) ||
+		    setresgid((gid_t)owner, (gid_t)owner, (gid_t)owner) ||
+		    setresuid(owner, owner, owner) || unshare(CLONE_NEWUSER))
+			_exit(2);
+		if (write(sv[1], &b, 1) != 1 || read(sv[1], &b, 1) != 1 || b)
+			_exit(2);
+		test_client_main(sv[1], getuid());
+	}
+
+	close(sv[1]);
+	client->ctl = sv[0];
+
+	snprintf(map, sizeof(map), "0 %u 1\n1 %u %u\n", (unsigned int)owner,
+		 TEST_SUB_BASE, TEST_SUB_COUNT - 1);
+	snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)client->pid);
+
+	if (read(client->ctl, &b, 1) == 1) {
+		fd = open(path, O_WRONLY | O_CLOEXEC);
+		b = 1;
+		if (fd >= 0) {
+			if (write(fd, map, strlen(map)) == (ssize_t)strlen(map))
+				b = 0;
+			close(fd);
+		}
+	}
+	if (write(client->ctl, &b, 1) != 1 || b) {
+		kill(client->pid, SIGKILL);
+		waitpid(client->pid, NULL, 0);
+		close(client->ctl);
+		client->pid = 0;
+		return -EPERM;
+	}
 
 	return 0;
 }
@@ -634,6 +791,125 @@ out:
 	test_settle();
 }
 
+/*
+ * All slots taken by a user connecting under a UID of its subordinate range
+ * for each connection, which holds one per UID, and by a UID holding two - as
+ * sshd's pre-authentication children do. A new connection of the user costs it
+ * one of its own: its UIDs are one account, the biggest holder, rather than
+ * each a holder of one next to the UID holding two. Needs root for the UIDs.
+ */
+static void test_full_subordinate(void)
+{
+	struct test_client a = { 0 }, b = { 0 };
+	unsigned int a_conns = 2, b_conns = TEST_SLOTS - 2;
+	uint64_t closed_a, closed_b;
+
+	printf("EGD evict: the UIDs of a subordinate range make room as one user\n");
+
+	if (geteuid() != 0) {
+		printf("  SKIPPED: several UIDs need root\n");
+		return;
+	}
+
+	if (test_client_start(&a, TEST_UID_A) ||
+	    test_client_start_userns(&b, TEST_UID_B)) {
+		CHECK(0, "cannot start the clients");
+		goto out;
+	}
+
+	/* A's connections are the least recently active ones. */
+	if (test_client_do(&a, test_client_open, a_conns) ||
+	    test_client_do(&b, test_client_open_sub, b_conns)) {
+		CHECK(0, "the clients could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+
+	test_sleep_ms(50);
+	CHECK(test_client_do(&b, test_client_open_sub, 1) == 0,
+	      "a new connection under another subordinate UID was not served with all slots taken");
+
+	closed_a = test_client_do(&a, test_client_closed, 0);
+	closed_b = test_client_do(&b, test_client_closed, 0);
+	CHECK(closed_a == 0,
+	      "a connection of a UID holding two was closed for a user holding one per subordinate UID: mask 0x%llx",
+	      (unsigned long long)closed_a);
+	CHECK(test_popcount(closed_b) == 1,
+	      "not exactly one connection of the user holding the most was closed: mask 0x%llx",
+	      (unsigned long long)closed_b);
+
+out:
+	test_client_stop(&a);
+	test_client_stop(&b);
+	test_settle();
+}
+
+/*
+ * Slots are short, held by a user under a UID of its subordinate range for
+ * each busy connection, and by a UID with two idle ones: those are not closed
+ * for being the UID holding the most - the user is. Once it lets its own go
+ * idle, those are closed. Needs root for the UIDs.
+ */
+static void test_scarce_subordinate(void)
+{
+	struct test_client a = { 0 }, b = { 0 };
+	unsigned int a_conns = 2, b_conns = ESDM_EGD_IDLE_REAP_CONNECTIONS;
+	uint64_t closed_a, closed_b, deadline;
+
+	printf("EGD evict: with slots short, the UIDs of a subordinate range are reaped as one user\n");
+
+	if (geteuid() != 0) {
+		printf("  SKIPPED: several UIDs need root\n");
+		return;
+	}
+
+	if (test_client_start(&a, TEST_UID_A) ||
+	    test_client_start_userns(&b, TEST_UID_B)) {
+		CHECK(0, "cannot start the clients");
+		goto out;
+	}
+
+	if (test_client_do(&a, test_client_open, a_conns) ||
+	    test_client_do(&b, test_client_open_sub, b_conns)) {
+		CHECK(0, "the clients could not open their connections");
+		goto out;
+	}
+
+	/* B is never idle for long, A never active. */
+	deadline = test_now_ms() + TEST_IDLE_WAIT_MS;
+	while (test_now_ms() < deadline) {
+		test_sleep_ms(ESDM_EGD_IDLE_TIMEOUT_MS / 4);
+		if (test_client_do(&b, test_client_touch, 0)) {
+			CHECK(0, "a busy connection was not served");
+			break;
+		}
+	}
+
+	closed_a = test_client_do(&a, test_client_closed, 0);
+	closed_b = test_client_do(&b, test_client_closed, 0);
+	CHECK(closed_a == 0,
+	      "idle connections of a UID holding two were closed for a user holding one per subordinate UID: mask 0x%llx",
+	      (unsigned long long)closed_a);
+	CHECK(closed_b == 0, "busy connections were closed: mask 0x%llx",
+	      (unsigned long long)closed_b);
+
+	/* Now B lets its own go idle. */
+	test_sleep_ms(TEST_IDLE_WAIT_MS);
+
+	closed_a = test_client_do(&a, test_client_closed, 0);
+	closed_b = test_client_do(&b, test_client_closed, 0);
+	CHECK(closed_a == 0,
+	      "idle connections of the UID holding the fewest were closed: mask 0x%llx",
+	      (unsigned long long)closed_a);
+	CHECK(test_popcount(closed_b) == a_conns + 1,
+	      "%u idle connections of the user holding the most were closed, not the %u to get below the mark",
+	      test_popcount(closed_b), a_conns + 1);
+
+out:
+	test_client_stop(&a);
+	test_client_stop(&b);
+	test_settle();
+}
+
 /****************************
  * ESDM state
  ****************************/
@@ -714,6 +990,8 @@ int main(int argc, char *argv[])
 	test_full_makes_room();
 	test_full_top_uid();
 	test_scarce_top_uid();
+	test_full_subordinate();
+	test_scarce_subordinate();
 
 out:
 	esdm_egd_server_fini();

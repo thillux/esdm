@@ -54,6 +54,7 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_peer_account.h"
 #include "esdm_peer_limit.h"
 #include "esdm_shm_status.h"
 #include "esdm_rpc_protocol.h"
@@ -91,8 +92,10 @@ struct esdm_rpcs {
 struct esdm_rpcs_connection {
 	struct esdm_rpcs *proto;
 	int child_fd;
-	/* Peer UID, accounted in esdm_rpcs_peer_limit if peer_counted */
+	/* Peer UID, and the user it is accounted to, see esdm_peer_account.h */
 	uid_t peer_uid;
+	uid_t peer_account;
+	/* Accounted in esdm_rpcs_peer_limit, as peer_account */
 	bool peer_counted;
 	uint32_t method_index;
 	uint32_t request_id;
@@ -144,10 +147,15 @@ static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 static atomic_int server_exit = 0;
 
 /*
- * Concurrent connections of one unprivileged UID over all RPC worker threads -
+ * Concurrent connections of one unprivileged user over all RPC worker threads -
  * root is exempt. Each worker serves up to 1024 connections and all of them
  * share one RLIMIT_NOFILE with the EGD interface; without a bound per peer a
  * single local user could exhaust them and lock every other client out.
+ *
+ * A user is its account, see esdm_peer_account.h, not the UID it connects
+ * under: the UIDs of its /etc/subuid range it may map in a user namespace and
+ * connect as count as its own, so it cannot multiply the bound by spreading
+ * its connections over them.
  *
  * A client process holds up to one connection per online node, and idle ones
  * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC. A fixed bound would therefore
@@ -155,26 +163,27 @@ static atomic_int server_exit = 0;
  * bound scales with the online nodes instead, admitting
  * ESDM_RPC_PROCESSES_PER_UID such processes, but never less than
  * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps both: no single
- * UID can take more than half of RLIMIT_NOFILE, which leaves the other half to
- * the remaining users and the EGD interface (see esdm_rpcs_peer_limit_init()).
+ * user can take more than half of RLIMIT_NOFILE, which leaves the other half
+ * to the remaining users and the EGD interface (see
+ * esdm_rpcs_peer_limit_init()).
  */
 #define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
 #define ESDM_RPC_PROCESSES_PER_UID 16
 
 /*
- * The per-UID bound alone does not protect the descriptors: a user can map the
- * UIDs of its /etc/subuid range in a user namespace, connect as each of them,
- * and keep the connections from being reaped as idle with a cheap request
- * every second. The unprivileged connections are therefore also bounded in
- * total, leaving ESDM_RPC_RESERVED_FDS of RLIMIT_NOFILE - but at most half of
- * it - to the EGD interface (up to 2048 connections), the privileged interface
- * and the server itself. The bound is split evenly over the worker threads,
- * each holding at most ESDM_RPCS_MAX_WORKER_CONNECTIONS.
+ * The per-user bound alone does not protect the descriptors: a few users
+ * together exhaust them, and keep their connections from being reaped as idle
+ * with a cheap request every second. The unprivileged connections are
+ * therefore also bounded in total, leaving ESDM_RPC_RESERVED_FDS of
+ * RLIMIT_NOFILE - but at most half of it - to the EGD interface (up to 2048
+ * connections), the privileged interface and the server itself. The bound is
+ * split evenly over the worker threads, each holding at most
+ * ESDM_RPCS_MAX_WORKER_CONNECTIONS.
  *
  * A worker whose slots are all taken stops accepting while another worker has
  * a free slot. Once all are taken, it does not turn a new connection away -
  * whoever holds the slots would lock everybody else out - but closes one of
- * its connections to make room: the least recently active one of the UID with
+ * its connections to make room: the least recently active one of the user with
  * the most connections in that worker. The clients reconnect transparently, so
  * service goes on for everybody, at the price of churn under attack. Never
  * closed are a connection with a request not read yet, and any connection of
@@ -192,7 +201,7 @@ static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
 	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 
 /*
- * Size the per-UID bound of the RPC interface. To be called before the first
+ * Size the per-user bound of the RPC interface. To be called before the first
  * RPC worker thread starts.
  */
 static void esdm_rpcs_peer_limit_init(void)
@@ -213,8 +222,11 @@ static void esdm_rpcs_peer_limit_init(void)
 								  UINT_MAX);
 
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-		    "Admitting at most %u RPC connections per unprivileged UID\n",
+		    "Admitting at most %u RPC connections per unprivileged user\n",
 		    esdm_rpcs_peer_limit.max_per_uid);
+
+	/* While the privileges are still held, see esdm_peer_account.h. */
+	esdm_peer_account_init();
 }
 
 /* Connection slots of each of @num_threads workers serving @proto */
@@ -775,7 +787,8 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 		rpc_conn->child_fd = -1;
 	}
 	if (rpc_conn->peer_counted)
-		esdm_peer_limit_put(&esdm_rpcs_peer_limit, rpc_conn->peer_uid);
+		esdm_peer_limit_put(&esdm_rpcs_peer_limit,
+				    rpc_conn->peer_account);
 	/*
 	 * No per-connection request buffer to wipe here anymore - the shared
 	 * per-worker esdm_rpcs_reqbuf is zeroized after every request in
@@ -913,10 +926,10 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 	{
 		if (n == ARRAY_SIZE(uids))
 			break;
-		uids[n++] = rpc_conn->peer_uid;
+		uids[n++] = rpc_conn->peer_account;
 	}
 
-	/* The UID with the most connections */
+	/* The user with the most connections */
 	qsort(uids, n, sizeof(uids[0]), esdm_rpcs_uid_cmp);
 	for (i = 0; i < n; i++) {
 		run = (i && uids[i] == uids[i - 1]) ? run + 1 : 1;
@@ -927,13 +940,14 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 	}
 
 	/*
-	 * The least recent idle one of that UID, else of any UID - which is
-	 * also the choice when no UID holds more than one. Only without an idle
-	 * one, one with an unread answer, chosen the same way.
+	 * The least recent idle one of that user, else of any user - which is
+	 * also the choice when no user holds more than one. Only without an
+	 * idle one, one with an unread answer, chosen the same way.
 	 */
 	TAILQ_FOREACH(rpc_conn, list, tailq)
 	{
-		bool preferred = (best_run > 1 && rpc_conn->peer_uid == best);
+		bool preferred =
+			(best_run > 1 && rpc_conn->peer_account == best);
 		enum esdm_rpcs_conn_state state;
 
 		if (!preferred && cand[esdm_rpcs_conn_idle][0])
@@ -977,8 +991,9 @@ static bool esdm_rpcs_make_room(int epfd,
 		return false;
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
-		    "Closing client FD %d of UID %u to make room\n",
-		    victim->child_fd, (unsigned int)victim->peer_uid);
+		    "Closing client FD %d of UID %u (user %u) to make room\n",
+		    victim->child_fd, (unsigned int)victim->peer_uid,
+		    (unsigned int)victim->peer_account);
 
 	for (i = 0; i < num; i++) {
 		if (pending[i].data.ptr == victim)
@@ -1259,13 +1274,21 @@ static int esdm_rpcs_handler(void *args)
 				{
 					struct ucred cred;
 					socklen_t cred_len = sizeof(cred);
+					bool admitted = false;
 
 					if (getsockopt(accepted_fd, SOL_SOCKET,
 						       SO_PEERCRED, &cred,
-						       &cred_len) < 0 ||
-					    !esdm_peer_limit_get(
-						    &esdm_rpcs_peer_limit,
-						    cred.uid)) {
+						       &cred_len) == 0) {
+						rpc_conn->peer_uid = cred.uid;
+						rpc_conn->peer_account =
+							esdm_peer_account(
+								accepted_fd,
+								&cred);
+						admitted = esdm_peer_limit_get(
+							&esdm_rpcs_peer_limit,
+							rpc_conn->peer_account);
+					}
+					if (!admitted) {
 						esdm_logger(
 							LOGGER_DEBUG,
 							LOGGER_C_RPC,
@@ -1275,7 +1298,6 @@ static int esdm_rpcs_handler(void *args)
 							rpc_conn);
 						continue;
 					}
-					rpc_conn->peer_uid = cred.uid;
 					rpc_conn->peer_counted = true;
 				}
 
@@ -1513,6 +1535,13 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		return -EINVAL;
 
 	CKNULL(proto->service, -EINVAL);
+
+	/*
+	 * Done by esdm_rpcs_peer_limit_init() already for the server - but not
+	 * for a harness serving the interface, whose first accept would wait
+	 * for it otherwise.
+	 */
+	esdm_peer_account_init();
 
 	if (proto->privileged) {
 		num_threads = 1;
