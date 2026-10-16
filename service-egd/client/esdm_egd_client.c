@@ -781,6 +781,8 @@ struct esdm_egd_random_op {
 	uint8_t *buf;
 	size_t buflen;
 	size_t generated;
+	/* Command of the read: standard, or prediction resistant */
+	uint8_t cmd;
 };
 
 /* Blocking read, split into protocol sized transfers. */
@@ -795,7 +797,7 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 		uint8_t chunk = (remaining > ESDM_EGD_MAX_TRANSFER) ?
 					ESDM_EGD_MAX_TRANSFER :
 					(uint8_t)remaining;
-		uint8_t request[2] = { ESDM_EGD_CMD_READ_BLOCK, chunk };
+		uint8_t request[2] = { op->cmd, chunk };
 		int ret;
 
 		ret = esdm_egd_client_write_all_locked(client, request,
@@ -816,14 +818,15 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 	return 0;
 }
 
-DSO_PUBLIC
-int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
-			       size_t buflen)
+static int esdm_egd_client_get_random_cmd(struct esdm_egd_client *client,
+					  uint8_t cmd, uint8_t *buf,
+					  size_t buflen)
 {
 	struct esdm_egd_random_op op = {
 		.buf = buf,
 		.buflen = buflen,
 		.generated = 0,
+		.cmd = cmd,
 	};
 	int ret;
 
@@ -845,12 +848,27 @@ int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
 	return ret;
 }
 
+DSO_PUBLIC
+int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
+			       size_t buflen)
+{
+	return esdm_egd_client_get_random_cmd(client, ESDM_EGD_CMD_READ_BLOCK,
+					      buf, buflen);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_pr(struct esdm_egd_client *client, uint8_t *buf,
+				  size_t buflen)
+{
+	return esdm_egd_client_get_random_cmd(
+		client, ESDM_EGD_CMD_ESDM_PR_READ_BLOCK, buf, buflen);
+}
+
 static int esdm_egd_client_get_random_nonblock_op(struct esdm_egd_client *client,
 						  void *arg)
 {
 	struct esdm_egd_random_op *op = arg;
-	uint8_t request[2] = { ESDM_EGD_CMD_READ_NONBLOCK,
-			       (uint8_t)op->buflen };
+	uint8_t request[2] = { op->cmd, (uint8_t)op->buflen };
 	uint8_t delivered;
 	int ret;
 
@@ -883,15 +901,15 @@ static int esdm_egd_client_get_random_nonblock_op(struct esdm_egd_client *client
 	return 0;
 }
 
-DSO_PUBLIC
-int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
-					uint8_t *buf, size_t buflen,
-					size_t *generated)
+static int esdm_egd_client_get_random_nonblock_cmd(
+	struct esdm_egd_client *client, uint8_t cmd, uint8_t *buf,
+	size_t buflen, size_t *generated)
 {
 	struct esdm_egd_random_op op = {
 		.buf = buf,
 		.buflen = buflen,
 		.generated = 0,
+		.cmd = cmd,
 	};
 	int ret;
 
@@ -915,6 +933,26 @@ int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
 
 	return 0;
 }
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
+					uint8_t *buf, size_t buflen,
+					size_t *generated)
+{
+	return esdm_egd_client_get_random_nonblock_cmd(
+		client, ESDM_EGD_CMD_READ_NONBLOCK, buf, buflen, generated);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *client,
+					   uint8_t *buf, size_t buflen,
+					   size_t *generated)
+{
+	return esdm_egd_client_get_random_nonblock_cmd(
+		client, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, buf, buflen,
+		generated);
+}
+
 
 static int esdm_egd_client_entropy_count_op(struct esdm_egd_client *client,
 					    void *arg)

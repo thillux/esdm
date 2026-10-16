@@ -385,15 +385,13 @@ The ESDM consists of the following components:
   shared memory - which makes it usable where the RPC interface cannot be
   reached. Its algorithms carry the property `provider=esdm-egd`, so it can be
   loaded next to the RPC based ones, and the socket it uses is named with the
-  `egd_socket` key of its `openssl.cnf` section. Note that the EGD protocol
-  cannot express prediction resistance: a request explicitly asking for it is
-  refused rather than served with ordinary random data.
+  `egd_socket` key of its `openssl.cnf` section. The EGD protocol itself cannot
+  express prediction resistance; a request asking for it is served with the
+  ESDM's own prediction resistant read command on the same socket.
 
-  `libesdm-egd-provider-pr.so` is the prediction resistance counterpart. Since
-  the protocol cannot select the generator per request, that is a property of
-  the socket - the ESDM serves a second EGD socket from
-  `esdm_get_random_bytes_pr()` - so this variant simply defaults to that socket
-  and accepts prediction resistance requests. Its algorithms carry
+  `libesdm-egd-provider-pr.so` is the prediction resistance counterpart: it
+  serves every request from `esdm_get_random_bytes_pr()` with that command,
+  whatever OpenSSL asked for, over the same socket. Its algorithms carry
   `provider=esdm-egd-pr`.
 
 * `libesdm_egd_client`: A small client library for the ESDM's EGD interface,

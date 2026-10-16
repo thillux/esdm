@@ -197,6 +197,90 @@ static int test_nonblocking_overlong(void)
 	return ret;
 }
 
+/*
+ * The prediction resistant reads go out as the ESDM's own commands, split into
+ * protocol transfers just like the standard ones, and are answered alike.
+ */
+static int test_pr_reads(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	uint8_t buf[300], overlong[16];
+	size_t generated = 0, i;
+	int ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("pr"), EGD_PEER_SHORT))
+		return 1;
+
+	if (esdm_egd_client_alloc(&client, test_socket("pr"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	/* Two transfers, answered in full as the blocking read is */
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) == 0,
+	      "the prediction resistant blocking read failed");
+	for (i = 0; i < sizeof(buf); i++) {
+		if (buf[i] != egd_peer_data_byte(i)) {
+			CHECK(0, "byte %zu is 0x%02x, expected 0x%02x", i,
+			      buf[i], egd_peer_data_byte(i));
+			break;
+		}
+	}
+	CHECK(egd_peer_pr_requests(peer) == 2,
+	      "%u prediction resistant transfers, expected 2",
+	      egd_peer_pr_requests(peer));
+
+	/* One transfer, which the peer answers with half of what was asked */
+	CHECK(esdm_egd_client_get_random_pr_nonblock(client, buf, 32,
+						     &generated) == 0,
+	      "the prediction resistant non-blocking read failed");
+	CHECK(generated == 16, "%zu bytes delivered, expected 16", generated);
+	CHECK(egd_peer_pr_requests(peer) == 3,
+	      "%u prediction resistant transfers, expected 3",
+	      egd_peer_pr_requests(peer));
+
+	/* More than one transfer is refused before anything is sent */
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, buf, ESDM_EGD_MAX_TRANSFER + 1, &generated) ==
+		      -EINVAL,
+	      "a non-blocking request beyond one transfer was not refused");
+	CHECK(egd_peer_requests(peer) == 3, "%u requests, expected 3",
+	      egd_peer_requests(peer));
+
+	/* The standard reads stay what they are */
+	CHECK(esdm_egd_client_get_random(client, buf, 8) == 0,
+	      "the blocking read failed");
+	CHECK(egd_peer_pr_requests(peer) == 3,
+	      "an ordinary read went out as a prediction resistant one");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	/* An answer longer than the request is refused here as well */
+	if (egd_peer_start(&peer, test_socket("pr-overlong"),
+			   EGD_PEER_OVERLONG))
+		return 1;
+	if (esdm_egd_client_alloc(&client, test_socket("pr-overlong"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	generated = 1;
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, overlong, sizeof(overlong), &generated) == -EPROTO,
+	      "an overlong prediction resistant answer was not rejected");
+	CHECK(generated == 0, "%zu bytes reported after the failure",
+	      generated);
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
 /* The entropy count arrives as a big endian four byte number. */
 static int test_entropy_count(void)
 {
@@ -893,6 +977,7 @@ int main(int argc, char *argv[])
 		{ "blocking read chunking", test_blocking_read_chunking },
 		{ "non-blocking read", test_nonblocking_read },
 		{ "overlong answer", test_nonblocking_overlong },
+		{ "prediction resistant reads", test_pr_reads },
 		{ "entropy count", test_entropy_count },
 		{ "PID request", test_get_pid },
 		{ "entropy insertion", test_write_entropy },

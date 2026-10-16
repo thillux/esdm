@@ -56,12 +56,6 @@
  */
 int esdm_init(void);
 
-/*
- * The first byte selects the prediction resistance socket when all of these
- * bits are set - see LLVMFuzzerTestOneInput() for why it is not a single one.
- */
-#define FUZZ_PR_SOCKET_MASK 0x0f
-
 /* Where the responses go, and its other end, which the harness empties */
 static int fuzz_response_fd = -1;
 static int fuzz_response_peer_fd = -1;
@@ -117,18 +111,11 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-	/* The first byte picks the socket, so an empty input has none */
-	if (!size)
-		return 0;
-
 	/*
-	 * Which of the two sockets the client reached decides which generator
-	 * answers it - the protocol cannot ask for prediction resistance, so it
-	 * is a property of the socket.
+	 * Which generator answers is a matter of the command - the ESDM's
+	 * prediction resistant reads are commands of their own.
 	 */
-	esdm_egd_fuzz_stream((data[0] & FUZZ_PR_SOCKET_MASK) ==
-				     FUZZ_PR_SOCKET_MASK,
-			     fuzz_response_fd, data + 1, size - 1);
+	esdm_egd_fuzz_stream(fuzz_response_fd, data, size);
 
 	fuzz_drain_responses();
 
@@ -140,10 +127,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
  ******************************************************************************/
 
 /*
- * One well formed command each, plus the two shapes that only a stream protocol
- * has: several commands in one read, and one command split across two.
+ * One well formed command each - the standard ones and the ESDM's prediction
+ * resistant reads - plus the two shapes that only a stream protocol has:
+ * several commands in one read, and one command split across two.
  */
-#define FUZZ_MAX_SEEDS 9
+#define FUZZ_MAX_SEEDS 12
 static struct fuzz_seed fuzz_seeds[FUZZ_MAX_SEEDS];
 static uint8_t fuzz_seed_data[FUZZ_MAX_SEEDS][64];
 static size_t fuzz_num_seeds;
@@ -165,11 +153,9 @@ static void fuzz_seed_add(const char *name, const uint8_t *cmd, size_t len)
 	if (fuzz_num_seeds >= FUZZ_MAX_SEEDS)
 		return;
 
-	seed[0] = 0; /* the ordinary socket */
-
 	fuzz_seeds[fuzz_num_seeds].name = name;
 	fuzz_seeds[fuzz_num_seeds].data = seed;
-	fuzz_seeds[fuzz_num_seeds].len = fuzz_seed_record(seed, 1, cmd, len);
+	fuzz_seeds[fuzz_num_seeds].len = fuzz_seed_record(seed, 0, cmd, len);
 	fuzz_num_seeds++;
 }
 
@@ -192,6 +178,11 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 						 6,
 						 7,
 						 8 };
+	static const uint8_t pr_read_nonblock[] = {
+		ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, 32
+	};
+	static const uint8_t pr_read_block[] = { ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
+						 32 };
 	uint8_t *seed;
 	size_t pos;
 
@@ -205,6 +196,9 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 	fuzz_seed_add("read-nonblock", read_nonblock, sizeof(read_nonblock));
 	fuzz_seed_add("read-block", read_block, sizeof(read_block));
 	fuzz_seed_add("write-entropy", write_entropy, sizeof(write_entropy));
+	fuzz_seed_add("pr-read-nonblock", pr_read_nonblock,
+		      sizeof(pr_read_nonblock));
+	fuzz_seed_add("pr-read-block", pr_read_block, sizeof(pr_read_block));
 
 	/* Several commands arriving in one read */
 	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
@@ -220,23 +214,10 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 		fuzz_seed_add("batched-commands", batch, sizeof(batch));
 	}
 
-	/* The same read on the prediction resistance socket. */
-	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
-		seed = fuzz_seed_data[fuzz_num_seeds];
-		seed[0] = FUZZ_PR_SOCKET_MASK;
-		pos = fuzz_seed_record(seed, 1, read_block, sizeof(read_block));
-
-		fuzz_seeds[fuzz_num_seeds].name = "read-block-pr";
-		fuzz_seeds[fuzz_num_seeds].data = seed;
-		fuzz_seeds[fuzz_num_seeds].len = pos;
-		fuzz_num_seeds++;
-	}
-
 	/* And one command split across two reads, which is the harder case */
 	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
 		seed = fuzz_seed_data[fuzz_num_seeds];
-		seed[0] = 0;
-		pos = fuzz_seed_record(seed, 1, write_entropy, 3);
+		pos = fuzz_seed_record(seed, 0, write_entropy, 3);
 		pos = fuzz_seed_record(seed, pos, write_entropy + 3,
 				       sizeof(write_entropy) - 3);
 

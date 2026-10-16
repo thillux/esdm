@@ -137,11 +137,6 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
 	fprintf(stderr,
-		"\t-E --egd_socket_pr <PATH>\tThe same, but serving the prediction\n");
-	fprintf(stderr,
-		"\t\t\tresistance generator - the EGD protocol cannot select it\n");
-	fprintf(stderr, "\t\t\tper request, so it gets a socket of its own\n");
-	fprintf(stderr,
 		"\t   --pkcs11_module <PATH>\tLoad the PKCS#11 provider module PATH for\n");
 	fprintf(stderr,
 		"\t\t\tthe PKCS#11 entropy source instead of the one the build\n");
@@ -373,7 +368,6 @@ static void parse_opts(int argc, char *argv[])
 			{ "keep_ipc", 0, 0, 0 },
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
-			{ "egd_socket_pr", 1, 0, 0 },
 			{ "pkcs11_module", 1, 0, 0 },
 			{ "es_ext_lib", 1, 0, 0 },
 			{ "es_ext_lib_entropy_rate", 1, 0, 0 },
@@ -384,7 +378,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "no_dtls", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
-		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
+		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
 				&opt_index);
 		if (-1 == c)
 			break;
@@ -472,45 +466,40 @@ static void parse_opts(int argc, char *argv[])
 					exit(1);
 				break;
 			case 17:
-				/* egd_socket_pr */
-				if (esdm_egd_server_enable_pr(optarg))
-					exit(1);
-				break;
-			case 18:
 				/* pkcs11_module */
 				set_pkcs11_module(optarg);
 				break;
-			case 19:
+			case 18:
 				/* es_ext_lib */
 				set_es_ext_lib(optarg);
 				break;
-			case 20:
+			case 19:
 				/* es_ext_lib_entropy_rate */
 				esdm_config_es_ext_lib_entropy_rate_set(
 					parse_entropy_rate(
 						"--es_ext_lib_entropy_rate",
 						optarg));
 				break;
-			case 21:
+			case 20:
 				/* es_ext_socket */
 				set_es_ext_socket(optarg);
 				break;
-			case 22:
+			case 21:
 				/* es_ext_socket_entropy_rate */
 				esdm_config_es_ext_socket_entropy_rate_set(
 					parse_entropy_rate(
 						"--es_ext_socket_entropy_rate",
 						optarg));
 				break;
-			case 23:
+			case 22:
 				/* es_ext_socket_uid */
 				set_es_ext_socket_uid(optarg);
 				break;
-			case 24:
+			case 23:
 				/* es_jent_kernel_name */
 				set_es_jent_kernel_name(optarg);
 				break;
-			case 25:
+			case 24:
 				/* no_dtls */
 				esdm_rpc_server_set_dtls(false);
 				break;
@@ -569,11 +558,6 @@ static void parse_opts(int argc, char *argv[])
 		case 'e':
 			/* egd_socket */
 			if (esdm_egd_server_enable(optarg))
-				exit(1);
-			break;
-		case 'E':
-			/* egd_socket_pr */
-			if (esdm_egd_server_enable_pr(optarg))
 				exit(1);
 			break;
 

@@ -34,8 +34,11 @@
  *
  * Prediction resistance
  * ---------------------
- * The EGD protocol cannot express it, so a request asking for it is refused
- * rather than silently served ordinary random data - use the RPC provider.
+ * The EGD protocol cannot express it, but the ESDM serves it with a command of
+ * its own on the same socket: a request asking for it is served by the
+ * prediction resistance DRNG. An EGD daemon other than the ESDM does not know
+ * that command and closes the connection, so such a request fails there rather
+ * than being silently served ordinary random data.
  */
 
 #define _GNU_SOURCE
@@ -57,17 +60,14 @@
 #include "visibility.h"
 
 /*
- * Built twice: once against the ordinary EGD socket, and once - with
- * ESDM_EGD_PROV_FORCE_PR - against the one serving the prediction resistance
- * generator. The protocol cannot ask for prediction resistance per request, so
- * the socket decides which generator answers; this variant therefore differs
- * from its sibling only in the socket it defaults to, and accepts requests
- * asking for prediction resistance rather than refusing them.
+ * Built twice: once serving prediction resistance where a request asks for it,
+ * and once - with ESDM_EGD_PROV_FORCE_PR - serving every request from the
+ * prediction resistance DRNG, as the RPC based provider does with
+ * ESDM_OSSL_PROV_FORCE_PR. Both talk to the same EGD socket.
  */
 #ifdef ESDM_EGD_PROV_FORCE_PR
 #define ESDM_EGD_PROV_NAME "ESDM RNG Provider (EGD, PR)"
 #define ESDM_EGD_PROV_PROPERTIES "provider=esdm-egd-pr"
-#define ESDM_EGD_PROV_DEFAULT_SOCKET ESDM_SERVER_EGD_PR_SOCKET_PATH
 #else
 #define ESDM_EGD_PROV_NAME "ESDM RNG Provider (EGD)"
 /*
@@ -76,7 +76,6 @@
  * at the same time, and a property query has to be able to name one.
  */
 #define ESDM_EGD_PROV_PROPERTIES "provider=esdm-egd"
-#define ESDM_EGD_PROV_DEFAULT_SOCKET NULL
 #endif
 
 #define ESDM_EGD_PROV_VERSION VERSION
@@ -95,7 +94,7 @@
 #define ESDM_EGD_R_INVALID_ARGUMENT 104
 #define ESDM_EGD_R_SEED_LENGTH_UNSUPPORTED 105
 #define ESDM_EGD_R_LOCK_FAILURE 106
-#define ESDM_EGD_R_PR_UNSUPPORTED 107
+/* 107 was the refusal of prediction resistance, which the ESDM serves now */
 #define ESDM_EGD_R_SOCKET_PATH_TOO_LONG 108
 
 /*
@@ -118,7 +117,7 @@ struct esdm_egd_rand_ctx {
 	CRYPTO_RWLOCK *lock;
 };
 
-/* Is this the variant bound to the prediction resistance socket? */
+/* Is this the variant serving every request with prediction resistance? */
 static inline bool esdm_egd_prov_is_pr(void)
 {
 #ifdef ESDM_EGD_PROV_FORCE_PR
@@ -208,23 +207,29 @@ static void esdm_egd_rand_freectx(void *ctx)
 	OPENSSL_secure_clear_free(rand, sizeof(struct esdm_egd_rand_ctx));
 }
 
-static int esdm_egd_rand_instantiate(void *ctx, unsigned int strength __unused,
-				     int prediction_resistance,
+static int esdm_egd_rand_instantiate(void *ctx __unused,
+				     unsigned int strength __unused,
+				     int prediction_resistance __unused,
 				     const unsigned char *pstr __unused,
 				     size_t pstr_len __unused,
 				     const OSSL_PARAM params[] __unused)
 {
-	struct esdm_egd_rand_ctx *rand = ctx;
-
-	if (prediction_resistance && !esdm_egd_prov_is_pr()) {
-		ESDM_PROV_ERR(
-			rand ? rand->prov->core : NULL,
-			ESDM_EGD_R_PR_UNSUPPORTED,
-			"the EGD protocol cannot request prediction resistance - use the prediction resistant EGD socket or the RPC based ESDM provider");
-		return 0;
-	}
-
 	return 1;
+}
+
+/*
+ * Fill @out from the prediction resistance DRNG when @prediction_resistance
+ * asks for it or this variant serves everything with it, otherwise from the
+ * fully seeded DRNG.
+ */
+static int esdm_egd_rand_get(struct esdm_egd_provider_ctx *prov,
+			     unsigned char *out, size_t outlen,
+			     int prediction_resistance)
+{
+	if (prediction_resistance || esdm_egd_prov_is_pr())
+		return esdm_egd_client_get_random_pr(prov->client, out, outlen);
+
+	return esdm_egd_client_get_random(prov->client, out, outlen);
 }
 
 static int esdm_egd_rand_uninstantiate(void *ctx __unused)
@@ -253,14 +258,7 @@ static int esdm_egd_rand_generate(void *ctx, unsigned char *out, size_t outlen,
 		return 0;
 	}
 
-	if (prediction_resistance && !esdm_egd_prov_is_pr()) {
-		ESDM_PROV_ERR(
-			prov->core, ESDM_EGD_R_PR_UNSUPPORTED,
-			"the EGD protocol cannot request prediction resistance - use the prediction resistant EGD socket or the RPC based ESDM provider");
-		return 0;
-	}
-
-	ret = esdm_egd_client_get_random(prov->client, out, outlen);
+	ret = esdm_egd_rand_get(prov, out, outlen, prediction_resistance);
 	if (ret) {
 		esdm_egd_transfer_error(prov, ret, outlen,
 					"bytes of random data");
@@ -298,7 +296,7 @@ static size_t esdm_egd_rand_nonce(void *ctx, unsigned char *out,
 	if (out == NULL)
 		return min_noncelen;
 
-	ret = esdm_egd_client_get_random(prov->client, out, min_noncelen);
+	ret = esdm_egd_rand_get(prov, out, min_noncelen, 0);
 	if (ret) {
 		esdm_egd_transfer_error(prov, ret, min_noncelen,
 					"bytes of nonce data");
@@ -324,13 +322,6 @@ static size_t esdm_egd_rand_get_seed(void *ctx, unsigned char **buffer,
 	if (rand == NULL)
 		return 0;
 	prov = rand->prov;
-
-	if (prediction_resistance && !esdm_egd_prov_is_pr()) {
-		ESDM_PROV_ERR(
-			prov->core, ESDM_EGD_R_PR_UNSUPPORTED,
-			"the EGD protocol cannot request prediction resistance - use the prediction resistant EGD socket or the RPC based ESDM provider");
-		return 0;
-	}
 
 	if (entropy_bits <= 0) {
 		ESDM_PROV_ERR(prov->core, ESDM_EGD_R_INVALID_ARGUMENT,
@@ -365,7 +356,7 @@ static size_t esdm_egd_rand_get_seed(void *ctx, unsigned char **buffer,
 		return 0;
 	}
 
-	ret = esdm_egd_client_get_random(prov->client, *buffer, buf_len);
+	ret = esdm_egd_rand_get(prov, *buffer, buf_len, prediction_resistance);
 	if (ret) {
 		esdm_egd_transfer_error(prov, ret, buf_len,
 					"bytes of seed material");
@@ -589,8 +580,7 @@ static const OSSL_ITEM *esdm_egd_get_reason_strings(void *provctx __unused)
 		{ ESDM_EGD_R_SEED_LENGTH_UNSUPPORTED,
 		  "requested seed length cannot be satisfied" },
 		{ ESDM_EGD_R_LOCK_FAILURE, "lock creation failed" },
-		{ ESDM_EGD_R_PR_UNSUPPORTED,
-		  "the EGD protocol cannot express prediction resistance" },
+
 		{ ESDM_EGD_R_SOCKET_PATH_TOO_LONG,
 		  "the configured EGD socket path does not fit into a Unix domain socket address" },
 		{ 0, NULL }
@@ -681,19 +671,16 @@ DSO_PUBLIC int OSSL_provider_init(const OSSL_CORE_HANDLE *handle,
 
 	/*
 	 * The socket named in this provider's openssl.cnf section wins; with
-	 * none configured the PR variant takes the path of its socket, and the
-	 * other one leaves it to the client library, which falls back to the
-	 * environment - naming the ordinary socket, hence not for the PR
-	 * variant - and then to the esdm-server-egd.socket path. This also
-	 * establishes the one connection used for the provider's lifetime.
-	 * An ESDM that is not up yet is not fatal - the client retries, and
-	 * refusing to load would take the whole OpenSSL configuration down. Use
-	 * the provider self test where that should be a hard failure.
+	 * none configured it is left to the client library, which falls back
+	 * to the environment and then to the esdm-server-egd.socket path. This
+	 * also establishes the one connection used for the provider's
+	 * lifetime. An ESDM that is not up yet is not fatal - the client
+	 * retries, and refusing to load would take the whole OpenSSL
+	 * configuration down. Use the provider self test where that should be
+	 * a hard failure.
 	 */
 	socket_path = esdm_prov_get_conf_param(handle,
 					       ESDM_EGD_SOCKET_CONF_KEY);
-	if (socket_path == NULL || *socket_path == '\0')
-		socket_path = ESDM_EGD_PROV_DEFAULT_SOCKET;
 
 	ret = esdm_egd_client_alloc(&cprov->client, socket_path, 0);
 	if (ret == -ENAMETOOLONG) {

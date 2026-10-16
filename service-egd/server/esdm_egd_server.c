@@ -73,11 +73,11 @@
 #define ESDM_EGD_READ_BUDGET (4 * ESDM_EGD_BUFSIZE)
 
 /*
- * Prediction resistant generations per connection and round. One costs several
- * reseeds - tens of milliseconds - for a two byte request, so the read budget
- * alone would let one client pipeline seconds of work into a single round and
- * hold up everybody else on the worker. The ordinary generator is cheap enough
- * for the read budget to bound it.
+ * Prediction resistant generations per connection and round, see the PR read
+ * commands. One costs several reseeds - tens of milliseconds - for a two byte
+ * request, so the read budget alone would let one client pipeline seconds of
+ * work into a single round and hold up everybody else on the worker. The
+ * ordinary generator is cheap enough for the read budget to bound it.
  *
  * This shares a round among the connections, but does not bound it: a client
  * with a request on each of a few hundred connections would still have the
@@ -89,7 +89,7 @@
  * Time a worker may spend per round of its event loop generating prediction
  * resistant bytes, over all of its connections - the same bound as
  * ESDM_RPCS_ROUND_BUDGET_NS of the RPC server, for the same reason: a worker
- * serves every client it accepted, on both sockets, and none of them is served
+ * serves every client it accepted, and none of them is served
  * while it generates. Beyond it, a command is left for the next round - a
  * deferred request stays deferred, a new one waits in the input buffer - which
  * follows at once, after the events of the other clients were collected and
@@ -222,7 +222,7 @@
 struct esdm_egd_conn {
 	int fd;
 
-	/* Listener this connection arrived on - it selects the generator. */
+	/* Listener this connection arrived on */
 	const struct esdm_egd_listener *listener;
 
 	/* Credentials of the peer, obtained once when the client connected. */
@@ -276,6 +276,9 @@ struct esdm_egd_conn {
 	 */
 	uint8_t deferred;
 
+	/* The deferred request asks for prediction resistant bytes */
+	bool deferred_pr;
+
 	/*
 	 * Bytes of the deferred answer collected so far, see
 	 * esdm_egd_cmd_read_block().
@@ -309,10 +312,9 @@ struct esdm_egd_conn {
 TAILQ_HEAD(esdm_egd_conn_list, esdm_egd_conn);
 
 /*
- * One served socket. The interface exists twice, once for the ordinary fully
- * seeded generator and once for the prediction resistance one: the EGD protocol
- * has no notion of prediction resistance, so which generator answers is a
- * property of the socket a client connects to, not of its request.
+ * The served socket. It is kept in a table of listeners, which the event loop
+ * tells apart from the connections by their address. Which generator answers
+ * is a matter of the command, see the PR read commands.
  */
 struct esdm_egd_listener {
 	/* Name under which systemd hands this socket over. */
@@ -333,26 +335,16 @@ struct esdm_egd_listener {
 	 * systemd's business then, and its path is unknown here.
 	 */
 	bool systemd_socket;
-
-	/* Serve from esdm_get_random_bytes_pr() rather than _full()? */
-	bool prediction_resistance;
 };
 
 static struct esdm_egd_listener esdm_egd_listeners[] = {
 	{
 		.systemd_name = "ESDM_EGD_SOCKET",
 		.listening_fd = -1,
-		.prediction_resistance = false,
-	},
-	{
-		.systemd_name = "ESDM_EGD_PR_SOCKET",
-		.listening_fd = -1,
-		.prediction_resistance = true,
 	},
 };
 
 #define ESDM_EGD_LISTENER_REGULAR (&esdm_egd_listeners[0])
-#define ESDM_EGD_LISTENER_PR (&esdm_egd_listeners[1])
 
 #define for_each_esdm_egd_listener(listener)                                   \
 	for (listener = &esdm_egd_listeners[0];                                \
@@ -433,11 +425,6 @@ static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
 int esdm_egd_server_enable(const char *socket_path)
 {
 	return esdm_egd_listener_enable(ESDM_EGD_LISTENER_REGULAR, socket_path);
-}
-
-int esdm_egd_server_enable_pr(const char *socket_path)
-{
-	return esdm_egd_listener_enable(ESDM_EGD_LISTENER_PR, socket_path);
 }
 
 void esdm_egd_server_set_pid(pid_t pid)
@@ -586,11 +573,11 @@ static int esdm_egd_listener_socket_init(struct esdm_egd_listener *listener)
 	}
 
 	/*
-	 * EGD clients are ordinary applications, so both sockets - the
-	 * prediction resistant one as well - are available to everybody: like
-	 * the unprivileged RPC socket, and everything reachable through them is
-	 * equally unprivileged (data from unprivileged callers is inserted
-	 * without entropy credit, see esdm_egd_cmd_write_entropy()). The mode
+	 * EGD clients are ordinary applications, so the socket is available
+	 * to everybody, like the unprivileged RPC socket, and everything
+	 * reachable through it is equally unprivileged (data from unprivileged
+	 * callers is inserted without entropy credit, see
+	 * esdm_egd_cmd_write_entropy()). The mode
 	 * is the file's from its creation on, as this runs as root and a
 	 * chmod(2) of the path afterwards would follow whatever was swapped in
 	 * for the socket meanwhile, see esdm_server_bind_unix(). A socket
@@ -695,6 +682,7 @@ static void esdm_egd_peer_gone(struct esdm_egd_conn *conn)
 	esdm_egd_out_clear(conn);
 
 	conn->deferred = 0;
+	conn->deferred_pr = false;
 	memset_secure(conn->answer, 0, sizeof(conn->answer));
 	conn->answer_len = 0;
 }
@@ -791,12 +779,13 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
 }
 
 /*
- * Fill @buf with data from the generator this connection's socket selects.
+ * Fill @buf with data from the fully seeded generator, or with @pr from the
+ * prediction resistance one.
  *
  * Exactly one non-blocking generation is attempted. A request it does not cover
  * goes back to the event loop as a deferred request (see
  * esdm_egd_cmd_read_block()) rather than being retried here, which would tie the
- * worker - it serves every client it accepted on both sockets - to a single
+ * worker - it serves every client it accepted - to a single
  * request for as long as the entropy sources need.
  *
  * @generated reports how much was produced, which matters for the prediction
@@ -808,10 +797,9 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
  *	   caller decides whether to answer short or to come back for more),
  *	   < 0 on all other errors
  */
-static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
-			       size_t len, size_t *generated)
+static int esdm_egd_get_random(struct esdm_egd_conn *conn, bool pr,
+			       uint8_t *buf, size_t len, size_t *generated)
 {
-	bool pr = conn->listener->prediction_resistance;
 	ssize_t ret;
 
 	*generated = 0;
@@ -864,13 +852,14 @@ static int esdm_egd_cmd_entropy_count(struct esdm_egd_conn *conn)
 
 /*
  * Command 0x01: deliver up to the requested number of bytes without blocking.
+ * Command 0xe0 does the same from the prediction resistance generator (@pr).
  *
  * The response is prefixed with the number of delivered bytes, which allows
  * answering with zero bytes while the ESDM is not operational yet. Clients
  * treat that as "no entropy available right now" and fall back to the blocking
  * request.
  */
-static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
+static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn, bool pr,
 				      uint8_t requested)
 {
 	uint8_t resp[1 + ESDM_EGD_MAX_TRANSFER];
@@ -881,7 +870,7 @@ static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
 	if (requested) {
 		size_t generated = 0;
 
-		ret = esdm_egd_get_random(conn, resp + 1, requested,
+		ret = esdm_egd_get_random(conn, pr, resp + 1, requested,
 					  &generated);
 		if (ret == -EAGAIN) {
 			/* A short answer is what this command is for. */
@@ -903,12 +892,13 @@ static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
 
 /*
  * Command 0x02: deliver exactly the requested number of bytes, waiting for the
- * ESDM to become operational if needed.
+ * ESDM to become operational if needed. Command 0xe1 does the same from the
+ * prediction resistance generator (@pr), waiting for its entropy as well.
  *
  * @return 0 when the request was served, -EAGAIN when it has to be retried
  *	   later, < 0 on all other errors
  */
-static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn,
+static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn, bool pr,
 				   uint8_t requested)
 {
 	size_t generated = 0;
@@ -920,11 +910,11 @@ static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn,
 	/*
 	 * Collect into the connection rather than into a local buffer: a
 	 * request is assembled over as many rounds of the event loop as the
-	 * available entropy needs - most visibly on the prediction resistance
-	 * socket, whose generator hands out no more than its entropy sources
-	 * just delivered - and what came out so far must survive them.
+	 * available entropy needs - most visibly for the prediction resistance
+	 * generator, which hands out no more than its entropy sources just
+	 * delivered - and what came out so far must survive them.
 	 */
-	ret = esdm_egd_get_random(conn, conn->answer + conn->answer_len,
+	ret = esdm_egd_get_random(conn, pr, conn->answer + conn->answer_len,
 				  requested - conn->answer_len, &generated);
 	conn->answer_len += (uint8_t)generated;
 
@@ -1008,12 +998,13 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 }
 
 /*
- * May the connection generate once more in this round? Within its own budget,
+ * May the connection generate once more in this round? Only prediction
+ * resistant generations (@pr) are bounded: within the connection's own budget,
  * ESDM_EGD_PR_BUDGET, and within that of the worker, ESDM_EGD_ROUND_BUDGET_NS.
  */
-static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn)
+static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn, bool pr)
 {
-	if (!conn->listener->prediction_resistance)
+	if (!pr)
 		return true;
 
 	if (!conn->pr_budget)
@@ -1064,14 +1055,15 @@ static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 		return 0;
 
 	/* Still deferred - the next round continues it. */
-	if (!esdm_egd_may_generate(conn))
+	if (!esdm_egd_may_generate(conn, conn->deferred_pr))
 		return -EAGAIN;
 
-	ret = esdm_egd_cmd_read_block(conn, conn->deferred);
+	ret = esdm_egd_cmd_read_block(conn, conn->deferred_pr, conn->deferred);
 	if (ret)
 		return ret;
 
 	conn->deferred = 0;
+	conn->deferred_pr = false;
 
 	return 0;
 }
@@ -1159,6 +1151,7 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 
 	while (conn->in_len) {
 		size_t cmd_len;
+		bool pr;
 
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
@@ -1167,6 +1160,8 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
 		case ESDM_EGD_CMD_READ_BLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
 			cmd_len = 2;
 			break;
 		case ESDM_EGD_CMD_WRITE_ENTROPY:
@@ -1202,9 +1197,9 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		}
 
 		/* Left for the next round, see ESDM_EGD_PR_BUDGET. */
-		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
-		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK) &&
-		    conn->in[1] && !esdm_egd_may_generate(conn)) {
+		pr = (conn->in[0] == ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK ||
+		      conn->in[0] == ESDM_EGD_CMD_ESDM_PR_READ_BLOCK);
+		if (pr && conn->in[1] && !esdm_egd_may_generate(conn, pr)) {
 			conn->yielded = true;
 			return 0;
 		}
@@ -1217,10 +1212,12 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			ret = esdm_egd_cmd_get_pid(conn);
 			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
-			ret = esdm_egd_cmd_read_nonblock(conn, conn->in[1]);
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
+			ret = esdm_egd_cmd_read_nonblock(conn, pr, conn->in[1]);
 			break;
 		case ESDM_EGD_CMD_READ_BLOCK:
-			ret = esdm_egd_cmd_read_block(conn, conn->in[1]);
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
+			ret = esdm_egd_cmd_read_block(conn, pr, conn->in[1]);
 			if (ret == -EAGAIN) {
 				/*
 				 * Remember the request and answer it once the
@@ -1228,6 +1225,7 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 				 * consumed here so it is not processed twice.
 				 */
 				conn->deferred = conn->in[1];
+				conn->deferred_pr = pr;
 				esdm_egd_consume(conn, cmd_len);
 				return 0;
 			}
@@ -1269,8 +1267,7 @@ consume:
 
 #ifdef ESDM_FUZZING
 /* Documented with its declaration in esdm_egd_server.h */
-int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
-			 const uint8_t *data, size_t len)
+int esdm_egd_fuzz_stream(int out_fd, const uint8_t *data, size_t len)
 {
 	struct esdm_egd_conn conn;
 	size_t pos = 0;
@@ -1281,8 +1278,7 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 
 	memset(&conn, 0, sizeof(conn));
 	conn.fd = out_fd;
-	conn.listener = prediction_resistance ? ESDM_EGD_LISTENER_PR :
-						ESDM_EGD_LISTENER_REGULAR;
+	conn.listener = ESDM_EGD_LISTENER_REGULAR;
 	/*
 	 * Who the client is decides whether its entropy claim is believed, so
 	 * it is the credentials of this process - the same answer the accept
@@ -1676,8 +1672,7 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_SERVER,
-		"EGD server: new %sconnection on FD %d from UID %u (user %u)\n",
-		listener->prediction_resistance ? "prediction resistant " : "",
+		"EGD server: new connection on FD %d from UID %u (user %u)\n",
 		fd, conn->peer_uid, conn->peer_account);
 
 	return conn;
@@ -1749,8 +1744,8 @@ static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
 }
 
 /*
- * Thread main of one worker serving the EGD sockets. The workers share both
- * listeners, and each serves the clients it accepted.
+ * Thread main of one worker serving the EGD socket. The workers share the
+ * listener, and each serves the clients it accepted.
  */
 static int esdm_egd_handler(void *args)
 {
@@ -1800,7 +1795,7 @@ static int esdm_egd_handler(void *args)
 	}
 
 	/*
-	 * Both sockets are served by every worker: a listener is identified
+	 * The socket is served by every worker: a listener is identified
 	 * by its own pointer in the epoll data, a connection by the pointer to
 	 * its own structure, and the two can never collide.
 	 */
@@ -1826,10 +1821,7 @@ static int esdm_egd_handler(void *args)
 		 * handed over by systemd carries its path in the .socket unit.
 		 */
 		esdm_logger(LOGGER_STATUS, LOGGER_C_SERVER,
-			    "EGD server: serving %s%s\n",
-			    listener->prediction_resistance ?
-				    "with prediction resistance on " :
-				    "",
+			    "EGD server: serving %s\n",
 			    listener->systemd_socket ?
 				    "the socket provided by systemd" :
 				    listener->socket_path);
@@ -2183,7 +2175,7 @@ int esdm_egd_server_start(void)
 	/*
 	 * The interface is active exactly when esdm_egd_server_socket_init()
 	 * obtained a listening socket - either from systemd or by binding the
-	 * path requested on the command line. Every worker serves both of them.
+	 * path requested on the command line. Every worker serves it.
 	 */
 	if (!esdm_egd_server_active())
 		return 0;
@@ -2213,7 +2205,7 @@ int esdm_egd_server_start(void)
 				t);
 
 			/*
-			 * The workers started so far serve both sockets
+			 * The workers started so far serve the socket
 			 * already - carry on with them, and fail only if there
 			 * is none at all.
 			 */

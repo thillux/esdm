@@ -98,6 +98,14 @@ unsigned int egd_peer_connections(struct egd_peer *peer);
 unsigned int egd_peer_requests(struct egd_peer *peer);
 
 /**
+ * @brief Number of the ESDM's prediction resistant read commands among them
+ *
+ * The peer answers them as it answers the standard reads, from the same
+ * counter sequence.
+ */
+unsigned int egd_peer_pr_requests(struct egd_peer *peer);
+
+/**
  * @brief The data of the last write entropy command received
  *
  * @param [out] buf Buffer for the data, at most @buflen bytes are copied

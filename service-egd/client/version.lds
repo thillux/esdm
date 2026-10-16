@@ -23,6 +23,9 @@ LIBESDM_EGD_CLIENT_1.0 {
 		esdm_egd_client_socket_path;
 		esdm_egd_client_get_random;
 		esdm_egd_client_get_random_nonblock;
+		esdm_egd_client_get_random_pr;
+		esdm_egd_client_get_random_pr_nonblock;
+
 		esdm_egd_client_entropy_count;
 		esdm_egd_client_write_entropy;
 		esdm_egd_client_get_pid;

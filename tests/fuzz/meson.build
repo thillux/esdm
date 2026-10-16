@@ -194,8 +194,9 @@ if get_option('openssl-rand-provider').enabled()
 			'timeout': 300,
 		},
 		# libesdm-egd-provider: the EGD socket instead of the RPC
-		# interface, and a peer whose answers the fuzzer writes. This
-		# one has to refuse a request asking for prediction resistance.
+		# interface, and a peer whose answers the fuzzer writes. A
+		# request asking for prediction resistance is served with the
+		# ESDM's prediction resistant read command.
 		{
 			'name': 'ossl_egd_prov',
 			'sources': openssl_prov_egd_src,
@@ -204,9 +205,9 @@ if get_option('openssl-rand-provider').enabled()
 			'link': [ esdm_common_static_lib ],
 			'c_args': [ '-DESDM_FUZZ_PROV_EGD=1' ],
 		},
-		# libesdm-egd-provider-pr: bound to the socket of the
-		# prediction resistance generator, so it accepts what its
-		# sibling refuses.
+		# libesdm-egd-provider-pr: every request served with the
+		# prediction resistant read command, whatever the caller asked
+		# for.
 		{
 			'name': 'ossl_egd_prov_pr',
 			'sources': openssl_prov_egd_src,

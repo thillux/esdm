@@ -104,6 +104,16 @@ static void test_unknown_option(void)
 {
 	const char *const unknown[] = { "--no-such-option", NULL };
 	const char *const unknown_short[] = { "-Z", NULL };
+	/*
+	 * The second EGD socket for prediction resistance is gone - the ESDM
+	 * serves that with a command on the one socket. A setup still asking
+	 * for it has to learn so rather than run without what it asked for.
+	 */
+	const char *const egd_pr[] = { "--egd_socket_pr",
+				       "/nonexistent/esdm-egd-pr.socket", NULL };
+	const char *const egd_pr_short[] = {
+		"-E", "/nonexistent/esdm-egd-pr.socket", NULL
+	};
 	struct test_run r;
 
 	/*
@@ -120,6 +130,15 @@ static void test_unknown_option(void)
 	CHECK(strstr(r.err, "Usage") != NULL,
 	      "an unknown short option was rejected without the usage (output: %.200s)",
 	      r.err);
+
+	CHECK_EQ(test_run(&r, egd_pr, NULL), 1);
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "--egd_socket_pr was not rejected with the usage (output: %.200s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, egd_pr_short, NULL), 1);
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "-E was not rejected with the usage (output: %.200s)", r.err);
 }
 
 /*
@@ -143,12 +162,9 @@ static void test_options_accepted(void)
 						  NULL };
 	static const char *const sockets[] = { "-e",
 					       "/nonexistent/esdm-egd.socket",
-					       "-E",
-					       "/nonexistent/esdm-egd-pr.socket",
 					       NULL };
 	static const char *const sockets_long[] = {
-		"--egd_socket", "/nonexistent/esdm-egd.socket",
-		"--egd_socket_pr", "/nonexistent/esdm-egd-pr.socket", NULL
+		"--egd_socket", "/nonexistent/esdm-egd.socket", NULL
 	};
 	struct test_run r;
 
@@ -171,8 +187,8 @@ static void test_options_accepted(void)
 	      "the short options were not all accepted (output: %.300s)", r.err);
 
 	/*
-	 * The EGD sockets are only recorded here - they are bound once the
-	 * daemon is up, so a path that cannot exist is accepted at this point.
+	 * The EGD socket is only recorded here - it is bound once the daemon
+	 * is up, so a path that cannot exist is accepted at this point.
 	 */
 	CHECK_EQ(test_run(&r, sockets, NULL), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,

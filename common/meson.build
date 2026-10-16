@@ -355,7 +355,6 @@ conf_data.set_quoted('ESDM_SERVER_RPC_BASE_PATH_PRIVILEGED', get_option('esdm-se
 # unit places it, and therefore where an EGD client looks for it unless it is
 # told otherwise.
 conf_data.set_quoted('ESDM_SERVER_EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
-conf_data.set_quoted('ESDM_SERVER_EGD_PR_SOCKET_PATH', get_option('esdm-server-egd-pr-socket-path'))
 
 conf_data.set('ESDM_RPC_IDLE_TIMEOUT_USEC', get_option('esdm-server-rpc-idle-timeout-usec'))
 

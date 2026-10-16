@@ -1055,15 +1055,6 @@ option('esdm-server-egd-socket-path', type: 'string', value: '/run/esdm-egd.sock
        option merely defines where the socket unit places it.
        ''')
 
-option('esdm-server-egd-pr-socket-path', type: 'string', value: '/run/esdm-egd-pr.socket',
-       description: '''Path of the optional prediction resistance EGD socket
-
-       Counterpart of esdm-server-egd-socket-path serving the prediction
-       resistance generator. The EGD protocol cannot ask for prediction
-       resistance per request, so it is a property of the socket: everything
-       arriving here is answered from esdm_get_random_bytes_pr().
-       ''')
-
 option('esdm-server-rpc-path-privileged', type: 'string', value: '/run',
        description: '''Sets the base path of ESDM's RPC sockets (default: /run)
 

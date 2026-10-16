@@ -44,7 +44,7 @@ it.
 | `ossl_rng_prov_pr_fuzz` | the same, against the prediction resistance build | slowest - each request collects fresh entropy |
 | `ossl_seed_src_prov_fuzz` | the same, against the SEED-SRC only build | slow |
 | `ossl_egd_prov_fuzz` | a script of provider calls, then the answers an impostor server gives them | slow - every call is a round trip over a socket |
-| `ossl_egd_prov_pr_fuzz` | the same, against the prediction resistance build | slow |
+| `ossl_egd_prov_pr_fuzz` | the same, against the build serving everything with prediction resistance | slow |
 
 `egd_client_fuzz` is the same socket seen from the other side. The harness is
 the server: it answers the client's calls with the bytes of the input rather
@@ -69,12 +69,13 @@ later is what the state machine has to survive.
 A provider is a library loaded into a process that is not ours, and the ESDM
 ships five of them: two speaking the RPC protocol (all four RAND algorithms,
 and the variant routing every request to the prediction resistance generator),
-one offering SEED-SRC alone, and two speaking the EGD protocol (the ordinary
-socket and the prediction resistance one). Each gets a harness, because what
-differs between them is exactly what the harness looks at: the interface they
-reach the ESDM through, whether prediction resistance is a per-request flag or
-a property of the socket, and the table of algorithms the operation query hands
-back.
+one offering SEED-SRC alone, and two speaking the EGD protocol (honoring the
+prediction resistance flag per request with the ESDM's prediction resistant
+read command, and the variant serving every request with it). Each gets a
+harness, because what differs between them is exactly what the harness looks
+at: the interface they reach the ESDM through, whether prediction resistance
+is a per-request flag or forced, and the table of algorithms the operation
+query hands back.
 
 The provider is loaded the way libcrypto loads it - `OSSL_PROVIDER_add_builtin()`
 and `OSSL_PROVIDER_load()`, so `OSSL_provider_init()` runs with the real core
@@ -282,10 +283,8 @@ promised:
   returned length is what a seed consumer sizes its pool by, so the harness
   reads the whole of it and lets the sanitizer decide; a failed `get_seed()`
   leaving the caller's pointer `NULL` rather than a buffer it would go on to
-  free; and the EGD provider bound to the ordinary socket refusing every
-  request asking for prediction resistance, rather than serving data that does
-  not have the property that was asked for. Holding `enable_locking()` to being
-  callable twice is how the leaked lock was found.
+  free. Holding `enable_locking()` to being callable twice is how the leaked
+  lock was found.
 
 ## In the test suite
 

@@ -54,6 +54,7 @@ struct egd_peer {
 	pthread_mutex_t lock;
 	unsigned int connections;
 	unsigned int requests;
+	unsigned int pr_requests;
 	unsigned int nconn;
 	int conn_fds[EGD_PEER_MAX_CONN];
 	pthread_t conn_threads[EGD_PEER_MAX_CONN];
@@ -303,14 +304,24 @@ static void *peer_conn_thread(void *arg)
 		peer->requests++;
 		pthread_mutex_unlock(&peer->lock);
 
+		/* The ESDM's prediction resistant reads, answered alike */
+		if (cmd == ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK ||
+		    cmd == ESDM_EGD_CMD_ESDM_PR_READ_BLOCK) {
+			pthread_mutex_lock(&peer->lock);
+			peer->pr_requests++;
+			pthread_mutex_unlock(&peer->lock);
+		}
+
 		switch (cmd) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = peer_cmd_entropy_count(conn);
 			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
 			ret = peer_cmd_read_nonblock(conn);
 			break;
 		case ESDM_EGD_CMD_READ_BLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
 			ret = peer_cmd_read_block(conn);
 			break;
 		case ESDM_EGD_CMD_WRITE_ENTROPY:
@@ -526,6 +537,17 @@ unsigned int egd_peer_requests(struct egd_peer *peer)
 	pthread_mutex_unlock(&peer->lock);
 
 	return requests;
+}
+
+unsigned int egd_peer_pr_requests(struct egd_peer *peer)
+{
+	unsigned int ret;
+
+	pthread_mutex_lock(&peer->lock);
+	ret = peer->pr_requests;
+	pthread_mutex_unlock(&peer->lock);
+
+	return ret;
 }
 
 unsigned int egd_peer_last_write(struct egd_peer *peer, uint8_t *buf,

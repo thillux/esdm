@@ -150,6 +150,7 @@ static void server_stop(void)
 	nanosleep(&wait, NULL);
 }
 
+
 int main(int argc, char *argv[])
 {
 	struct esdm_egd_client *client = NULL;
@@ -269,6 +270,21 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
+
+	printf("EGD server: prediction resistant reads\n");
+	memset(buf, 0, sizeof(buf));
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) == 0,
+	      "the prediction resistant blocking read failed");
+	CHECK(memcmp(buf, zero, sizeof(buf)) != 0,
+	      "the prediction resistant read delivered nothing but zeroes");
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, buf, ESDM_EGD_MAX_TRANSFER, &generated) == 0,
+	      "the prediction resistant non-blocking read failed");
+	CHECK(generated <= ESDM_EGD_MAX_TRANSFER,
+	      "%zu prediction resistant bytes delivered, at most %u were asked for",
+	      generated, ESDM_EGD_MAX_TRANSFER);
+	printf("  %zu of %u prediction resistant bytes delivered right away\n",
+	       generated, ESDM_EGD_MAX_TRANSFER);
 
 	/*
 	 * The daemon goes away underneath the client: the request must come

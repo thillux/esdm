@@ -258,6 +258,19 @@ Point the consumers at the socket, e.g. for libgcrypt at build time with
 `--with-egd-socket=/run/esdm-egd.socket` or at runtime with
 `gcry_control(GCRYCTL_SET_RNDEGD_SOCKET, "/run/esdm-egd.socket")`.
 
+### ESDM extensions of the protocol
+
+What the EGD protocol cannot express, the socket offers with commands of the
+ESDM's own. Their codes lie far from the five standard ones, so no EGD client
+sends one by accident, and an EGD daemon that does not know them closes the
+connection as it does for any unknown command. Numbers are big endian, like
+those of EGD; `service-egd/esdm_egd_protocol.h` holds the wire format.
+
+| Command | Request | Answer |
+|---------|---------|--------|
+| `0xe0` PR read non-blocking | length byte | like `0x01`, from the prediction resistance DRNG |
+| `0xe1` PR read blocking | length byte | like `0x02`, from the prediction resistance DRNG |
+
 ### Own consumers of the EGD interface
 
 Two components of the ESDM use the interface themselves, and both are useful
@@ -272,8 +285,8 @@ one socket, for instance:
 * `libesdm-egd-provider.so` is an OpenSSL 3 RAND provider built on it. Unlike
   `libesdm-rng-provider.so` it needs no RPC client, and it tags its algorithms
   with `provider=esdm-egd` so both can be loaded side by side. Its counterpart
-  `libesdm-egd-provider-pr.so` is served by the prediction resistance socket
-  described below and tags its algorithms `provider=esdm-egd-pr`:
+  `libesdm-egd-provider-pr.so` serves every request with prediction resistance,
+  as described below, and tags its algorithms `provider=esdm-egd-pr`:
 
 ```
    [provider_sect]
@@ -292,31 +305,25 @@ one socket, for instance:
 ```
 
   Without the `egd_socket` key the socket is taken from the `ESDM_EGD_SOCKET`
-  environment variable and, failing that, from the path the respective provider
-  was built with. The variable names the ordinary socket, so the `-pr` provider
-  skips it.
+  environment variable and, failing that, from the path the provider was built
+  with. Both providers use the same socket.
 
 ### Prediction resistance
 
 The EGD protocol has no notion of prediction resistance and therefore no way to
-ask for it per request. It is a property of the socket instead: a second socket
-answers every request from `esdm_get_random_bytes_pr()` rather than from
-`esdm_get_random_bytes_full()`. Enable it with
+ask for it. The ESDM serves it on the same socket with read commands of its
+own, answered from `esdm_get_random_bytes_pr()` rather than from
+`esdm_get_random_bytes_full()` (see "ESDM extensions of the protocol" below and
+`esdm_egd_client_get_random_pr()`). An EGD daemon other than the ESDM does not
+know them and closes the connection, so a request for prediction resistance
+fails there rather than being served ordinary random data.
 
-```
-   systemctl enable --now esdm-server-egd-pr.socket
-```
-
-or with `esdm-server --egd_socket_pr <path>`; its path is set at build time with
-`-Desdm-server-egd-pr-socket-path=`. The two sockets are independent and either
-can be enabled on its own.
-
-Consequently the ordinary provider refuses a request that explicitly asks for
-prediction resistance, rather than quietly serving it ordinary random data,
-while `libesdm-egd-provider-pr.so` - which talks to the prediction resistance
-socket - accepts it. Note that this generator hands out no more than the
-entropy sources just produced, so answers take as long as collecting that
-entropy does.
+`libesdm-egd-provider.so` serves a request that asks for prediction resistance
+with that command, and `libesdm-egd-provider-pr.so` serves every request with
+it. Note that this generator hands out no more than the entropy sources just
+produced, so answers take as long as collecting that entropy does; the server
+generates such answers within a budget per connection and round of its event
+loop, so that they cannot hold up the other clients.
 
 ### Sandboxed consumers
 

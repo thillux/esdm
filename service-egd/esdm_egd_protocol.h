@@ -56,6 +56,32 @@
 #define ESDM_EGD_CMD_WRITE_ENTROPY 0x03
 #define ESDM_EGD_CMD_GET_PID 0x04
 
+/*
+ * ESDM extensions
+ *
+ * What the EGD protocol cannot express is offered by commands of the ESDM's
+ * own, far away from the standard commands above so that no EGD client ever
+ * sends one by accident. A peer that does not know them - another EGD, or an
+ * ESDM from before they were added - treats one as any unknown command and
+ * closes the connection, which a client takes for "not supported".
+ *
+ * They are framed in the spirit of EGD: a command byte, fixed size arguments,
+ * and an answer whose size is known from the request or announced by a length
+ * prefix. All numbers are big endian, like those of EGD.
+ *
+ * 0xe0 PR read non-blocking	-> request byte follows; answered as 0x01, but
+ *				   from the prediction resistance DRNG
+ * 0xe1 PR read blocking	-> request byte follows; answered as 0x02, but
+ *				   from the prediction resistance DRNG
+ *
+ * Prediction resistant bytes cost reseeds, so a server worker generates them
+ * within a budget per connection and round of its event loop. A PR read that
+ * exceeds it is answered in a later round, which a client sees as latency.
+ */
+
+#define ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK 0xe0
+#define ESDM_EGD_CMD_ESDM_PR_READ_BLOCK 0xe1
+
 /* The protocol's length byte caps every transfer at 255 bytes. */
 #define ESDM_EGD_MAX_TRANSFER 255
 

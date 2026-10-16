@@ -70,11 +70,20 @@ test('OpenSSL 3.x EGD Provider - instance full', openssl_rng_tester,
 	env: tester_esdm_env,
 )
 
-# The EGD protocol has no way to ask for prediction resistance, so this
-# provider refuses rather than quietly handing back data that does not have the
-# property the caller asked for. The tester checks for the refusal itself,
-# rather than taking any failure for it.
-test('OpenSSL 3.x EGD Provider - instance pr is refused', openssl_rng_tester,
-	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr_refused', 'egd'],
+# The EGD protocol has no way to ask for prediction resistance, the ESDM serves
+# it with a command of its own on the same socket.
+test('OpenSSL 3.x EGD Provider - instance pr', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'egd'],
+	env: tester_esdm_env,
+)
+
+# The variant serving every request with prediction resistance.
+test('OpenSSL 3.x EGD PR Provider - simple random', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'random', 'egd-pr'],
+	env: tester_esdm_env,
+)
+
+test('OpenSSL 3.x EGD PR Provider - instance full', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_full', 'egd-pr'],
 	env: tester_esdm_env,
 )

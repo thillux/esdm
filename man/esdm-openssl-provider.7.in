@@ -57,14 +57,17 @@ memory, no second socket. This is the variant for environments the RPC
 interface cannot reach, a chroot that can be handed exactly one socket being
 the usual case. See
 .BR libesdm_egd_client (3)
-for what the protocol can and cannot do.
+for what the protocol can and cannot do. A request asking for prediction
+resistance is served with the ESDM's prediction resistant read command on the
+same socket, which an EGD daemon other than the ESDM does not know: there, such
+a request fails rather than being served ordinary random data.
 .TP
 .B libesdm\-egd\-provider\-pr.so
 Property
 .BR provider=esdm\-egd\-pr .
-The EGD variant bound to the prediction\-resistance socket. The EGD protocol
-cannot select the generator per request, so this is purely a matter of which
-socket the provider connects to.
+The EGD variant serving every request from the prediction\-resistance
+generator of the ESDM regardless of what OpenSSL asked for, over the same
+socket.
 .PP
 The distinct property strings mean several of these can be loaded side by side
 and be selected individually.
@@ -116,12 +119,9 @@ key of their provider section in
 .IR openssl.cnf ,
 from the
 .B ESDM_EGD_SOCKET
-environment variable, and from the path the ESDM was built with. The variable
-names the socket of the ordinary generator, so
-.I libesdm\-egd\-provider\-pr.so
-skips it and goes to the path of the prediction resistance socket. Configuring
-the EGD variant therefore differs from the above only in the module and in the
-properties:
+environment variable, and from the path the ESDM was built with. Both EGD
+variants talk to the same socket. Configuring the EGD variant therefore differs
+from the above only in the module and in the properties:
 .PP
 .RS
 .nf
