@@ -331,7 +331,7 @@ if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 		link_with: esdm_static_lib,
 	)
 
-	test('ES eBPF conditioning pool hash failure', es_ebpf_pool_tester)
+	test('ES eBPF conditioning pool', es_ebpf_pool_tester)
 endif
 
 if get_option('es_jent_kernel').enabled()
