@@ -90,9 +90,14 @@ most with what the entropy rate configured for the source allows
 .BR es_ext_socket_entropy_rate ,
 or the corresponding
 .BR esdm\-server (8)
-options). A claim beyond the size of the block is a failure: the block is
-discarded, and the source is credited with nothing until it delivers properly
-again.
+options). The cap of a plugin library defaults to 256, which takes its claims
+as they are; that of a provider to 0, so that a provider is credited only once
+a rate is configured. A claim beyond the size of the block is a failure: the
+block is discarded, and the source is credited with nothing until it delivers
+properly again \- the ESDM asks a failed source again on its own to find out.
+A source failing its
+.I selftest
+is credited with nothing until a self test passes.
 .SH FUNCTIONS
 .SS Provider server
 .TP

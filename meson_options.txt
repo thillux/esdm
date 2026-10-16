@@ -714,16 +714,18 @@ PATH names another one. When empty and not given on the command line, no
 provider is used.
 ''')
 
-option('es_ext_socket_entropy_rate', type: 'integer', min: 0, max: 256, value: 256,
+option('es_ext_socket_entropy_rate', type: 'integer', min: 0, max: 256, value: 0,
        description: '''Entropy rate cap of the external entropy source provider.
 
 A block of data from the provider is credited with the entropy the provider
 claims for it, but with at most what this rate allows: the amount of entropy
-per 256 bits of data. With the default of 256 the claim of the provider is
-taken as it is. esdm-server --es_ext_socket_entropy_rate overrides it.
+per 256 bits of data. esdm-server --es_ext_socket_entropy_rate overrides it.
 
-When configuring this value to 0, the provider delivers data without being
-credited to contain entropy.
+The default is 0: the provider delivers data without being credited to contain
+entropy until a rate is configured. Unlike a plugin library, which runs in the
+ESDM and is trusted with everything it does there anyway, a provider is
+another process whose only trust anchor is the user it runs as; crediting its
+claims is a decision to be taken explicitly. 256 takes them as they are.
 ''')
 
 option('es_ext_socket_peer_uid', type: 'integer', min: -1, max: 4294967294,

@@ -249,9 +249,12 @@ handed to the ESDM in one of two ways:
 
 A block is credited with the entropy the source claims for it, capped by
 `es_ext_lib_entropy_rate` / `es_ext_socket_entropy_rate` (or
-`--es_ext_lib_entropy_rate` / `--es_ext_socket_entropy_rate`), 256 by
-default. A source claiming more than the block holds, or failing, is
-credited with nothing until it delivers again.
+`--es_ext_lib_entropy_rate` / `--es_ext_socket_entropy_rate`). The cap of a
+plugin defaults to 256, which takes its claims as they are; that of a
+provider defaults to 0, so a provider is credited only once a rate is
+configured. A source claiming more than the block holds, or failing, is
+credited with nothing until it delivers again, and one failing its self test
+until a self test passes.
 
 The PKCS#11 entropy source takes its provider module from the command line
 as well: `esdm-server --pkcs11_module /path/to/pkcs11-module.so`.

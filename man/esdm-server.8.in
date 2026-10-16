@@ -175,8 +175,9 @@ below.
 Credit a block of the provider with at most
 .I BITS
 bits of entropy per 256 bits of data, 0 to 256 (meson option
-.BR es_ext_socket_entropy_rate ,
-256 by default).
+.BR es_ext_socket_entropy_rate ).
+The default is 0: the data of a provider is not credited with entropy until a
+rate is configured.
 .TP
 .BR \-\-es_ext_socket_uid " \fIUSER\fR"
 Accept a provider running as
