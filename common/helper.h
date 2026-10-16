@@ -20,6 +20,7 @@
 #ifndef HELPER_H
 #define HELPER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
@@ -68,6 +69,36 @@ uint32_t esdm_curr_node(void);
 ssize_t esdm_safe_read(int fd, uint8_t *buf, size_t buflen);
 ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen);
 void may_enable_memory_debugging(void);
+
+struct shmid_ds;
+
+/**
+ * @brief Whether a shared memory segment is one the ESDM server created
+ *
+ * The status segment uses a well-known key. Any local user can create it while
+ * there is none, and would control the state it reports. The server removes
+ * such a segment when it starts, but until then - and as long as no server
+ * runs - a client must not take it for the server's.
+ *
+ * The server creates the segment with its effective uid before it drops its
+ * privileges: root in the stock deployment, the uid it is started with
+ * otherwise. Which one it is the clients cannot tell from a configuration, so
+ * the segment is accepted when created by and owned by root or by the owner of
+ * the server's RPC socket @server_socket. The socket is created likewise
+ * before the privileges are dropped, or by systemd as root, in a directory
+ * other users cannot write to. Whoever owns it is the one a client receives
+ * its random numbers from, so a segment of that uid is no less trustworthy.
+ * So is one of the caller's own real uid, whose creator controls the caller
+ * anyway - e.g. a server and a client run by the same unprivileged user.
+ *
+ * @param [in] buf Status of the segment as obtained with IPC_STAT
+ * @param [in] server_socket Path of the server's RPC socket, may be NULL to
+ *			     accept root only
+ *
+ * @return true if the segment is the server's, false otherwise
+ */
+bool esdm_shm_created_by_server(const struct shmid_ds *buf,
+				const char *server_socket);
 
 #ifdef __cplusplus
 }

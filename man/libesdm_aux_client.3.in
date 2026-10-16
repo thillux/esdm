@@ -32,7 +32,10 @@ provider delivers exactly when the daemon has a use for the data.
 Attach to the status segment and the semaphore. Both belong to the daemon, and
 this creates neither: while the daemon is not running yet, the wait below
 attaches to them once it has created them, and again after it replaced them,
-e.g. when it was restarted. Returns 0 on success and a negative errno value on
+e.g. when it was restarted. A segment is only taken for the daemon's when root,
+the owner of the daemon's unprivileged RPC socket or the caller's own user
+created it: another user may create one under the well\-known key while the
+daemon is not running. Returns 0 on success and a negative errno value on
 error.
 .TP
 .BI "void esdm_aux_fini_wait_for_need_entropy(void);"

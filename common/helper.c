@@ -31,8 +31,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include "helper.h"
 #include "math_helper.h"
 
 uint32_t esdm_online_nodes(void)
@@ -137,6 +140,44 @@ ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen)
 
 out:
 	return bytes_written;
+}
+
+/*
+ * Root, the server's uid, or the real uid of the caller: a segment the latter
+ * created can only be planted by somebody who controls the caller anyway. The
+ * real one, as the CUSE daemon checks with its effective uid dropped to an
+ * unprivileged user, whose segments are not the server's.
+ */
+static bool esdm_shm_uid_trusted(uid_t uid, uid_t server_uid)
+{
+	return uid == 0 || uid == server_uid || uid == getuid();
+}
+
+bool esdm_shm_created_by_server(const struct shmid_ds *buf,
+				const char *server_socket)
+{
+	struct stat sb;
+	/* root, unless the socket names somebody else */
+	uid_t server_uid = 0;
+
+	if (!buf)
+		return false;
+
+	/*
+	 * Only a socket counts: a plain file at the path tells nothing about
+	 * who runs the server. Without one, no server runs that is not root.
+	 */
+	if (server_socket && !stat(server_socket, &sb) && S_ISSOCK(sb.st_mode))
+		server_uid = sb.st_uid;
+
+	/*
+	 * The creator is what matters: the owner of a segment can hand it to
+	 * any uid with IPC_SET, the creator stays. The owner is checked as
+	 * well, as the server never hands its segment to somebody else, which
+	 * could then change its permissions.
+	 */
+	return esdm_shm_uid_trusted(buf->shm_perm.cuid, server_uid) &&
+	       esdm_shm_uid_trusted(buf->shm_perm.uid, server_uid);
 }
 
 void may_enable_memory_debugging()

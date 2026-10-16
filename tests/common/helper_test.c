@@ -35,6 +35,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/shm.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -398,6 +401,122 @@ out:
 	close(fds[1]);
 }
 
+/* A segment status as IPC_STAT reports it, with only the uids of interest */
+static struct shmid_ds shm_with(uid_t cuid, uid_t uid)
+{
+	struct shmid_ds buf;
+
+	memset(&buf, 0, sizeof(buf));
+	buf.shm_perm.cuid = cuid;
+	buf.shm_perm.uid = uid;
+
+	return buf;
+}
+
+/* Bind a Unix socket at @path, returning its descriptor or -1 */
+static int bind_socket(const char *path)
+{
+	struct sockaddr_un addr;
+	int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+
+	if (fd < 0)
+		return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+/*
+ * Which status segments a client takes for the server's: those of root, of the
+ * owner of the server's socket and of its own real uid - not one another user
+ * created while no server ran, whatever it was handed over to afterwards.
+ */
+static void test_shm_created_by_server(void)
+{
+	uid_t self = getuid();
+	/* A uid that is neither root nor the caller */
+	uid_t other = (self == 4242) ? 4243 : 4242;
+	char dir[] = "/tmp/esdm-helper-test-XXXXXX";
+	char sock_path[64], file_path[64];
+	struct shmid_ds buf;
+	int fd;
+
+	CHECK(!esdm_shm_created_by_server(NULL, NULL),
+	      "no segment status is accepted");
+
+	buf = shm_with(0, 0);
+	CHECK(esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of root is not accepted");
+
+	buf = shm_with(self, self);
+	CHECK(esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of the caller's own uid is not accepted");
+
+	buf = shm_with(other, other);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of uid %u is accepted", (unsigned int)other);
+
+	/* Handing it to root afterwards does not make it the server's */
+	buf = shm_with(other, 0);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment uid %u created and handed to root is accepted",
+	      (unsigned int)other);
+
+	/* Nor does a segment of root handed to somebody else stay trusted */
+	buf = shm_with(0, other);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of root handed to uid %u is accepted",
+	      (unsigned int)other);
+
+	if (!mkdtemp(dir)) {
+		CHECK(0, "mkdtemp failed: %s", strerror(errno));
+		return;
+	}
+	snprintf(sock_path, sizeof(sock_path), "%s/socket", dir);
+	snprintf(file_path, sizeof(file_path), "%s/file", dir);
+
+	/* A socket that is not there names nobody */
+	buf = shm_with(other, other);
+	CHECK(!esdm_shm_created_by_server(&buf, sock_path),
+	      "a missing socket names uid %u", (unsigned int)other);
+
+	fd = bind_socket(sock_path);
+	CHECK(fd >= 0, "cannot bind %s: %s", sock_path, strerror(errno));
+
+	/* The socket's owner is the server, which is the caller here */
+	CHECK(!esdm_shm_created_by_server(&buf, sock_path),
+	      "the socket of uid %u names uid %u", (unsigned int)self,
+	      (unsigned int)other);
+
+	/* Only root can hand the socket to another uid, which then counts */
+	if (fd >= 0 && !geteuid() && !chown(sock_path, other, other)) {
+		CHECK(esdm_shm_created_by_server(&buf, sock_path),
+		      "the segment of the socket's owner %u is not accepted",
+		      (unsigned int)other);
+
+		/* A file in its place is no server's socket */
+		close(open(file_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0600));
+		CHECK_EQ(chown(file_path, other, other), 0);
+		CHECK(!esdm_shm_created_by_server(&buf, file_path),
+		      "a plain file names uid %u", (unsigned int)other);
+		unlink(file_path);
+	} else {
+		printf("esdm_shm_created_by_server: socket owner of another uid not covered, needs root\n");
+	}
+
+	if (fd >= 0)
+		close(fd);
+	unlink(sock_path);
+	rmdir(dir);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -415,6 +534,7 @@ int main(int argc, char *argv[])
 	test_safe_read_eintr();
 	test_safe_read_write_errors();
 	test_safe_read_write_partial_error();
+	test_shm_created_by_server();
 
 	return common_test_result("helper");
 }

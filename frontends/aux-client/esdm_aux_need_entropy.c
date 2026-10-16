@@ -28,6 +28,7 @@
 
 #include "esdm_aux_client.h"
 #include "esdm_logger.h"
+#include "helper.h"
 #include "esdm_rpc_service.h"
 #include "visibility.h"
 
@@ -122,6 +123,20 @@ static void esdm_cuse_shm_status_attach_shm(void)
 	 */
 	if (shmctl(shmid, IPC_STAT, &buf) < 0 || buf.shm_nattch == 0)
 		return;
+
+	/*
+	 * Somebody else may have created the segment while the server does
+	 * not run, and stay attached to it - the server only removes it once
+	 * it starts. Its contents would tell the client whatever its creator
+	 * likes. It is checked again on the next call, when the server may
+	 * have replaced it.
+	 */
+	if (!esdm_shm_created_by_server(&buf, ESDM_RPC_UNPRIV_SOCKET)) {
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_ANY,
+			"Shared memory segment not created by the ESDM server ignored\n");
+		return;
+	}
 
 	/*
 	 * Read-only: a client only reads the segment, and the server creates it

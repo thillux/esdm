@@ -133,6 +133,19 @@ static int esdm_cuse_shm_status_new_shmid(void)
 	if (shmctl(shmid, IPC_STAT, &buf) < 0 || buf.shm_nattch == 0)
 		return -1;
 
+	/*
+	 * Somebody else may have created the segment while the server does
+	 * not run, and stay attached to it - the server only removes it once
+	 * it starts. Its contents would tell the poll path and the
+	 * O_NONBLOCK readers whatever its creator likes.
+	 */
+	if (!esdm_shm_created_by_server(&buf, ESDM_RPC_UNPRIV_SOCKET)) {
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_CUSE,
+			"Shared memory segment not created by the ESDM server ignored\n");
+		return -1;
+	}
+
 	return shmid;
 }
 
