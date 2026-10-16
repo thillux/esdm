@@ -1186,8 +1186,19 @@ void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
 	 * 9.2 mandating that DRNG is reseeded with the security strength.
 	 */
 	if (!force && fully_seeded && (esdm_avail_entropy() < req_ent)) {
+		/*
+		 * Nothing is fetched, so nothing is handed out either: the
+		 * data of @seedbuf is cleared along with its estimators. The
+		 * buffer of esdm_get_seed() is the caller's own, @addtl being
+		 * @seedbuf there, and a slot left as it was would return the
+		 * caller's bytes to it as seed - with a success that tells it
+		 * nothing about them but an entropy count of zero. A reseed
+		 * that comes here on a later pass of its emergency loop loses
+		 * nothing: the previous pass is injected already.
+		 */
 		for_each_esdm_es (i) {
-			seedbuf->entropy_es[i].e_bits = 0;
+			memset_secure(&seedbuf->entropy_es[i], 0,
+				      sizeof(seedbuf->entropy_es[i]));
 			if (addtl)
 				addtl->entropy_es[i].e_bits = 0;
 		}
