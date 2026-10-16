@@ -56,7 +56,7 @@ addon/es_ebpf_testing
 
 * Kernel Jitter RNG ES: the kernel crypto API RNG it reads is configurable - meson option es_jent_kernel_name (jitterentropy_rng by default) and esdm-server --es_jent_kernel_name, e.g. for a jitterentropy kernel module registering its RNG under another name; the status names it
 
-* Auxiliary pool: each pool is an XDRBG-256 - the XDRBG over SHAKE256 with a state of 512 bits - instead of a pair of conditioning hashes; whatever is inserted is the seed of the next reseed and an extraction reseeds and generates; the SHAKE256 is that of the crypto backend (nettle >= 3.6 for the GnuTLS backend, Botan >= 3.2), the crypto self test covers it with a known-answer test of the XDRBG, and esdm_get_digestsize() reports the size of the state
+* Entropy pools: each auxiliary pool and the conditioning pool of the eBPF entropy sources is an XDRBG-256 - the XDRBG over SHAKE256 with a state of 512 bits - instead of a pair of conditioning hashes; whatever is inserted is the seed of the next reseed and an extraction reseeds and generates; the SHAKE256 is that of the crypto backend (nettle >= 3.6 for the GnuTLS backend, Botan >= 3.2), the crypto self test covers it with a known-answer test of the XDRBG, and esdm_get_digestsize() reports the size of the state
 
 * Status: the status is built as JSON only, the entropy sources report their state as a JSON object, and every text status - esdm_status(), RPC, shared memory, CUSE, esdm-tool - is the JSON status printed as text; numbers are JSON numbers, the eBPF ES reports a permanent health test failure as a member of its own, and the ExternalSocket ES no longer reports "root0" for a provider accepted only as root
 
