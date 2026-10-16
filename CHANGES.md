@@ -328,6 +328,22 @@ addon/es_ebpf_testing
 
 * fix: esdm-tool wipes the random numbers and seeds it handled; esdm-server removes its PID file with --pid_namespace and empties it otherwise
 
+* fix: EGD and RPC servers: connections are bounded and chosen for closing per user rather than per UID - the subordinate UIDs of /etc/subuid, and those of a user namespace the server can attribute, count as their owner - so a user spreading connections over its subordinate UIDs can neither take all slots nor have the connections of another user, sshd's pre-authentication children among them, closed for its own; root's EGD connections are never closed for a slot
+
+* fix: RPC server: seed requests share the per-round budget of the prediction resistant requests; EGD server: a worker generates prediction resistant bytes for at most 25 ms per round over all its connections, not one generation per connection
+
+* fix: the status reports NTG.1(2024) only when built with the NTG.1 seeding strategy, not whenever the Jitter RNG runs in its NTG.1 mode
+
+* fix: the status shared memory segment is created exclusively, so a segment another user creates in the meantime is never published into
+
+* fix: esdm_get_seed() clears the slot of every entropy source before asking it, so a failing or absent source no longer leaves the caller's bytes in the seed
+
+* fix: TPM2 and kernel Jitter RNG ES: no entropy is claimed while their reads fail
+
+* fix: esdm-server keeps the PID file locked until it is torn down and takes the lock only on the file at the path; libesdm_aux_client trusts a segment of the caller's real UID only when the caller runs unprivileged
+
+* fix: Linux kernel addon: the ring generation is taken before the startup test check, so a health test failure in between is caught; the scheduler ES reports the real registration error; esdm_getrawentropy bounds --samples
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 
