@@ -151,12 +151,15 @@ static void esdm_dtls_openssl_init(void)
 
 /*
  * The result @ret of an SSL operation on @ssl that did not complete: -EAGAIN
- * if it waits for the peer, -ECONNRESET if the peer is gone, -EPROTO for
- * anything else. The error queue of the thread is cleared - errors are per
- * connection here, not per thread.
+ * if it waits for the peer, -ECONNRESET if the peer is gone - the end of the
+ * connection or a send(2) or recv(2) telling so -, -EIO for another error of
+ * the socket, -EPROTO for anything else. The error queue of the thread is
+ * cleared - errors are per connection here, not per thread.
  */
 static int esdm_dtls_openssl_error(SSL *ssl, int ret)
 {
+	/* That of the socket call of the BIO, for SSL_ERROR_SYSCALL */
+	int sock_err = errno;
 	int err = SSL_get_error(ssl, ret);
 
 	ERR_clear_error();
@@ -168,7 +171,10 @@ static int esdm_dtls_openssl_error(SSL *ssl, int ret)
 	case SSL_ERROR_ZERO_RETURN:
 		return -ECONNRESET;
 	case SSL_ERROR_SYSCALL:
-		return ret == 0 ? -ECONNRESET : -EIO;
+		if (ret == 0 || sock_err == ECONNRESET || sock_err == EPIPE ||
+		    sock_err == ENOTCONN)
+			return -ECONNRESET;
+		return -EIO;
 	default:
 		return -EPROTO;
 	}
@@ -251,6 +257,11 @@ int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 	SSL_CTX_set_options(c, SSL_OP_NO_RENEGOTIATION | SSL_OP_NO_TICKET |
 				       SSL_OP_NO_QUERY_MTU);
 	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+	/*
+	 * A server holds many connections, most of them idle between the
+	 * requests: no record buffers for those
+	 */
+	SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
 
 	if (server) {
 		if (esdm_dtls_openssl_server_key(c))

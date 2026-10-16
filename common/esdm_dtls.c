@@ -39,6 +39,12 @@
 /* A record as received: one byte more than one can be, to tell a longer one */
 #define ESDM_DTLS_RECORD_BUF (ESDM_DTLS_PART_SIZE + 2)
 
+/*
+ * The record buffers are allocated per call rather than placed on the stack:
+ * the getrandom(2) shim may call in from any thread of an application, and a
+ * thread may have a small stack.
+ */
+
 struct esdm_dtls_ctx {
 	void *backend;
 	bool server;
@@ -186,12 +192,17 @@ int esdm_dtls_handshake(struct esdm_dtls *dtls)
 DSO_PUBLIC
 int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 {
-	uint8_t rec[ESDM_DTLS_PART_SIZE + 1];
+	const size_t recsize = ESDM_DTLS_PART_SIZE + 1;
 	const uint8_t *p = buf;
+	uint8_t *rec;
 	int ret = 0;
 
 	if (!dtls || (!buf && len))
 		return -EINVAL;
+
+	rec = malloc(recsize);
+	if (!rec)
+		return -ENOMEM;
 
 	esdm_dtls_enter();
 	do {
@@ -207,14 +218,15 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 	} while (!ret && len);
 	esdm_dtls_leave();
 
-	memset_secure(rec, 0, sizeof(rec));
+	memset_secure(rec, 0, recsize);
+	free(rec);
 	return ret;
 }
 
 DSO_PUBLIC
 ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 {
-	uint8_t rec[ESDM_DTLS_RECORD_BUF];
+	uint8_t *rec;
 	ssize_t n, ret;
 	size_t part, limit;
 
@@ -223,9 +235,14 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 
 	limit = len < dtls->max_msg ? len : dtls->max_msg;
 
+	rec = malloc(ESDM_DTLS_RECORD_BUF);
+	if (!rec)
+		return -ENOMEM;
+
 	esdm_dtls_enter();
 	for (;;) {
-		n = esdm_dtls_backend_recv(dtls->backend, rec, sizeof(rec));
+		n = esdm_dtls_backend_recv(dtls->backend, rec,
+					   ESDM_DTLS_RECORD_BUF);
 		if (n < 0) {
 			ret = n;
 			goto out;
@@ -270,7 +287,8 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 
 out:
 	esdm_dtls_leave();
-	memset_secure(rec, 0, sizeof(rec));
+	memset_secure(rec, 0, ESDM_DTLS_RECORD_BUF);
+	free(rec);
 	if (ret < 0 && ret != -EAGAIN)
 		esdm_dtls_drop_partial(dtls);
 	return ret;

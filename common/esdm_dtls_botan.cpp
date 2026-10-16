@@ -229,11 +229,15 @@ class Esdm_Dtls_Callbacks final : public Botan::TLS::Callbacks {
 				 MSG_DONTWAIT | MSG_NOSIGNAL);
 
 		/* Told to the caller once the channel returns */
-		if (n != static_cast<ssize_t>(data.size()))
-			m_send_error = n < 0 && (errno == EAGAIN ||
-						 errno == EWOULDBLOCK) ?
-					       -EAGAIN :
-					       -EIO;
+		if (n == static_cast<ssize_t>(data.size()))
+			return;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			m_send_error = -EAGAIN;
+		else if (n < 0 && (errno == ECONNRESET || errno == EPIPE ||
+				   errno == ENOTCONN))
+			m_send_error = -ECONNRESET;
+		else
+			m_send_error = -EIO;
 	}
 
 	void tls_record_received(uint64_t seq_no,
@@ -302,10 +306,11 @@ struct Esdm_Dtls_Conn {
  */
 static int esdm_dtls_botan_feed(Esdm_Dtls_Conn *c)
 {
-	uint8_t buf[ESDM_DTLS_LINK_MTU + 512];
+	/* On the heap, see esdm_dtls.c */
+	std::vector<uint8_t> buf(ESDM_DTLS_LINK_MTU + 512);
 
 	for (;;) {
-		ssize_t n = recv(c->callbacks->m_fd, buf, sizeof(buf),
+		ssize_t n = recv(c->callbacks->m_fd, buf.data(), buf.size(),
 				 MSG_DONTWAIT);
 
 		if (n < 0) {
@@ -317,8 +322,8 @@ static int esdm_dtls_botan_feed(Esdm_Dtls_Conn *c)
 		if (n == 0)
 			return -ECONNRESET;
 
-		c->channel->received_data(
-			std::span<const uint8_t>(buf, static_cast<size_t>(n)));
+		c->channel->received_data(std::span<const uint8_t>(
+			buf.data(), static_cast<size_t>(n)));
 		if (c->callbacks->m_closed || c->channel->is_closed())
 			return -ECONNRESET;
 		if (!c->callbacks->m_records.empty())
