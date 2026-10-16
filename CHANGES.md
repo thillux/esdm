@@ -9,10 +9,22 @@ libesdm-egd-provider.so, an OpenSSL 3 RAND provider based on it: both need
 nothing but the one EGD socket and therefore work where the RPC interface
 cannot be reached, OpenSSH's sandboxed pre-authentication child included
 
-* Add a second EGD socket serving the prediction resistance generator
-(esdm-server-egd-pr.socket, --egd_socket_pr) together with the matching
-libesdm-egd-provider-pr.so - the EGD protocol cannot ask for prediction
-resistance per request, so it is a property of the socket
+* EGD interface: ESDM-specific commands on the same socket for what the EGD
+protocol cannot express - prediction resistance reads (0xe0, 0xe1), reading
+without waiting for full seeding (0xe2), the state (0xe3), the status as text
+and JSON (0xe4, 0xe5), and, for a peer with UID 0 only, crediting entropy,
+clearing the entropy count, reseeding and setting write_wakeup_threshold and
+urandom_min_reseed_secs (0xe6 - 0xea); codes far from the standard ones, so
+EGD clients are unaffected. libesdm_egd_client offers the prediction resistance
+reads (esdm_egd_client_get_random_pr), libesdm-egd-provider.so serves OpenSSL's
+prediction resistance requests with them and libesdm-egd-provider-pr.so all
+requests
+
+* Add the kernel module esdm_cdev (addon/linux_esdm_cdev): /dev/esdm_random,
+/dev/esdm_urandom and /proc/esdm served from the ESDM over its EGD socket, with
+the ioctls of the kernel's random devices - the counterpart of the CUSE
+frontend in the kernel, leaving the kernel's own devices untouched; it falls
+back to the kernel's RNG while the ESDM is not reachable
 
 * Split the build option ais2031 into ais2031_ntg1 (NTG.1 seeding strategy),
 ais2031_drg3 (DRG.3 class) and ais2031_drg4 (DRG.4.10 reseeding limits), which
@@ -61,6 +73,13 @@ addon/es_ebpf_testing
 * Status: the status is built as JSON only, the entropy sources report their state as a JSON object, and every text status - esdm_status(), RPC, shared memory, CUSE, esdm-tool - is the JSON status printed as text; numbers are JSON numbers, the eBPF ES reports a permanent health test failure as a member of its own, and the ExternalSocket ES no longer reports "root0" for a provider accepted only as root
 
 * The shell scripts of the repository run with set -euxo pipefail and bash
+
+* The source tree of the library is sorted into esdm/es, esdm/crypto,
+esdm/drng and esdm/status
+
+* The design document and the presentation are Typst sources with their figures
+as draw.io, PlantUML and Typst plot sources (doc/typst, nix build .#esdm-doc),
+brought in line with the code; the presentations before v1.0.0 are dropped
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
