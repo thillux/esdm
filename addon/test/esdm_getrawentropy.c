@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -38,7 +39,7 @@
 #define DEBUGFS_INTERFACE "/sys/kernel/debug/esdm_es/esdm_raw_sched_hires"
 
 struct opts {
-	size_t samples;
+	uint64_t samples;
 	char *debugfs_file;
 	char *outfile;
 };
@@ -46,7 +47,8 @@ struct opts {
 static int getrawentropy(struct opts *opts)
 {
 #define BUFFER_SIZE (RAWENTROPY_SAMPLES * sizeof(uint64_t))
-	uint32_t requested = (uint32_t)opts->samples * sizeof(uint64_t);
+	/* main() bounds the samples so that this cannot wrap */
+	uint64_t requested = opts->samples * sizeof(uint64_t);
 	uint8_t *buffer_p, buffer[BUFFER_SIZE];
 	ssize_t ret;
 	int in_fd = -1;
@@ -85,7 +87,8 @@ static int getrawentropy(struct opts *opts)
 		 */
 		if (!ret) {
 			fprintf(stderr,
-				"No more data from %s, still %lu events missing\n",
+				"No more data from %s, still %" PRIu64
+				" events missing\n",
 				opts->debugfs_file, requested / sizeof(uint64_t));
 			ret = -ENODATA;
 			goto out;
@@ -95,14 +98,14 @@ static int getrawentropy(struct opts *opts)
 			uint64_t val;
 
 			memcpy(&val, buffer_p, sizeof(uint64_t));
-			dprintf(out_fd, "%lu\n", val);
+			dprintf(out_fd, "%" PRIu64 "\n", val);
 			buffer_p += sizeof(uint64_t);
 		}
 
 		requested -= (uint32_t)ret;
 
-		fprintf(stderr, "Fetched %lu events, still %lu to do\n",
-			(uint32_t)ret / sizeof(uint64_t),
+		fprintf(stderr, "Fetched %zu events, still %" PRIu64 " to do\n",
+			(size_t)ret / sizeof(uint64_t),
 			requested / sizeof(uint64_t));
 	}
 
@@ -149,11 +152,21 @@ int main(int argc, char *argv[])
 		case 'h':
 			usage();
 			return EXIT_FAILURE;
-		case 's':
-			opts.samples = strtoul(optarg, NULL, 10);
-			if (opts.samples == ULONG_MAX)
+		case 's': {
+			unsigned long long val;
+			char *end;
+
+			errno = 0;
+			val = strtoull(optarg, &end, 10);
+			if (errno || end == optarg || *end || strchr(optarg, '-') ||
+			    val > UINT64_MAX / sizeof(uint64_t)) {
+				fprintf(stderr, "Invalid number of samples: %s\n",
+					optarg);
 				return -EINVAL;
+			}
+			opts.samples = val;
 			break;
+		}
 		case 'f':
 			opts.debugfs_file = optarg;
 			break;
@@ -165,7 +178,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	fprintf(stderr, "Try to collect %lu samples\n", opts.samples);
+	fprintf(stderr, "Try to collect %" PRIu64 " samples\n", opts.samples);
 	fprintf(stderr, "Use debugfs file %s\n", opts.debugfs_file);
 	if (opts.outfile) {
 		fprintf(stderr, "Write to %s\n", opts.outfile);
