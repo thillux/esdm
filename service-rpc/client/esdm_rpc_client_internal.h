@@ -59,10 +59,32 @@ enum {
 	esdm_rpcc_in_termination,
 };
 
+struct esdm_dtls;
+
 struct esdm_rpc_client_connection {
 	ProtobufCService service;
 	char socketname[FILENAME_MAX];
 	int fd;
+
+	/*
+	 * The DTLS of the connection on fd, NULL while it is unencrypted - see
+	 * ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h. Guarded by lock, as
+	 * the socket is.
+	 */
+	struct esdm_dtls *dtls;
+
+	/*
+	 * The DTLS of a connection of the parent, left behind by a fork - see
+	 * reinit_conns_after_fork(). Never used, only kept reachable.
+	 */
+	struct esdm_dtls *dtls_orphan;
+
+	/*
+	 * CLOCK_MONOTONIC time in milliseconds before which a new connection is
+	 * not to ask for DTLS: the server did not agree to it the last time.
+	 * 0 to ask. Guarded by lock.
+	 */
+	int64_t dtls_retry_ms;
 
 	/*
 	 * Caller can register function that is invoked to check whether call

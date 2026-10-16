@@ -46,6 +46,7 @@
 #include "esdm_rpc_client.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_service.h"
+#include "rpc_standin_startdtls.h"
 
 #define TEST_LEN 32
 #define TEST_FILL 0x5a
@@ -123,6 +124,9 @@ static bool test_serve(int fd)
 		return false;
 
 	memcpy(&cs, req, sizeof(cs));
+	if (test_standin_startdtls(fd, &cs))
+		return true;
+
 	len = test_request_len(req + sizeof(cs), (size_t)rc - sizeof(cs));
 	if (len > TEST_LEN)
 		len = TEST_LEN;

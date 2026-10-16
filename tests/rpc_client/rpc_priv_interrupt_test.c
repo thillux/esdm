@@ -44,6 +44,7 @@
 #include "esdm_rpc_client.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_service.h"
+#include "rpc_standin_startdtls.h"
 
 #define TEST_MAX_CONNS 8
 
@@ -87,6 +88,9 @@ static bool test_serve(int fd)
 	if (rc < (ssize_t)sizeof(cs))
 		return false;
 	memcpy(&cs, req, sizeof(cs));
+
+	if (test_standin_startdtls(fd, &cs))
+		return true;
 
 	atomic_fetch_add(&test_requests, 1);
 
