@@ -27,6 +27,11 @@ It is extensible as follows:
   can be deselected during compile time or its entropy rate altered
   during startup time.
 
+* Entropy sources can be developed outside of the ESDM against
+  `libesdm_es_ext` and loaded into it as a plugin library, or served to it
+  by a process of their own over a Unix domain socket - see
+  [External Entropy Sources].
+
 * The cryptographic primitives can be altered by simply providing a new
   backend for hash algorithms or DRNG algorithms. See the `drng_chacha20`
   configuration option replacing the SP800-90A DRBG with a ChaCha20-based
@@ -220,6 +225,36 @@ The default entropy rate of both sources is 0 (uncredited): determine the
 appropriate rate for a deployment environment with the measurement tooling
 in `addon/es_ebpf_testing/` before crediting the sources, see its
 `README.md`.
+
+### External Entropy Sources
+
+Noise sources that are not part of the ESDM are written against
+`esdm_es_ext.h` of `libesdm_es_ext` as a `struct esdm_es_ext_plugin`: an
+`init`, `fini`, `get_entropy` and `selftest` callback - see
+`libesdm_es_ext(3)` and the example in `es-ext/example/`. Such a plugin is
+handed to the ESDM in one of two ways:
+
+* As a plugin library loaded into the `esdm-server`:
+  `esdm-server --es_ext_lib /path/to/plugin.so`, or the meson option
+  `es_ext_lib_path`. Its `init` runs while the daemon still has its
+  privileges.
+
+* As a provider process the `esdm-server` reads from over a Unix domain
+  socket: `esdm-es-ext-serve --plugin /path/to/plugin.so --socket
+  /run/my-es.socket` together with `esdm-server --es_ext_socket
+  /run/my-es.socket`, or the meson option `es_ext_socket_path`. The
+  provider has to run as root, or as the user given with
+  `--es_ext_socket_uid`; the protocol is documented in `esdm_es_ext.h` for
+  providers written without the library.
+
+A block is credited with the entropy the source claims for it, capped by
+`es_ext_lib_entropy_rate` / `es_ext_socket_entropy_rate` (or
+`--es_ext_lib_entropy_rate` / `--es_ext_socket_entropy_rate`), 256 by
+default. A source claiming more than the block holds, or failing, is
+credited with nothing until it delivers again.
+
+The PKCS#11 entropy source takes its provider module from the command line
+as well: `esdm-server --pkcs11_module /path/to/pkcs11-module.so`.
 
 ## Testing
 

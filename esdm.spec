@@ -210,12 +210,14 @@ This subpackage holds the OpenSSL 3 RAND provider
 %doc README.md README.usage.md
 %{_libdir}/lib%{name}_aux*.so*
 %{_libdir}/lib%{name}_egd_client*.so*
+%{_libdir}/lib%{name}_es_ext*.so*
 %{_libdir}/lib%{name}-getrandom*.so*
 %{_libdir}/lib%{name}_rpc_client*.so*
 %{_libdir}/lib%{name}.so*
 %{_libdir}/pkgconfig/%{name}_*.pc
 %{_libdir}/pkgconfig/%{name}-*.pc
 %{_bindir}/esdm-server*
+%{_bindir}/esdm-es-ext-serve
 %{_bindir}/esdm-kernel-seeder
 %{_bindir}/esdm-tool
 %{_unitdir}/esdm-server*
@@ -224,6 +226,7 @@ This subpackage holds the OpenSSL 3 RAND provider
 %{_mandir}/man1/esdm-tool.1*
 %{_mandir}/man3/lib%{name}*.3*
 %{_mandir}/man8/esdm-server*.8*
+%{_mandir}/man8/esdm-es-ext-serve.8*
 %{_mandir}/man8/esdm-kernel-seeder.8*
 
 %files -n %{name}-cuse
@@ -249,5 +252,6 @@ This subpackage holds the OpenSSL 3 RAND provider
 %files devel-static
 %{_libdir}/lib%{name}_aux_client.a
 %{_libdir}/lib%{name}_egd_client.a
+%{_libdir}/lib%{name}_es_ext.a
 %{_libdir}/lib%{name}-getrandom.a
 %{_libdir}/lib%{name}_rpc_client.a
