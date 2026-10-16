@@ -2024,6 +2024,36 @@
               description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
             };
           });
+
+          # The documentation from its Typst sources in doc/typst: the
+          # PlantUML figures are rendered here, the draw.io ones are taken
+          # from their committed SVGs as drawio needs a display.
+          #   nix build .#esdm-doc
+          esdm-doc = pkgs.stdenvNoCC.mkDerivation {
+            pname = "esdm-doc";
+            version = "1.2.4";
+            src = lib.fileset.toSource {
+              root = ./doc/typst;
+              fileset = ./doc/typst;
+            };
+            nativeBuildInputs = [
+              pkgs.plantuml
+              pkgs.typst
+            ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME="$TMPDIR"
+              export SOURCE_DATE_EPOCH="${toString self.lastModified}"
+              export FONTCONFIG_FILE="${
+                pkgs.makeFontsConf { fontDirectories = [ pkgs.liberation_ttf ]; }
+              }"
+              export TYPST_FONT_PATHS="${pkgs.liberation_ttf}/share/fonts"
+              export TYPST_IGNORE_SYSTEM_FONTS=true
+              SKIP_DRAWIO=1 OUT_DIR="$out/share/doc/esdm" bash ./build.sh
+              runHook postBuild
+            '';
+            dontInstall = true;
+          };
         };
 
         # One live system per defined kernel version, e.g. live_6_18. Only
