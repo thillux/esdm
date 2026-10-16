@@ -974,6 +974,11 @@ static uint64_t test_now_ms(void)
  * This build of the server closes idle connections after the short
  * ESDM_EGD_IDLE_TIMEOUT_MS it is compiled with instead of a minute. The server
  * scans for them once a second, so the close comes up to that much later.
+ *
+ * Root's connection is never closed for its slot, idle or not: root is not
+ * accounted, and holds none by the count that picks the connections to close -
+ * not even while it is the only one with any. Run as root, the test checks
+ * that instead.
  */
 static void test_idle_close(void)
 {
@@ -993,7 +998,8 @@ static void test_idle_close(void)
 	unsigned int i;
 	int fd, other, rc;
 
-	printf("EGD raw: idle connections are closed\n");
+	printf("EGD raw: idle connections are closed%s\n",
+	       geteuid() ? "" : " - but not root's");
 
 	fd = test_connect();
 	if (fd < 0) {
@@ -1018,6 +1024,17 @@ static void test_idle_close(void)
 	rc = test_recv(fd, &byte, sizeof(byte),
 		       ESDM_EGD_IDLE_TIMEOUT_MS + scan_slack_ms);
 	closed_after = test_now_ms() - last_answer;
+
+	if (geteuid() == 0) {
+		CHECK(rc == -ETIMEDOUT,
+		      "an idle connection of root's was closed after %llu ms: %d",
+		      (unsigned long long)closed_after, rc);
+		CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+		      "an idle connection of root's was not served any more");
+		close(fd);
+		return;
+	}
+
 	CHECK(rc == -EPIPE || rc == -ECONNRESET,
 	      "an idle connection was not closed: %d", rc);
 	CHECK(closed_after + clock_slack_ms >= ESDM_EGD_IDLE_TIMEOUT_MS,

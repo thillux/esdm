@@ -207,7 +207,11 @@ struct esdm_egd_conn {
 	/* The user the peer is accounted to, see esdm_peer_account.h */
 	uid_t peer_account;
 
-	/* Accounted in esdm_egd_peer_limit, as peer_account */
+	/*
+	 * Accounted in esdm_egd_peer_limit, as peer_account. Never for root,
+	 * which is not accounted - and none of whose connections is ever closed
+	 * for somebody else's, see esdm_egd_can_make_room().
+	 */
 	bool peer_counted;
 
 	/* Holds one of the ESDM_EGD_MAX_CONNECTIONS in esdm_egd_connections */
@@ -1541,7 +1545,12 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 		esdm_egd_release_conn(conn);
 		return NULL;
 	}
-	conn->peer_counted = true;
+	/*
+	 * Root's connection is admitted without being accounted. Taking it as
+	 * accounted all the same would make it one holding the most - none -
+	 * whenever nobody else holds any.
+	 */
+	conn->peer_counted = (conn->peer_account != 0);
 
 	/*
 	 * Several workers accept from the same listener - which one of them
@@ -1627,8 +1636,8 @@ static bool esdm_egd_scarce(uint64_t now)
  *     being idle gains nothing but its own slots, and spreading them over the
  *     UIDs of its subordinate range does not hide them, see
  *     esdm_peer_account.h. Where no account stands out, all of them hold the
- *     most, and any idle connection may go. Root is not accounted and holds
- *     none by that count.
+ *     most, and any idle connection may go - but none of root's, which is
+ *     not accounted, as with esdm_egd_can_make_room().
  *   - the connection's own account is being refused further connections -
  *     which reclaims the slots of a client that abandons its connections
  *     without closing them for that client's own user, at no cost to anybody
@@ -1637,7 +1646,8 @@ static bool esdm_egd_scarce(uint64_t now)
 static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
 				   uint64_t now, bool scarce, unsigned int top)
 {
-	if (conn->deferred || conn->yielded || esdm_egd_out_pending(conn) ||
+	if (!conn->peer_counted || conn->deferred || conn->yielded ||
+	    esdm_egd_out_pending(conn) ||
 	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
 		return false;
 

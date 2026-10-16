@@ -192,7 +192,8 @@ that has received no command and owes no response for 60 seconds is closed
 only when its slot is wanted: at most 256 slots are left, an accept ran out of
 descriptors within that time, or its user was refused a connection and is still
 at its limit. While slots are short, only the idle connections of the users
-holding the most connections are closed. Once all slots are taken, a new
+holding the most connections are closed, never those of root. Once all slots
+are taken, a new
 connection is not left waiting but a connection is closed to make room for it
 \- one of a user holding the most connections of all, preferably of the user
 of the new connection, the least recently active one with nothing owed to its

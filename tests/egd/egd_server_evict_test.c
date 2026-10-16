@@ -36,7 +36,9 @@
  *   - both with a user connecting under a UID of its subordinate range for
  *     each connection (root only), from a user namespace of its own: its UIDs
  *     are one user, the one holding the most, and not each a UID holding one
- *     next to a UID holding two, which would make the latter the first to go.
+ *     next to a UID holding two, which would make the latter the first to go,
+ *   - root's connections are not closed for anybody, idle or not, even while
+ *     root is the only one holding any (root only).
  *
  * Like egd_server_conn_test, the server runs in this process, so no daemon is
  * needed. Its build bounds it to a handful of connections, and it runs a single
@@ -910,6 +912,96 @@ out:
 	test_settle();
 }
 
+/*
+ * How a new client of @uid, root to stay root, fares while all slots are taken
+ * by connections that may not be closed for it: 0 when it is left waiting in
+ * the backlog, 1 when it is accepted only to be closed, 2 when it is served,
+ * 3 on errors. From a process of its own, which may take on another UID.
+ */
+static int test_newcomer(uid_t uid)
+{
+	int status;
+	pid_t pid = fork();
+
+	if (pid < 0)
+		return 3;
+
+	if (!pid) {
+		int fd, rc;
+
+		if (uid && (setgroups(0, NULL) ||
+			    setresgid((gid_t)uid, (gid_t)uid, (gid_t)uid) ||
+			    setresuid(uid, uid, uid)))
+			_exit(3);
+		fd = test_connect();
+		if (fd < 0)
+			_exit(3);
+		rc = test_cmd_entropy_count(fd, 1500);
+		_exit(rc == -ETIMEDOUT ? 0 : (rc ? 1 : 2));
+	}
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+		return 3;
+
+	return WEXITSTATUS(status);
+}
+
+/*
+ * All slots taken by root, the only one holding any: none of its connections
+ * is closed, neither for a new client of its own nor for one of anybody else,
+ * nor while they sit idle with slots short - root holds none by the count that
+ * picks the connections to close. The new clients are left waiting rather
+ * than accepted only to be turned away. Needs root.
+ */
+static void test_full_root(void)
+{
+	struct test_client r = { 0 };
+	uint64_t closed;
+	int rc;
+
+	printf("EGD evict: root's connections are not closed for anybody\n");
+
+	if (geteuid() != 0) {
+		printf("  SKIPPED: needs root\n");
+		return;
+	}
+
+	if (test_client_start(&r, 0)) {
+		CHECK(0, "cannot start a client");
+		return;
+	}
+
+	if (test_client_do(&r, test_client_open, TEST_SLOTS)) {
+		CHECK(0, "the client could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+
+	/* Idle, with slots short. */
+	test_sleep_ms(TEST_IDLE_WAIT_MS);
+	closed = test_client_do(&r, test_client_closed, 0);
+	CHECK(closed == 0,
+	      "idle connections of root's were closed with slots short: mask 0x%llx",
+	      (unsigned long long)closed);
+
+	rc = test_newcomer(0);
+	CHECK(rc == 0,
+	      "a new client of root's was not left waiting with all slots root's: %d",
+	      rc);
+	rc = test_newcomer(TEST_UID_A);
+	CHECK(rc == 0,
+	      "a new client was not left waiting with all slots root's: %d",
+	      rc);
+
+	closed = test_client_do(&r, test_client_closed, 0);
+	CHECK(closed == 0,
+	      "a connection of root's was closed for a new client: mask 0x%llx",
+	      (unsigned long long)closed);
+
+out:
+	test_client_stop(&r);
+	test_settle();
+}
+
 /****************************
  * ESDM state
  ****************************/
@@ -992,6 +1084,7 @@ int main(int argc, char *argv[])
 	test_scarce_top_uid();
 	test_full_subordinate();
 	test_scarce_subordinate();
+	test_full_root();
 
 out:
 	esdm_egd_server_fini();
