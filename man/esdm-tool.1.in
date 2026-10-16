@@ -35,7 +35,10 @@ Log to syslog instead of standard output and standard error.
 Print the status of the ESDM and all of its entropy sources.
 .TP
 .B \-\-status\-json
-Print the same information as a JSON document.
+Print the same information as a JSON document \- the one the text of
+.B \-\-status
+is printed from, with the values as numbers, booleans and null where they
+are such.
 .TP
 .BR \-\-drng\-status " [=" \fINODE\fR | pr ]
 Print the status of the DRNG instances as an indented JSON document. Without an
