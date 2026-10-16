@@ -1,8 +1,8 @@
 @startuml
-' Figure 2.5: Collection Pool Processing
-' Life cycle of the per-CPU entropy pool (a hash state) of the interrupt ES:
-' filled collection pools are hashed in, the digest goes into the seed
-' buffer next to the digests of the other CPUs.
+' Figure: Kernel Entropy Source Data Extraction
+' esdm_es_drbg_pool_extract() / esdm_es_drbg_pool_extract_block() of
+' addon/linux_esdm_es/esdm_es_drbg.c, serving the ESDM_IRQ_ENT_BUF and
+' ESDM_SCHED_ENT_BUF IOCTLs of /dev/esdm_es
 skinparam defaultFontName "Liberation Sans"
 skinparam defaultFontSize 12
 skinparam shadowing false
@@ -14,35 +14,42 @@ skinparam ActivityDiamondBorderColor #000000
 skinparam NoteBackgroundColor #FFFFFF
 skinparam NoteBorderColor #000000
 
-:Kernel Start; <<#FFFFFF>>
-:Hash Init;
-note left: Entropy Pool
+start
+:ESDM_IRQ_ENT_BUF / ESDM_SCHED_ENT_BUF
+IOCTL of /dev/esdm_es
+(b requested bits: 256 or 384); <<#FFFFFF>>
+if (SP800-90B startup test completed\nand high-resolution timer?) then (no)
+  :Return no data;
+  stop
+else (yes)
+endif
+if (Recorded events suffice for\nall ceil(b / 256) blocks?) then (no)
+  :Return no data;
+  stop
+else (yes)
+endif
 repeat
-  :Hash Update;
-  note right
-    Filled Collection Pool Instances
-    |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |<#FFB66C>      ...      |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |
-  end note
-  :Hash Update;
+  :Collect (256 + o) * r / 256 time stamps
+  from the per-CPU rings;
   note right
     |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |<#FFB66C>      ...      |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |
+    CPU 0 ... CPU N rings
+    r: time stamps per 256 bits of entropy
+    o: 65 bits oversampling in FIPS mode
   end note
-  -[dotted]-> ...;
-  :Hash Update;
-  note right
-    |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |<#FFB66C>      ...      |<#FFB66C>| |<#FFB66C>| |<#FFB66C>| |
-  end note
-  :Hash Final;
-  :Hash Init;
-  note right
-    |<#FFB66C> Digest CPU0 | CPU 0 |
-     
-    |<#66FFFF>   |<#FFB66C>   |<#AFD095>   |<#FFFFA6>   |<#FF4000>   |<#6B5E9B>   |<#EC9BA4>   |<#E8F2A1> |
-     
-    |<#FFB66C> Digest CPU1 | CPU 1 |
-    |<#FFB66C> Digest CPUn | CPU n |
-  end note
-  :Hash Update;
-repeat while (...)
-detach
+  :DRBG.Seed(time stamps)
+  (instantiate, then reseed);
+  :Block = DRBG.Generate(256 bits,
+  additional input "ESDM_IRQ_DRBG"
+  or "ESDM_SCH_DRBG");
+  :Release the ring slots;
+repeat while (More blocks needed?) is (yes)
+-> no;
+if (Ring reset during the extraction?) then (yes)
+  :Zeroize and return no data;
+else (no)
+  :Return the blocks with b bits of entropy
+  in struct entropy_buf; <<#FFFFFF>>
+endif
+stop
 @enduml

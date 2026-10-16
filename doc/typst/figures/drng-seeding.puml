@@ -1,0 +1,50 @@
+@startuml
+' Seeding of one DRNG instance: esdm_drng_seed_es_nolock() with the
+' emergency reseeding loop (esdm/drng/esdm_drng_mgr.c)
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #000000
+skinparam ActivityBorderColor #000000
+skinparam ActivityBackgroundColor #EEEEEE
+skinparam ActivityDiamondBackgroundColor #FFFFFF
+skinparam ActivityDiamondBorderColor #000000
+skinparam NoteBackgroundColor #FFFFFF
+skinparam NoteBorderColor #000000
+
+start
+:Lock DRNG and entropy pool;
+if (DRNG fully seeded?) then (no)
+  :Initial seeding:
+  request 256 bits
+  (384 bits with SP800-90C oversampling)
+  from every entropy source;
+else (yes)
+  :Reseed:
+  request 256 bits from every entropy source
+  (+64 bits for the PR DRNG with the
+  SP800-90C oversampling, RBG3(RS));
+endif
+repeat
+  if (Forced, ESDM not yet fully seeded\nor >= 256 bits available?) then (yes)
+    :Fill the slots of the seed buffer T
+    and the additional input U
+    (esdm_get_seed_buffers);
+    note right
+      Entropy sources credited with
+      zero bits go to U
+    end note
+  else (no)
+    :Empty seed buffer;
+  endif
+  :DRNG.Seed(T, U);
+  :Add up the entropy of all passes;
+repeat while (Forced, not fully seeded and\nfully seeded level reachable?) is (yes)
+-> no;
+if (Entropy >= fully seeded level?\n(NTG.1: 2 x 240 bits)) then (yes)
+  :Mark DRNG fully seeded;
+else (no)
+endif
+:Unlock;
+stop
+@enduml

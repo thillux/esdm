@@ -24,13 +24,14 @@ enumerated:
   no privileges.
 
 + The ESDM is modular consisting of a central server which is implemented with
-  minimal dependencies. This allows the ESDM to execute on different operating
-  systems. The aforementioned Linux interfaces are implemented with separate
-  processes and libraries and therefore their absence do not affect the ESDM
-  operation on operating systems other than Linux.
+  minimal dependencies: POSIX support along with `protobuf-c` and `json-c`.
+  This allows the ESDM to execute on different operating systems. The
+  aforementioned Linux interfaces are implemented with separate processes and
+  libraries and therefore their absence do not affect the ESDM operation on
+  operating systems other than Linux.
 
 + All user-visible behavior implemented by the kernel /dev/random – such as the
-  per-NUMA-node DRNG / per-CPU instances are provided by the ESDM as well.
+  per-CPU DRNG instances – is provided by the ESDM as well.
 
 + The ESDM must not use locking in hot code paths to limit the impact on
   massively parallel systems.
@@ -70,26 +71,36 @@ contemporary and future-proof entropy source and DRNG management framework:
 
   - Two additional but optional entropy sources are provided for
     resource-constrained systems: the scheduler-based entropy source and the
-    interrupt-based entropy source. Both, however, uses a kernel extension as
-    it hooks into the scheduler / the interrupt handling code path.
+    interrupt-based entropy source. Both exist in two variants: one is
+    provided by a kernel module (`addon/linux_esdm_es`) which hooks into the
+    scheduler / the interrupt handling code path by means of small kernel
+    patches, the other one by eBPF programs attached to tracepoints of a
+    stock Linux kernel which needs no kernel patches.
 
-  - The ESDM server executes without any privilege. The Linux interfaces
-    providing /dev/random, /dev/urandom and the associated proc files execute
-    with limited privileges.
+  - The ESDM server performs its privileged initialization – creating its
+    sockets and its status shared memory segment, loading the eBPF programs and
+    initializing the entropy sources needing privileges – and then permanently
+    drops its privileges to an unprivileged user (`nobody` by default). The
+    Linux interfaces providing /dev/random, /dev/urandom and the associated
+    proc files execute with limited privileges.
 
 - Sole use of crypto for data processing:
 
-  - Exclusive use of a hash operation for conditioning entropy data with a
-    clear mathematical description as given section @sec:data-processing –
-    non-cryptographic operations like LFSR are not used.
+  - Exclusive use of cryptographic mechanisms for conditioning entropy data
+    with a clear mathematical description as given in section
+    @sec:data-processing: an SP800-90A DRBG in the kernel module, an
+    XDRBG-256 over SHAKE256 for the auxiliary pool and the conditioning pool
+    of the eBPF entropy sources, and the conditioning hash for the
+    compression of CPU entropy source data – non-cryptographic operations
+    like LFSR are not used.
 
   - The ESDM uses only properly defined and implemented cryptographic
-    algorithms unlike the use of the SHA-1 transformation in the Linux kernel
-    /dev/random implementation that is not compliant with SHA-1 as defined in
-    FIPS 180-4.
+    algorithms unlike the use of the SHA-1 transformation in the legacy Linux
+    kernel /dev/random implementation that is not compliant with SHA-1 as
+    defined in FIPS 180-4.
 
-  - Hash operations use on-stack hash instances to benefit large parallel
-    systems.
+  - Per-CPU DRNG instances serve the requests of large parallel systems
+    side by side.
 
   - ESDM uses limited number of data post-processing steps as documented in
     section @sec:data-processing compared to the large variation of different
@@ -98,55 +109,52 @@ contemporary and future-proof entropy source and DRNG management framework:
 
 - Performance
 
-  - High-performance implementation of scheduler entropy source requiring only
-    a few cycles to collect entropy.
+  - High-performance implementation of the scheduler entropy source of the
+    kernel module requiring only a few cycles to collect entropy.
 
-  - High-performance implementation of interrupt entropy source requiring only
-    a few cycles to collect entropy which is significantly faster than the
-    existing kernel interrupt handler.
+  - High-performance implementation of the interrupt entropy source of the
+    kernel module requiring only a few cycles to collect entropy.
 
 - Testing
 
   - Availability of run-time health tests of the raw unconditioned entropy
-    source data of the scheduler-based entropy source to identify degradation
-    of the available entropy. Such health tests are important today due to
-    virtual machine monitors reducing the resolution of or disabling the
-    high-resolution timer.
+    source data of the scheduler-based and the interrupt-based entropy
+    sources to identify degradation of the available entropy. Such health
+    tests are important today due to virtual machine monitors reducing the
+    resolution of or disabling the high-resolution timer.
 
-  - Heuristic entropy estimation for the scheduler-based entropy source is
-    based on quantitative measurements and analysis following SP800-90B.
+  - Heuristic entropy estimation for the interrupt-based entropy source is
+    based on quantitative measurements and analysis following SP800-90B; the
+    measurement tooling is provided for the scheduler-based and the eBPF-based
+    entropy sources as well.
 
-  - Power-on self tests for critical deterministic components (DRNG, hash
-    implementation, and entropy collection logic).
+  - Power-on self tests for the critical deterministic components (conditioning
+    hash, XDRBG-256 with its SHAKE256, DRNG) and of each entropy source, which
+    are repeated periodically at runtime – see section @sec:self-tests.
 
-  - Availability of test interfaces for all operational stages of the ESDM
-    including boot-time raw entropy event data sampling as outlined in section
+  - Availability of test interfaces to obtain the raw entropy event data of
+    the scheduler-based and interrupt-based entropy sources including
+    boot-time raw entropy event data sampling as outlined in section
     @sec:test-interfaces.
 
-  - The ESDM offers a test interface to validate the used software hash
-    implementation and in particular that the ESDM invokes the hash correctly,
-    allowing a NIST ACVP-compliant test cycle – see section
-    @sec:test-interfaces.
+  - Availability of stress testing covering the different code paths for data
+    and mechanism (de)allocations and code paths covered with locks
+    (`esdm-tool` stress tests, fuzz harnesses of the `fuzzing` build option).
 
-  - #link("https://github.com/smuellerDD/lrng/blob/master/test/swap_stress.sh")[Availability
-    of stress testing] covering the different code paths for data and
-    mechanism (de)allocations and code paths covered with locks.
-
-  - #link("https://github.com/smuellerDD/lrng/blob/master/test/automation")[Availability
-    of fully automated regression testing] covering different ESDM functions
-    in different configurations allow an unattended functional verification
-    testing.
+  - Availability of fully automated regression testing covering different
+    ESDM functions in different configurations allow an unattended functional
+    verification testing (meson test suite in the `tests` directory).
 
 - Entropy collection of the internal interrupt and scheduler-based entropy
   source
 
-  - The ESDM scheduler-based and interrupt-based entropy sources are fully
-    compliant to SP800-90B requirements and are shipped with a full SP800-90B
-    assessment and all #link("https://www.chronox.de/lrng")[required test
-    tools.]
+  - The ESDM scheduler-based and interrupt-based entropy sources of the kernel
+    module are designed as SP800-90B entropy sources with health tests applied
+    in FIPS mode and are shipped with all required test tools.
 
-  - Full entropy assessment and description is provided with chapter
-    @sec:irq-assessment, specifically section @sec:90b-3151.
+  - Full entropy assessment and description of the interrupt entropy source is
+    provided with chapter @sec:irq-assessment, specifically section
+    @sec:90b-3151.
 
   - The ESDM provides a configuration to be compliant to SP800-90C following
     RBG2(NP) as well as RBG2(P) construction methods.
@@ -156,8 +164,10 @@ contemporary and future-proof entropy source and DRNG management framework:
     returning as many bits of data as entropy was available. This shall
     support chaining of DRBGs compliant to SP800-90C.
 
-  - The ESDM provides a configuration to be compliant to the German AIS 20/31
-    NTG.1 considering the aforementioned prediction resistance interface.
+  - The ESDM provides configurations to be compliant to the German AIS 20/31
+    NTG.1 (2011) considering the aforementioned prediction resistance
+    interface, to NTG.1 of AIS 20/31 version 3.0 (2024) with its seeding
+    strategy, and to the classes DRG.3 and DRG.4.
 
 - Configurable
 

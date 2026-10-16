@@ -1,0 +1,37 @@
+@startuml
+' Opportunistic DTLS of an RPC connection - see the STARTDTLS description in
+' service-rpc/service/esdm_rpc_protocol.h and common/esdm_dtls.h
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #000000
+skinparam SequenceLifeLineBorderColor #000000
+skinparam ParticipantBorderColor #000000
+skinparam ParticipantBackgroundColor #EEEEEE
+skinparam NoteBackgroundColor #FFFFFF
+skinparam NoteBorderColor #000000
+hide footbox
+
+participant "RPC client\n(libesdm_rpc_client)" as C
+participant "esdm-server" as S
+
+note over C, S: SOCK_SEQPACKET connection, in the clear
+C -> S: STARTDTLS request\n(method index 0x534c5444 "DTLS", no message)
+C -> S: probe request without waiting\n(GetPoolsize / RndAddEntropy without data)
+alt server with DTLS
+  S --> C: SUCCESS, message "DTLS"
+  S --> C: answer to the probe
+  C <-> S: DTLS 1.2 handshake\n(ephemeral ECDH, AEAD, self-signed\nserver certificate not verified)
+  C -> S: request in DTLS records\n(one record per socket message)
+  S --> C: answer in DTLS records
+else server without DTLS, or --no_dtls
+  S --> C: SERVICE_FAILED
+  S --> C: answer to the probe
+  C -> S: request in the clear
+  S --> C: answer in the clear
+else server 1.2.3 and before
+  S --> C: answer to the probe only,\nor connection closed
+  C -> S: request in the clear\n(on a new connection if closed)
+end
+note over C, S: The peer is trusted for what SO_PEERCRED reports
+@enduml
