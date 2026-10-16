@@ -32,7 +32,6 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_es_irq.h"
 #include "esdm_es_mgr.h"
-#include "esdm_es_jent.h"
 #include "esdm_es_sched.h"
 #include "esdm_logger.h"
 #include "esdm_node.h"
@@ -179,9 +178,14 @@ int esdm_status(char *buf, size_t buflen)
 		 esdm_drg4_compliant() ? "DRG.4 " : "",
 		 esdm_sp80090c_compliant() ? "SP800-90C " : "",
 		 esdm_ntg1_compliant() ? "NTG.1(2011) " : "",
-		 (esdm_ntg1_2024_compliant() || esdm_jent_ntg1()) ?
-			 "NTG.1(2024)" :
-			 "",
+		 /*
+		  * Only the NTG.1 seeding strategy makes the ESDM NTG.1(2024)
+		  * compliant: without it a DRNG is seeded from 256/384 bits of
+		  * any sources, whatever NTG.1 mode the Jitter RNG runs in.
+		  * That mode is a property of the Jitter RNG, which its own
+		  * entropy source section reports.
+		  */
+		 esdm_ntg1_2024_compliant() ? "NTG.1(2024)" : "",
 		 esdm_state_fully_seeded() ? "true" : "false",
 		 esdm_avail_entropy());
 
@@ -609,7 +613,8 @@ int esdm_status_json(char *buf, size_t buflen)
 	if (esdm_ntg1_compliant())
 		json_object_array_add(compliance,
 				      json_object_new_string("NTG.1(2011)"));
-	if (esdm_ntg1_2024_compliant() || esdm_jent_ntg1())
+	/* The Jitter RNG's NTG.1 mode is in its own section - see above */
+	if (esdm_ntg1_2024_compliant())
 		json_object_array_add(compliance,
 				      json_object_new_string("NTG.1(2024)"));
 	json_object_object_add(root, "standards_compliance", compliance);
