@@ -458,7 +458,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, fuzz_socket_path, sizeof(addr.sun_path) - 1);
+	/* Of the same size, and terminated where it was formatted */
+	memcpy(addr.sun_path, fuzz_socket_path, sizeof(addr.sun_path));
 
 	if (bind(fuzz_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
 	    listen(fuzz_listen_fd, 8) < 0) {
