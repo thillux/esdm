@@ -526,10 +526,10 @@ static int esdm_es_pkcs11_monitor(void)
 }
 
 static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
-			       uint32_t requested_bits,
-			       bool __unused unused)
+			       uint32_t requested_bits, bool allow_cached)
 {
-	if (esdm_es_buf_try_get(&pkcs11_buf, eb_es, requested_bits,
+	if (allow_cached &&
+	    esdm_es_buf_try_get(&pkcs11_buf, eb_es, requested_bits,
 				!!esdm_config_es_pkcs11_entropy_rate()))
 		return;
 
@@ -540,7 +540,7 @@ static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
 
 static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
 			       uint32_t requested_bits,
-			       bool __unused unused)
+			       bool __unused allow_cached)
 {
 	esdm_es_pkcs11_get_sync(eb_es, requested_bits);
 }
