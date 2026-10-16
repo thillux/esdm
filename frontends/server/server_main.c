@@ -370,7 +370,8 @@ static void daemon_raise_sched_priority(void)
  * reuses it. systemd removes the file of a PIDFile= service once it stopped.
  *
  * The file is emptied while it is still locked: an instance started meanwhile
- * fails to take the lock and leaves the file alone.
+ * fails to take the lock and leaves the file alone. Hence this runs once the
+ * daemon is torn down completely, see dealloc().
  */
 static void pidfile_release(void)
 {
@@ -404,11 +405,18 @@ static void pidns_supervisor_exit(void)
 	pidfile_release();
 }
 
+/*
+ * The PID file is released last: until it is, its lock keeps another instance
+ * from coming up. One that started while this one still tears down would take
+ * over the status SHM segment, which esdm_fini() then marks as left by its
+ * server - the CUSE daemons and the aux clients would see no server while the
+ * new one serves.
+ */
 static void dealloc(void)
 {
-	pidfile_release();
-
 	daemon_release();
+
+	pidfile_release();
 }
 
 /*

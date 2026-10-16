@@ -63,7 +63,8 @@ option implies
 .BR \-p ", " \-\-pid " \fIFILE\fR"
 Write the PID of the daemon to
 .IR FILE .
-The daemon keeps the file locked for as long as it runs. It writes the file
+The daemon keeps the file locked for as long as it runs, its shutdown included,
+so another instance cannot start before it is gone. It writes the file
 before it drops its privileges, and can then no longer remove it from a
 directory only root may write to, such as
 .IR /run .
