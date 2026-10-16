@@ -97,6 +97,18 @@ static void esdm_es_pkcs11_clear_runtime_token_label_locked(void)
 #if (ESDM_PKCS11_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf pkcs11_buf;
 static bool pkcs11_buf_alloced = false;
+
+/*
+ * What a block of @requested_bits is credited with at present: the configured
+ * rate. Unlike esdm_es_pkcs11_entropylevel() it does not ask for a token bound
+ * now - a block cached before the card was pulled was read from a token that
+ * delivered.
+ */
+static uint32_t esdm_es_pkcs11_buf_credit(uint32_t requested_bits)
+{
+	return esdm_fast_noise_entropylevel(
+		esdm_config_es_pkcs11_entropy_rate(), requested_bits);
+}
 #endif
 
 static bool esdm_es_pkcs11_active(void);
@@ -277,7 +289,8 @@ static int esdm_es_pkcs11_init(void)
 		esdm_es_buf_reset(&pkcs11_buf);
 	} else if (esdm_es_buf_alloc(&pkcs11_buf, ESDM_PKCS11_ENTROPY_BLOCKS,
 				     "PKCS#11",
-				     esdm_config_es_pkcs11_entropy_rate) == 0) {
+				     esdm_config_es_pkcs11_entropy_rate,
+				     esdm_es_pkcs11_buf_credit) == 0) {
 		pkcs11_buf_alloced = true;
 	}
 #endif
