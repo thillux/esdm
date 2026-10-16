@@ -63,6 +63,27 @@ if get_option('esdm-es-ext').enabled()
 		'es_ext_serve_test.c',
 		include_directories: include_dirs_es_ext_test,
 	)
+	# The external entropy sources as the esdm-server takes them on its
+	# command line. Skipped (77) unless run as root.
+	if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
+		es_ext_server_test = executable('es_ext_server_test',
+			'es_ext_server_test.c',
+			include_directories: [ include_dirs_client,
+					       include_directories('../common') ],
+			dependencies: dependencies_client,
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib ],
+		)
+		test('esdm-server with external entropy sources',
+			es_ext_server_test,
+			args: [ esdm_server.full_path(),
+				esdm_es_ext_serve.full_path(),
+				es_ext_test_plugin.full_path() ],
+			depends: [ esdm_server, esdm_es_ext_serve,
+				   es_ext_test_plugin ],
+			suite: 'es_ext', timeout: 120)
+	endif
+
 	test('esdm-es-ext-serve', es_ext_serve_test,
 		args: [ esdm_es_ext_serve.full_path(),
 			es_ext_test_plugin.full_path(),
