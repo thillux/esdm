@@ -229,6 +229,7 @@ int __init esdm_es_sched_module_init(void)
 	/* drbg_alloc() reports failure via ERR_PTR, never NULL. */
 	if (IS_ERR_OR_NULL(drbg_state)) {
 		pr_warn("could not alloc DRBG for post-processing\n");
+		ret = drbg_state ? PTR_ERR(drbg_state) : -ENOMEM;
 		goto free_mem;
 	}
 
@@ -250,7 +251,7 @@ int __init esdm_es_sched_module_init(void)
 
 free_mem:
 	esdm_es_ring_free(&esdm_sched_ring);
-	return -ENOMEM;
+	return ret;
 }
 
 void esdm_es_sched_module_exit(void)
