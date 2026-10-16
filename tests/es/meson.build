@@ -117,6 +117,22 @@ if get_option('es_kernel').enabled()
 	)
 
 	test('ES Kernel', es_krng_tester)
+
+	# The interrupt ES is compiled into the test to fake the descriptor of
+	# its kernel add-on - see the file header.
+	if get_option('es_irq').enabled()
+		es_krng_irq_cap_tester = executable(
+			'es_krng_irq_cap_tester',
+			[ esdm_ipc_ns, 'es_krng_irq_cap_test.c' ],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			dependencies: dependencies_server,
+			link_with: esdm_static_lib,
+		)
+
+		test('ES Kernel capped while the interrupt add-on is present',
+		     es_krng_irq_cap_tester)
+	endif
 endif
 
 if get_option('es_sched').enabled()

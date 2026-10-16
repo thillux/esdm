@@ -89,6 +89,22 @@ static void esdm_irq_buf_discard(void)
 #endif
 }
 
+/*
+ * The kernel add-on is there, credited or not: its hook in random.c takes the
+ * interrupts away from the kernel RNG as soon as the add-on registers, whatever
+ * rate user space credits the source with.
+ */
+bool esdm_irq_present(void)
+{
+	bool ret;
+
+	mutex_reader_lock(&irq_mutex);
+	ret = esdm_irq_entropy_fd >= 0;
+	mutex_reader_unlock(&irq_mutex);
+
+	return ret;
+}
+
 bool esdm_irq_enabled(void)
 {
 	bool ret;
@@ -264,7 +280,7 @@ static int esdm_irq_initialize(void)
 	mutex_unlock(&irq_mutex);
 
 	/*
-	 * The kernel RNG ES caps its rate itself while this ES is credited
+	 * The kernel RNG ES caps its rate itself while this ES is present
 	 * (esdm_krng_properties_entropylevel()), leaving the configured rate
 	 * alone.
 	 */

@@ -302,7 +302,8 @@ uint32_t esdm_config_es_krng_entropy_rate(void)
 DSO_PUBLIC
 void esdm_config_es_krng_entropy_rate_set(uint32_t ent)
 {
-	if (esdm_irq_enabled() || esdm_irq_ebpf_enabled())
+	/* As esdm_krng_properties_entropylevel() caps it */
+	if (esdm_irq_present() || esdm_irq_ebpf_enabled())
 		ent = min_uint32(ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY, ent);
 
 	esdm_config.esdm_es_krng_entropy_rate_bits =

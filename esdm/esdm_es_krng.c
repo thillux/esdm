@@ -87,11 +87,15 @@ static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 		return 0;
 
 	/*
-	 * A credited interrupt entropy source either takes the interrupts away
-	 * from the kernel RNG (kernel add-on) or credits the same events the
-	 * kernel RNG processes (eBPF) - either way only a remainder is left.
+	 * The interrupt entropy source either takes the interrupts away from
+	 * the kernel RNG (kernel add-on) or credits the same events the kernel
+	 * RNG processes (eBPF) - either way only a remainder is left. The
+	 * add-on diverts the interrupts once it is there, whether or not user
+	 * space credits it with anything; the eBPF variant only observes them
+	 * and takes nothing from the kernel RNG, so it matters only while it
+	 * is credited.
 	 */
-	if (esdm_irq_enabled() || esdm_irq_ebpf_enabled())
+	if (esdm_irq_present() || esdm_irq_ebpf_enabled())
 		return min_uint32(entropylevel,
 				  ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
 
