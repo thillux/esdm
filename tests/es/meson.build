@@ -357,4 +357,16 @@ if get_option('es_jent_kernel').enabled()
 	)
 	test('ES Kernel Jitter RNG that stops delivering',
 	     es_jent_kernel_read_fail_tester)
+
+	# The same stand-in, knowing two RNGs - see the file header.
+	es_jent_kernel_name_tester = executable(
+		'es_jent_kernel_name_tester',
+		[ esdm_ipc_ns, 'es_jent_kernel_name_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES Kernel Jitter RNG of a configured name',
+	     es_jent_kernel_name_tester)
 endif

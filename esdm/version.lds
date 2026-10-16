@@ -142,6 +142,12 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_jent_status;
 
 		/*
+		 * esdm_es_jent_kernel.h - the kernel RNG the server sets from
+		 * its command line. Only built when es_jent_kernel is enabled.
+		 */
+		esdm_es_jent_kernel_set_name;
+
+		/*
 		 * esdm_es_extlib.h, esdm_es_extsock.h - the plugin library
 		 * and the provider socket the server sets from its command
 		 * line. Only built when es_ext is enabled.

@@ -184,6 +184,19 @@ Accept a provider running as
 .I USER
 \- a uid or a user name \- next to one running as root (meson option
 .BR es_ext_socket_peer_uid ).
+.TP
+.BR \-\-es_jent_kernel_name " \fINAME\fR"
+Read the kernel crypto API RNG
+.I NAME
+\- its name or driver name in
+.I /proc/crypto
+\- for the kernel Jitter RNG entropy source, instead of the one the build was
+configured with (meson option
+.BR es_jent_kernel_name ,
+.B jitterentropy_rng
+by default): e.g. that of a jitterentropy kernel module registering its RNG
+under another name. Refused by a build without the source (meson option
+.BR es_jent_kernel ).
 .SH EXTERNAL ENTROPY SOURCES
 Noise sources that are not part of the ESDM are written against
 .BR libesdm_es_ext (3)
