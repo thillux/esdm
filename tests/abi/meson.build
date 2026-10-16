@@ -28,6 +28,12 @@ if nm.found() and get_option('default_library') != 'static'
 		'libesdm_egd_client': [ esdm_egd_client_lib.get_shared_lib(),
 					files('../../service-egd/client/esdm_egd_client.h') ],
 	}
+	if get_option('esdm-es-ext').enabled()
+		abi_libs += {
+			'libesdm_es_ext': [ esdm_es_ext_lib.get_shared_lib(),
+					    files('../../es-ext/esdm_es_ext.h') ],
+		}
+	endif
 	if get_option('esdm-aux-client').enabled()
 		abi_libs += {
 			'libesdm_aux_client': [ esdm_aux_client_lib.get_shared_lib(),

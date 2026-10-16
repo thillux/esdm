@@ -1,0 +1,216 @@
+.TH LIBESDM_ES_EXT 3 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+libesdm_es_ext \- external entropy sources for the ESDM
+.SH SYNOPSIS
+.nf
+.B #include <esdm/esdm_es_ext.h>
+.PP
+.B pkg\-config \-\-cflags \-\-libs esdm_es_ext
+.fi
+.SH DESCRIPTION
+An external entropy source is noise source code that is not part of the ESDM.
+It is written once, as a
+.B struct esdm_es_ext_plugin
+of the header
+.IR esdm_es_ext.h ,
+and handed to
+.BR esdm\-server (8)
+in one of two ways:
+.TP
+.B As a plugin library
+A shared library exporting the struct under the name
+.B esdm_es_ext_plugin
+.RB ( ESDM_ES_EXT_PLUGIN_SYMBOL ).
+The ESDM loads it into its own process and calls it directly; it is named
+with
+.B esdm\-server \-\-es_ext_lib
+.I PATH
+or the meson option
+.BR es_ext_lib_path .
+Building such a plugin needs the header only, not this library.
+.TP
+.B As a provider process
+A process of its own that serves the plugin on a UNIX domain socket with the
+provider server of this library. The ESDM connects to it; the socket is named
+with
+.B esdm\-server \-\-es_ext_socket
+.I PATH
+or the meson option
+.BR es_ext_socket_path .
+.BR esdm\-es\-ext\-serve (8)
+is such a provider for a plugin library, so the same plugin runs either way.
+.PP
+A plugin in the ESDM runs with the privileges and in the namespaces of the
+daemon and takes it down when it crashes; a provider keeps its own privileges,
+its own address space and its own life cycle, at the cost of a round trip per
+seed.
+.SS The plugin
+.nf
+struct esdm_es_ext_plugin {
+	uint32_t version;
+	const char *name;
+	int (*init)(void **ctx);
+	void (*fini)(void *ctx);
+	int (*get_entropy)(void *ctx, uint8_t *buf, size_t buflen,
+			   uint32_t *entropy_bits);
+	int (*selftest)(void *ctx);
+};
+.fi
+.PP
+.I version
+is
+.BR ESDM_ES_EXT_PLUGIN_VERSION .
+.I get_entropy
+fills all
+.I buflen
+bytes of
+.I buf
+and sets
+.I *entropy_bits
+to the entropy they hold, at most
+.IR buflen " * 8,"
+returning 0 \- or a negative errno if the source cannot deliver, upon which
+the data is discarded. It must not block for long, as a DRNG waits for the
+seed it is part of. The other callbacks may be NULL;
+.I init
+returns the context handed to the others,
+.I selftest
+checks the source without consuming the data it delivers and runs on the
+interval of the ESDM self tests.
+.PP
+The callbacks are never called concurrently. Both the ESDM and the provider
+server call
+.I init
+before the ESDM drops its privileges and isolates itself, so a device the
+source needs is opened there.
+.SS Entropy credit
+The ESDM credits a block with the entropy the source claims for it, but at
+most with what the entropy rate configured for the source allows
+.RB ( es_ext_lib_entropy_rate ,
+.BR es_ext_socket_entropy_rate ,
+or the corresponding
+.BR esdm\-server (8)
+options). A claim beyond the size of the block is a failure: the block is
+discarded, and the source is credited with nothing until it delivers properly
+again.
+.SH FUNCTIONS
+.SS Provider server
+.TP
+.BI "int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *" plugin ", const char *" socket_path ", mode_t " mode ", struct esdm_es_ext_server **" server );
+Create the
+.B SOCK_SEQPACKET
+socket file
+.I socket_path
+with exactly the access mode
+.I mode
+\- whatever the umask \- and call the
+.I init
+callback of
+.IR plugin .
+A socket file left at the path by an earlier instance is replaced, any other
+file is not
+.RB ( \-EEXIST ).
+The ESDM connects with its privileges dropped (user
+.B nobody
+by default), so the mode has to let that user connect.
+.TP
+.BI "int esdm_es_ext_server_run(struct esdm_es_ext_server *" server );
+Serve the connected clients, one request after the other, until
+.BR esdm_es_ext_server_stop ()
+is called. A client that breaks the protocol is disconnected.
+.TP
+.BI "void esdm_es_ext_server_stop(struct esdm_es_ext_server *" server );
+Make
+.BR esdm_es_ext_server_run ()
+return. Callable from another thread and from a signal handler.
+.TP
+.BI "void esdm_es_ext_server_free(struct esdm_es_ext_server *" server );
+Close the connections, remove the socket file \- the one created, not one
+another instance put there meanwhile \- and call the
+.I fini
+callback of the plugin.
+.SS Plugin loader
+.TP
+.BI "int esdm_es_ext_plugin_load(const char *" path ", struct esdm_es_ext_plugin_handle **" handle ", const struct esdm_es_ext_plugin **" plugin );
+Load the plugin library
+.I path
+and check the plugin it exports, without calling its
+.I init
+callback \- the plugin is meant for
+.BR esdm_es_ext_server_alloc (),
+which does. Returns
+.B \-ENOENT
+for a library that cannot be loaded,
+.B \-ENOEXEC
+for one exporting no plugin, and
+.B \-EPROTO
+for a plugin of another version or without
+.IR get_entropy .
+.TP
+.BI "void esdm_es_ext_plugin_unload(struct esdm_es_ext_plugin_handle *" handle );
+Unload the library.
+.SH RETURN VALUE
+The functions returning an int return 0 on success and a negative errno on
+failure.
+.SH PROTOCOL
+The ESDM sends requests on its connection to the provider one at a time; the
+provider answers each with exactly one response. Requests and responses are
+one
+.B SOCK_SEQPACKET
+message each, all integers little endian.
+.PP
+A request is 12 bytes: the magic
+.B ESDM_ES_EXT_PROTO_MAGIC
+(the bytes "ESEX"), the version
+.B ESDM_ES_EXT_PROTO_VERSION
+(u16, 1), the type (u16:
+.B ESDM_ES_EXT_PROTO_GET_ENTROPY
+= 1 or
+.B ESDM_ES_EXT_PROTO_SELFTEST
+= 2) and the length (u32: the bytes asked for, 1 to
+.B ESDM_ES_EXT_PROTO_MAX_DATA
+= 512, for GET_ENTROPY; 0 for SELFTEST).
+.PP
+A response is 16 bytes: magic, version and type as in the request, the status
+(s32: 0 or a negative errno) and the entropy of the data (u32, at most 8 times
+the length); a GET_ENTROPY answered with status 0 is followed by exactly the
+length bytes of data, any other response by nothing.
+.PP
+A message that breaks any of this ends the connection.
+.SH EXAMPLE
+A plugin library, built with
+.B cc \-shared \-fPIC
+and loaded with
+.BR "esdm\-server \-\-es_ext_lib /usr/lib/esdm/my_es.so" ,
+or served with
+.BR "esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/my_es.so \-\-socket /run/my\-es.socket" :
+.PP
+.nf
+#include <esdm/esdm_es_ext.h>
+
+static int my_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
+			  uint32_t *entropy_bits)
+{
+	(void)ctx;
+
+	if (read_my_noise_source(buf, buflen))
+		return \-EIO;
+
+	/* The entropy assessment of the noise source: 1 bit per byte */
+	*entropy_bits = buflen;
+	return 0;
+}
+
+ESDM_ES_EXT_PLUGIN_EXPORT
+const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
+	.version = ESDM_ES_EXT_PLUGIN_VERSION,
+	.name = "my-noise-source",
+	.get_entropy = my_get_entropy,
+};
+.fi
+.SH SEE ALSO
+.BR esdm\-server (8),
+.BR esdm\-es\-ext\-serve (8),
+.BR libesdm (3)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

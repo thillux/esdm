@@ -155,6 +155,7 @@ include_user_files = [ ]
 include_dirs_server = include_directories([ 'esdm',
 					    'crypto',
 					    'common',
+					    'es-ext',
 					    'service-egd',
 					    'service-egd/server',
 					    'service-rpc/service',
@@ -167,6 +168,15 @@ include_dirs_client = include_directories([ 'common',
 					    'service-rpc/service',
 					    'service-rpc/client' ])
 dependencies_client = dependencies
+
+# The external entropy source library needs the common code and the socket
+# creation of the servers - see es-ext/meson.build.
+include_dirs_es_ext = include_directories([ 'common',
+					    'es-ext',
+					    'service-egd/server' ])
+
+# Plugin libraries of the external entropy sources are loaded with dlopen(3)
+dl_dep = dependency('dl')
 
 # The EGD client needs nothing but the common code - keep it that way by not
 # handing it the RPC service includes.
@@ -287,6 +297,10 @@ else
 	include_dirs_aux_client = []
 endif
 
+if get_option('esdm-es-ext').enabled()
+	subdirs += [ 'es-ext' ]
+endif
+
 if get_option('esdm-tool').enabled()
 	subdirs += [ 'frontends/tool' ]
 endif
@@ -314,6 +328,7 @@ testdirs = [
 	'tests/cuse',
 	'tests/egd',
 	'tests/es',
+	'tests/es_ext',
 	'tests/esdm',
 	'tests/getrandom',
 	'tests/kernel-seeder',
