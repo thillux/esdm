@@ -3,7 +3,7 @@
 #show: esdm-doc.with(
   title: [Entropy Source and DRNG Manager],
   author: [Stephan Müller \<smueller\@chronox.de\>],
-  date: [February 7, 2024],
+  date: [October 16, 2026],
   abstract: [
     Almost all parts of cryptography rest on a random number generator
     which produces data that are indistinguishable from a perfect generator.
