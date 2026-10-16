@@ -40,6 +40,28 @@ static bool jent_kernel_selftest_failed = false;
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf jent_kernel_buf;
 static bool jent_kernel_buf_alloced = false;
+
+/*
+ * What a block of @requested_bits is credited with at present: the configured
+ * rate, and nothing once a self test saw the kernel's jitterentropy RNG repeat
+ * its output. Unlike esdm_jent_kernel_entropylevel() it does not ask whether
+ * the handle is open now - a block cached before was read from an RNG that
+ * delivered.
+ */
+static uint32_t esdm_jent_kernel_buf_credit(uint32_t requested_bits)
+{
+	bool failed;
+
+	mutex_reader_lock(&jent_rng_mutex);
+	failed = jent_kernel_selftest_failed;
+	mutex_reader_unlock(&jent_rng_mutex);
+
+	if (failed)
+		return 0;
+
+	return esdm_fast_noise_entropylevel(
+		esdm_config_es_jent_kernel_entropy_rate(), requested_bits);
+}
 #endif
 
 static bool esdm_jent_kernel_active(void);
@@ -89,10 +111,11 @@ static int esdm_jent_kernel_init(void)
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
 	if (jent_kernel_buf_alloced) {
 		esdm_es_buf_reset(&jent_kernel_buf);
-	} else if (!esdm_es_buf_alloc(
-			   &jent_kernel_buf, ESDM_JENT_KERNEL_ENTROPY_BLOCKS,
-			   "KernelJitterRNG",
-			   esdm_config_es_jent_kernel_entropy_rate)) {
+	} else if (!esdm_es_buf_alloc(&jent_kernel_buf,
+				      ESDM_JENT_KERNEL_ENTROPY_BLOCKS,
+				      "KernelJitterRNG",
+				      esdm_config_es_jent_kernel_entropy_rate,
+				      esdm_jent_kernel_buf_credit)) {
 		jent_kernel_buf_alloced = true;
 	}
 #endif
