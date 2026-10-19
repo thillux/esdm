@@ -20,6 +20,46 @@ reads (esdm_egd_client_get_random_pr), libesdm-egd-provider.so serves OpenSSL's
 prediction resistance requests with them and libesdm-egd-provider-pr.so all
 requests
 
+* Add the EGD protocol over the network (meson option egd-net): the
+esdm-egd-net-server serves the EGD protocol of the ESDM on TCP and answers it
+through the unprivileged RPC interface, so nothing of the network reaches the
+esdm-server and every client is unprivileged - entropy claims are dropped, the
+privileged commands answered -EPERM; the esdm-egd-net-relay serves the EGD
+socket of a host without an ESDM, where libgcrypt, RAND_egd() and the EGD
+OpenSSL provider find it, from such a server. Two modes: TLS 1.3 with mutual
+authentication by certificates (egd-net-tls, by the TLS stack of OpenSSL,
+GnuTLS or Botan), and plain TCP, which is neither encrypted nor authenticated
+and meant only for networks protected underneath, by IPsec or WireGuard, say -
+it has to be asked for with --plain, is never a default and builds with every
+crypto backend. Bounds on the connections in all, on probation and per source
+address, per client - certificate, or source address with IPv6 grouped by /64
+in plain mode -, an idle and a handshake timeout, and an allowlist of source
+networks (--allow); systemd units with socket activation, DynamicUser= and the
+TLS files as credentials, on port 7378 (egd-net-port)
+
+* EGD over the network: certificates, trust anchors and CRLs are taken up
+without a restart, on SIGHUP and when the files change (--reload_interval),
+by a complete new context that replaces the old one only if everything loaded,
+so a broken rotation keeps the service up; the relay's upstream connections
+take up a rotated client certificate the same way. CRLs (--crl) are checked
+identically on every TLS stack, within its verification and with the alert
+of the reason, on the chain up to the own trust anchors, and fail closed for
+the certificate of the peer (--crl_check_all for the CA certificates,
+--crl_allow_expired for an expired CRL); delta CRLs and CRLs with an issuing
+distribution point are refused. Established connections are checked against
+reloaded CRLs and closed when revoked, connections of an expired client
+certificate closed, and CRLs close to or past their nextUpdate logged;
+esdm-egd-net-crl-update@.timer downloads CRLs without an HTTP client in the
+daemons
+
+* libesdm_egd_client: network modes - esdm_egd_client_alloc_net() with an
+extensible configuration, plain TCP, which keeps the syscall discipline of the
+Unix domain socket once connected, and TLS, by a module of the library loaded
+by the first client in TLS mode, so that a process using it otherwise has no
+TLS stack loaded - and the ESDM commands
+esdm_egd_client_get_random_unseeded(), esdm_egd_client_get_state(),
+esdm_egd_client_status() and esdm_egd_client_status_json() in every mode
+
 * Add the kernel module esdm_cdev (kernel/esdm_cdev): /dev/esdm_random,
 /dev/esdm_urandom and /proc/esdm served from the ESDM over its EGD socket, with
 the ioctls of the kernel's random devices - the counterpart of the CUSE
