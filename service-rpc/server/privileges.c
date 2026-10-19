@@ -70,7 +70,7 @@ int drop_privileges_permanent(const char *user, const char *group)
 	}
 
 	uid = pwd->pw_uid;
-	gid = pwd->pw_gid;
+	gid = grp ? grp->gr_gid : pwd->pw_gid;
 
 	/*
 	 * Changing the UID or GID below makes the kernel reset the dumpable
@@ -81,7 +81,14 @@ int drop_privileges_permanent(const char *user, const char *group)
 	dumpable = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
 
 	if (grp) {
-		if (setgroups(1, &grp->gr_gid) == -1) {
+		/*
+		 * The group becomes the one of the process. It is a
+		 * supplementary group as well, and so is the group of the user:
+		 * the process has access to what either grants access to.
+		 */
+		gid_t groups[2] = { grp->gr_gid, pwd->pw_gid };
+
+		if (setgroups(groups[0] == groups[1] ? 1 : 2, groups) == -1) {
 			ret = -errno;
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "Cannot set supplemental groups: %s\n",

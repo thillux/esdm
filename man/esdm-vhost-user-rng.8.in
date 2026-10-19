@@ -197,10 +197,11 @@ Nothing it does afterwards needs privileges: the memory and the notifiers of
 the guest come as file descriptors over the socket.
 .TP
 .BR \-g ", " \-\-group " \fIGROUP\fR"
-Started as root, drop to
-.IR GROUP ,
-by default the group of
-.IR USER .
+Started as root, drop to the group
+.I GROUP
+rather than the group of
+.IR USER ,
+which the daemon keeps as a supplementary group.
 .TP
 .B \-\-syslog
 Log to syslog.

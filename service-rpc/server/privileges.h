@@ -26,6 +26,11 @@ extern "C" {
 
 /**
  * @brief Permanently dropping privileges
+ *
+ * @param [in] username User to switch to
+ * @param [in] groupname Group to switch to - it and the group of @username are
+ *	  the supplementary groups then -, NULL for the group of @username and
+ *	  no supplementary groups
  */
 int drop_privileges_permanent(const char *username, const char *groupname);
 

@@ -35,7 +35,8 @@
  *	hostile		requests and rings a hostile guest writes
  *	lifecycle	stopping, disabling, resetting, reconnecting, memory
  *			changing under a request, waiting for the seeding
- *	options		--max_bytes/--period_ms and --pr
+ *	options		--max_bytes/--period_ms, --pr, and --user/--group
+ *			when run as root
  *	esdm		the real thing: an esdm-server instead of the stand-in,
  *			which takes root, as the server does
  */
@@ -44,6 +45,8 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2111,10 +2114,179 @@ static void test_options_pr(void)
 	test_end(pid);
 }
 
+/* Line @key of the status of process @pid, without the key */
+static bool test_proc_status(pid_t pid, const char *key, char *line,
+			     size_t len)
+{
+	char path[64], buf[8192];
+	const char *p;
+	ssize_t n;
+	int fd;
+
+	snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = 0;
+
+	for (p = buf; p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
+		size_t klen = strlen(key), i = 0;
+
+		if (strncmp(p, key, klen) || p[klen] != ':')
+			continue;
+		for (p += klen + 1; *p == '\t' || *p == ' '; p++)
+			;
+		while (p[i] && p[i] != '\n' && i + 1 < len) {
+			line[i] = p[i];
+			i++;
+		}
+		line[i] = 0;
+		return true;
+	}
+
+	return false;
+}
+
+/* Whether the four IDs of a Uid: or Gid: line of the status are all @id */
+static bool test_ids_are(const char *line, unsigned int id)
+{
+	unsigned int ids[4];
+
+	return sscanf(line, "%u %u %u %u", &ids[0], &ids[1], &ids[2],
+		      &ids[3]) == 4 &&
+	       ids[0] == id && ids[1] == id && ids[2] == id && ids[3] == id;
+}
+
+/*
+ * Start the daemon with @args as root and check the user, group and
+ * supplementary groups it dropped to, then that it serves
+ */
+static void test_options_ids(const char *const *args, uid_t uid, gid_t gid,
+			     const gid_t *groups, unsigned int ngroups)
+{
+	char line[512] = "";
+	unsigned int n = 0, i;
+	bool dropped = false;
+	struct fe_mem mem;
+	struct fe fe;
+	uint64_t end;
+	const char *p;
+	pid_t pid;
+
+	pid = test_start(args);
+	if (pid < 0) {
+		test_failures++;
+		return;
+	}
+
+	/* Dropped right after the socket is there */
+	end = fe_now_ms() + TEST_WAIT_MS;
+	do {
+		dropped = test_proc_status(pid, "Uid", line, sizeof(line)) &&
+			  test_ids_are(line, (unsigned int)uid);
+		if (!dropped)
+			fe_sleep_ms(20);
+	} while (!dropped && fe_now_ms() < end);
+	CHECK(dropped, "UIDs %s, expected %u", line, (unsigned int)uid);
+
+	CHECK(test_proc_status(pid, "Gid", line, sizeof(line)) &&
+		      test_ids_are(line, (unsigned int)gid),
+	      "GIDs %s, expected %u", line, (unsigned int)gid);
+
+	line[0] = 0;
+	CHECK(test_proc_status(pid, "Groups", line, sizeof(line)),
+	      "supplementary groups listed");
+	for (p = line; *p;) {
+		char *e;
+		unsigned long g = strtoul(p, &e, 10);
+		bool known = false;
+
+		if (e == p)
+			break;
+		for (i = 0; i < ngroups; i++)
+			known |= g == (unsigned long)groups[i];
+		CHECK(known, "supplementary group %lu expected", g);
+		n++;
+		p = e;
+		while (*p == ' ')
+			p++;
+	}
+	CHECK(n == ngroups, "%u supplementary groups (%s), expected %u", n,
+	      line, ngroups);
+
+	CHECK(!fe_mem_create(&mem, TEST_MEM_SIZE, TEST_GPA), "memfd");
+	CHECK(!fe_setup(&fe, test_sock, &mem, 0, TEST_PFEATURES, TEST_NUM),
+	      "set-up");
+	drv_desc(&fe, 0, fe_data_gpa(&fe, 0), 64, VIRTQ_DESC_F_WRITE, 0);
+	test_serve(&fe, 0, 64);
+	fe_close(&fe);
+	fe_mem_destroy(&mem);
+
+	test_end(pid);
+}
+
+/*
+ * Started as root, the daemon drops to --user and --group: the group of the
+ * process is the one of --group, which is a supplementary group as is the
+ * group of the user - and without --group, the group of the user alone
+ */
+static void test_options_privileges(void)
+{
+	static const char *const user[] = { "--user", "nobody", NULL };
+	const char *group[] = { "--user", "nobody", "--group", NULL, NULL };
+	char name[64] = "";
+	const struct passwd *pw;
+	const struct group *gr;
+	gid_t groups[2], gid = 0;
+	uid_t nobody;
+
+	if (geteuid()) {
+		printf("Not root - skipping --user and --group\n");
+		return;
+	}
+
+	pw = getpwnam("nobody");
+	CHECK(pw, "user nobody known");
+	if (!pw)
+		return;
+	nobody = pw->pw_uid;
+	groups[1] = pw->pw_gid;
+
+	/* A group neither root's nor nobody's, mapped in a user namespace */
+	setgrent();
+	while ((gr = getgrent())) {
+		if (gr->gr_gid && gr->gr_gid != groups[1] &&
+		    gr->gr_gid < 65536 && strlen(gr->gr_name) < sizeof(name)) {
+			snprintf(name, sizeof(name), "%s", gr->gr_name);
+			gid = gr->gr_gid;
+			break;
+		}
+	}
+	endgrent();
+
+	TEST_STEP("--user nobody: the group of nobody, no supplementary ones");
+	test_options_ids(user, nobody, groups[1], NULL, 0);
+
+	if (!gid) {
+		printf("No group but root's and nobody's - skipping --group\n");
+		return;
+	}
+	TEST_STEP("--user nobody --group %s: group %s, nobody's supplementary",
+		  name, name);
+	group[3] = name;
+	groups[0] = gid;
+	test_options_ids(group, nobody, gid, groups, 2);
+}
+
 static int test_group_options(void)
 {
 	test_options_ratelimit();
 	test_options_pr();
+	test_options_privileges();
 	return 0;
 }
 
