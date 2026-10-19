@@ -1,0 +1,23 @@
+# esdm-vhost-user-rng: the vhost-user back-end of a virtio entropy device, a
+# process of its own per VM that reaches the ESDM through the unprivileged RPC
+# interface - see esdm-vhost-user-rng(8).
+#
+# The protocol and ring handling is a library of its own, so the tests can
+# drive it with a random source of their own; the fuzz harnesses compile its
+# sources instead, to have them instrumented.
+vhost_user_rng_core_src = files([
+	'vhost_user_dev.c',
+	'vhost_user_mem.c',
+	'vhost_user_vring.c',
+])
+
+vhost_user_rng_inc = include_directories([
+	'.',
+])
+
+vhost_user_rng_core_lib = static_library('vhost_user_rng_core',
+		vhost_user_rng_core_src,
+		include_directories: [ include_dirs_client, vhost_user_rng_inc ],
+		dependencies: [ dependencies_client ],
+		link_with: [ esdm_common_static_lib ],
+		)

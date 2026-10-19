@@ -1087,6 +1087,15 @@ if you want to use the OpenSSL as a provider for ESDM-internal crypto algorithms
 like hash algorithms.
 ''')
 
+option('vhost-user-rng', type: 'feature', value: 'enabled',
+       description: '''Enable esdm-vhost-user-rng, the vhost-user back-end of a virtio entropy device.
+
+The daemon serves the virtio entropy device (virtio-rng) of a QEMU or Cloud
+Hypervisor guest from the ESDM: one instance per VM, a process of its own that
+reaches the ESDM through the unprivileged RPC interface, as it parses the memory
+of the guest. Linux only.
+''')
+
 option('linux-reseed-interval', type: 'integer', value: 120,
        description: 'interval between forced Linux kernel RNG reseeds (in seconds)')
 option('linux-reseed-entropy-count', type: 'integer', value: 0, min: 0, max: 512,

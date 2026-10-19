@@ -238,6 +238,13 @@ if get_option('linux-getrandom').enabled()
 	subdirs += [ 'frontends/getrandom' ]
 endif
 
+if get_option('vhost-user-rng').enabled()
+	if host_machine.system() != 'linux'
+		error('vhost-user-rng is only available on Linux - set -Dvhost-user-rng=disabled')
+	endif
+	subdirs += [ 'frontends/vhost-user-rng' ]
+endif
+
 ################################################################################
 # Crypto Backends/Frontends
 ################################################################################
