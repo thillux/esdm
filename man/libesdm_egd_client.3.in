@@ -24,7 +24,9 @@ exactly one socket. The price is the protocol: it is a legacy one that cannot
 transfer more than
 .B ESDM_EGD_MAX_TRANSFER
 (255) bytes per request, though this client splits larger requests
-transparently. Nor can it express prediction resistance: the ESDM offers that
+transparently \- the commands of a blocking read of up to 64 KiB go out at
+once and their answers are read after, one round trip per 64 KiB rather than
+per transfer. Nor can it express prediction resistance: the ESDM offers that
 with a read command of its own on the same socket, which
 .BR esdm_egd_client_get_random_pr ()
 and

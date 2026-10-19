@@ -77,7 +77,10 @@ Each connection is served by a thread of its own, which waits for the
 answers of the ESDM as long as they take: a blocking read before the ESDM is
 operational waits for it. A non\-blocking read waits at most 250 ms for the
 ESDM. Commands of one connection are answered in order; a client pipelining
-them is served one after the other.
+them is served one after the other \- blocking reads in a row, as
+.BR libesdm_egd_client (3)
+sends them for a read beyond 255 bytes, with one request to the ESDM for up to
+64 KiB of them.
 .SH OPTIONS
 .TP
 .BR \-l ", " \-\-listen " \fI[HOST]:PORT\fR"
