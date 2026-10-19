@@ -1,0 +1,31 @@
+# The socket of an external entropy source served on the network by
+# esdm-es-ext-serve-net.service - see NETWORK in esdm-es-ext-serve(8).
+#
+# SCTP, one-to-one style. Not started by anything on its own: enabling the
+# service - which enables this unit along - is what puts the source on the
+# network.
+#
+#	systemctl enable --now esdm-es-ext-serve-net.service
+#
+# Bind it to an address of its own with a drop-in:
+#
+#	[Socket]
+#	ListenStream=
+#	ListenStream=192.0.2.1:@PORT@
+#
+# A firewall has to pass SCTP to the port, which a rule for TCP does not.
+
+[Unit]
+Description=ESDM external entropy source on the network, socket
+Documentation=man:esdm-es-ext-serve(8)
+
+[Socket]
+# Every address, IPv4 and IPv6 - restrict the clients with --allow or a
+# firewall, and the address with a drop-in, see above.
+ListenStream=@PORT@
+SocketProtocol=sctp
+Backlog=16
+Service=esdm-es-ext-serve-net.service
+
+[Install]
+WantedBy=sockets.target

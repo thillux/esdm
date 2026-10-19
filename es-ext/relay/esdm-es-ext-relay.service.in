@@ -1,0 +1,104 @@
+# Systemd configuration file of esdm-es-ext-relay, which serves the ESDM of
+# this host an external entropy source on another host - see
+# esdm-es-ext-relay(8).
+#
+# The relay serves a provider socket below, which the ESDM reads through one of
+# its provider socket sources, and forwards it over SCTP with DTLS and
+# certificates to esdm-es-ext-serve or esdm-es-pkcs11 serving on the network.
+# Tell the ESDM about it with a drop-in of esdm-server.service, e.g.
+# /etc/systemd/system/esdm-server.service.d/es-ext-relay.conf:
+#
+#	[Service]
+#	Environment="ESDM_SERVER_OPTIONS=--es_ext_socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket --es_ext_socket_uid esdm-es-ext-relay"
+#
+# and tell the relay about the provider in /etc/esdm/es-ext-relay.env:
+#
+#	ESDM_ES_EXT_RELAY_ARGS="--connect source.example"
+#
+# The provider has to present a certificate issued for the name of --connect,
+# or for the one of --server_name.
+#
+# Trust: the ESDM credits the source at the rate the remote provider declares,
+# unless a rate is configured for it (--es_ext_socket_entropy_rate). Accepting
+# the user of the relay is trusting every holder of a certificate for the name
+# of the provider that chains to the trust anchors below - see TRUST in
+# esdm-es-ext-relay(8).
+#
+# TLS: the certificate of the relay, its key and the trust anchors of the
+# provider are credentials of the service, loaded below from
+# /etc/esdm/es-ext-net/. systemd copies them at the start of the service; to
+# have renewed files taken up while the relay runs - by SIGHUP (systemctl
+# reload) or when they change, see --reload_interval -, give their paths in
+# ESDM_ES_EXT_RELAY_ARGS instead, readable by the user esdm-es-ext-relay, and
+# reset the LoadCredential= lines in a drop-in. CRLs are given with --crl.
+#
+# SCTP: the kernel loads its module sctp when the relay opens its first
+# connection, unless the distribution keeps it from loading on demand - load it
+# at boot then (modules-load.d(5)). Any firewall in between has to pass SCTP to
+# port @PORT@ of the provider.
+#
+# The relay runs as the system user esdm-es-ext-relay (see sysusers.d), a user
+# of its own rather than a DynamicUser=: the ESDM accepts a provider by the
+# user it runs as, which it has to be able to name when it starts.
+
+[Unit]
+Description=ESDM external entropy source relay
+Documentation=man:esdm-es-ext-relay(8)
+
+# Started together with the ESDM, the relay serves it before its initial
+# seeding. An ordering only: the ESDM reads the relay again on its own whenever
+# it comes later or is restarted. The relay needs no network to start - it
+# connects to the provider when the ESDM asks it to -, so it orders the ESDM
+# after nothing of the network: a provider not reachable yet is one the ESDM
+# does without until it is.
+Before=esdm-server.service
+
+[Service]
+@SERVICE_TYPE@
+EnvironmentFile=/etc/esdm/es-ext-relay.env
+LoadCredential=cert:/etc/esdm/es-ext-net/client.crt
+LoadCredential=key:/etc/esdm/es-ext-net/client.key
+LoadCredential=ca:/etc/esdm/es-ext-net/ca.crt
+ExecStart=@PATH@/esdm-es-ext-relay --socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket $ESDM_ES_EXT_RELAY_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+User=esdm-es-ext-relay
+Group=esdm-es-ext-relay
+# The socket goes into a directory of the relay's own, which the ESDM, running
+# as nobody, can traverse. The relay serves the ESDM and root only, so the
+# socket itself is open to everybody (--mode 0666, --client_uid nobody).
+RuntimeDirectory=esdm-es-ext-relay
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5s
+
+AmbientCapabilities=
+CapabilityBoundingSet=
+DevicePolicy=closed
+LimitCORE=0
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=yes
+# The local socket, and the network for the provider - SCTP over IPv4 or IPv6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

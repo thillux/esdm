@@ -1,0 +1,4 @@
+# The user esdm-es-ext-relay(8) runs as - see esdm-es-ext-relay.service. The
+# ESDM accepts the relay as a provider by this user: esdm-server
+# --es_ext_socket_uid esdm-es-ext-relay.
+u esdm-es-ext-relay - "ESDM external entropy source relay" - -

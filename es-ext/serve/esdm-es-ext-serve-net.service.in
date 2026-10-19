@@ -1,0 +1,81 @@
+# An external entropy source served to the ESDM of other hosts, over SCTP with
+# DTLS and certificates - see NETWORK in esdm-es-ext-serve(8). Their
+# esdm-es-ext-relay connects to it.
+#
+# The plugin to serve, and further options, go into
+# /etc/esdm/es-ext-serve-net.env:
+#
+#	ESDM_ES_EXT_SERVE_NET_ARGS="--plugin /usr/lib/esdm/my_es.so --allow 192.0.2.0/24"
+#
+# The service runs as a user of its own (DynamicUser=) and listens on the
+# socket of esdm-es-ext-serve-net.socket. A plugin reaching a device needs it
+# granted in a drop-in, e.g. for /dev/hwrng:
+#
+#	[Service]
+#	PrivateDevices=no
+#	DeviceAllow=/dev/hwrng r
+#	SupplementaryGroups=<the group of the device>
+#
+# TLS: the certificate of the provider, its key and the trust anchors of the
+# clients are credentials of the service, loaded below from
+# /etc/esdm/es-ext-net/. systemd copies them at the start of the service; to
+# have renewed files taken up while it runs - by SIGHUP (systemctl reload) or
+# when they change, see --reload_interval -, give their paths in
+# ESDM_ES_EXT_SERVE_NET_ARGS instead, readable by the service, and reset the
+# LoadCredential= lines in a drop-in. CRLs are given with --crl.
+#
+# Enable the service, not only its socket: the server sets the socket up for
+# SCTP-AUTH as it starts, and refuses the associations the kernel accepted
+# before - which a start by the first connection would have it refuse. The
+# relays connect again by themselves.
+
+[Unit]
+Description=ESDM external entropy source on the network
+Documentation=man:esdm-es-ext-serve(8)
+Requires=esdm-es-ext-serve-net.socket
+After=esdm-es-ext-serve-net.socket
+
+[Service]
+@SERVICE_TYPE@
+EnvironmentFile=/etc/esdm/es-ext-serve-net.env
+LoadCredential=cert:/etc/esdm/es-ext-net/server.crt
+LoadCredential=key:/etc/esdm/es-ext-net/server.key
+LoadCredential=ca:/etc/esdm/es-ext-net/ca.crt
+ExecStart=@PATH@/esdm-es-ext-serve $ESDM_ES_EXT_SERVE_NET_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5s
+
+AmbientCapabilities=
+CapabilityBoundingSet=
+DevicePolicy=closed
+LimitCORE=0
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=yes
+# SCTP over IPv4 or IPv6, and the logging
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+Also=esdm-es-ext-serve-net.socket

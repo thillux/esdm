@@ -78,6 +78,28 @@ if es_ext_net
 			      es_ext_net_deps,
 		install: true
 		)
+
+	# The units of both ends: the relay with the system user it runs as,
+	# and esdm-es-ext-serve on the network with its socket - see the units
+	es_ext_net_conf_data = configuration_data()
+	es_ext_net_conf_data.set('PATH',
+		get_option('prefix') / get_option('bindir'))
+	es_ext_net_conf_data.set('PORT', get_option('es-ext-net-port'))
+	# Ready once they serve, which they tell systemd where they can
+	es_ext_net_conf_data.set('SERVICE_TYPE',
+		get_option('systemd').enabled() ? 'Type=notify' : 'Type=exec')
+	foreach unit : [ [ 'relay', 'esdm-es-ext-relay.service' ],
+			 [ 'serve', 'esdm-es-ext-serve-net.service' ],
+			 [ 'serve', 'esdm-es-ext-serve-net.socket' ] ]
+		install_data(configure_file(
+				input: unit[0] / unit[1] + '.in',
+				output: unit[1],
+				configuration: es_ext_net_conf_data),
+			     install_dir: get_option('prefix') / 'lib/systemd/system')
+	endforeach
+	install_data('relay/esdm-es-ext-relay.sysusers',
+		rename: 'esdm-es-ext-relay.conf',
+		install_dir: get_option('prefix') / 'lib/sysusers.d')
 endif
 
 # The PKCS#11 entropy source: a provider of its own, serving the random number
