@@ -72,6 +72,16 @@ jobs:
             opts: -Dcrypto_backend=leancrypto
           - name: gnutls
             opts: -Dcrypto_backend=gnutls
+        # Several external entropy sources of each kind: the tests of the
+        # instances against each other are only built where there are some.
+        # One runner suffices, the code is the same on both.
+        include:
+          - runner: ubuntu-24.04
+            backend:
+              name: openssl-several-ext-sources
+              opts: >-
+                -Dcrypto_backend=openssl
+                -Des_ext_lib_num=4 -Des_ext_socket_num=4
 
     steps:
     - uses: actions/checkout@v4

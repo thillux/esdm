@@ -32,6 +32,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -51,10 +52,44 @@ struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 	.claim_bits = UINT32_MAX,
 };
 
+/* Take the settings of ES_EXT_TEST_PLUGIN_ENV, if there are any */
+static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
+{
+	const char *env = getenv(ES_EXT_TEST_PLUGIN_ENV);
+	char settings[256], *setting, *save = NULL;
+
+	if (!env || strlen(env) >= sizeof(settings))
+		return;
+	memcpy(settings, env, strlen(env) + 1);
+
+	for (setting = strtok_r(settings, ",", &save); setting;
+	     setting = strtok_r(NULL, ",", &save)) {
+		char *val = strchr(setting, '=');
+		long n;
+
+		if (!val)
+			continue;
+		*val++ = '\0';
+		n = strtol(val, NULL, 0);
+
+		if (!strcmp(setting, "selftest_ret"))
+			ctl->selftest_ret = (int)n;
+		else if (!strcmp(setting, "get_ret"))
+			ctl->get_ret = (int)n;
+		else if (!strcmp(setting, "claim_bits"))
+			ctl->claim_bits = (uint32_t)n;
+		else if (!strcmp(setting, "get_delay_ms"))
+			ctl->get_delay_ms = (unsigned int)n;
+		else if (!strcmp(setting, "status_delay_ms"))
+			ctl->status_delay_ms = (unsigned int)n;
+	}
+}
+
 static int es_ext_test_init(void **ctx)
 {
 	struct esdm_es_ext_test_control *ctl = &esdm_es_ext_test_control;
 
+	es_ext_test_env(ctl);
 	ctl->init_calls++;
 	*ctx = ctl;
 

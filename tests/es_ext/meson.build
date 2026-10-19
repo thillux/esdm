@@ -42,6 +42,21 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		include_directories: include_directories('include'),
 		implicit_include_directories: false,
 	)
+	# Copies of the test plugin, each a library with a control of its own:
+	# a plugin library serves one source, and a build with several sources
+	# of a kind tests them with plugins of their own.
+	es_ext_test_plugin_copies = []
+	es_ext_test_plugin_copy_args = []
+	foreach copy : [ '1', '2', '3', '4', '5', '6', '7', '8' ]
+		es_ext_test_plugin_copy = shared_module(
+			'esdm_es_ext_test_plugin_' + copy,
+			'es_ext_test_plugin.c',
+			include_directories: include_dirs_es_ext_test,
+		)
+		es_ext_test_plugin_copies += es_ext_test_plugin_copy
+		es_ext_test_plugin_copy_args += es_ext_test_plugin_copy.full_path()
+	endforeach
+
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
 			   es_ext_example_plugin, es_ext_test_plugin_v1 ]
@@ -88,13 +103,13 @@ if get_option('esdm-es-ext').enabled()
 		include_directories: include_dirs_es_ext_test,
 	)
 	# The external entropy sources as the esdm-server takes them on its
-	# command line, a source of each kind. Skipped (77) unless run as root.
-	if get_option('es_ext').enabled() and get_option('esdm-server').enabled() and es_ext_lib_num > 0 and es_ext_socket_num > 0
+	# command line. Skipped (77) unless run as root.
+	if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
 		es_ext_server_test = executable('es_ext_server_test',
 			'es_ext_server_test.c',
 			include_directories: [ include_dirs_client,
 					       include_directories('../common') ],
-			dependencies: dependencies_client,
+			dependencies: dependencies_client + [ json_c_dep ],
 			link_with: [ esdm_common_static_lib,
 				     esdm_rpc_client_lib ],
 		)
@@ -102,9 +117,11 @@ if get_option('esdm-es-ext').enabled()
 			es_ext_server_test,
 			args: [ esdm_server.full_path(),
 				esdm_es_ext_serve.full_path(),
-				es_ext_test_plugin.full_path() ],
+				es_ext_test_plugin.full_path() ] +
+			      es_ext_test_plugin_copy_args,
 			depends: [ esdm_server, esdm_es_ext_serve,
-				   es_ext_test_plugin ],
+				   es_ext_test_plugin ] +
+				 es_ext_test_plugin_copies,
 			suite: 'es_ext', timeout: 120)
 	endif
 
@@ -163,4 +180,22 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 		test('External ES provider socket', es_extsock_test,
 			suite: 'es_ext', timeout: 60)
 	endif
+endif
+
+# Several sources of each kind, both compiled into the test - see the file
+# header. Only a build with two of each at least has them.
+if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es_ext_lib_num >= 2 and es_ext_socket_num >= 2
+	es_ext_multi_test = executable('es_ext_multi_test',
+		[ esdm_ipc_ns, 'es_ext_multi_test.c' ],
+		dependencies: dependencies_server + [ dl_dep ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('External ES with several sources of each kind',
+		es_ext_multi_test,
+		args: [ esdm_es_ext_serve.full_path() ] +
+		      es_ext_test_plugin_copy_args,
+		depends: [ esdm_es_ext_serve ] + es_ext_test_plugin_copies,
+		suite: 'es_ext', timeout: 120)
 endif

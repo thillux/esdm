@@ -26,12 +26,17 @@
  * - --es_ext_socket connects to a provider served by esdm-es-ext-serve. Once
  *   the provider was restarted, the daemon - its privileges dropped by then -
  *   connects to it again on demand.
+ * - In a build with several sources of each kind, the options given several
+ *   times configure one source each, the n-th occurrence the n-th source: each
+ *   source has its own plugin or provider and rate, and is listed under its
+ *   own name in the JSON and the text status.
  *
  * Skipped (77) unless run as root, as the esdm-server refuses to start
  * otherwise. The daemon claims the fixed socket, semaphore and IPC names, so
  * the test puts itself in namespaces of its own.
  *
  * Usage: es_ext_server_test <esdm-server> <esdm-es-ext-serve> <test plugin>
+ *			     [<plugin copy> x 4]
  */
 
 #define _GNU_SOURCE
@@ -50,7 +55,21 @@
 #include "../test_env.h"
 #include "../test_namespace.h"
 #include "common_test.h"
+#include "config.h"
+#include "es_ext_test_util.h"
 #include "esdm_rpc_client.h"
+
+/* The names of the first source of each kind, see esdm_es_extlib.h */
+#if ESDM_EXT_LIB_NUM > 1
+#define TEST_EXTLIB "ExternalLib0"
+#else
+#define TEST_EXTLIB "ExternalLib"
+#endif
+#if ESDM_EXT_SOCKET_NUM > 1
+#define TEST_EXTSOCK "ExternalSocket0"
+#else
+#define TEST_EXTSOCK "ExternalSocket"
+#endif
 
 /* How long the daemon and the provider are given to come up */
 #define TEST_START_SEC 30
@@ -104,7 +123,7 @@ static const char *test_es_section(const char *status, const char *name)
 {
 	char needle[64];
 
-	snprintf(needle, sizeof(needle), " Name: %s", name);
+	snprintf(needle, sizeof(needle), " Name: %s\n", name);
 	return strstr(status, needle);
 }
 
@@ -122,13 +141,15 @@ static bool test_wait_socket(void)
 	return false;
 }
 
+#if ESDM_EXT_LIB_NUM > 0
 static void test_plugin(const char *server, const char *plugin)
 {
 	char *const argv[] = { (char *)server, "-f", "--es_ext_lib",
 			       (char *)plugin, NULL };
 	static char status[65536];
 	const char *es;
-	uint8_t seed[512];
+	/* Room for the seed of every source, of up to 16 of each external kind */
+	static uint8_t seed[8192];
 	pid_t pid;
 
 	pid = test_spawn(argv);
@@ -138,8 +159,8 @@ static void test_plugin(const char *server, const char *plugin)
 
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	es = test_es_section(status, "ExternalLib");
-	CHECK(es != NULL, "the status lists no ExternalLib source");
+	es = test_es_section(status, TEST_EXTLIB);
+	CHECK(es != NULL, "the status lists no " TEST_EXTLIB " source");
 	if (es) {
 		CHECK(strstr(es, "Plugin: es-ext-test") != NULL,
 		      "the plugin was not loaded (%.400s)", es);
@@ -156,7 +177,7 @@ static void test_plugin(const char *server, const char *plugin)
 	      "no seed with the plugin loaded");
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	es = test_es_section(status, "ExternalLib");
+	es = test_es_section(status, TEST_EXTLIB);
 	CHECK(es && strstr(es, "Status: delivering") != NULL,
 	      "the plugin does not deliver after the privilege drop (%.400s)",
 	      es ? es : "");
@@ -164,6 +185,9 @@ static void test_plugin(const char *server, const char *plugin)
 	test_terminate(pid);
 }
 
+#endif
+
+#if ESDM_EXT_SOCKET_NUM > 0
 static void test_socket_provider(const char *server, const char *serve,
 				 const char *plugin)
 {
@@ -173,7 +197,8 @@ static void test_socket_provider(const char *server, const char *serve,
 				      test_socket, NULL };
 	static char status[65536];
 	const char *es;
-	uint8_t seed[512];
+	/* Room for the seed of every source, of up to 16 of each external kind */
+	static uint8_t seed[8192];
 	pid_t provider, pid;
 
 	provider = test_spawn(serve_argv);
@@ -187,7 +212,7 @@ static void test_socket_provider(const char *server, const char *serve,
 
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	es = test_es_section(status, "ExternalSocket");
+	es = test_es_section(status, TEST_EXTSOCK);
 	CHECK(es && strstr(es, "Status: connected (uid 0)") != NULL,
 	      "the provider was not connected to (%.400s)", es ? es : "");
 	/* Its status, which esdm-es-ext-serve fetches from the plugin */
@@ -201,7 +226,7 @@ static void test_socket_provider(const char *server, const char *serve,
 	      "no seed with the provider gone");
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	es = test_es_section(status, "ExternalSocket");
+	es = test_es_section(status, TEST_EXTSOCK);
 	CHECK(es && strstr(es, "Status: not connected") != NULL,
 	      "a provider gone is still connected (%.400s)", es ? es : "");
 
@@ -218,7 +243,7 @@ static void test_socket_provider(const char *server, const char *serve,
 	      "no seed with the provider back");
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	es = test_es_section(status, "ExternalSocket");
+	es = test_es_section(status, TEST_EXTSOCK);
 	CHECK(es && strstr(es, "Status: connected (uid 0)") != NULL,
 	      "the provider back was not connected to again (%.400s)",
 	      es ? es : "");
@@ -228,13 +253,136 @@ static void test_socket_provider(const char *server, const char *serve,
 out:
 	test_terminate(provider);
 }
+#endif
+
+#if ESDM_EXT_LIB_NUM >= 2 && ESDM_EXT_SOCKET_NUM >= 2
+
+/* The integer member @key of the JSON object @obj, -1 if there is none */
+static int64_t test_json_int(struct json_object *obj, const char *key)
+{
+	struct json_object *val;
+
+	if (!obj || !json_object_object_get_ex(obj, key, &val) ||
+	    !json_object_is_type(val, json_type_int))
+		return -1;
+	return json_object_get_int64(val);
+}
+
+/* Is the string member @key of the JSON object @obj @expected? */
+static bool test_json_str_is(struct json_object *obj, const char *key,
+			     const char *expected)
+{
+	struct json_object *val;
+
+	return obj && json_object_object_get_ex(obj, key, &val) &&
+	       json_object_is_type(val, json_type_string) &&
+	       !strcmp(json_object_get_string(val), expected);
+}
+
+/*
+ * Two sources of each kind, configured on the command line, the n-th
+ * occurrence of an option for the n-th source: each with its own plugin or
+ * provider and rate - the first provider failing its self test, the other
+ * sources credited at the rates given.
+ */
+static void test_several(const char *server, const char *serve,
+			 char *const copies[])
+{
+	char socket[2][sizeof(test_dir) + 32];
+	char *const server_argv[] = {
+		(char *)server, "-f",
+		"--es_ext_lib", copies[0],
+		"--es_ext_lib", copies[1],
+		"--es_ext_lib_entropy_rate", "64",
+		"--es_ext_lib_entropy_rate", "128",
+		"--es_ext_socket", socket[0],
+		"--es_ext_socket", socket[1],
+		"--es_ext_socket_entropy_rate", "256",
+		"--es_ext_socket_entropy_rate", "192",
+		NULL
+	};
+	static char status[65536];
+	struct json_object *root = NULL, *es;
+	pid_t provider[2], pid;
+	unsigned int i;
+
+	for (i = 0; i < 2; i++)
+		snprintf(socket[i], sizeof(socket[i]), "%s/provider%u.socket",
+			 test_dir, i);
+	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], NULL,
+					"selftest_ret=-19");
+	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], NULL,
+					NULL);
+	CHECK(provider[0] > 0 && provider[1] > 0,
+	      "the providers did not come up");
+
+	pid = test_spawn(server_argv);
+	CHECK(pid > 0, "cannot start %s", server);
+	if (pid <= 0)
+		goto out;
+
+	/* Once it seeded from them */
+	CHECK(test_status(status, sizeof(status)),
+	      "the server does not answer");
+	for (i = 0; i < TEST_START_SEC * 10; i++) {
+		if (!esdm_rpcc_status_json(status, sizeof(status)) &&
+		    strstr(status, "\"fully_seeded\":true"))
+			break;
+		test_sleep_ms(100);
+	}
+	root = json_tokener_parse(status);
+	CHECK(root != NULL, "the JSON status is no JSON");
+
+	es = es_ext_test_status_es(root, "ExternalLib0");
+	CHECK(test_json_str_is(es, "plugin_library", copies[0]) &&
+		      test_json_int(es, "entropy_rate_per_256_data_bits") == 64,
+	      "ExternalLib0 is not configured as its options say: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
+	es = es_ext_test_status_es(root, "ExternalLib1");
+	CHECK(test_json_str_is(es, "plugin_library", copies[1]) &&
+		      test_json_int(es, "entropy_rate_per_256_data_bits") == 128,
+	      "ExternalLib1 is not configured as its options say: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
+	es = es_ext_test_status_es(root, "ExternalSocket0");
+	CHECK(test_json_str_is(es, "provider_socket", socket[0]) &&
+		      test_json_int(es, "entropy_rate_per_256_data_bits") == 0 &&
+		      strstr(json_object_to_json_string(es),
+			     "failing its self test"),
+	      "ExternalSocket0 is not configured as its options say: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
+	es = es_ext_test_status_es(root, "ExternalSocket1");
+	CHECK(test_json_str_is(es, "provider_socket", socket[1]) &&
+		      test_json_int(es, "entropy_rate_per_256_data_bits") == 192,
+	      "ExternalSocket1 is not configured as its options say: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
+	json_object_put(root);
+
+	/* And the text status names each of them */
+	CHECK(test_status(status, sizeof(status)),
+	      "the server does not answer");
+	CHECK(test_es_section(status, "ExternalLib0") &&
+		      test_es_section(status, "ExternalLib1") &&
+		      test_es_section(status, "ExternalSocket0") &&
+		      test_es_section(status, "ExternalSocket1"),
+	      "the text status does not name each source");
+
+	test_terminate(pid);
+
+out:
+	for (i = 0; i < 2; i++) {
+		es_ext_test_terminate(provider[i]);
+		unlink(socket[i]);
+	}
+}
+
+#endif
 
 int main(int argc, char *argv[])
 {
 	int ret;
 
-	if (argc != 4) {
-		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin>\n",
+	if (argc < 4) {
+		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> [<plugin copy> x 4]\n",
 		       argv[0]);
 		return 1;
 	}
@@ -266,8 +414,18 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+#if ESDM_EXT_LIB_NUM > 0
 	test_plugin(argv[1], argv[3]);
+#endif
+#if ESDM_EXT_SOCKET_NUM > 0
 	test_socket_provider(argv[1], argv[2], argv[3]);
+#endif
+#if ESDM_EXT_LIB_NUM >= 2 && ESDM_EXT_SOCKET_NUM >= 2
+	if (argc >= 8)
+		test_several(argv[1], argv[2], argv + 4);
+	else
+		CHECK(0, "the plugin copies are missing");
+#endif
 
 	esdm_rpcc_fini_unpriv_service();
 	unlink(test_socket);

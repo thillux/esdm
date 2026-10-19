@@ -62,6 +62,15 @@ struct esdm_es_ext_test_control {
 	size_t last_status_buflen;
 };
 
+/*
+ * A plugin served by esdm-es-ext-serve runs in a process of its own, out of
+ * reach of the control of the test: the test hands its settings over in this
+ * environment variable instead, which the plugin reads in its init - a comma
+ * separated list of selftest_ret=N, get_ret=N, claim_bits=N, get_delay_ms=N
+ * and status_delay_ms=N.
+ */
+#define ES_EXT_TEST_PLUGIN_ENV "ESDM_ES_EXT_TEST_PLUGIN"
+
 /* The status of the test plugin unless the test sets another one */
 #define ES_EXT_TEST_STATUS "{\"plugin\":\"es-ext-test\",\"healthy\":true}"
 
