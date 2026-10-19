@@ -1517,6 +1517,14 @@ static void test_read_nonblock(void)
 	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
 
+	/*
+	 * Nor does it opened with O_DSYNC, which is part of O_SYNC but does not
+	 * ask for prediction resistance on its own - the seeding of which it
+	 * would have waited for.
+	 */
+	read_call(O_NONBLOCK | O_DSYNC, esdm_rpcc_get_random_bytes_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
 	/* A blocking reader is served - here from the fallback */
 	read_call(0, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
@@ -1534,6 +1542,18 @@ static void test_read_nonblock(void)
 	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
 	CHECK_EQ(reply.size, 32);
+
+	/*
+	 * O_DSYNC alone is a read of seeded data, the timed one of the
+	 * non-blocking reader - test_full_timeout() leaves the time it was
+	 * given, the prediction resistant call does not.
+	 */
+	memset(&full_timeout_ts, 0, sizeof(full_timeout_ts));
+	read_call(O_NONBLOCK | O_DSYNC, esdm_rpcc_get_random_bytes_full_int,
+		  fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK(full_timeout_ts.tv_sec || full_timeout_ts.tv_nsec,
+	      "O_DSYNC alone was read with prediction resistance");
 
 	test_read_pr_nonblock(fd);
 	test_read_full_nonblock(fd);

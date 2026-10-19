@@ -55,6 +55,21 @@ serves the non\-blocking semantics, and like the kernel's
 it is always readable and writable to
 .BR poll (2).
 .PP
+A device opened with
+.B O_SYNC
+is read from the prediction resistance DRNG of the ESDM, which is reseeded from
+the entropy sources for each request \- for either daemon, so that a read of
+.B esdm\-cuse\-urandom
+then waits for the ESDM to be fully seeded as well, or fails with
+.B EAGAIN
+with
+.BR O_NONBLOCK .
+.B O_DSYNC
+alone does not ask for it, although the C library defines
+.B O_SYNC
+as a flag of its own together with
+.BR O_DSYNC .
+.PP
 Both daemons must be started as root and drop to an unprivileged user after
 the device has been created. On systemd installations they are normally
 started through the shipped

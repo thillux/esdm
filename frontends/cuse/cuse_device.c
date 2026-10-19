@@ -834,10 +834,13 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 	fallback_fd = esdm_test_fallback_fd(fallback_fd);
 
 	/*
+	 * O_SYNC asks for prediction resistance. It is a bit of its own plus
+	 * O_DSYNC, which alone does not ask for it - as with esdm_cdev.
+	 *
 	 * The blocking PR call waits for as long as the PR DRNG is busy or not
 	 * operational, which an O_NONBLOCK reader must not.
 	 */
-	if (fi->flags & O_SYNC)
+	if ((fi->flags & O_SYNC) == O_SYNC)
 		get = (fi->flags & O_NONBLOCK) ?
 			      esdm_rpcc_get_random_bytes_pr_nonblock_int :
 			      esdm_rpcc_get_random_bytes_pr_int;
