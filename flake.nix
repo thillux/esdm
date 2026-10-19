@@ -493,6 +493,10 @@
                       ];
                       environment.etc."esdm-startup-loop.py".source = ./tests/startup/esdm_startup_loop.py;
 
+                      # kmemleak and page_owner only take effect on a kernel
+                      # built with kernelDebug = true (DEBUG_KMEMLEAK,
+                      # PAGE_OWNER - see kernel/esdm_es/debug.nix), and the
+                      # check reads neither of their reports.
                       boot.kernelParams = [
                         "kmemleak=on"
                         "page_owner=on"
@@ -562,7 +566,7 @@
               machine.succeed("test \"$(head -c 32 /dev/urandom | wc -c)\" = 32")
               machine.succeed("grep -qx '[0-9][0-9]*' /proc/sys/kernel/random/entropy_avail")
 
-              # A clean shutdown must not deadlock or leak (kmemleak is on).
+              # A clean shutdown must not deadlock.
               machine.succeed("systemctl stop esdm-server.service")
 
               # The service credits the kernel ES with nothing, so it seeds
