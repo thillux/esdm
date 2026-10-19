@@ -1374,6 +1374,17 @@ without control characters and not the name of another entropy source; the
 name of its entry in the ES table, ExternalLib1 say, remains its `instance`
 in the status. Two sources may declare the same name.
 
+The status a plugin reports with its `status_json` callback, a JSON object of
+up to 512 bytes, appears as the `provider` member of its source in the ESDM
+status. A provider answers the STATUS request with one of up to 1024 bytes:
+`esdm-es-ext-serve`, as any provider served by `libesdm_es_ext`, with
+`{"server": {...}, "plugin": ...}` - fields of the server, such as the name
+and the rate it declares, the DTLS of the connection, its clients, the
+requests served, the verdict of the last self test of its plugin and its
+uptime, next to the status of its plugin, null where there is none. The ESDM
+asks each source for its status at most every 5 seconds, never waiting for a
+source busy with a request.
+
 == DRNG Seeding Operation <sec:seeding>
 
 The seeding operation obtains random data from all available entropy sources.
