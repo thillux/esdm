@@ -71,6 +71,13 @@ freed. Passing NULL to a put call is a no\-op.
 Limit the number of connection pool nodes the client keeps. Call before
 initializing a service.
 .PP
+The pool has a node for every online CPU, or as many as this limit allows, and
+a node connects to the server when it is used first. A call takes the node its
+thread had last if that one is free, the free one of the lowest number
+otherwise, and waits for a busy one only if all of them are busy. So a process
+holds as many connections as it has calls in flight at the same time \- one
+for a process calling from one thread at a time, whichever CPUs it runs on.
+.PP
 Every RPC call listed below exists in two forms: a plain one, and one suffixed
 .BR _int ()
 that takes an additional

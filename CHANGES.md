@@ -542,6 +542,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC client: reads the coarse monotonic clock for its own timeouts and the age of a connection, which a clocksource without a vDSO serves without a system call; a deadline of the caller keeps the precise clock
 
+* RPC client: a process holds as many connections as it has calls in flight at the same time, not one per CPU its threads ran on - a call takes the connection its thread had last, or the free one of the lowest number
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

@@ -1819,13 +1819,23 @@ out:
 	return ret;
 }
 
+/*
+ * Check out a connection of the pool, see esdm_rpcc_get_unpriv_service().
+ *
+ * @home_conn is the connection of the pool the calling thread had last, plus
+ * one, 0 for none - an index rather than a pointer, as it outlives the pool it
+ * was taken from, and a fork. @deadline, NULL for none, bounds the wait for
+ * a connection should all of them be busy, and the requests sent on it until
+ * it is put back, see esdm_rpcc_get_unpriv_service_deadline().
+ */
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
-	uint32_t *num_conn_ptr, esdm_rpc_client_connection_t **ret_rpc_conn,
-	void *int_data, const struct timespec *deadline)
+	uint32_t *num_conn_ptr, uint32_t *home_conn,
+	esdm_rpc_client_connection_t **ret_rpc_conn, void *int_data,
+	const struct timespec *deadline)
 {
 	esdm_rpc_client_connection_t *rpc_conn_array, *rpc_conn_p;
-	uint32_t node, num_conn;
+	uint32_t node, num_conn, home;
 	bool found_unused_conn = false;
 	int ret = 0;
 	uint32_t i;
@@ -1880,20 +1890,28 @@ static int esdm_rpcc_get_service(
 	node = min_uint32(esdm_rpcc_curr_node(), num_conn - 1);
 
 	/*
-	 * Always using a fixed connection based on the current
-	 * core slows the client down, as under load a thread waiting
-	 * on a reply from ESDM is paused and probably another thread
-	 * also communicating with ESDM scheduled on the same node
-	 * waiting for the RPC connection to become available again
-	 * with no gain.
-	 *
-	 * Try to optimistically find a free connection slot first.
+	 * The connection this thread had last, if it is free, and the free
+	 * one of the lowest index otherwise. A connection is opened when it
+	 * is used first, so the pool grows with the requests that are in
+	 * flight at the same time, up to its size, rather than with the CPUs a
+	 * thread happens to run on: going by the current CPU, a single
+	 * threaded process set up a connection - and its DTLS - for every CPU
+	 * the scheduler moved it to, and the server held them all. A thread
+	 * keeps to its connection as long as nobody else took it meanwhile, so
+	 * the threads of a busy process spread over the pool and stay there.
 	 */
-	for (i = 0; i < num_conn; ++i) {
-		rpc_conn_p = rpc_conn_array + (i + node) % num_conn;
-		if (mutex_w_trylock(&rpc_conn_p->ref_cnt) == 0) {
-			found_unused_conn = true;
-			break;
+	home = *home_conn;
+	if (home && home <= num_conn &&
+	    mutex_w_trylock(&rpc_conn_array[home - 1].ref_cnt) == 0) {
+		rpc_conn_p = rpc_conn_array + home - 1;
+		found_unused_conn = true;
+	} else {
+		for (i = 0; i < num_conn; ++i) {
+			rpc_conn_p = rpc_conn_array + i;
+			if (mutex_w_trylock(&rpc_conn_p->ref_cnt) == 0) {
+				found_unused_conn = true;
+				break;
+			}
 		}
 	}
 
@@ -1956,6 +1974,7 @@ static int esdm_rpcc_get_service(
 		return -ESHUTDOWN;
 	}
 
+	*home_conn = (uint32_t)(rpc_conn_p - rpc_conn_array) + 1;
 	*ret_rpc_conn = rpc_conn_p;
 	rpc_conn_p->interrupt_data = int_data;
 	rpc_conn_p->deadline = deadline;
@@ -1982,13 +2001,16 @@ static _Atomic(esdm_rpc_client_connection_t *) unpriv_rpc_conn = NULL;
 static uint32_t unpriv_rpc_conn_num = 0;
 /* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
 static uint32_t unpriv_rpc_conn_init_ref = 0;
+/* The connection the thread had last, see esdm_rpcc_get_service() */
+static __thread uint32_t unpriv_rpc_conn_home = 0;
 
 DSO_PUBLIC
 int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
 				 void *int_data)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, NULL);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     NULL);
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -1997,7 +2019,8 @@ int esdm_rpcc_get_unpriv_service_deadline(
 	const struct timespec *deadline)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, deadline);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline);
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -2031,7 +2054,8 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 	nanosleep(&sleep_ts, NULL);
 
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, deadline);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline);
 }
 
 DSO_PUBLIC
@@ -2072,13 +2096,16 @@ static _Atomic(esdm_rpc_client_connection_t *) priv_rpc_conn = NULL;
 static uint32_t priv_rpc_conn_num = 0;
 /* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
 static uint32_t priv_rpc_conn_init_ref = 0;
+/* The connection the thread had last, see esdm_rpcc_get_service() */
+static __thread uint32_t priv_rpc_conn_home = 0;
 
 DSO_PUBLIC
 int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
 			       void *int_data)
 {
 	return esdm_rpcc_get_service(&priv_rpc_conn, &priv_rpc_conn_num,
-				     rpc_conn, int_data, NULL);
+				     &priv_rpc_conn_home, rpc_conn, int_data,
+				     NULL);
 }
 
 DSO_PUBLIC
