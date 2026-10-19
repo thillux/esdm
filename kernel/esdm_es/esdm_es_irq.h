@@ -22,9 +22,10 @@ config ESDM_IRQ_ENTROPY_RATE
 	  obtain 256 bits of entropy. This value can be set to any between
 	  256 and 4294967295. The ESDM guarantees that this value is not
 	  lower than 256. This lower limit implies that one interrupt event
-	  is credited with one bit of entropy. This value is subject to the
-	  increase by the oversampling factor, if no high-resolution timer
-	  is found.
+	  is credited with one bit of entropy. The module sets it to
+	  256 * ESDM_ES_OSR, the oversampling rate of its Makefile. Without
+	  a high-resolution timer the module does not load; a timer found
+	  too coarse once it runs stops the crediting of entropy.
 
 	  In order to effectively disable the interrupt entropy source,
 	  the option has to be set to 4294967295. In this case, the

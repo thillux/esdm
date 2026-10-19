@@ -1,8 +1,9 @@
 KERNEL_DIR?=/lib/modules/$(shell uname -r)/build
 
 #
-# typically enable only one ES due to percpu
-# memory size constraints
+# The entropy sources to build: the scheduler ES needs the scheduler hooks of
+# 0001-*.patch, the interrupt ES the interrupt hooks of 0002-*.patch. Each
+# allocates its event rings, one per possible CPU, when the module is loaded.
 #
 BUILD_ES_SCHED?=0
 BUILD_ES_IRQ?=1
