@@ -278,36 +278,41 @@ static struct notifier_block esdm_es_mgr_notifier_power = {
 	.priority = 0,
 };
 
+/*
+ * Every step that failed undid its own part, so the error path undoes the
+ * steps before it only: an entropy source that was never set up is not torn
+ * down, which would log its unloading.
+ */
 static int __init esdm_es_mgr_init(void)
 {
 	int ret = esdm_init_time_source();
 	if (ret) {
 		pr_warn("esdm_init_time_source() failed\n");
-		goto out;
+		goto out_time;
 	}
 
 	ret = esdm_drbg_selftest();
 	if (ret) {
 		pr_warn("esdm_drbg_selftest() failed\n");
-		goto out;
+		goto out_time;
 	}
 
 	ret = esdm_es_mgr_irq_init();
 	if (ret) {
 		pr_warn("esdm_es_mgr_irq_init() failed\n");
-		goto out;
+		goto out_time;
 	}
 
 	ret = esdm_es_mgr_sched_init();
 	if (ret) {
 		pr_warn("esdm_es_mgr_sched_init() failed\n");
-		goto out;
+		goto out_irq;
 	}
 
 	ret = esdm_test_init();
 	if (ret) {
 		pr_warn("esdm_test_init() failed\n");
-		goto out;
+		goto out_sched;
 	}
 
 	ret = esdm_es_mgr_dev_init();
@@ -325,9 +330,11 @@ static int __init esdm_es_mgr_init(void)
 
 out_test:
 	esdm_test_exit();
-out:
+out_sched:
 	esdm_es_mgr_sched_exit();
+out_irq:
 	esdm_es_mgr_irq_exit();
+out_time:
 	/* as in esdm_es_mgr_exit(), drain messages the hooks queued */
 	esdm_health_exit();
 	esdm_time_source_exit();
