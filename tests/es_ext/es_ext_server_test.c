@@ -142,11 +142,10 @@ static const char *test_es_section(const char *status, const char *instance)
 
 static bool test_wait_socket(void)
 {
-	struct stat sb;
 	unsigned int i;
 
 	for (i = 0; i < TEST_START_SEC * 50; i++) {
-		if (lstat(test_socket, &sb) == 0 && S_ISSOCK(sb.st_mode))
+		if (es_ext_test_socket_ready(test_socket))
 			return true;
 		test_sleep_ms(20);
 	}

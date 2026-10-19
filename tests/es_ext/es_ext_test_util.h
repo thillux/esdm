@@ -87,14 +87,49 @@ static inline void es_ext_test_terminate(pid_t pid)
 	waitpid(pid, &status, 0);
 }
 
-/* Wait up to 10 seconds for the socket @path to appear */
+/*
+ * Does a socket accept connections on @path?
+ *
+ * The file of a socket appears with its bind(2), before the listen(2), and a
+ * connect(2) in between is refused - on a loaded machine often enough to fail
+ * a test that took the file for the provider being up. /proc/net/unix tells a
+ * listening socket by its flags (__SO_ACCEPTCON). Without it, the file is all
+ * there is to go by.
+ */
+static inline bool es_ext_test_socket_ready(const char *path)
+{
+	char line[512], sock_path[256];
+	unsigned int flags;
+	struct stat sb;
+	bool ready = false;
+	FILE *f;
+
+	if (lstat(path, &sb) || !S_ISSOCK(sb.st_mode))
+		return false;
+
+	f = fopen("/proc/net/unix", "re");
+	if (!f)
+		return true;
+
+	while (!ready && fgets(line, sizeof(line), f)) {
+		/* Num RefCount Protocol Flags Type St Inode Path */
+		if (sscanf(line, "%*s %*x %*x %x %*x %*x %*u %255s", &flags,
+			   sock_path) != 2)
+			continue;
+		ready = (flags & 0x10000) && !strcmp(sock_path, path);
+	}
+
+	fclose(f);
+	return ready;
+}
+
+/* Wait up to 10 seconds for a socket to accept connections on @path */
 static inline bool es_ext_test_wait_socket(const char *path)
 {
-	struct stat sb;
 	unsigned int i;
 
 	for (i = 0; i < 500; i++) {
-		if (lstat(path, &sb) == 0 && S_ISSOCK(sb.st_mode))
+		if (es_ext_test_socket_ready(path))
 			return true;
 		es_ext_test_sleep_ms(20);
 	}

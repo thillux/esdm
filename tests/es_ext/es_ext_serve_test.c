@@ -96,17 +96,7 @@ static int test_run(char *const argv[])
 
 static bool test_wait_socket(void)
 {
-	const struct timespec ts = { .tv_nsec = 20000000 };
-	struct stat sb;
-	unsigned int i;
-
-	for (i = 0; i < 500; i++) {
-		if (lstat(test_socket, &sb) == 0 && S_ISSOCK(sb.st_mode))
-			return true;
-		nanosleep(&ts, NULL);
-	}
-
-	return false;
+	return es_ext_test_wait_socket(test_socket);
 }
 
 static int test_connect(void)
