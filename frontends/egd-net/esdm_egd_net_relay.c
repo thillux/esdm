@@ -91,7 +91,7 @@ static struct {
 	const char *socket_path;
 	const char *connect;
 	bool plain;
-	struct egd_net_tls_files files;
+	struct esdm_net_tls_files files;
 	const char *server_name;
 	unsigned int reload_interval;
 	unsigned int timeout;
@@ -481,23 +481,13 @@ static int relay_reload(bool force)
 {
 	struct esdm_tls_config cfg;
 	struct esdm_tls_ctx *ctx = NULL;
-	uint8_t stamp[ESDM_TLS_STAMP_LEN];
 	int ret;
 
-	egd_net_tls_config(&relay_cfg.files, &cfg);
-	esdm_tls_stamp(&cfg, stamp);
-	if (!force && !memcmp(stamp, relay_stamp, sizeof(stamp)))
-		return 0;
-	memcpy(relay_stamp, stamp, sizeof(stamp));
-
-	ret = esdm_tls_ctx_alloc(false, &cfg, &ctx);
-	if (ret) {
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"%s: the TLS files do not load (%s) - the upstream connections keep the ones loaded before\n",
-			RELAY_NAME, strerror(-ret));
+	esdm_net_tls_config(&relay_cfg.files, &cfg);
+	ret = esdm_net_tls_reload(RELAY_NAME, false, &cfg, force, relay_stamp,
+				  &ctx);
+	if (ret <= 0)
 		return ret;
-	}
 
 	esdm_tls_ctx_put(relay_ctx);
 	relay_ctx = ctx;
@@ -685,7 +675,7 @@ int main(int argc, char *argv[])
 	};
 	const char *username = "nobody", *groupname = NULL;
 	struct pollfd pfds[2];
-	int lfds[EGD_NET_MAX_LISTEN];
+	int lfds[ESDM_NET_MAX_LISTEN];
 	int lfd = -1, sfd = -1, c, ret = 1, n;
 	bool tls_option = false, bound = false, socket_given = false;
 	uint64_t last_reload, last_housekeeping;
@@ -751,34 +741,34 @@ int main(int argc, char *argv[])
 			relay_cfg.files.crl_allow_expired = true;
 			break;
 		case OPT_RELOAD_INTERVAL:
-			if (egd_net_parse_uint("reload_interval", optarg,
+			if (esdm_net_parse_uint("reload_interval", optarg,
 					       86400 * 365,
 					       &relay_cfg.reload_interval))
 				return 1;
 			break;
 		case OPT_TIMEOUT:
-			if (egd_net_parse_uint("timeout", optarg, 3600,
+			if (esdm_net_parse_uint("timeout", optarg, 3600,
 					       &relay_cfg.timeout))
 				return 1;
 			break;
 		case OPT_MAX_CONNECTIONS:
-			if (egd_net_parse_uint("max_connections", optarg,
+			if (esdm_net_parse_uint("max_connections", optarg,
 					       1000000,
 					       &relay_cfg.max_connections))
 				return 1;
 			break;
 		case OPT_MAX_PER_UID:
-			if (egd_net_parse_uint("max_per_uid", optarg, 1000000,
+			if (esdm_net_parse_uint("max_per_uid", optarg, 1000000,
 					       &relay_cfg.max_per_uid))
 				return 1;
 			break;
 		case OPT_IDLE_TIMEOUT:
-			if (egd_net_parse_uint("idle_timeout", optarg, 86400 * 7,
+			if (esdm_net_parse_uint("idle_timeout", optarg, 86400 * 7,
 					       &relay_cfg.idle_timeout))
 				return 1;
 			break;
 		case OPT_IO_TIMEOUT:
-			if (egd_net_parse_uint("io_timeout", optarg, 3600,
+			if (esdm_net_parse_uint("io_timeout", optarg, 3600,
 					       &relay_cfg.io_timeout))
 				return 1;
 			break;
@@ -835,9 +825,9 @@ int main(int argc, char *argv[])
 	esdm_peer_account_init();
 
 	/* A socket of socket activation, unless one is asked for explicitly */
-	n = socket_given ? 0 : egd_net_listen_fds(lfds, EGD_NET_MAX_LISTEN);
+	n = socket_given ? 0 : esdm_net_listen_fds(lfds, ESDM_NET_MAX_LISTEN);
 	if (n > 0) {
-		if (egd_net_listener_check(lfds[0], true)) {
+		if (esdm_net_listener_check(lfds[0], ESDM_NET_LISTENER_UNIX)) {
 			fprintf(stderr,
 				"The socket handed over is no listening Unix domain stream socket\n");
 			goto out;
@@ -968,6 +958,6 @@ out:
 	if (sfd >= 0)
 		close(sfd);
 	esdm_tls_ctx_put(relay_ctx);
-	egd_net_tls_files_free(&relay_cfg.files);
+	esdm_net_tls_files_free(&relay_cfg.files);
 	return ret;
 }

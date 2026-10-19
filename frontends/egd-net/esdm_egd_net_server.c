@@ -104,18 +104,18 @@
 
 struct server_conn {
 	int fd;
-	char addr[EGD_NET_ADDR_STR_LEN];
+	char addr[ESDM_NET_ADDR_STR_LEN];
 	/* The peer for the log: its address, and who it authenticated as */
-	char peer[EGD_NET_ADDR_STR_LEN + 2 * SERVER_TEXT_LEN];
+	char peer[ESDM_NET_ADDR_STR_LEN + 2 * SERVER_TEXT_LEN];
 
 	/* Counted against the probation bounds, global and per source */
 	bool probation;
-	uint8_t source[EGD_NET_KEY_LEN];
+	uint8_t source[ESDM_NET_KEY_LEN];
 	size_t source_len;
 
 	/* Counted against the bound per client */
 	bool client_counted;
-	uint8_t client[EGD_NET_KEY_LEN];
+	uint8_t client[ESDM_NET_KEY_LEN];
 	size_t client_len;
 
 	/* TLS mode: the connection, and whether its handshake completed */
@@ -129,10 +129,10 @@ TAILQ_HEAD(server_conn_list, server_conn);
 
 static struct {
 	bool plain;
-	struct egd_net_tls_files files;
+	struct esdm_net_tls_files files;
 	unsigned int reload_interval;
 
-	struct egd_net_cidr allow[EGD_NET_MAX_ALLOW];
+	struct esdm_net_cidr allow[ESDM_NET_MAX_ALLOW];
 	unsigned int allow_num;
 
 	unsigned int max_connections;
@@ -165,10 +165,10 @@ static struct server_conn_list server_conns =
 	TAILQ_HEAD_INITIALIZER(server_conns);
 static unsigned int server_conn_num = 0;
 static unsigned int server_probation_num = 0;
-static struct egd_net_limit server_probation_limit =
-	EGD_NET_LIMIT_INIT("source address in probation");
-static struct egd_net_limit server_client_limit =
-	EGD_NET_LIMIT_INIT("client");
+static struct esdm_net_limit server_probation_limit =
+	ESDM_NET_LIMIT_INIT("source address in probation");
+static struct esdm_net_limit server_client_limit =
+	ESDM_NET_LIMIT_INIT("client");
 
 static struct esdm_egd_serve_pool server_pool = ESDM_EGD_SERVE_POOL_INIT;
 
@@ -575,7 +575,7 @@ static void server_conn_probation_end(struct server_conn *conn)
 		conn->probation = false;
 		server_probation_num--;
 		pthread_mutex_unlock(&server_conns_lock);
-		egd_net_limit_put(&server_probation_limit, conn->source,
+		esdm_net_limit_put(&server_probation_limit, conn->source,
 				  conn->source_len);
 		return;
 	}
@@ -598,7 +598,7 @@ static void server_conn_release(struct server_conn *conn)
 	pthread_mutex_unlock(&server_conns_lock);
 
 	if (conn->client_counted)
-		egd_net_limit_put(&server_client_limit, conn->client,
+		esdm_net_limit_put(&server_client_limit, conn->client,
 				  conn->client_len);
 
 	if (conn->tls) {
@@ -668,7 +668,7 @@ static int server_conn_handshake(struct server_conn *conn)
 	conn->client[0] = 'c';
 	memcpy(conn->client + 1, fp, sizeof(fp));
 	conn->client_len = 1 + sizeof(fp);
-	if (!egd_net_limit_get(&server_client_limit, conn->client,
+	if (!esdm_net_limit_get(&server_client_limit, conn->client,
 			       conn->client_len)) {
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
 			    "%s: refusing a further connection of %s\n",
@@ -760,10 +760,10 @@ static void server_accept(int lfd)
 	struct sockaddr_storage ss;
 	socklen_t sslen = sizeof(ss);
 	struct server_conn *conn;
-	uint8_t source[EGD_NET_KEY_LEN];
+	uint8_t source[ESDM_NET_KEY_LEN];
 	size_t source_len;
 	int fd, one = 1, ret;
-	char addr[EGD_NET_ADDR_STR_LEN];
+	char addr[ESDM_NET_ADDR_STR_LEN];
 
 	fd = accept4(lfd, (struct sockaddr *)&ss, &sslen,
 		     SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -776,11 +776,11 @@ static void server_accept(int lfd)
 		return;
 	}
 
-	egd_net_addr_unmap(&ss);
-	egd_net_addr_str(&ss, addr, sizeof(addr));
+	esdm_net_addr_unmap(&ss);
+	esdm_net_addr_str(&ss, addr, sizeof(addr));
 
 	/* Not from the networks allowed: gone before anything else */
-	if (!egd_net_cidr_allowed(server_cfg.allow, server_cfg.allow_num,
+	if (!esdm_net_cidr_allowed(server_cfg.allow, server_cfg.allow_num,
 				  &ss)) {
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
 			    "%s: refusing %s, which is not allowed\n",
@@ -789,7 +789,7 @@ static void server_accept(int lfd)
 		return;
 	}
 
-	source_len = egd_net_source_key(&ss, source);
+	source_len = esdm_net_source_key(&ss, source);
 
 	pthread_mutex_lock(&server_conns_lock);
 	if (server_conn_num >= server_cfg.max_connections ||
@@ -816,7 +816,7 @@ static void server_accept(int lfd)
 	memcpy(conn->source, source, sizeof(source));
 	conn->source_len = source_len;
 
-	if (!egd_net_limit_get(&server_probation_limit, source, source_len)) {
+	if (!esdm_net_limit_get(&server_probation_limit, source, source_len)) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
 			    "%s: refusing %s, its source has too many connections in probation\n",
 			    SERVER_NAME, addr);
@@ -830,7 +830,7 @@ static void server_accept(int lfd)
 		conn->client[0] = 's';
 		memcpy(conn->client + 1, source, source_len);
 		conn->client_len = 1 + source_len;
-		if (!egd_net_limit_get(&server_client_limit, conn->client,
+		if (!esdm_net_limit_get(&server_client_limit, conn->client,
 				       conn->client_len)) {
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
 				    "%s: refusing a further connection of %s\n",
@@ -858,7 +858,7 @@ static void server_accept(int lfd)
 	return;
 
 undo_probation:
-	egd_net_limit_put(&server_probation_limit, source, source_len);
+	esdm_net_limit_put(&server_probation_limit, source, source_len);
 	conn->probation = false;
 undo_slots:
 	pthread_mutex_lock(&server_conns_lock);
@@ -919,24 +919,11 @@ static void server_reload(bool force)
 {
 	struct esdm_tls_config cfg;
 	struct esdm_tls_ctx *ctx = NULL, *old;
-	uint8_t stamp[ESDM_TLS_STAMP_LEN];
-	int ret;
 
-	egd_net_tls_config(&server_cfg.files, &cfg);
-	esdm_tls_stamp(&cfg, stamp);
-	if (!force && !memcmp(stamp, server_stamp, sizeof(stamp)))
+	esdm_net_tls_config(&server_cfg.files, &cfg);
+	if (esdm_net_tls_reload(SERVER_NAME, true, &cfg, force, server_stamp,
+				&ctx) <= 0)
 		return;
-	/* Not again for these files, whether they load or not */
-	memcpy(server_stamp, stamp, sizeof(stamp));
-
-	ret = esdm_tls_ctx_alloc(true, &cfg, &ctx);
-	if (ret) {
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_SERVER,
-			"%s: the TLS files do not load (%s) - keeping the ones loaded before\n",
-			SERVER_NAME, strerror(-ret));
-		return;
-	}
 
 	pthread_mutex_lock(&server_ctx_lock);
 	old = server_ctx;
@@ -951,79 +938,6 @@ static void server_reload(bool force)
 
 	/* Revocation has to bite on the connections that are there already */
 	server_check_conns(ctx);
-}
-
-/******************************************************************************
- * Listeners
- ******************************************************************************/
-
-/* Bind and listen on @text, one socket per address it resolves to */
-static int server_listen(const char *text, int *fds, int *num, int max)
-{
-	struct addrinfo hints, *res = NULL, *ai;
-	char *host = NULL, *port = NULL;
-	int ret, fd, one = 1, bound = 0;
-
-	ret = egd_net_split_listen(text, &host, &port);
-	if (ret) {
-		fprintf(stderr, "--listen %s does not parse\n", text);
-		return ret;
-	}
-
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
-
-	ret = getaddrinfo(host, port, &hints, &res);
-	if (ret) {
-		fprintf(stderr, "--listen %s: %s\n", text, gai_strerror(ret));
-		ret = -EINVAL;
-		goto out;
-	}
-
-	for (ai = res; ai; ai = ai->ai_next) {
-		if (*num >= max) {
-			fprintf(stderr, "Too many listening sockets\n");
-			ret = -EINVAL;
-			goto out;
-		}
-
-		fd = socket(ai->ai_family,
-			    ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			    ai->ai_protocol);
-		if (fd < 0) {
-			ret = -errno;
-			continue;
-		}
-		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-		/* The wildcard of IPv6 for IPv6 only, IPv4 has its own */
-		if (ai->ai_family == AF_INET6)
-			setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one,
-				   sizeof(one));
-
-		if (bind(fd, ai->ai_addr, ai->ai_addrlen) < 0 ||
-		    listen(fd, SERVER_BACKLOG) < 0) {
-			ret = -errno;
-			fprintf(stderr, "--listen %s: %s\n", text,
-				strerror(errno));
-			close(fd);
-			goto out;
-		}
-
-		fds[(*num)++] = fd;
-		bound++;
-	}
-
-	ret = bound ? 0 : (ret ? ret : -EADDRNOTAVAIL);
-
-out:
-	if (res)
-		freeaddrinfo(res);
-	free(host);
-	free(port);
-	return ret;
 }
 
 /******************************************************************************
@@ -1140,10 +1054,10 @@ int main(int argc, char *argv[])
 		{ "version", no_argument, NULL, OPT_VERSION },
 		{ NULL, 0, NULL, 0 }
 	};
-	const char *listen_args[EGD_NET_MAX_LISTEN];
+	const char *listen_args[ESDM_NET_MAX_LISTEN];
 	const char *username = "nobody", *groupname = NULL;
-	struct pollfd pfds[EGD_NET_MAX_LISTEN + 1];
-	int lfds[EGD_NET_MAX_LISTEN];
+	struct pollfd pfds[ESDM_NET_MAX_LISTEN + 1];
+	int lfds[ESDM_NET_MAX_LISTEN];
 	unsigned int listen_num = 0, i;
 	int lfd_num = 0, sfd = -1, c, ret = 1;
 	bool tls_option = false;
@@ -1159,10 +1073,10 @@ int main(int argc, char *argv[])
 	while ((c = getopt_long(argc, argv, "l:u:g:Svh", opts, NULL)) != -1) {
 		switch (c) {
 		case 'l':
-			if (listen_num >= EGD_NET_MAX_LISTEN) {
+			if (listen_num >= ESDM_NET_MAX_LISTEN) {
 				fprintf(stderr,
 					"--listen may be given %u times at most\n",
-					EGD_NET_MAX_LISTEN);
+					ESDM_NET_MAX_LISTEN);
 				return 1;
 			}
 			listen_args[listen_num++] = optarg;
@@ -1207,19 +1121,19 @@ int main(int argc, char *argv[])
 			server_cfg.files.crl_allow_expired = true;
 			break;
 		case OPT_RELOAD_INTERVAL:
-			if (egd_net_parse_uint("reload_interval", optarg,
+			if (esdm_net_parse_uint("reload_interval", optarg,
 					       86400 * 365,
 					       &server_cfg.reload_interval))
 				return 1;
 			break;
 		case OPT_ALLOW:
-			if (server_cfg.allow_num >= EGD_NET_MAX_ALLOW) {
+			if (server_cfg.allow_num >= ESDM_NET_MAX_ALLOW) {
 				fprintf(stderr,
 					"--allow may be given %u times at most\n",
-					EGD_NET_MAX_ALLOW);
+					ESDM_NET_MAX_ALLOW);
 				return 1;
 			}
-			if (egd_net_cidr_parse(
+			if (esdm_net_cidr_parse(
 				    optarg,
 				    &server_cfg.allow[server_cfg.allow_num])) {
 				fprintf(stderr,
@@ -1230,42 +1144,42 @@ int main(int argc, char *argv[])
 			server_cfg.allow_num++;
 			break;
 		case OPT_MAX_CONNECTIONS:
-			if (egd_net_parse_uint("max_connections", optarg,
+			if (esdm_net_parse_uint("max_connections", optarg,
 					       1000000,
 					       &server_cfg.max_connections))
 				return 1;
 			break;
 		case OPT_MAX_HANDSHAKES:
-			if (egd_net_parse_uint("max_handshakes", optarg, 1000000,
+			if (esdm_net_parse_uint("max_handshakes", optarg, 1000000,
 					       &server_cfg.max_probation))
 				return 1;
 			break;
 		case OPT_MAX_HANDSHAKES_PER_SOURCE:
-			if (egd_net_parse_uint(
+			if (esdm_net_parse_uint(
 				    "max_handshakes_per_source", optarg,
 				    1000000,
 				    &server_cfg.max_probation_per_source))
 				return 1;
 			break;
 		case OPT_MAX_PER_CLIENT:
-			if (egd_net_parse_uint("max_per_client", optarg,
+			if (esdm_net_parse_uint("max_per_client", optarg,
 					       1000000,
 					       &server_cfg.max_per_client))
 				return 1;
 			break;
 		case OPT_HANDSHAKE_TIMEOUT:
-			if (egd_net_parse_uint("handshake_timeout", optarg,
+			if (esdm_net_parse_uint("handshake_timeout", optarg,
 					       3600,
 					       &server_cfg.handshake_timeout))
 				return 1;
 			break;
 		case OPT_IDLE_TIMEOUT:
-			if (egd_net_parse_uint("idle_timeout", optarg, 86400 * 7,
+			if (esdm_net_parse_uint("idle_timeout", optarg, 86400 * 7,
 					       &server_cfg.idle_timeout))
 				return 1;
 			break;
 		case OPT_IO_TIMEOUT:
-			if (egd_net_parse_uint("io_timeout", optarg, 3600,
+			if (esdm_net_parse_uint("io_timeout", optarg, 3600,
 					       &server_cfg.io_timeout))
 				return 1;
 			break;
@@ -1325,10 +1239,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	lfd_num = egd_net_listen_fds(lfds, EGD_NET_MAX_LISTEN);
+	lfd_num = esdm_net_listen_fds(lfds, ESDM_NET_MAX_LISTEN);
 	for (i = 0; i < listen_num; i++) {
-		if (server_listen(listen_args[i], lfds, &lfd_num,
-				  EGD_NET_MAX_LISTEN))
+		if (esdm_net_listen(listen_args[i], IPPROTO_TCP,
+				    SERVER_BACKLOG, NULL, lfds, &lfd_num,
+				    ESDM_NET_MAX_LISTEN))
 			goto out;
 	}
 	if (!lfd_num) {
@@ -1337,7 +1252,7 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 	for (i = 0; i < (unsigned int)lfd_num; i++) {
-		if (egd_net_listener_check(lfds[i], false)) {
+		if (esdm_net_listener_check(lfds[i], ESDM_NET_LISTENER_TCP)) {
 			fprintf(stderr,
 				"Descriptor %d is no listening stream socket of TCP\n",
 				lfds[i]);
@@ -1488,6 +1403,6 @@ out:
 		close(lfds[i]);
 	if (sfd >= 0)
 		close(sfd);
-	egd_net_tls_files_free(&server_cfg.files);
+	esdm_net_tls_files_free(&server_cfg.files);
 	return ret;
 }

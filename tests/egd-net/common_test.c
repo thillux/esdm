@@ -18,10 +18,10 @@
  */
 
 /*
- * The addresses of the network as the esdm-egd-net-server sees them, compiled
- * in from frontends/egd-net/egd_net_common.c: the source a connection is
- * accounted to - an IPv6 /64 is one, which the loopback interface cannot
- * show end to end -, the allowlist, the --listen syntax and the keyed bounds.
+ * The addresses of the network as the esdm-egd-net-server sees them, from
+ * common/esdm_net.c: the source a connection is accounted to - an IPv6 /64 is
+ * one, which the loopback interface cannot show end to end -, the allowlist,
+ * the --listen syntax and the keyed bounds.
  */
 
 #include <arpa/inet.h>
@@ -31,7 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "egd_net_common.h"
+#include "esdm_net.h"
 
 static int failures = 0;
 
@@ -69,8 +69,8 @@ static struct sockaddr_storage addr_of(const char *text, uint16_t port)
 static bool same_source(const char *a, const char *b)
 {
 	struct sockaddr_storage sa = addr_of(a, 1), sb = addr_of(b, 2);
-	uint8_t ka[EGD_NET_KEY_LEN], kb[EGD_NET_KEY_LEN];
-	size_t la = egd_net_source_key(&sa, ka), lb = egd_net_source_key(&sb, kb);
+	uint8_t ka[ESDM_NET_KEY_LEN], kb[ESDM_NET_KEY_LEN];
+	size_t la = esdm_net_source_key(&sa, ka), lb = esdm_net_source_key(&sb, kb);
 
 	return la == lb && !memcmp(ka, kb, la);
 }
@@ -97,18 +97,18 @@ static void test_sources(void)
 
 static bool allowed(const char *const *list, const char *addr)
 {
-	struct egd_net_cidr cidr[8];
+	struct esdm_net_cidr cidr[8];
 	struct sockaddr_storage ss = addr_of(addr, 7378);
 	unsigned int n = 0;
 
 	for (; *list; list++) {
-		if (egd_net_cidr_parse(*list, &cidr[n])) {
+		if (esdm_net_cidr_parse(*list, &cidr[n])) {
 			CHECK(0, "%s does not parse", *list);
 			return false;
 		}
 		n++;
 	}
-	return egd_net_cidr_allowed(cidr, n, &ss);
+	return esdm_net_cidr_allowed(cidr, n, &ss);
 }
 
 static void test_allowlist(void)
@@ -121,7 +121,7 @@ static void test_allowlist(void)
 	static const char *const bad[] = { "192.0.2.0/33", "2001:db8::/129",
 					   "host.example", "192.0.2.0/",
 					   "/24", "", NULL };
-	struct egd_net_cidr cidr;
+	struct esdm_net_cidr cidr;
 	unsigned int i;
 
 	printf("Allowlist\n");
@@ -144,7 +144,7 @@ static void test_allowlist(void)
 	CHECK(allowed(none, "203.0.113.1"), "an empty list refused");
 
 	for (i = 0; bad[i]; i++)
-		CHECK(egd_net_cidr_parse(bad[i], &cidr) == -EINVAL,
+		CHECK(esdm_net_cidr_parse(bad[i], &cidr) == -EINVAL,
 		      "\"%s\" parsed", bad[i]);
 }
 
@@ -168,7 +168,7 @@ static void test_listen_syntax(void)
 	printf("Listening addresses\n");
 
 	for (i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
-		CHECK(!egd_net_split_listen(good[i].text, &host, &port) &&
+		CHECK(!esdm_net_split_listen(good[i].text, &host, &port) &&
 			      ((!host && !good[i].host) ||
 			       (host && good[i].host &&
 				!strcmp(host, good[i].host))) &&
@@ -179,32 +179,32 @@ static void test_listen_syntax(void)
 		free(port);
 	}
 	for (i = 0; bad[i]; i++) {
-		CHECK(egd_net_split_listen(bad[i], &host, &port) == -EINVAL,
+		CHECK(esdm_net_split_listen(bad[i], &host, &port) == -EINVAL,
 		      "\"%s\" was taken", bad[i]);
 	}
 }
 
 static void test_limit(void)
 {
-	struct egd_net_limit limit = EGD_NET_LIMIT_INIT("test key");
+	struct esdm_net_limit limit = ESDM_NET_LIMIT_INIT("test key");
 	const uint8_t a[] = { 1, 2, 3 }, b[] = { 1, 2, 4 };
 
 	printf("Keyed bounds\n");
 
 	limit.max = 2;
-	CHECK(egd_net_limit_get(&limit, a, sizeof(a)), "first of a refused");
-	CHECK(egd_net_limit_get(&limit, a, sizeof(a)), "second of a refused");
-	CHECK(!egd_net_limit_get(&limit, a, sizeof(a)), "third of a admitted");
-	CHECK(egd_net_limit_get(&limit, b, sizeof(b)), "b refused for a");
-	CHECK(egd_net_limit_count(&limit, a, sizeof(a)) == 2, "count of a");
-	egd_net_limit_put(&limit, a, sizeof(a));
-	CHECK(egd_net_limit_get(&limit, a, sizeof(a)),
+	CHECK(esdm_net_limit_get(&limit, a, sizeof(a)), "first of a refused");
+	CHECK(esdm_net_limit_get(&limit, a, sizeof(a)), "second of a refused");
+	CHECK(!esdm_net_limit_get(&limit, a, sizeof(a)), "third of a admitted");
+	CHECK(esdm_net_limit_get(&limit, b, sizeof(b)), "b refused for a");
+	CHECK(esdm_net_limit_count(&limit, a, sizeof(a)) == 2, "count of a");
+	esdm_net_limit_put(&limit, a, sizeof(a));
+	CHECK(esdm_net_limit_get(&limit, a, sizeof(a)),
 	      "a refused after one of it went");
-	egd_net_limit_put(&limit, a, sizeof(a));
-	egd_net_limit_put(&limit, a, sizeof(a));
-	egd_net_limit_put(&limit, b, sizeof(b));
-	CHECK(!egd_net_limit_count(&limit, a, sizeof(a)) &&
-		      !egd_net_limit_count(&limit, b, sizeof(b)),
+	esdm_net_limit_put(&limit, a, sizeof(a));
+	esdm_net_limit_put(&limit, a, sizeof(a));
+	esdm_net_limit_put(&limit, b, sizeof(b));
+	CHECK(!esdm_net_limit_count(&limit, a, sizeof(a)) &&
+		      !esdm_net_limit_count(&limit, b, sizeof(b)),
 	      "the counts did not return to zero");
 }
 

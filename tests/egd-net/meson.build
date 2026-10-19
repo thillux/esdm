@@ -21,10 +21,10 @@ test('EGD network TLS layer', egd_net_tls_test, timeout: 120,
 	suite: 'egd-net')
 
 # The addresses of the network, the allowlist and the keyed bounds of the
-# daemons, compiled in.
+# daemons, of the common library.
 egd_net_common_test = executable(
 		'egd_net_common_test',
-		[ 'common_test.c', egd_net_common_src ],
+		[ 'common_test.c' ],
 		include_directories: include_dirs_egd_net,
 		dependencies: [ dependency('threads') ] + egd_net_tls_deps,
 		link_with: esdm_common_static_lib

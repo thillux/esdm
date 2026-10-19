@@ -51,6 +51,12 @@ if egd_net_tls
 	])
 endif
 
+# What the daemons serving the network share - see esdm_net.h. Into the static
+# common library only, as the TLS layer.
+if egd_net
+	common_tls_src += files([ 'esdm_net.c' ])
+endif
+
 common_stateless_src = common_src
 common_src += common_state_src
 
