@@ -33,7 +33,9 @@
  * client sent cannot be seen on the socket. The build of this test renames the
  * server's call into the auxiliary pool to test_pool_insert_aux() below, which
  * counts the bytes on their way through - and can slow the pool down, so that
- * clients flooding it are sure to outpace it, see test_flood().
+ * clients flooding it are sure to outpace it, see test_flood(). Its calls
+ * rendering a status report and waiting for the events of a round are renamed
+ * likewise, see test_status_budget().
  */
 
 #define _GNU_SOURCE
@@ -48,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -62,10 +65,17 @@
 #include "esdm_logger.h"
 #include "threading_support.h"
 
-/* The real one, which the build renamed in esdm.h above. */
+/* The real ones, which the build renamed in esdm.h above. */
 #undef esdm_pool_insert_aux
 int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 			 uint32_t entropy_bits);
+#undef esdm_status
+int esdm_status(char *buf, size_t buflen);
+#undef esdm_status_json
+int esdm_status_json(char *buf, size_t buflen);
+#undef epoll_wait
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+	       int timeout);
 
 /* See esdm_server_remove_stale_socket() in egd_server_raw_test.c. */
 void esdm_server_remove_stale_socket(const char *path, int socktype);
@@ -135,6 +145,53 @@ int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	atomic_fetch_add(&test_inserted, inbuflen);
 
 	return rc;
+}
+
+/*
+ * Status reports the server rendered in the current round of the event loop of
+ * the calling worker - which begins with its wait for the events of the round -
+ * the most in any one round, and in total. See test_status_budget().
+ */
+static __thread unsigned int test_round_reports;
+static atomic_uint test_round_reports_max;
+static atomic_uint test_reports;
+
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout);
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout)
+{
+	test_round_reports = 0;
+
+	return epoll_wait(epfd, events, maxevents, timeout);
+}
+
+static void test_report_rendered(void)
+{
+	unsigned int n = ++test_round_reports;
+	unsigned int max = atomic_load(&test_round_reports_max);
+
+	while (n > max &&
+	       !atomic_compare_exchange_weak(&test_round_reports_max, &max, n))
+		;
+
+	atomic_fetch_add(&test_reports, 1);
+}
+
+int test_status(char *buf, size_t buflen);
+int test_status(char *buf, size_t buflen)
+{
+	test_report_rendered();
+
+	return esdm_status(buf, buflen);
+}
+
+int test_status_json(char *buf, size_t buflen);
+int test_status_json(char *buf, size_t buflen)
+{
+	test_report_rendered();
+
+	return esdm_status_json(buf, buflen);
 }
 
 /* Backstop below the harness timeout, see egd_server_raw_test.c. */
@@ -701,6 +758,81 @@ out:
 #undef TEST_SECOND_PART
 }
 
+/*
+ * A status report is asked for with a single byte but takes long to render, so
+ * a client pipelining the command and draining the answers would have the
+ * worker render reports for as many bytes as it reads in a round, and hold up
+ * everybody else on it meanwhile. One report is rendered per connection and
+ * round, the rest in the rounds that follow - in order, all of them.
+ *
+ * The reports asked for all fit into the socket, so without that bound they
+ * are all rendered in the round that reads them.
+ */
+static void test_status_budget(void)
+{
+#define TEST_REPORTS 8
+	uint8_t cmds[TEST_REPORTS];
+	unsigned int i, reports = atomic_load(&test_reports), answered = 0;
+	char *report = malloc(ESDM_EGD_MAX_STATUS);
+	int fd;
+
+	printf("EGD conn: one status report per connection and round\n");
+
+	if (!report) {
+		CHECK(0, "no memory for the reports");
+		return;
+	}
+
+	/* Text and JSON alternating, which share the budget */
+	for (i = 0; i < TEST_REPORTS; i++)
+		cmds[i] = (i & 1) ? ESDM_EGD_CMD_ESDM_STATUS_JSON :
+				    ESDM_EGD_CMD_ESDM_STATUS;
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		goto out;
+	}
+
+	atomic_store(&test_round_reports_max, 0);
+
+	CHECK(test_send(fd, cmds, sizeof(cmds)) == 0,
+	      "the status requests could not be sent");
+
+	for (i = 0; i < TEST_REPORTS; i++) {
+		uint8_t hdr[4];
+		uint32_t len;
+
+		if (test_recv(fd, hdr, sizeof(hdr), TEST_RESPONSE_MS))
+			break;
+		len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+		      ((uint32_t)hdr[2] << 8) | hdr[3];
+		if (len > ESDM_EGD_MAX_STATUS ||
+		    (len && test_recv(fd, report, len, TEST_RESPONSE_MS)))
+			break;
+		answered++;
+	}
+
+	CHECK(answered == TEST_REPORTS, "%u of %u status requests answered",
+	      answered, TEST_REPORTS);
+	CHECK(atomic_load(&test_reports) - reports == TEST_REPORTS,
+	      "%u reports rendered for %u requests",
+	      atomic_load(&test_reports) - reports, TEST_REPORTS);
+	CHECK(atomic_load(&test_round_reports_max) == 1,
+	      "%u status reports rendered in one round",
+	      atomic_load(&test_round_reports_max));
+
+	/* And the connection is in step still */
+	CHECK(test_cmd_entropy_count(fd, TEST_RESPONSE_MS) == 0,
+	      "the server lost the stream over the reports");
+
+	close(fd);
+
+out:
+	free(report);
+#undef TEST_REPORTS
+}
+
 struct test_flooder {
 	int fd;
 	pthread_t thread;
@@ -914,6 +1046,7 @@ int main(int argc, char *argv[])
 	test_hangup_after_write();
 	test_hangup_after_pipelined_request();
 	test_input_wiped();
+	test_status_budget();
 	test_flood();
 	test_idle_kept();
 	test_idle_uid_exhausted();

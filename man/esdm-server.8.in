@@ -346,7 +346,8 @@ Reseed the DRNGs at their next use (RNDRESEEDCRNG).
 Set the write wakeup threshold in bits, respectively the maximum reseed
 interval in seconds, to the 4 byte number that follows.
 .PP
-The prediction resistant reads are generated within the budget described under
+The prediction resistant reads and the status reports are served within the
+budgets described under
 .BR "CONNECTION LIMITS" .
 .SH SIGNALS
 .TP
@@ -423,7 +424,7 @@ A worker thread spends at most 25 ms per round of its event loop on generating
 prediction resistant data for the prediction resistant read commands, one
 generation per connection, so that their clients cannot hold up the others of
 that thread; a request beyond that waits for the next round, which follows at
-once.
+once. Likewise, it renders one status report per connection and round.
 .PP
 With DTLS, an unprivileged user is served encrypted on at most 64 of these
 connections at a time; see

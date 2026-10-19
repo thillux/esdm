@@ -74,14 +74,19 @@ if get_option('esdm-server').enabled()
 	# The same setup for the end of a connection, the client's and the
 	# server's. The insertion command has no response, so the server's call
 	# into the auxiliary pool is renamed to a counting wrapper in the test.
-	# Idle connections time out after a second, and the per-UID limit is
-	# small enough for the test to run into it.
+	# So are its calls rendering a status report and waiting for the events
+	# of a round, which tells the reports rendered per round. Idle
+	# connections time out after a second, and the per-UID limit is small
+	# enough for the test to run into it.
 	egd_server_conn_test = executable(
 			'egd_server_conn_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_conn_test.c' ],
 			c_args: [
 				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-Desdm_status=test_status',
+				'-Desdm_status_json=test_status_json',
+				'-Depoll_wait=test_epoll_wait',
 				'-DESDM_EGD_IDLE_TIMEOUT_MS=1000',
 				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=48',
 			],

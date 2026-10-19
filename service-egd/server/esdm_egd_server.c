@@ -86,6 +86,16 @@
 #define ESDM_EGD_PR_BUDGET 1
 
 /*
+ * Status reports per connection and round, see the status commands. A report
+ * is asked for with a single byte, but rendering one takes tens of
+ * microseconds: the read budget alone would let a client pipelining the
+ * command and draining the answers have the worker render thousands of them
+ * per round, and hold up everybody else on the worker for as long. A further
+ * one is left for the next round, as a prediction resistant generation is.
+ */
+#define ESDM_EGD_STATUS_BUDGET 1
+
+/*
  * Time a worker may spend per round of its event loop generating prediction
  * resistant bytes, over all of its connections - the same bound as
  * ESDM_RPCS_ROUND_BUDGET_NS of the RPC server, for the same reason: a worker
@@ -293,10 +303,12 @@ struct esdm_egd_conn {
 	uint8_t answer_len;
 
 	/*
-	 * Generations left in this round of the event loop, see
-	 * ESDM_EGD_PR_BUDGET, and the round they were granted for.
+	 * Generations and status reports left in this round of the event loop,
+	 * see ESDM_EGD_PR_BUDGET and ESDM_EGD_STATUS_BUDGET, and the round they
+	 * were granted for.
 	 */
 	unsigned int pr_budget;
+	unsigned int status_budget;
 	uint64_t budget_round;
 
 	/*
@@ -1122,6 +1134,9 @@ static int esdm_egd_cmd_status(struct esdm_egd_conn *conn, bool json)
 	size_t len = 0;
 	int ret;
 
+	if (conn->status_budget)
+		conn->status_budget--;
+
 	/* Without memory, an empty report is all there is to say */
 	if (!buf) {
 		uint8_t empty[4] = { 0 };
@@ -1249,6 +1264,7 @@ static void esdm_egd_conn_round(struct esdm_egd_conn *conn, uint64_t round)
 
 	conn->budget_round = round;
 	conn->pr_budget = ESDM_EGD_PR_BUDGET;
+	conn->status_budget = ESDM_EGD_STATUS_BUDGET;
 }
 
 /* Serve a deferred blocking read request, if there is one. */
@@ -1348,7 +1364,8 @@ static bool esdm_egd_cmd_changes(uint8_t cmd)
  * It stops at the first command whose response the client did not take right
  * away, which is what makes one response buffer enough: a client asking faster
  * than it reads is slowed down by its own socket, not buffered for. It also
- * stops at a generation the round has no budget left for (conn->yielded).
+ * stops at a generation or a status report the round has no budget left for
+ * (conn->yielded).
  *
  * @return 0 when the connection remains usable, < 0 when it has to be closed
  */
@@ -1448,6 +1465,14 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			return 0;
 		}
 
+		/* The same for a status report, see ESDM_EGD_STATUS_BUDGET. */
+		if ((conn->in[0] == ESDM_EGD_CMD_ESDM_STATUS ||
+		     conn->in[0] == ESDM_EGD_CMD_ESDM_STATUS_JSON) &&
+		    !conn->status_budget) {
+			conn->yielded = true;
+			return 0;
+		}
+
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = esdm_egd_cmd_entropy_count(conn);
@@ -1535,6 +1560,7 @@ consume:
 int esdm_egd_fuzz_stream(int out_fd, const uint8_t *data, size_t len)
 {
 	struct esdm_egd_conn conn;
+	uint64_t round = 0;
 	size_t pos = 0;
 	int ret = 0;
 
@@ -1574,7 +1600,7 @@ int esdm_egd_fuzz_stream(int out_fd, const uint8_t *data, size_t len)
 
 		/* Each record is a round, and as many follow as it needs. */
 		do {
-			conn.pr_budget = ESDM_EGD_PR_BUDGET;
+			esdm_egd_conn_round(&conn, ++round);
 			ret = esdm_egd_process(&conn);
 		} while (!ret && conn.yielded);
 		if (ret)

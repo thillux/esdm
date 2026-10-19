@@ -116,7 +116,9 @@
  *
  * Prediction resistant bytes cost reseeds, so a server worker generates them
  * within a budget per connection and round of its event loop. A PR read that
- * exceeds it is answered in a later round, which a client sees as latency.
+ * exceeds it is answered in a later round, which a client sees as latency. The
+ * same holds for the status reports, of which a worker renders one per
+ * connection and round.
  */
 
 #define ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK 0xe0
