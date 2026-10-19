@@ -58,10 +58,14 @@ static char esdm_cdev_boot_id[ESDM_CDEV_UUID_LEN + 1];
 
 static struct proc_dir_entry *esdm_cdev_proc_dir;
 
+/*
+ * The snapshots stay allocated for as long as the file is open, by anybody:
+ * charged to the memory cgroup of the opener, as the seq_file buffer is.
+ */
 static int esdm_cdev_text(char **text, size_t *len, const char *str,
 			  size_t slen)
 {
-	*text = kvmalloc(slen + 1, GFP_KERNEL);
+	*text = kvmalloc(slen + 1, GFP_KERNEL_ACCOUNT);
 	if (!*text)
 		return -ENOMEM;
 
@@ -219,7 +223,7 @@ static int esdm_cdev_proc_open(struct inode *inode, struct file *filp)
 	struct esdm_cdev_proc_snap *snap;
 	int ret;
 
-	snap = kzalloc(sizeof(*snap), GFP_KERNEL);
+	snap = kzalloc(sizeof(*snap), GFP_KERNEL_ACCOUNT);
 	if (!snap)
 		return -ENOMEM;
 
@@ -248,6 +252,15 @@ static int esdm_cdev_proc_release(struct inode *inode, struct file *filp)
 
 	kvfree_sensitive(snap->text, snap->len);
 	kfree(snap);
+
+	/*
+	 * The seq_file buffer holds a copy of the snapshot - the random UUID
+	 * of uuid among them -, which single_release() frees without wiping.
+	 * It is the one single_open_size() allocated: the snapshot fits it, so
+	 * seq_read() never replaced it with a larger one.
+	 */
+	if (m->buf)
+		memzero_explicit(m->buf, m->size);
 
 	return single_release(inode, filp);
 }

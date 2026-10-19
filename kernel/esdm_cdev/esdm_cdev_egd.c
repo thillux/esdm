@@ -859,7 +859,8 @@ static int esdm_cdev_status_op(struct socket *sock, void *arg, bool *sent)
 	if (len > ESDM_EGD_MAX_STATUS)
 		return -EPROTO;
 
-	report = kvmalloc(len + 1, GFP_KERNEL);
+	/* Held by the snapshot of a proc file, see esdm_cdev_proc.c */
+	report = kvmalloc(len + 1, GFP_KERNEL_ACCOUNT);
 	if (!report)
 		return -ENOMEM;
 

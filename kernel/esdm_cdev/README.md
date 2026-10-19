@@ -119,8 +119,9 @@ ioctl.
 `write_wakeup_threshold` and `urandom_min_reseed_secs` can be written by a
 process with `CAP_SYS_ADMIN`, with a number in decimal, octal (leading `0`) or
 hexadecimal (leading `0x`), optionally followed by a newline. A file is filled
-when it is opened, so that all reads of one open see the same snapshot. Every
-other file is read only.
+when it is opened, so that all reads of one open see the same snapshot, which
+is charged to the memory cgroup of the opener for as long as the file is open.
+Every other file is read only.
 
 ## The ESDM Unreachable
 
@@ -170,10 +171,11 @@ long after the ESDM came back.
   answers is checked against what was asked for and the protocol's bounds
   before anything is read; a connection with an answer that does not fit is
   closed. The status report is bounded to 64 KiB.
-* **Hygiene.** Every buffer of the module that held random data is wiped,
-  nothing random is logged, large buffers are allocated rather than on the
-  stack, transfers are bounded by `timeout_ms`, and waits are interruptible -
-  but for the answer of an ioctl changing something in the ESDM, see above.
+* **Hygiene.** Every buffer of the module that held random data is wiped -
+  the seq_file buffers of `/proc/esdm` included -, nothing random is logged,
+  large buffers are allocated rather than on the stack, transfers are bounded
+  by `timeout_ms`, and waits are interruptible - but for the answer of an
+  ioctl changing something in the ESDM, see above.
   The socket buffers of the kernel that carry the random data from the ESDM
   are freed as those of any Unix domain socket, without being wiped.
 * **No waiting for user memory with a connection.** A connection to the ESDM
