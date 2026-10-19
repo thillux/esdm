@@ -322,6 +322,34 @@ else
 	dtls_deps = []
 endif
 
+# The EGD protocol over the network - see common/esdm_tls.h. Plain TCP needs
+# nothing; the TLS mode is provided by the TLS stack of the crypto backend.
+# The TLS layer is built into the static common library only, from where the
+# EGD client library and the daemons take it.
+egd_net = get_option('egd-net').enabled()
+egd_net_tls = false
+egd_net_tls_deps = []
+if egd_net
+	if get_option('crypto_backend') == 'openssl'
+		egd_net_tls_deps = [ openssl_dep ]
+	elif get_option('crypto_backend') == 'gnutls'
+		egd_net_tls_deps = [ gnutls_dep ]
+	elif get_option('crypto_backend') == 'botan'
+		egd_net_tls_deps = [ botan_dep ]
+	elif get_option('egd-net-tls').enabled()
+		error('egd-net-tls needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none. Leave egd-net-tls at auto or disabled for plain TCP only.')
+	endif
+	egd_net_tls = not get_option('egd-net-tls').disabled() and \
+		      egd_net_tls_deps.length() > 0
+	if not egd_net_tls
+		egd_net_tls_deps = []
+	endif
+elif get_option('egd-net-tls').enabled()
+	error('egd-net-tls is the TLS mode of egd-net, which is disabled')
+endif
+dependencies_client += egd_net_tls_deps
+dependencies_server += egd_net_tls_deps
+
 if get_option('openssl-rand-provider').enabled()
 	subdirs += [ 'frontends/openssl-provider' ]
 endif

@@ -38,6 +38,19 @@ if get_option('dtls').enabled()
 	])
 endif
 
+# The TLS of the EGD protocol over the network, by the TLS stack of the crypto
+# backend - see esdm_tls.h and the egd-net options in the top-level
+# meson.build. Built into the static common library only: libesdm has no use
+# for it, and would only depend on the TLS stack for it.
+common_tls_src = []
+if egd_net_tls
+	common_tls_src += files([
+		'esdm_tls.c',
+		'esdm_tls_' + get_option('crypto_backend') +
+			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
+	])
+endif
+
 common_stateless_src = common_src
 common_src += common_state_src
 
@@ -349,6 +362,9 @@ foreach es_ext_opt : [
 	endforeach
 endforeach
 conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
+conf_data.set('ESDM_EGD_NET', egd_net)
+conf_data.set('ESDM_EGD_NET_TLS', egd_net_tls)
+conf_data.set('ESDM_EGD_NET_PORT', get_option('egd-net-port'))
 
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())
 if get_option('es_jent_kernel_name') == '' or get_option('es_jent_kernel_name').contains('"')

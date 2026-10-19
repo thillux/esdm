@@ -132,7 +132,7 @@ else
 endif
 
 esdm_common_static_lib = static_library('esdm_common_static',
-	[ common_src, crypto_src ],
+	[ common_src, common_tls_src, crypto_src ],
 	include_directories: include_dirs_server,
 	dependencies: [ dependencies_client ],
 	)
