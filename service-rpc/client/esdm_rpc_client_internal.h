@@ -250,6 +250,33 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   const struct timespec *deadline);
 
 /**
+ * @brief Bound the wait of the calling thread for a connection
+ *
+ * Not API, exported for libesdm_getrandom: a getrandom(2) that must not block -
+ * GRND_NONBLOCK, GRND_INSECURE - must not wait for another thread of the process
+ * whose request holds every connection, which may take seconds for prediction
+ * resistant data. Until it is set back to NULL, every checkout of the
+ * unprivileged interface by the calling thread gives up with -ETIMEDOUT at
+ * @deadline, should it have to wait for a connection, and so does a wait for
+ * the ESDM to become able to serve, see esdm_rpcc_unpriv_service_pause(). The
+ * requests themselves are not bounded by it: once a connection is had, the
+ * call takes as long as the ESDM needs to answer it. A call with a deadline of
+ * its own, esdm_rpcc_get_random_bytes_full_timeout(), goes by that one.
+ *
+ * The deadline in place before is returned, for the caller to put back: a
+ * call that sets one may be made from within another one that did - the TLS
+ * stack of a connection asking for random numbers, which a preloaded
+ * libesdm_getrandom answers.
+ *
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time, NULL for none. It must
+ *			stay valid until it is set back.
+ *
+ * @return the checkout deadline of the thread before
+ */
+const struct timespec *
+esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline);
+
+/**
  * @brief Put the connection back between two parts of a request, and check one
  *	  out again for the next part
  *

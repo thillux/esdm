@@ -1824,15 +1824,17 @@ out:
  *
  * @home_conn is the connection of the pool the calling thread had last, plus
  * one, 0 for none - an index rather than a pointer, as it outlives the pool it
- * was taken from, and a fork. @deadline, NULL for none, bounds the wait for
- * a connection should all of them be busy, and the requests sent on it until
- * it is put back, see esdm_rpcc_get_unpriv_service_deadline().
+ * was taken from, and a fork. @deadline bounds the requests sent on the
+ * connection until it is put back, see esdm_rpcc_get_unpriv_service_deadline();
+ * @checkout_deadline only the wait for a connection, should all of them be
+ * busy. Either may be NULL for none.
  */
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
 	uint32_t *num_conn_ptr, uint32_t *home_conn,
 	esdm_rpc_client_connection_t **ret_rpc_conn, void *int_data,
-	const struct timespec *deadline)
+	const struct timespec *deadline,
+	const struct timespec *checkout_deadline)
 {
 	esdm_rpc_client_connection_t *rpc_conn_array, *rpc_conn_p;
 	uint32_t node, num_conn, home;
@@ -1939,9 +1941,9 @@ static int esdm_rpcc_get_service(
 		atomic_fetch_add(&rpc_conn_p->waiters, 1);
 		mutex_reader_unlock(&esdm_rpcc_conn_lock);
 
-		if (deadline) {
+		if (checkout_deadline) {
 			lock_ret = mutex_w_timedlock(&rpc_conn_p->ref_cnt,
-						     deadline);
+						     checkout_deadline);
 		} else {
 			mutex_w_lock(&rpc_conn_p->ref_cnt);
 			lock_ret = 0;
@@ -2004,13 +2006,40 @@ static uint32_t unpriv_rpc_conn_init_ref = 0;
 /* The connection the thread had last, see esdm_rpcc_get_service() */
 static __thread uint32_t unpriv_rpc_conn_home = 0;
 
+/*
+ * The checkout deadline of the calling thread, see
+ * esdm_rpcc_set_unpriv_checkout_deadline().
+ */
+static __thread const struct timespec *unpriv_rpc_checkout_deadline = NULL;
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+DSO_PUBLIC
+const struct timespec *
+esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline)
+{
+	const struct timespec *prev = unpriv_rpc_checkout_deadline;
+
+	unpriv_rpc_checkout_deadline = deadline;
+	return prev;
+}
+
+/*
+ * How long a checkout may wait: until the deadline of the call, without one
+ * until the checkout deadline of the thread, if any.
+ */
+static const struct timespec *
+esdm_rpcc_unpriv_checkout_by(const struct timespec *deadline)
+{
+	return deadline ? deadline : unpriv_rpc_checkout_deadline;
+}
+
 DSO_PUBLIC
 int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
 				 void *int_data)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
 				     &unpriv_rpc_conn_home, rpc_conn, int_data,
-				     NULL);
+				     NULL, esdm_rpcc_unpriv_checkout_by(NULL));
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -2020,7 +2049,8 @@ int esdm_rpcc_get_unpriv_service_deadline(
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
 				     &unpriv_rpc_conn_home, rpc_conn, int_data,
-				     deadline);
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -2028,19 +2058,25 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   void *int_data,
 				   const struct timespec *deadline)
 {
+	const struct timespec *until = esdm_rpcc_unpriv_checkout_by(deadline);
 	struct timespec sleep_ts = esdm_client_poll_ts;
 
 	esdm_rpcc_put_unpriv_service(*rpc_conn);
 	*rpc_conn = NULL;
 
-	if (deadline) {
+	/*
+	 * Not beyond the deadline of the call - nor, without one, beyond the
+	 * checkout deadline of the thread: the wait is for the ESDM to be able
+	 * to serve, which a call that must not wait does not do either.
+	 */
+	if (until) {
 		struct timespec now;
 		int64_t left_ns;
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		left_ns = ((int64_t)deadline->tv_sec - (int64_t)now.tv_sec) *
+		left_ns = ((int64_t)until->tv_sec - (int64_t)now.tv_sec) *
 				  1000000000LL +
-			  ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec);
+			  ((int64_t)until->tv_nsec - (int64_t)now.tv_nsec);
 		if (left_ns <= 0)
 			return -ETIMEDOUT;
 
@@ -2055,7 +2091,8 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
 				     &unpriv_rpc_conn_home, rpc_conn, int_data,
-				     deadline);
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -2068,7 +2105,8 @@ int esdm_rpcc_unpriv_service_next(esdm_rpc_client_connection_t **rpc_conn,
 
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
 				     &unpriv_rpc_conn_home, rpc_conn, int_data,
-				     deadline);
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
 }
 
 DSO_PUBLIC
@@ -2118,7 +2156,7 @@ int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
 {
 	return esdm_rpcc_get_service(&priv_rpc_conn, &priv_rpc_conn_num,
 				     &priv_rpc_conn_home, rpc_conn, int_data,
-				     NULL);
+				     NULL, NULL);
 }
 
 DSO_PUBLIC

@@ -80,8 +80,27 @@ static bool stub_fully_seeded;
 static int stub_seeded_ret;
 static ssize_t stub_full_ret;
 static ssize_t stub_pr_nonblock_ret;
+static ssize_t stub_insecure_ret;
+static ssize_t stub_seed_ret;
 static unsigned int stub_full_calls, stub_pr_calls, stub_pr_nonblock_calls,
 	stub_init_calls;
+
+/*
+ * The checkout deadline the library set for the calls that follow, NULL once
+ * it set it back - and whether one was set for each of these calls.
+ */
+static const struct timespec *stub_checkout_deadline;
+static bool stub_seeded_bounded, stub_insecure_bounded, stub_pr_nonblock_bounded,
+	stub_seed_bounded, stub_full_bounded, stub_pr_bounded;
+
+const struct timespec *
+esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline)
+{
+	const struct timespec *prev = stub_checkout_deadline;
+
+	stub_checkout_deadline = deadline;
+	return prev;
+}
 
 int esdm_rpcc_set_max_online_nodes(uint32_t nodes)
 {
@@ -110,6 +129,7 @@ void esdm_rpcc_fini_unpriv_service(void)
 
 int esdm_rpcc_is_fully_seeded(bool *fully_seeded)
 {
+	stub_seeded_bounded = !!stub_checkout_deadline;
 	*fully_seeded = stub_fully_seeded;
 
 	return stub_seeded_ret;
@@ -125,6 +145,7 @@ static ssize_t stub_fill(uint8_t *buf, size_t buflen)
 ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *buf, size_t buflen)
 {
 	stub_full_calls++;
+	stub_full_bounded = !!stub_checkout_deadline;
 
 	if (stub_full_ret)
 		return stub_full_ret;
@@ -168,6 +189,7 @@ static void stub_full_timeout_set(ssize_t first, ssize_t second)
 ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *buf, size_t buflen)
 {
 	stub_pr_calls++;
+	stub_pr_bounded = !!stub_checkout_deadline;
 
 	return stub_fill(buf, buflen);
 }
@@ -175,6 +197,7 @@ ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *buf, size_t buflen)
 ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen)
 {
 	stub_pr_nonblock_calls++;
+	stub_pr_nonblock_bounded = !!stub_checkout_deadline;
 
 	if (stub_pr_nonblock_ret)
 		return stub_pr_nonblock_ret;
@@ -184,12 +207,20 @@ ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen)
 
 ssize_t esdm_rpcc_get_random_bytes(uint8_t *buf, size_t buflen)
 {
+	stub_insecure_bounded = !!stub_checkout_deadline;
+	if (stub_insecure_ret)
+		return stub_insecure_ret;
+
 	return stub_fill(buf, buflen);
 }
 
 ssize_t esdm_rpcc_get_seed(uint8_t *buf, size_t buflen, unsigned int flags)
 {
 	(void)flags;
+
+	stub_seed_bounded = !!stub_checkout_deadline;
+	if (stub_seed_ret)
+		return stub_seed_ret;
 
 	return stub_fill(buf, buflen);
 }
@@ -375,6 +406,79 @@ static void test_nonblock_no_esdm(void)
 }
 
 /*
+ * The connections of the process are shared by its threads, and a request of
+ * another one may hold them for seconds - prediction resistant data comes 32
+ * bytes per round trip. A request that must not block waits for a connection
+ * no longer than for an unseeded ESDM: the RPC client gives up the checkout at
+ * the deadline the library sets, with -ETIMEDOUT, which the library answers
+ * as it would a request it cannot serve without waiting. A blocking request
+ * sets no deadline.
+ */
+static void test_nonblock_connections_busy(void)
+{
+	uint8_t buf[16];
+
+	stub_fully_seeded = true;
+	stub_full_calls = stub_pr_calls = stub_pr_nonblock_calls = 0;
+	stub_full_timeout_len = stub_full_timeout_calls = 0;
+
+	/* The check whether the ESDM is seeded: EAGAIN, no data asked for */
+	stub_seeded_ret = -ETIMEDOUT;
+	errno = 0;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK), -1);
+	CHECK_EQ(errno, EAGAIN);
+	CHECK(stub_seeded_bounded, "the seeding check waits for a connection");
+	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
+	CHECK_EQ(stub_full_timeout_calls, 0);
+	stub_seeded_ret = 0;
+
+	/* Insecure data: the kernel's, as without an ESDM */
+	stub_insecure_ret = -ETIMEDOUT;
+	stub_kernel[0] = sizeof(buf);
+	stub_kernel_len = 1;
+	stub_kernel_calls = 0;
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_INSECURE),
+		 (ssize_t)sizeof(buf));
+	CHECK_EQ(stub_kernel_calls, 1);
+	CHECK(buf[0] == 0x17, "the kernel did not serve the request");
+	CHECK(stub_insecure_bounded,
+	      "the insecure request waits for a connection");
+	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
+	stub_kernel_len = 0;
+	stub_insecure_ret = 0;
+
+	/* Prediction resistance without waiting: EAGAIN, as for a busy DRNG */
+	stub_pr_nonblock_ret = -ETIMEDOUT;
+	errno = 0;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM), -1);
+	CHECK_EQ(errno, EAGAIN);
+	CHECK(stub_pr_nonblock_bounded,
+	      "the non-blocking PR request waits for a connection");
+	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
+	stub_pr_nonblock_ret = 0;
+
+	/* Seed material without waiting: EAGAIN as well */
+	stub_seed_ret = -ETIMEDOUT;
+	errno = 0;
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_SEED), -1);
+	CHECK_EQ(errno, EAGAIN);
+	CHECK(stub_seed_bounded,
+	      "the non-blocking seed request waits for a connection");
+	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
+	stub_seed_ret = 0;
+
+	/* The blocking requests wait for a connection as long as it takes */
+	CHECK_EQ(getrandom(buf, sizeof(buf), 0), (ssize_t)sizeof(buf));
+	CHECK(!stub_full_bounded, "a blocking request gives up its wait");
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_RANDOM),
+		 (ssize_t)sizeof(buf));
+	CHECK(!stub_pr_bounded, "a blocking PR request gives up its wait");
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_SEED), (ssize_t)sizeof(buf));
+	CHECK(!stub_seed_bounded, "a blocking seed request gives up its wait");
+}
+
+/*
  * getentropy(3) from the kernel, once the ESDM did not answer: its caller has
  * no reason to expect EINTR, so an interrupted call is retried and a partial
  * one continued, as glibc and musl do. A call delivering nothing fails with
@@ -466,6 +570,7 @@ int main(int argc, char *argv[])
 	test_nonblock_unseeded_meanwhile();
 	test_nonblock_pr_busy();
 	test_nonblock_no_esdm();
+	test_nonblock_connections_busy();
 	test_getentropy_kernel();
 
 	ret = common_test_result("getrandom_shim");

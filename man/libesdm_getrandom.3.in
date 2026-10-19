@@ -1,4 +1,4 @@
-.TH LIBESDM_GETRANDOM 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_GETRANDOM 3 "2026-10-20" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_getrandom \- route getrandom(2) and getentropy(3) to the ESDM
 .SH SYNOPSIS
@@ -68,6 +68,18 @@ instead. Should the ESDM stop being fully seeded while a request is served,
 the call waits about half a second for it, and then returns the data obtained
 until then or, without any, fails with
 .BR EAGAIN .
+Nor does a call with
+.B GRND_NONBLOCK
+or
+.B GRND_INSECURE
+wait longer than about half a second for a connection that requests of other
+threads of the process hold: then
+.B GRND_NONBLOCK
+fails with
+.BR EAGAIN ,
+and
+.B GRND_INSECURE
+is answered by the kernel.
 .B GRND_RANDOM
 selects the prediction\-resistance generator, and
 .B GRND_INSECURE
