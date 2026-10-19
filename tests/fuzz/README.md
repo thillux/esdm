@@ -223,7 +223,14 @@ load; `ESDM_STRESS_THREADS` and `ESDM_STRESS_REQUESTS` turn the same binary
 into as long a run as you care to give it:
 
     ESDM_STRESS_THREADS=16 ESDM_STRESS_REQUESTS=500000 \
-        build-fuzz/tests/fuzz/rpc_stress_test
+        build/tests/fuzz/rpc_stress_test
+
+It and the other regression tests of this directory that reach the server and
+client through the entry points of the harnesses - the failure answers, the
+connection handling, DTLS, the budget of prediction resistance - are built in
+every configuration, not only with `-Dfuzzing=enabled`: each compiles the
+sources it tests with `-DESDM_FUZZING`, the shipped binaries stay without the
+entry points.
 
 ## Running
 

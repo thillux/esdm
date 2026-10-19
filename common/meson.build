@@ -524,7 +524,11 @@ conf_data.set('HAVE_SECURE_GETENV',
 			      prefix: '#define _GNU_SOURCE\n#include <stdlib.h>'))
 
 # Guards the entry points the fuzz harnesses drive the RPC interfaces
-# through - see tests/fuzz.
-conf_data.set('ESDM_FUZZING', get_option('fuzzing').enabled())
+# through - see tests/fuzz. Left out of config.h rather than #undef'd there
+# without the option: the regression tests in tests/fuzz compile the sources
+# they test with -DESDM_FUZZING, which an #undef would take back.
+if get_option('fuzzing').enabled()
+	conf_data.set('ESDM_FUZZING', true)
+endif
 
 configure_file(output: 'config.h', configuration : conf_data)
