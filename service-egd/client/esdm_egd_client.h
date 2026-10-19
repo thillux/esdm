@@ -280,9 +280,11 @@ const char *esdm_egd_client_socket_path(const struct esdm_egd_client *client);
 /**
  * @brief Obtain random data, waiting for the ESDM to become operational
  *
- * Requests larger than one protocol transfer are split transparently. On
- * failure @buf is cleansed, so a partial transfer can never be mistaken for a
- * complete one.
+ * Requests larger than one protocol transfer are split transparently, the
+ * commands of up to 64 KiB sent at once and their answers read after, which
+ * takes one round trip per 64 KiB rather than one per transfer. On failure
+ * @buf is cleansed, so a partial transfer can never be mistaken for a complete
+ * one.
  *
  * @param [in] client Client to use
  * @param [out] buf Buffer to fill

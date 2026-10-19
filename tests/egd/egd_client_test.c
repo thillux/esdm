@@ -121,6 +121,39 @@ static int test_blocking_read_chunking(void)
 
 	CHECK(egd_peer_requests(peer) == 2, "%u transfers, expected 2",
 	      egd_peer_requests(peer));
+
+	/*
+	 * A read of more transfers than the client sends at once: their
+	 * commands go out in two batches, the bytes have to come in order all
+	 * the same, behind those of the read before on the same connection.
+	 */
+	{
+		const size_t large = 70000;
+		uint8_t *big = malloc(large);
+
+		CHECK(big != NULL, "no memory for the large read");
+		if (big) {
+			CHECK(esdm_egd_client_get_random(client, big, large) ==
+				      0,
+			      "the large blocking read failed");
+			for (i = 0; i < large; i++) {
+				if (big[i] !=
+				    egd_peer_data_byte(sizeof(buf) + i)) {
+					CHECK(0,
+					      "byte %zu of the large read is 0x%02x, expected 0x%02x",
+					      i, big[i],
+					      egd_peer_data_byte(sizeof(buf) +
+								 i));
+					break;
+				}
+			}
+			free(big);
+		}
+		CHECK(egd_peer_requests(peer) == 2 + (large + 254) / 255,
+		      "%u transfers, expected %zu", egd_peer_requests(peer),
+		      2 + (large + 254) / 255);
+	}
+
 	CHECK(egd_peer_connections(peer) == 1,
 	      "%u connections, expected a single one",
 	      egd_peer_connections(peer));

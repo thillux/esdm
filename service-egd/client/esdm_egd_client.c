@@ -110,6 +110,12 @@ static const struct esdm_egd_tls_module *esdm_egd_tls_mod = NULL;
  */
 #define ESDM_EGD_CLIENT_MAX_TIMEOUT_MS 3600000
 
+/*
+ * Read commands of a blocking read sent at once, see
+ * esdm_egd_client_get_random_op(): 512 bytes of commands, 64 KiB of answers.
+ */
+#define ESDM_EGD_CLIENT_PIPELINE 256
+
 /* Environment variable overriding the compiled in socket path. */
 #define ESDM_EGD_CLIENT_SOCKET_ENV "ESDM_EGD_SOCKET"
 
@@ -1493,32 +1499,56 @@ struct esdm_egd_random_op {
 	uint8_t cmd;
 };
 
-/* Blocking read, split into protocol sized transfers. */
+/*
+ * Blocking read, split into protocol sized transfers.
+ *
+ * The commands of up to ESDM_EGD_CLIENT_PIPELINE transfers go out with one
+ * write, and their answers are read after: a blocking read is answered with
+ * exactly the bytes asked for, so the answers of the commands are the bytes
+ * of the read in order, and the reads take whatever of them is there. One
+ * round trip per 64 KiB rather than per 255 bytes - over the network that was
+ * the time of a large read - and the server answers the commands together,
+ * see esdm_egd_read_run(). It is still the plain protocol, which a server
+ * reads command by command from the stream: any EGD serves it.
+ *
+ * The commands fit into any socket buffer, so the write never waits for the
+ * server to take answers that nobody reads yet.
+ */
 static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 					 void *arg)
 {
 	struct esdm_egd_random_op *op = arg;
+	uint8_t request[2 * ESDM_EGD_CLIENT_PIPELINE];
 	size_t done = 0;
 
 	while (done < op->buflen) {
-		size_t remaining = op->buflen - done;
-		uint8_t chunk = (remaining > ESDM_EGD_MAX_TRANSFER) ?
-					ESDM_EGD_MAX_TRANSFER :
-					(uint8_t)remaining;
-		uint8_t request[2] = { op->cmd, chunk };
+		size_t num, batch = 0;
 		int ret;
 
+		for (num = 0; num < ESDM_EGD_CLIENT_PIPELINE &&
+			      done + batch < op->buflen;
+		     num++) {
+			size_t remaining = op->buflen - done - batch;
+			uint8_t chunk = (remaining > ESDM_EGD_MAX_TRANSFER) ?
+						ESDM_EGD_MAX_TRANSFER :
+						(uint8_t)remaining;
+
+			request[2 * num] = op->cmd;
+			request[2 * num + 1] = chunk;
+			batch += chunk;
+		}
+
 		ret = esdm_egd_client_write_all_locked(client, request,
-						       sizeof(request));
+						       2 * num);
 		if (ret)
 			return ret;
 
 		ret = esdm_egd_client_read_all_locked(client, op->buf + done,
-						      chunk);
+						      batch);
 		if (ret)
 			return ret;
 
-		done += chunk;
+		done += batch;
 	}
 
 	op->generated = done;
