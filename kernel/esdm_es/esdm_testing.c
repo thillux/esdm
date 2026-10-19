@@ -76,31 +76,38 @@ static void esdm_testing_reset(struct esdm_testing *data)
 	raw_spin_unlock_irqrestore(&data->lock, flags);
 }
 
-static void esdm_testing_init(struct esdm_testing *data, u32 boot)
+/* Returns whether the reader may hand out data */
+static bool esdm_testing_init(struct esdm_testing *data, u32 boot)
 {
-	/*
-	 * The boot time testing implies we have a running test. If the
-	 * caller wants to clear it, he has to unset the boot_test flag
-	 * at runtime via sysfs to enable regular runtime testing
-	 */
-	if (boot)
-		return;
-
 	/*
 	 * should the testing interface be present by accident in a production build
 	 * with lockdown mode enabled later on (not in early boot), do not store values!
+	 *
+	 * Neither hand out those of a boot time test: its parameter is writable
+	 * at runtime, so the test may have been started after lockdown was
+	 * enabled. The store cannot check lockdown, it runs in atomic context.
 	 *
 	 * This is only defense in depth, as lockdown would probably already deny
 	 * access without this based on the access rights.
 	 */
 	if (security_locked_down(LOCKDOWN_DEBUGFS)) {
 		pr_warn("Skipping data collection due to enabled lockdown mode\n");
-		return;
+		return false;
 	}
+
+	/*
+	 * The boot time testing implies we have a running test. If the
+	 * caller wants to clear it, he has to unset the boot_test flag
+	 * at runtime via sysfs to enable regular runtime testing
+	 */
+	if (boot)
+		return true;
 
 	esdm_testing_reset(data);
 	atomic_set(&data->esdm_testing_enabled, 1);
 	pr_warn("Enabling data collection\n");
+
+	return true;
 }
 
 static void esdm_testing_fini(struct esdm_testing *data, u32 boot)
@@ -165,7 +172,8 @@ static int esdm_testing_reader(struct esdm_testing *data, u32 *boot, u8 *outbuf,
 	if (mutex_lock_interruptible(&data->reader_lock))
 		return -ERESTARTSYS;
 
-	esdm_testing_init(data, *boot);
+	if (!esdm_testing_init(data, *boot))
+		goto out;
 
 	while (outbuflen) {
 		u32 writer = (u32)atomic_read(&data->rb_writer);
