@@ -114,18 +114,28 @@ is enabled during compile time:
   from the [libp11 Github website](https://github.com/OpenSC/libp11). Its
   tests use SoftHSM (`softhsm2-util`) when it is installed.
 
-* Botan >= 3.0: If the Botan backend for cryptographic operations shall be used
+* Botan >= 3.2: If the Botan backend for cryptographic operations shall be used
   and is enabled as a compile time option get Botan either from your distribution
   or from the
-  [botan Github website](https://github.com/randombit/botan).
+  [botan Github website](https://github.com/randombit/botan). 3.2 is the first
+  version with the SHAKE-256 XOF (`Botan::XOF`) the auxiliary pool takes.
 
 * OpenSSL >= 3.0: If the OpenSSL backend for cryptographic operations shall be
   used and is enabled as a compile time option, or if the OpenSSL ESDM seed
   source shall be compiled when the compile time option is enabled, obtain OpenSSL either from your distribution or from the
   [OpenSSL website](https://www.openssl.org/source/).
 
-* leancrypto: If the leancrypto backend for cryptographic operations shall be
-  enabled during compile time, obtain leancrypto from the
+* GnuTLS >= 3.6.8 with FIPS140 mode and nettle >= 3.6: If the GnuTLS backend
+  for cryptographic operations shall be enabled during compile time, GnuTLS has
+  to be built with `--enable-fips140-mode`: only such a build exports the
+  SP800-90A CTR DRBG (`drbg_aes_init`, `drbg_aes_reseed`, `drbg_aes_generate`)
+  the backend drives, and distribution packages usually are not built that way.
+  nettle provides the AES core of the derivation function in front of that DRBG
+  and the SHAKE-256 of the auxiliary pool. Obtain GnuTLS from the
+  [GnuTLS website](https://www.gnutls.org/) and nettle from your distribution.
+
+* leancrypto >= 1.0: If the leancrypto backend for cryptographic operations
+  shall be enabled during compile time, obtain leancrypto from the
   [leancrypto](https://leancrypto.org) website.
 
 Beyond those dependencies, only POSIX support is required.
@@ -571,7 +581,7 @@ The ESDM consists of the following components:
 
 * `esdm-tool`: This tool can be used to test ESDM and interact with it without
   building an own tool with the rpc_client library or using the CUSE devices.
-  With the help of esdm-tool `esdm-wait-unti-fully-seeded.service` is implemented.
+  With the help of esdm-tool `esdm-wait-until-fully-seeded.service` is implemented.
   Add this service as a dependency of your early system start if you'd like to
   guarantee, that all services started in succession can expect ESDM to return
   fast.
