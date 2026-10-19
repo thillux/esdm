@@ -3558,10 +3558,10 @@
 
         }
         # One out-of-tree esdm_es module build per defined kernel, e.g.
-        # esdm_es_6_6 / esdm_es_latest. These carry the debugfs testing
-        # interfaces, so they stay compiled on every kernel; the module the
-        # checks and live systems load comes from the kernel package set and
-        # leaves them out.
+        # esdm_es_6_6 / esdm_es_latest, with the warnings of W=1 as errors.
+        # These carry the debugfs testing interfaces, so they stay compiled
+        # on every kernel; the module the checks and live systems load comes
+        # from the kernel package set and leaves them out.
         // lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "esdm_es_${name}" (
@@ -3569,6 +3569,7 @@
               inherit (pkgs) lib;
               inherit (kernel) kernel;
               enableTesting = true;
+              werror = true;
             }
           )
         ) kernels

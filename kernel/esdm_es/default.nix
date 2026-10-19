@@ -3,10 +3,14 @@
   stdenv,
   kernel,
   kmod,
+  python3,
   esdm,
   # The debugfs raw entropy and performance interfaces (esdm_testing.c) are
   # for entropy assessments, nothing a regular system should carry.
   enableTesting ? false,
+  # Turn the warnings of the extra set into errors, for the builds that check
+  # the module against every kernel rather than install it.
+  werror ? false,
 }:
 
 stdenv.mkDerivation rec {
@@ -42,7 +46,12 @@ stdenv.mkDerivation rec {
     sed -i '/depmod/d' Makefile
   '';
 
-  nativeBuildInputs = [ kmod ] ++ kernel.moduleBuildDependencies;
+  # python3 for the kernel-doc check of W=1, which newer kernels run in it
+  nativeBuildInputs = [
+    kmod
+    python3
+  ]
+  ++ kernel.moduleBuildDependencies;
 
   makeFlags = [
     "KBUILD_OUTPUT=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
@@ -52,7 +61,10 @@ stdenv.mkDerivation rec {
     "BUILD_TESTING=${if enableTesting then "1" else "0"}"
     "BUILD_ES_IRQ=1"
     "BUILD_ES_SCHED=1"
-  ];
+    # Every warning of the extra set, which the module builds without
+    "W=1"
+  ]
+  ++ lib.optional werror "KCFLAGS=-Werror";
   installFlags = makeFlags;
 
   enableParallelBuilding = true;
