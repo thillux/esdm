@@ -538,8 +538,12 @@ The following compile-time settings must be observed for AIS 20/31 3.0
 - The requirement of two entropy sources does not apply when the Jitter RNG
   is operated in its own NTG.1 mode with the option `es_jent_ntg1`, which
   requires jitterentropy 3.7.0 or later with support for secure memory. Such a
-  Jitter RNG is NTG.1 conformant on its own: once it delivered 240 bits of
-  entropy, it seeds a DRNG without a second entropy source.
+  Jitter RNG is NTG.1 conformant on its own and seeds a DRNG without a second
+  entropy source once it delivered at least 240 bits of entropy and the
+  entropy sources together the 256 bits (384 bits with oversampling) required
+  for the initial seeding in any case. 240 bits from the Jitter RNG are
+  therefore not sufficient by themselves: unless other entropy sources make up
+  the difference, it has to deliver the full 256 bits (384 bits) itself.
 
 #par(first-line-indent: 0pt)[The following requirements apply to the runtime
 configuration:]

@@ -797,7 +797,13 @@ when the jitter RNG is operated in its own NTG.1 mode
 (option 'es_jent_ntg1' together with jitterentropy 3.7.0
 or later). Such a jitter RNG is NTG.1 conformant on its
 own and therefore seeds a DRNG without a second entropy
-source; 240 bits of entropy from it are then sufficient.
+source once it delivered at least 240 bits of entropy and
+the entropy sources together the 256 bits (384 bits with
+the entropy source oversampling) the initial seeding
+requires in any case. 240 bits from the jitter RNG are
+not sufficient by themselves: unless other entropy sources
+make up the difference, it has to deliver the full 256
+bits (384 bits) itself.
 
 Compliance with German AIS 20/31 from 2011 is always
 present when using /dev/random with the flag O_SYNC or
