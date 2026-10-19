@@ -6,7 +6,7 @@
  * the CUSE frontend's esdm-proc emulates them, plus the status of the ESDM:
  *
  *  boot_id			the kernel's boot_id, read once at load time
- *  uuid			a fresh random UUID per read
+ *  uuid			a fresh random UUID per open
  *  entropy_avail		entropy of the ESDM's auxiliary pool in bits
  *  poolsize			size of that pool in bits
  *  write_wakeup_threshold	writable with CAP_SYS_ADMIN
@@ -17,7 +17,8 @@
  *
  * A file is filled when it is opened, so that one open reads one consistent
  * snapshot, also in several reads and after seeking. While the ESDM cannot be
- * reached, the files it fills are empty, as with esdm-proc.
+ * reached, the files it fills are empty, as with esdm-proc - but for uuid,
+ * which the kernel's RNG fills then, as it serves /dev/esdm_urandom.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  */
@@ -29,6 +30,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
+#include <linux/random.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -92,15 +94,16 @@ static int esdm_cdev_fill_uuid(const struct esdm_cdev_proc_file *file,
 
 	/*
 	 * As the kernel's uuid file, which uses get_random_bytes(): a UUID is
-	 * not a key, so the DRNG need not be fully seeded for it.
+	 * not a key, so the DRNG need not be fully seeded for it. The ESDM
+	 * hands out nothing before it is operational, and nothing at all
+	 * while it cannot be reached: the kernel's RNG serves then, as it
+	 * serves the reads of /dev/esdm_urandom.
 	 */
 	ret = esdm_cdev_egd_read(ESDM_EGD_CMD_ESDM_READ_UNSEEDED, uuid, 16);
 	if (ret == -ERESTARTSYS)
 		return ret;
-	if (ret != 16) {
-		memzero_explicit(uuid, sizeof(uuid));
-		return esdm_cdev_text(text, len, "", 0);
-	}
+	if (ret != 16)
+		get_random_bytes(uuid, 16);
 
 	/* Version 4, variant 1: a random UUID */
 	uuid[6] = (uuid[6] & 0x0f) | 0x40;

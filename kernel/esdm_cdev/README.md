@@ -118,7 +118,7 @@ ioctl.
 | File                      | Content |
 |---------------------------|---------|
 | `boot_id`                 | the kernel's `boot_id`, read once when the module is loaded |
-| `uuid`                    | a random UUID (version 4), new on every open |
+| `uuid`                    | a random UUID (version 4), new on every open, from the kernel's RNG while the ESDM cannot serve it |
 | `entropy_avail`           | entropy of the ESDM's auxiliary pool in bits |
 | `poolsize`                | size of that pool in bits |
 | `write_wakeup_threshold`  | the ESDM's write wakeup threshold in bits |
@@ -150,7 +150,9 @@ does, which falls back to the kernel's devices:
   as an ESDM from before the extensions does, and `EPROTO` for an answer that
   does not fit the protocol. An ioctl changing something whose answer did not
   come may have been carried out all the same,
-* the files of `/proc/esdm` other than `boot_id` are empty.
+* the files of `/proc/esdm` other than `boot_id` and `uuid` are empty; `uuid`
+  is served by the kernel's RNG, as the kernel's own `uuid` is, and as it is
+  while the ESDM is not operational yet.
 
 A request that finds no connection free within `timeout_ms` - all of them busy
 with an ESDM that takes its time - fails as one the ESDM did not answer.
@@ -227,10 +229,10 @@ module without an ESDM and unloading it. The fake EGD server of
 `esdm-cdev-check fake-egd` stands in for what the ESDM cannot be made to do:
 never answering, for the backoff; logging what the module sends, for the credit
 of writes, of `RNDADDENTROPY` - none for the arguments it refuses - and of
-`RNDADDTOENTCNT` interrupted by a signal; not being operational, for `poll()`
-and for the reads that wait for the ESDM, which have to wait for it rather than
-take the kernel's RNG, until a signal ends them with `EINTR` or has them
-restarted:
+`RNDADDTOENTCNT` interrupted by a signal; not being operational, for `poll()`,
+for `/proc/esdm` and for the reads that wait for the ESDM, which have to wait
+for it rather than take the kernel's RNG, until a signal ends them with `EINTR`
+or has them restarted:
 
     nix build .#checks.x86_64-linux.esdm_cdev
 

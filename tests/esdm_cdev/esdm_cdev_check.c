@@ -1078,6 +1078,20 @@ static void proc_check_json(void)
 }
 
 /*
+ * Two reads of uuid are two random UUIDs, whether the ESDM or the kernel's RNG
+ * serves them
+ */
+static void proc_check_uuid(void)
+{
+	char *u1 = proc_read("uuid"), *u2 = proc_read("uuid");
+
+	if (!is_uuid(u1) || !is_uuid(u2) || !strcmp(u1, u2))
+		fail("uuid %s %s", quote(u1), quote(u2));
+	free(u1);
+	free(u2);
+}
+
+/*
  * proc: the files of /proc/esdm with the ESDM reachable - their content, the
  * two that can be written, and what is refused there.
  */
@@ -1090,7 +1104,7 @@ static void cmd_proc(int argc, char *argv[])
 	static const char *const sections[] = { "ESDM library version",
 						"Entropy Source",
 						"DRNG instance" };
-	char *val, *kernel_boot_id, *u1, *u2;
+	char *val, *kernel_boot_id;
 	size_t i;
 	int err;
 
@@ -1109,12 +1123,7 @@ static void cmd_proc(int argc, char *argv[])
 	free(val);
 	free(kernel_boot_id);
 
-	u1 = proc_read("uuid");
-	u2 = proc_read("uuid");
-	if (!is_uuid(u1) || !is_uuid(u2) || !strcmp(u1, u2))
-		fail("uuid %s %s", quote(u1), quote(u2));
-	free(u1);
-	free(u2);
+	proc_check_uuid();
 
 	for (i = 0; i < ARRAY_SIZE(numbers); i++) {
 		val = proc_read(numbers[i]);
@@ -1178,7 +1187,8 @@ static void cmd_proc(int argc, char *argv[])
 
 /*
  * proc-empty: with the ESDM not reachable, every file but boot_id - which the
- * module read when it was loaded - is empty.
+ * module read when it was loaded - and uuid - which the kernel's RNG serves
+ * then - is empty.
  */
 static void cmd_proc_empty(int argc, char *argv[])
 {
@@ -1189,7 +1199,8 @@ static void cmd_proc_empty(int argc, char *argv[])
 	(void)argv;
 
 	for (i = 0; i < ARRAY_SIZE(proc_files); i++) {
-		if (!strcmp(proc_files[i], "boot_id"))
+		if (!strcmp(proc_files[i], "boot_id") ||
+		    !strcmp(proc_files[i], "uuid"))
 			continue;
 		val = proc_read(proc_files[i]);
 		if (*val)
@@ -1202,6 +1213,8 @@ static void cmd_proc_empty(int argc, char *argv[])
 	if (strlen(val) != 37)
 		fail("boot_id lost: %s", quote(val));
 	free(val);
+
+	proc_check_uuid();
 
 	printf("proc-empty ok\n");
 }
@@ -2453,6 +2466,44 @@ static void cmd_block_notop(int argc, char *argv[])
 }
 
 /*
+ * proc-notop: against a notop fake-egd - uuid holds random UUIDs, which the
+ * kernel's RNG serves as the ESDM hands out nothing before it is
+ * operational. The other files hold what the ESDM reports: the state
+ * fake_egd_cmd() makes up, and its status reports of no length.
+ */
+static void cmd_proc_notop(int argc, char *argv[])
+{
+	static const struct {
+		const char *name, *want;
+	} files[] = {
+		{ "entropy_avail", "0\n" },
+		{ "poolsize", "256\n" },
+		{ "write_wakeup_threshold", "64\n" },
+		{ "urandom_min_reseed_secs", "60\n" },
+		{ "esdm_type", "" },
+		{ "status", "" },
+		{ "status.json", "" },
+	};
+	size_t i;
+
+	(void)argc;
+	(void)argv;
+
+	proc_check_uuid();
+
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		char *val = proc_read(files[i].name);
+
+		if (strcmp(val, files[i].want))
+			fail("%s: %s, want %s", files[i].name, quote(val),
+			     quote(files[i].want));
+		free(val);
+	}
+
+	printf("proc-notop ok\n");
+}
+
+/*
  * backoff <log> <seconds>: against a mute fake-egd - every read waits for the
  * timeout once its connection is made, after that the reconnects back off up
  * to 2 s.
@@ -2520,6 +2571,7 @@ static const struct check {
 	  cmd_addtoentcnt_signal },
 	{ "poll-notop", "", 0, 0, NEED_MODULE, cmd_poll_notop },
 	{ "block-notop", "", 0, 0, NEED_MODULE, cmd_block_notop },
+	{ "proc-notop", "", 0, 0, NEED_MODULE, cmd_proc_notop },
 	{ "backoff", "<log> <seconds>", 2, 2, NEED_MODULE, cmd_backoff },
 };
 

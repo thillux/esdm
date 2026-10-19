@@ -2084,6 +2084,11 @@
                   machine.succeed("timeout 60 ${check} block-notop")
                   real_egd()
 
+              with subtest("/proc/esdm of an ESDM not operational, uuid from the kernel's RNG"):
+                  fake_egd("notop")
+                  machine.succeed("${check} proc-notop")
+                  real_egd()
+
               with subtest("unloading once the reader is gone"):
                   machine.succeed(
                       "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"
