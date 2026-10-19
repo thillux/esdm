@@ -88,8 +88,10 @@ extern "C" {
 
 /*
  * Bytes served before the worker looks at its file descriptors again - the
- * next round goes on right away, the bound keeps one busy guest from making
- * the worker deaf to everything else.
+ * next round goes on right away. The bound keeps a guest asking without end
+ * from making the worker deaf to the changes of the control thread; it limits
+ * neither what the guest gets nor the load on the ESDM, which only the rate
+ * limit does, see vu_dev_set_ratelimit().
  */
 #define VU_ROUND_MAX_BYTES 65536
 

@@ -56,8 +56,11 @@ While the ESDM cannot be reached, the requests of the guest wait as well, and
 the daemon asks again, backing off up to every 5 seconds, until it can. A
 request is served with at most 4096 bytes, the used length telling the driver
 how many it got, and the daemon looks at its descriptors again after
-65536 bytes or 256 requests in a row, so a guest asking without end keeps
-neither the daemon nor the ESDM busy at the expense of everything else. With
+65536 bytes or 256 requests in a row, so a guest asking without end does not
+keep it from what the VMM tells it. That limits neither what the guest gets
+nor what it costs the ESDM: the daemon serves a guest as fast as the guest
+asks and the ESDM answers, as the ESDM would serve any local user reading
+from it. With
 .BR \-\-max_bytes ,
 the bytes served are limited the way the
 .B max\-bytes
@@ -71,6 +74,22 @@ bytes per
 .IR MS ;
 a request waits until the bucket holds all of it, or as much as the bucket
 holds at most.
+.PP
+With
+.BR \-\-pr ,
+every 32 bytes the guest gets are a reseed of the prediction resistant DRNG
+from the entropy sources of the ESDM, which a guest asking without end would
+keep busy at the expense of every other user of them. So
+.B \-\-pr
+limits the guest to 1024 bytes per period \- a second, unless
+.B \-\-period_ms
+says otherwise \- by default;
+.B \-\-max_bytes
+sets another limit, and
+.B "\-\-max_bytes 0"
+none. A Linux guest asks its hardware random number generator for 32 or
+64 bytes at a time, and rarely once its own random number generator is
+seeded.
 .PP
 The bytes pass through a buffer of the daemon on their way into guest memory,
 which is excluded from core dumps and wiped after every request, as is the
@@ -151,7 +170,9 @@ Serve the guest from the prediction resistant DRNG.
 .B \-\-max_bytes \fIN\fR
 Serve at most
 .I N
-bytes per period, see above. 0, the default, is no limit.
+bytes per period, see above. 0 is no limit, which is the default \- with
+.B \-\-pr
+the default is 1024.
 .TP
 .B \-\-period_ms \fIMS\fR
 Length of the period of
@@ -230,7 +251,7 @@ all of them:
 .PP
 .nf
 [Service]
-Environment=ESDM_VHOST_USER_RNG_OPTS="\-\-pr \-\-max_bytes 1024"
+Environment=ESDM_VHOST_USER_RNG_OPTS="\-\-pr \-\-max_bytes 512"
 .fi
 .SH QEMU
 The memory of the guest has to be shared with the daemon: a memory backend

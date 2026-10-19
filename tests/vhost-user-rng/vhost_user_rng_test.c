@@ -1696,6 +1696,8 @@ static void test_options_ratelimit(void)
 static void test_options_pr(void)
 {
 	static const char *const args[] = { "--pr", NULL };
+	static const char *const unlimited[] = { "--pr", "--max_bytes", "0",
+						 NULL };
 	unsigned int full, pr;
 	struct fe_mem mem;
 	struct fe fe;
@@ -1721,6 +1723,32 @@ static void test_options_pr(void)
 	CHECK(standin_full_requests() == full,
 	      "%u requests of the fully seeded DRNG",
 	      standin_full_requests() - full);
+
+	/*
+	 * Every 32 bytes are a reseed of the ESDM: --pr comes with a bucket of
+	 * 1024 bytes a second, and a larger request gets what it holds
+	 */
+	TEST_STEP("--pr limits the guest to 1024 bytes a second by default");
+	drv_desc(&fe, 0, fe_data_gpa(&fe, 0x1000), TEST_REQ_MAX,
+		 VIRTQ_DESC_F_WRITE, 0);
+	test_serve(&fe, 0, 1024);
+
+	fe_close(&fe);
+	fe_mem_destroy(&mem);
+	test_end(pid);
+
+	TEST_STEP("--pr --max_bytes 0 serves without a limit");
+	pid = test_start(unlimited);
+	if (pid < 0) {
+		test_failures++;
+		return;
+	}
+	CHECK(!fe_mem_create(&mem, TEST_MEM_SIZE, TEST_GPA), "memfd");
+	CHECK(!fe_setup(&fe, test_sock, &mem, 0, TEST_PFEATURES, TEST_NUM),
+	      "set-up");
+	drv_desc(&fe, 0, fe_data_gpa(&fe, 0), TEST_REQ_MAX, VIRTQ_DESC_F_WRITE,
+		 0);
+	test_serve(&fe, 0, TEST_REQ_MAX);
 
 	fe_close(&fe);
 	fe_mem_destroy(&mem);

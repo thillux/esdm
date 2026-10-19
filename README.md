@@ -562,7 +562,9 @@ The ESDM consists of the following components:
   come from the ESDM - by default from its fully seeded DRNG, so a guest gets
   nothing before the ESDM is fully seeded, with `--pr` from the prediction
   resistant DRNG for guests crediting the device as full entropy, and
-  optionally rate limited (`--max_bytes`, `--period_ms`). The daemon parses
+  optionally rate limited (`--max_bytes`, `--period_ms`) - with `--pr` to
+  1 KiB per second unless told otherwise, as every 32 bytes reseed that DRNG.
+  The daemon parses
   memory the guest writes, so it runs as a process of its own, one per VM,
   without privileges, and reaches the ESDM over the unprivileged RPC interface
   like any other client. The template units `esdm-vhost-user-rng@.socket` and

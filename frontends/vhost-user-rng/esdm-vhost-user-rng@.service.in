@@ -5,12 +5,13 @@
 #
 # Options of the daemon go into ESDM_VHOST_USER_RNG_OPTS, for one VM or all of
 # them with a drop-in, e.g. to serve a guest that credits the device as full
-# entropy from the prediction resistant DRNG, at 1 KiB per second at most:
+# entropy from the prediction resistant DRNG, at 512 bytes per second at most
+# rather than the 1 KiB --pr allows by default:
 #
 #	systemctl edit esdm-vhost-user-rng@vm1.service
 #
 #	[Service]
-#	Environment=ESDM_VHOST_USER_RNG_OPTS="--pr --max_bytes 1024 --period_ms 1000"
+#	Environment=ESDM_VHOST_USER_RNG_OPTS="--pr --max_bytes 512 --period_ms 1000"
 
 [Unit]
 Description=ESDM vhost-user RNG back-end of VM %i

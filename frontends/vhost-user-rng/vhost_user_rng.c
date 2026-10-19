@@ -69,6 +69,9 @@
 /* Pending connections while one is served */
 #define VU_RNG_BACKLOG 4
 
+/* --max_bytes of --pr, unless given: 1 KiB per --period_ms, see main() */
+#define VU_RNG_PR_MAX_BYTES 1024
+
 struct vu_rng {
 	struct vu_dev dev;
 	/* Serve from the prediction resistant DRNG */
@@ -555,7 +558,8 @@ static void usage(void)
 		"\t-p --pr\t\t\tServe from the prediction resistant DRNG\n");
 	fprintf(stderr,
 		"\t   --max_bytes <N>\tServe at most N bytes per period (default 0:\n");
-	fprintf(stderr, "\t\t\t\tunlimited)\n");
+	fprintf(stderr, "\t\t\t\tunlimited; %u with --pr)\n",
+		VU_RNG_PR_MAX_BYTES);
 	fprintf(stderr,
 		"\t   --period_ms <MS>\tLength of the period (default 1000)\n");
 	fprintf(stderr,
@@ -626,7 +630,8 @@ int main(int argc, char *argv[])
 	uint64_t max_bytes = 0, period_ms = 1000;
 	int fd_arg = -1, lfd = -1, ret, c, verbosity = 0, nlisten;
 	gid_t sgid = (gid_t)-1;
-	bool mode_set = false, listening = true, worker = false;
+	bool mode_set = false, max_bytes_set = false, listening = true;
+	bool worker = false;
 	mode_t mode = 0600;
 	char where[PATH_MAX + 32];
 
@@ -653,6 +658,7 @@ int main(int argc, char *argv[])
 		case OPT_MAX_BYTES:
 			max_bytes = vu_rng_parse_u64(optarg, "byte count",
 						     UINT32_MAX, 10);
+			max_bytes_set = true;
 			break;
 		case OPT_PERIOD_MS:
 			period_ms = vu_rng_parse_u64(optarg, "period",
@@ -695,6 +701,18 @@ int main(int argc, char *argv[])
 	esdm_logger_set_verbosity(verbosity > LOGGER_WARN ?
 					  (enum esdm_logger_verbosity)verbosity :
 					  LOGGER_WARN);
+
+	/*
+	 * Every 32 bytes of the prediction resistant DRNG are a reseed from
+	 * the entropy sources, which a guest asking without end would keep
+	 * busy at the expense of every other user of the ESDM. So --pr comes
+	 * with a limit of 1 KiB per period unless --max_bytes sets one - 0 for
+	 * none -, far above what a Linux guest asks for. The fully seeded DRNG
+	 * costs the ESDM no more than any local user reading from it, and is
+	 * not limited by default.
+	 */
+	if (vu_rng.pr && !max_bytes_set)
+		max_bytes = VU_RNG_PR_MAX_BYTES;
 
 	if (max_bytes && !period_ms) {
 		fprintf(stderr,
