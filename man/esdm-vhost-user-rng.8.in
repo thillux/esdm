@@ -150,7 +150,12 @@ Listen on a UNIX domain socket at
 created with
 .BR \-\-mode .
 A socket left at the path by an earlier instance is replaced, unless an
-instance still listens on it; any other file is not.
+instance still listens on it; any other file is not. The daemon removes the
+socket when it ends \- started as root, only where
+.B \-\-user
+may, in a directory that user can write to. Elsewhere the socket stays behind
+when the daemon ends, refusing connections, until the next instance replaces
+it.
 .TP
 .B \-\-fd \fIN\fR
 Serve the socket on file descriptor
@@ -376,6 +381,12 @@ Without systemd, as root, for a QEMU running as user and group
 .nf
 esdm\-vhost\-user\-rng \-\-socket /run/vm1\-rng.sock \-\-socket_group qemu
 .fi
+.PP
+The daemon runs as
+.B nobody
+then, which cannot remove the socket from
+.I /run
+when the daemon ends; the next instance replaces it.
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR libesdm_rpc_client (3),

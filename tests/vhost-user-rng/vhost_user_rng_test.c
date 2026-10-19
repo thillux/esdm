@@ -222,6 +222,14 @@ static void test_end(pid_t pid)
 	CHECK(fe_alive(pid), "daemon %d alive at the end", (int)pid);
 	status = fe_stop(pid, 5000);
 	CHECK(status == 0, "daemon exit status %d after SIGTERM", status);
+
+	/*
+	 * It removes its socket - unless started as root, as it then drops to
+	 * nobody, who cannot write the directory of the test
+	 */
+	if (geteuid())
+		CHECK(access(test_sock, F_OK) && errno == ENOENT,
+		      "the daemon removed its socket");
 }
 
 /* Copy of guest memory to compare against */
@@ -2270,6 +2278,26 @@ static void test_options_privileges(void)
 
 	TEST_STEP("--user nobody: the group of nobody, no supplementary ones");
 	test_options_ids(user, nobody, groups[1], NULL, 0);
+
+	/*
+	 * nobody cannot remove the socket from the directory of the test, which
+	 * is root's: the next instance replaces the socket left behind
+	 */
+	TEST_STEP("the socket of an instance dropped to nobody is taken over");
+	{
+		struct stat sb;
+		pid_t pid;
+
+		CHECK(!lstat(test_sock, &sb) && S_ISSOCK(sb.st_mode),
+		      "the socket stays behind");
+		pid = fe_spawn(test_daemon, test_sock, user);
+		CHECK(pid > 0, "the next instance started: %d", (int)pid);
+		if (pid > 0) {
+			CHECK(test_responsive(),
+			      "the next instance serves on the socket");
+			test_end(pid);
+		}
+	}
 
 	if (!gid) {
 		printf("No group but root's and nobody's - skipping --group\n");

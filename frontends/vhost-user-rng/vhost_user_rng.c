@@ -449,18 +449,35 @@ err:
 	return ret;
 }
 
-/* Remove the socket file of --socket, if it is still the one bound to */
+/*
+ * Remove the socket file of --socket, if it is still the one bound to. Started
+ * as root, the daemon created it with privileges it gave up since: it can
+ * remove it only where --user may, in a directory that user can write to.
+ * Elsewhere the socket stays behind, refusing connections, and the next
+ * instance replaces it - see vu_rng_listen_path().
+ */
 static void vu_rng_unlink(void)
 {
 	struct stat sb;
+	int ret;
 
 	if (!vu_rng_bound.bound)
 		return;
 	vu_rng_bound.bound = false;
 
-	if (lstat(vu_rng_bound.path, &sb) == 0 && S_ISSOCK(sb.st_mode) &&
-	    sb.st_dev == vu_rng_bound.dev && sb.st_ino == vu_rng_bound.ino)
-		unlink(vu_rng_bound.path);
+	ret = lstat(vu_rng_bound.path, &sb);
+	if (!ret) {
+		/* Somebody else's by now */
+		if (!S_ISSOCK(sb.st_mode) || sb.st_dev != vu_rng_bound.dev ||
+		    sb.st_ino != vu_rng_bound.ino)
+			return;
+		ret = unlink(vu_rng_bound.path);
+	}
+
+	if (ret < 0 && errno != ENOENT)
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_VHOST,
+			    "Cannot remove %s: %s - the next instance replaces it\n",
+			    vu_rng_bound.path, strerror(errno));
 }
 
 /*
