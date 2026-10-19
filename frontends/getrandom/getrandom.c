@@ -69,6 +69,13 @@ static void esdm_getrandom_lib_init(void)
 		goto out;
 	}
 
+	/*
+	 * The connections this process may hold, see the meson option
+	 * linux-getrandom-num-nodes. They are opened as the requests in flight
+	 * at the same time need them, see esdm_rpcc_get_service(): a process
+	 * that asks from one thread at a time - most of those this library is
+	 * preloaded into - holds one, as it did when this was the limit.
+	 */
 #if ESDM_GETRANDOM_NUM_NODES > 0
 	esdm_rpcc_set_max_online_nodes(ESDM_GETRANDOM_NUM_NODES);
 #endif

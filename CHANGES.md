@@ -548,6 +548,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK or GRND_INSECURE waited for as long as requests of other threads held the connections - minutes, with several threads reading prediction resistant data -; it gives up after half a second now, with EAGAIN or the data of the kernel
 
+* libesdm_getrandom: up to four connections per process (meson option linux-getrandom-num-nodes, which was 1), opened as concurrent requests need them, so the threads of a process are served in parallel
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

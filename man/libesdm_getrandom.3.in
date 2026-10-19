@@ -73,7 +73,9 @@ Nor does a call with
 or
 .B GRND_INSECURE
 wait longer than about half a second for a connection that requests of other
-threads of the process hold: then
+threads of the process hold \- see
+.BR CONNECTIONS :
+then
 .B GRND_NONBLOCK
 fails with
 .BR EAGAIN ,
@@ -105,6 +107,24 @@ and
 are contradictory combinations and are rejected with
 .BR EINVAL ,
 as is any unknown flag.
+.SH CONNECTIONS
+The calls reach the ESDM over the unprivileged RPC interface of
+.BR esdm\-server (8),
+on connections the threads of a process share. A connection is opened when a
+request finds all others busy, so a process holds as many as it has requests in
+flight at the same time \- one for a process asking from one thread at a time,
+whichever CPUs it runs on \- up to the number the library was built with (the
+meson option
+.BR linux\-getrandom\-num\-nodes ,
+4 by default) and the number of online CPUs. Every connection is a file
+descriptor of the process and counts against the connections the server admits
+per user, which is why the library, preloaded into processes of every kind,
+does not open more. A large request puts its connection back between the parts
+it is served in, so a long read of prediction resistant data does not keep the
+other threads of the process waiting for its end. The server closes a
+connection that was idle for the idle timeout of its build (two seconds by
+default); the descriptor stays open in the process until a request uses that
+connection again and connects anew.
 .SH RETURN VALUE
 .BR getrandom ()
 returns the number of bytes written or \-1 with

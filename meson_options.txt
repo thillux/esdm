@@ -1093,8 +1093,15 @@ Using CUSE, the device files are provided.
 option('linux-getrandom', type: 'feature', value: 'enabled',
        description: 'Enable the Linux getrandom system call support.')
 
-option('linux-getrandom-num-nodes', type: 'integer', value: 1, min: 0, max: 64,
-       description: 'Number of DRNG nodes to allocate for getrandom. 0 means no limit.')
+option('linux-getrandom-num-nodes', type: 'integer', value: 4, min: 0, max: 64,
+       description: '''Connections to the ESDM a process with libesdm-getrandom holds at most.
+
+The library is preloaded into processes of every kind, and every connection is
+a descriptor of the process and counts against the limits of the server per
+user and in total. A connection is opened only when a request finds all others
+busy, so a process holds as many as it has requests in flight at the same time,
+at most this number and the online CPUs. 1 serves the threads of a process one
+request at a time, 0 means no limit beyond the online CPUs.''')
 
 option('openssl-rand-provider', type: 'feature', value: 'disabled',
        description: '''Enable the OpenSSL >= 3 RAND/SEED-SRC provider support.
