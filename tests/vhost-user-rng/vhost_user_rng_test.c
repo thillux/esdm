@@ -257,6 +257,36 @@ static bool test_quiet(struct fe *fe)
 	return drv_used_idx(fe) == idx;
 }
 
+/* CPU time process @pid spent so far in milliseconds, -1 if unknown */
+static long test_cpu_ms(pid_t pid)
+{
+	unsigned long utime, stime;
+	char path[64], buf[1024];
+	const char *p;
+	ssize_t n;
+	int fd;
+
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = 0;
+
+	/* Fields 14 and 15, behind the name in parentheses, see proc(5) */
+	p = strrchr(buf, ')');
+	if (!p || sscanf(p + 1,
+			 " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+			 &utime, &stime) != 2)
+		return -1;
+
+	return (long)((utime + stime) * 1000 /
+		      (unsigned long)sysconf(_SC_CLK_TCK));
+}
+
 /* A fresh connection to the daemon answers GET_FEATURES */
 static bool test_responsive(void)
 {
@@ -1425,6 +1455,65 @@ out:
 }
 
 /*
+ * A kick descriptor that is no eventfd but readable for good is ignored rather
+ * than waking the worker without end, until the front-end hands over another
+ */
+static void test_lifecycle_bad_kick(pid_t pid)
+{
+	static const char *const devs[] = { "/dev/zero", "/dev/null",
+					    "/dev/urandom" };
+	struct fe_mem mem, file;
+	struct fe fe;
+	unsigned int i;
+	int ret;
+
+	CHECK(!fe_mem_create(&mem, TEST_MEM_SIZE, TEST_GPA), "memfd");
+	/* A file of 64 KiB, every byte FE_CANARY */
+	CHECK(!fe_mem_create(&file, 65536, 0), "memfd of the file");
+	ret = fe_setup(&fe, test_sock, &mem, 0, TEST_PFEATURES, TEST_NUM);
+	CHECK(!ret, "set-up: %d", ret);
+	if (ret)
+		goto out;
+
+	for (i = 0; i <= 3; i++) {
+		const char *what = i < 3 ? devs[i] : "a file of 64 KiB";
+		uint64_t idx = 0;
+		long before, after;
+		int fd;
+
+		TEST_STEP("a kick descriptor of %s", what);
+		fd = i < 3 ? open(devs[i], O_RDONLY | O_CLOEXEC) :
+			     fcntl(file.fd, F_DUPFD_CLOEXEC, 0);
+		CHECK(fd >= 0, "%s opened", what);
+		if (fd < 0)
+			continue;
+		CHECK(!fe_request(&fe, VHOST_USER_SET_VRING_KICK, &idx,
+				  sizeof(idx), &fd, 1),
+		      "SET_VRING_KICK with %s", what);
+		close(fd);
+
+		fe_sleep_ms(200);
+		before = test_cpu_ms(pid);
+		fe_sleep_ms(1000);
+		after = test_cpu_ms(pid);
+		CHECK(before >= 0 && after >= 0 && after - before < 300,
+		      "the daemon spent %ld ms of CPU time in a second",
+		      after - before);
+
+		CHECK(!fe_set_vring_fd(&fe, VHOST_USER_SET_VRING_KICK),
+		      "an eventfd again");
+		drv_desc(&fe, 0, fe_data_gpa(&fe, 0), 64, VIRTQ_DESC_F_WRITE,
+			 0);
+		test_serve(&fe, 0, 64);
+	}
+
+out:
+	fe_close(&fe);
+	fe_mem_destroy(&file);
+	fe_mem_destroy(&mem);
+}
+
+/*
  * A request waits for the ESDM to be seeded, and what the front-end does
  * meanwhile is never held up by it
  */
@@ -1602,6 +1691,7 @@ static int test_group_lifecycle(void)
 		return 1;
 
 	test_lifecycle_rings();
+	test_lifecycle_bad_kick(pid);
 	test_lifecycle_seeding();
 	test_lifecycle_mem_slots();
 

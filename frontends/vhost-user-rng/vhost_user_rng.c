@@ -62,6 +62,9 @@
 /* Polling interval of a ring without kick descriptor */
 #define VU_RNG_POLL_MS 20
 
+/* Reads of a kick descriptor in a row that make it no eventfd */
+#define VU_RNG_KICK_READS 16
+
 /* Wait between failed attempts to reach the ESDM, growing up to the second */
 #define VU_RNG_BACKOFF_MIN_MS 100
 #define VU_RNG_BACKOFF_MAX_MS 5000
@@ -221,6 +224,37 @@ static void vu_rng_drain(int fd)
 }
 
 /*
+ * Read what the kick descriptor holds. The eventfd a front-end hands over reads
+ * as the count of the kicks since the last read, at least 1, and is not
+ * readable again until the next kick. Anything else the front-end could hand
+ * over instead is readable for good - a file reads its content and then its
+ * end, /dev/zero zeros, /dev/urandom without end - and would keep the worker
+ * going around at full speed: false for those. A descriptor that still reads
+ * after VU_RNG_KICK_READS reads in a row is one of them, as a guest would have
+ * to kick between every two of them to get there.
+ */
+static bool vu_rng_drain_kick(int fd)
+{
+	unsigned int reads = 0;
+
+	while (reads < VU_RNG_KICK_READS) {
+		uint64_t v = 0;
+		ssize_t ret = read(fd, &v, sizeof(v));
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return errno == EAGAIN;
+		}
+		if (ret != (ssize_t)sizeof(v) || !v)
+			return false;
+		reads++;
+	}
+
+	return false;
+}
+
+/*
  * Serve the ring whenever there is something to do: a kick of the guest, a
  * change the control thread made, the end of a wait for the rate limit, or -
  * for a ring without kick descriptor - the polling interval.
@@ -273,20 +307,18 @@ static void *vu_rng_worker(void *arg)
 		if (pfd[0].revents & POLLIN)
 			vu_rng_drain(pfd[0].fd);
 
-		if (n > 1) {
-			if (pfd[1].revents & POLLIN)
-				vu_rng_drain(pfd[1].fd);
-
-			/*
-			 * An eventfd never hangs up; whatever the front-end
-			 * handed over instead would wake the worker for good.
-			 * It is ignored until the front-end replaces it.
-			 */
-			if (pfd[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-				esdm_logger(LOGGER_WARN, LOGGER_C_VHOST,
-					    "The kick descriptor of the front-end is unusable, ignoring it\n");
-				kick_dead = true;
-			}
+		/*
+		 * An eventfd never hangs up, and reads as one; whatever the
+		 * front-end handed over instead would wake the worker for good.
+		 * It is ignored until the front-end replaces it.
+		 */
+		if (n > 1 &&
+		    (((pfd[1].revents & POLLIN) &&
+		      !vu_rng_drain_kick(pfd[1].fd)) ||
+		     (pfd[1].revents & (POLLERR | POLLHUP | POLLNVAL)))) {
+			esdm_logger(LOGGER_WARN, LOGGER_C_VHOST,
+				    "The kick descriptor of the front-end is no eventfd, ignoring it\n");
+			kick_dead = true;
 		}
 	}
 

@@ -127,7 +127,10 @@ breaking the protocol in a way no reply can tell it \- a message of a size or
 with file descriptors its request does not have, a version other than 1, a
 request whose reply the daemon cannot give \- is disconnected; a request that
 fails is refused with REPLY_ACK, and a request the daemon does not know is
-refused or ignored.
+refused or ignored. A kick file descriptor that is no eventfd \- one readable
+for good, such as a file or
+.I /dev/zero
+\- is ignored until the VMM hands over another one.
 .PP
 Nothing of the protocol waits for the ESDM: stopping the queue
 (GET_VRING_BASE), a reset, a new memory table or the end of the connection
