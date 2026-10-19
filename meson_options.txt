@@ -342,8 +342,8 @@ option('es_sched_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF scheduler entropy source. Every context switch
-event contributes its 64 bit time stamp, so 256 bits of data are four
-events. The ESDM enforces the limit that this value must be between 0 and
+event contributes the 64 bit delta of its time stamp to the previous one, so
+256 bits of data are four events. The ESDM enforces the limit that this value must be between 0 and
 256 bits.
 
 The credited entropy is additionally capped by the oversampling rate
@@ -422,7 +422,8 @@ option('es_irq_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF interrupt entropy source. Every interrupt event
-contributes its 64 bit time stamp, so 256 bits of data are four events. The
+contributes the 64 bit delta of its time stamp to the previous one, so 256
+bits of data are four events. The
 ESDM enforces the limit that this value must be between 0 and 256 bits.
 
 The credited entropy is additionally capped by the oversampling rate

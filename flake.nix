@@ -283,8 +283,8 @@
                   )
                   peak = max(peak, avail())
               print(f"peak available entropy of the eBPF pool: {peak} bits")
-              # The pool is a SHA-512 state and holds at most one digest of
-              # entropy (SP800-90B section 3.1.5.1 table 1).
+              # The pool is an XDRBG-256 whose state of 512 bits is the most
+              # entropy it holds (SP800-90B section 3.1.5.1 table 1).
               assert peak <= 512, (
                   f"available entropy reached {peak} bits, more than the "
                   "conditioning pool can hold - the ingest credits events whose "
