@@ -39,6 +39,13 @@
 int standin_start(void);
 void standin_stop(void);
 
+/*
+ * Stop serving, and leave the socket behind with nobody listening on it, as an
+ * esdm-server stopped with its socket units leaves it: every connection is
+ * refused. standin_start() takes it over again.
+ */
+int standin_stop_refusing(void);
+
 /* Whether the fully seeded and the prediction resistant DRNG serve */
 void standin_set_seeded(bool seeded);
 

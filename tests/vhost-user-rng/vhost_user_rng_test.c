@@ -97,12 +97,14 @@ static unsigned int test_failures;
  * Helpers
  ******************************************************************************/
 
-static pid_t test_start(const char *const *extra)
+/* Start the daemon, logging into @log_fd, with -vvvvv if @verbose */
+static pid_t test_start_log(const char *const *extra, int log_fd,
+			    bool verbose)
 {
 	pid_t pid;
 
 	unlink(test_sock);
-	pid = fe_spawn(test_daemon, test_sock, extra);
+	pid = fe_spawn_log(test_daemon, test_sock, extra, log_fd, verbose);
 	if (pid < 0)
 		return pid;
 
@@ -112,6 +114,102 @@ static pid_t test_start(const char *const *extra)
 	}
 
 	return pid;
+}
+
+static pid_t test_start(const char *const *extra)
+{
+	return test_start_log(extra, -1, true);
+}
+
+/* A file in the test directory for the log of a daemon, -1 on error */
+static int test_log_open(void)
+{
+	char path[128];
+
+	snprintf(path, sizeof(path), "%s/daemon.log", test_dir);
+	return open(path, O_RDWR | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC,
+		    0600);
+}
+
+static void test_log_close(int fd)
+{
+	char path[128];
+
+	snprintf(path, sizeof(path), "%s/daemon.log", test_dir);
+	close(fd);
+	unlink(path);
+}
+
+/*
+ * The log of a daemon so far, at most 1 MiB of it, NUL terminated - NULL if it
+ * cannot be read
+ */
+static char *test_log_read(int fd, size_t *len)
+{
+	static const size_t max = 1U << 20;
+	char *buf = malloc(max + 1);
+	size_t got = 0;
+
+	if (!buf)
+		return NULL;
+
+	while (got < max) {
+		ssize_t n = pread(fd, buf + got, max - got, (off_t)got);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		got += (size_t)n;
+	}
+	buf[got] = 0;
+	if (len)
+		*len = got;
+
+	return buf;
+}
+
+/* How often the log of a daemon holds @what */
+static unsigned int test_log_count(int fd, const char *what)
+{
+	char *buf = test_log_read(fd, NULL);
+	const char *p;
+	unsigned int n = 0;
+
+	if (!buf)
+		return 0;
+	for (p = buf; (p = strstr(p, what)); p += strlen(what))
+		n++;
+	free(buf);
+
+	return n;
+}
+
+/* Wait until a line of the log holds @what */
+static bool test_log_wait(int fd, const char *what, int timeout_ms)
+{
+	uint64_t end = fe_now_ms() + (uint64_t)timeout_ms;
+
+	do {
+		if (test_log_count(fd, what))
+			return true;
+		fe_sleep_ms(20);
+	} while (fe_now_ms() < end);
+
+	return false;
+}
+
+/* Print the log of a daemon from offset @from on into the output of the test */
+static void test_log_print(int fd, size_t from)
+{
+	size_t len = 0;
+	char *buf = test_log_read(fd, &len);
+
+	if (!buf)
+		return;
+	if (from < len)
+		printf("  log of the daemon:\n%s\n", buf + from);
+	free(buf);
 }
 
 static void test_end(pid_t pid)
@@ -1543,6 +1641,70 @@ out:
 }
 
 /*
+ * The ESDM refusing every connection - its socket left behind - is logged once
+ * by the daemon, and the RPC client with its lines about every attempt does not
+ * fill the log meanwhile: a daemon of its own without -v, logging into a file
+ */
+static void test_lifecycle_esdm_refusing(void)
+{
+	struct fe_mem mem;
+	struct fe fe;
+	size_t before = 0, after = 0;
+	int log_fd, ret;
+	pid_t pid;
+
+	TEST_STEP("the ESDM refusing every connection does not flood the log");
+	log_fd = test_log_open();
+	CHECK(log_fd >= 0, "log file");
+	if (log_fd < 0)
+		return;
+	pid = test_start_log(NULL, log_fd, false);
+	CHECK(pid > 0, "daemon started: %d", (int)pid);
+	if (pid <= 0)
+		goto out_log;
+
+	CHECK(!fe_mem_create(&mem, TEST_MEM_SIZE, TEST_GPA), "memfd");
+	ret = fe_setup(&fe, test_sock, &mem, 0, TEST_PFEATURES, TEST_NUM);
+	CHECK(!ret, "set-up: %d", ret);
+	if (ret)
+		goto out;
+	drv_desc(&fe, 0, fe_data_gpa(&fe, 0), 64, VIRTQ_DESC_F_WRITE, 0);
+	test_serve(&fe, 0, 64);
+
+	ret = standin_stop_refusing();
+	CHECK(!ret, "the stand-in refusing: %d", ret);
+	drv_avail(&fe, 0);
+	/* The first request fails once every connection attempt has */
+	CHECK(test_log_wait(log_fd, "Cannot obtain random bytes",
+			    3 * TEST_WAIT_MS),
+	      "the daemon logs that the ESDM fails");
+
+	free(test_log_read(log_fd, &before));
+	/* Two more requests, each of 10 attempts that are refused */
+	fe_sleep_ms(6000);
+	free(test_log_read(log_fd, &after));
+	CHECK(after == before,
+	      "%zu bytes logged while the ESDM went on refusing",
+	      after - before);
+	if (after != before)
+		test_log_print(log_fd, before);
+
+	ret = standin_start();
+	CHECK(!ret, "the stand-in back: %d", ret);
+	CHECK(drv_wait_used(&fe, 2, 3 * TEST_WAIT_MS),
+	      "served once the ESDM is back");
+	CHECK(test_log_wait(log_fd, "The ESDM serves again", TEST_WAIT_MS),
+	      "the daemon logs that the ESDM serves again");
+
+out:
+	fe_close(&fe);
+	fe_mem_destroy(&mem);
+	test_end(pid);
+out_log:
+	test_log_close(log_fd);
+}
+
+/*
  * A request waits for the ESDM to be seeded, and what the front-end does
  * meanwhile is never held up by it
  */
@@ -1759,6 +1921,9 @@ static int test_group_lifecycle(void)
 	standin_set_seeded(true);
 	fe_close(&fe);
 	fe_mem_destroy(&mem);
+
+	/* Daemons of their own, after the one of the group ended */
+	test_lifecycle_esdm_refusing();
 
 	return 0;
 }

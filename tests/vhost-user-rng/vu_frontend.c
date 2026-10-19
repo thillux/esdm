@@ -642,6 +642,12 @@ static const char *const fe_env_sanitizer[] = {
 
 pid_t fe_spawn(const char *daemon, const char *sock, const char *const *extra)
 {
+	return fe_spawn_log(daemon, sock, extra, -1, true);
+}
+
+pid_t fe_spawn_log(const char *daemon, const char *sock,
+		   const char *const *extra, int log_fd, bool verbose)
+{
 	char *envp[TEST_ENV_MAX_VARS + 1 + 4];
 	char *argv[32];
 	unsigned int argc = 0, envc, i, j;
@@ -650,7 +656,8 @@ pid_t fe_spawn(const char *daemon, const char *sock, const char *const *extra)
 	argv[argc++] = (char *)daemon;
 	argv[argc++] = "--socket";
 	argv[argc++] = (char *)sock;
-	argv[argc++] = "-vvvvv";
+	if (verbose)
+		argv[argc++] = "-vvvvv";
 	for (i = 0; extra && extra[i] && argc < 31; i++)
 		argv[argc++] = (char *)extra[i];
 	argv[argc] = NULL;
@@ -673,6 +680,8 @@ pid_t fe_spawn(const char *daemon, const char *sock, const char *const *extra)
 	if (pid < 0)
 		return -errno;
 	if (!pid) {
+		if (log_fd >= 0 && dup2(log_fd, STDERR_FILENO) < 0)
+			_exit(127);
 		execve(daemon, argv, envp);
 		_exit(127);
 	}

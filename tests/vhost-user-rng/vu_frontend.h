@@ -181,6 +181,13 @@ bool fe_signalled(int fd, int timeout_ms);
 /* Start the daemon on @sock with the extra arguments @extra, NULL ended */
 pid_t fe_spawn(const char *daemon, const char *sock, const char *const *extra);
 
+/*
+ * The same, with the standard error of the daemon going to @log_fd if it is
+ * not -1, and with the -vvvvv the daemon gets otherwise only if @verbose
+ */
+pid_t fe_spawn_log(const char *daemon, const char *sock,
+		   const char *const *extra, int log_fd, bool verbose);
+
 /* Whether the daemon still runs */
 bool fe_alive(pid_t pid);
 

@@ -53,7 +53,12 @@ That is the one for guests crediting the device with full entropy, as Linux
 does with the input of a hardware random number generator.
 .PP
 While the ESDM cannot be reached, the requests of the guest wait as well, and
-the daemon asks again, backing off up to every 5 seconds, until it can. A
+the daemon asks again, backing off up to every 5 seconds, until it can. It
+logs that once, and once more when the ESDM serves again; what the RPC client
+logs about every attempt is held back meanwhile, unless debug messages are
+asked for
+.RB ( \-vvvvv ).
+A
 request is served with at most 4096 bytes, the used length telling the driver
 how many it got, and the daemon looks at its descriptors again after
 65536 bytes or 256 requests in a row, so a guest asking without end does not

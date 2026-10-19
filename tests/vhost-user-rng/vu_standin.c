@@ -269,6 +269,29 @@ int standin_start(void)
 	return 0;
 }
 
+int standin_stop_refusing(void)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	int fd, ret = 0;
+
+	standin_stop();
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+		 ESDM_RPC_UNPRIV_SOCKET);
+	fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return -errno;
+
+	/* Bound, never listening, and closed: the file stays, refusing */
+	unlink(addr.sun_path);
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
+	    chmod(addr.sun_path, 0666))
+		ret = -errno;
+	close(fd);
+
+	return ret;
+}
+
 void standin_stop(void)
 {
 	if (standin_fd < 0)

@@ -79,7 +79,7 @@ struct vu_rng {
 	struct vu_dev dev;
 	/* Serve from the prediction resistant DRNG */
 	bool pr;
-	/* The ESDM failed the last request - logged once, until it serves */
+	/* The ESDM failed the last request, see vu_rng_set_failing() */
 	bool rpc_failing;
 	/* Random bytes on their way into guest memory, see vu_rng_buf_alloc() */
 	uint8_t *buf;
@@ -115,6 +115,24 @@ static int vu_rng_rpc_interrupt(void *data)
 		return 0;
 
 	return vu_dev_interrupted(&vu_rng.dev, intr->gen);
+}
+
+/*
+ * Whether the ESDM fails the requests. The daemon says so when that starts and
+ * when it ends, once each. The RPC client says so with every attempt - over and
+ * over for as long as the ESDM is gone, several lines for every request a
+ * socket left behind refuses -, so its messages are held back meanwhile,
+ * unless debug messages were asked for: the logger logs the class of the
+ * daemon alone, which is all the daemon logs besides once it serves.
+ */
+static void vu_rng_set_failing(struct vu_rng *rng, bool failing)
+{
+	if (rng->rpc_failing == failing)
+		return;
+	rng->rpc_failing = failing;
+
+	if (esdm_logger_get_verbosity(LOGGER_C_VHOST) < LOGGER_DEBUG)
+		esdm_logger_set_class(failing ? LOGGER_C_VHOST : LOGGER_C_ANY);
 }
 
 /* Sleep @ms, unless generation @gen passes first */
@@ -160,7 +178,7 @@ static int vu_rng_fill(void *ctx, uint8_t *buf, size_t len, unsigned int gen)
 			if (rng->rpc_failing)
 				esdm_logger(LOGGER_STATUS, LOGGER_C_VHOST,
 					    "The ESDM serves again\n");
-			rng->rpc_failing = false;
+			vu_rng_set_failing(rng, false);
 			return 0;
 		}
 
@@ -173,7 +191,7 @@ static int vu_rng_fill(void *ctx, uint8_t *buf, size_t len, unsigned int gen)
 			esdm_logger(LOGGER_WARN, LOGGER_C_VHOST,
 				    "Cannot obtain random bytes from the ESDM: %s - the guest waits until it can\n",
 				    strerror(ret < 0 ? (int)-ret : EIO));
-		rng->rpc_failing = true;
+		vu_rng_set_failing(rng, true);
 
 		vu_rng_sleep(rng, gen, backoff);
 		if (backoff < VU_RNG_BACKOFF_MAX_MS)
