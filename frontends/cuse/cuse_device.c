@@ -1835,7 +1835,14 @@ static const struct fuse_opt esdm_cuse_opts[] = {
 	ESDM_CUSE_OPT("-v %u", verbosity),
 	ESDM_CUSE_OPT("--verbosity=%u", verbosity),
 	ESDM_CUSE_OPT("-u %s", username),
+	/*
+	 * fuse_opt takes "--username=USER" for the template "--username %s" as
+	 * well, with "=USER" as the value. The template below takes the value
+	 * after the "=", and comes after that one, as fuse_opt applies every
+	 * template an argument matches, in the order of this table.
+	 */
 	ESDM_CUSE_OPT("--username %s", username),
+	ESDM_CUSE_OPT("--username=%s", username),
 	ESDM_CUSE_OPT("--pid_namespace", pid_namespace),
 	/* cuse_lowlevel_setup() ignores it, see esdm_cuse_session_loop() */
 	ESDM_CUSE_OPT("max_threads=%u", max_threads),

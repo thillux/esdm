@@ -1813,10 +1813,53 @@ static void test_shm_status(void)
 	shmctl(test_server_shmid, IPC_RMID, NULL);
 }
 
+/*
+ * The user to drop to, in every form the usage offers: --username=USER, the
+ * one it shows, used to come out as "=USER".
+ */
+static void test_option_username(void)
+{
+	static const struct {
+		const char *argv[3];
+		const char *user;
+	} cases[] = {
+		{ { "esdm-cuse", "--username=alice", NULL }, "alice" },
+		{ { "esdm-cuse", "--username", "bob" }, "bob" },
+		{ { "esdm-cuse", "-u", "carol" }, "carol" },
+		{ { "esdm-cuse", "-udave", NULL }, "dave" },
+	};
+	unsigned int i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		char *argv[3];
+		int argc = cases[i].argv[2] ? 3 : 2;
+		struct fuse_args args;
+		struct esdm_cuse_param param = { 0 };
+
+		memcpy(argv, cases[i].argv, sizeof(argv));
+		args = (struct fuse_args)FUSE_ARGS_INIT(argc, argv);
+
+		CHECK_EQ(fuse_opt_parse(&args, &param, esdm_cuse_opts,
+					esdm_cuse_process_arg),
+			 0);
+		CHECK(param.username &&
+			      !strcmp(param.username, cases[i].user),
+		      "%s %s: the user is %s rather than %s", argv[1],
+		      argc > 2 ? argv[2] : "",
+		      param.username ? param.username : "(none)",
+		      cases[i].user);
+
+		free(param.username);
+		fuse_opt_free_args(&args);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
+
+	test_option_username();
 
 	caller_is_root(false);
 
