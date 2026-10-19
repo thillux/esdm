@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,8 +86,22 @@ static char *pkcs11_runtime_module_path = NULL;
 /* Between init and fini - a new module path is loaded at once then */
 static bool pkcs11_initialized = false;
 static DEFINE_MUTEX_UNLOCKED(pkcs11_mutex);
+/*
+ * pkcs11_mutex is held across the calls into the module, which a network HSM
+ * may take seconds to answer. What the readers that must not wait for them need
+ * - the state of the source for the status, its entropy estimate and whether it
+ * is active (esdm_es_mgr_cb.h) - is kept apart: the flags below are atomic, and
+ * the label of the bound token and the module path are guarded by
+ * pkcs11_status_mutex as well, which is held for no longer than it takes to
+ * copy them. Lock order: pkcs11_mutex, then pkcs11_status_mutex.
+ */
+static DEFINE_MUTEX_UNLOCKED(pkcs11_status_mutex);
+/* A PKCS#11 token label has 32 bytes, "(none)" without a token bound */
+static char pkcs11_status_token[33] = "(none)";
+/* Whether a token is bound - pkcs11_slot - once the login is done */
+static atomic_bool pkcs11_bound = false;
 /* Set by a self test that saw a repeated output, cleared by one that passes */
-static bool pkcs11_selftest_failed = false;
+static atomic_bool pkcs11_selftest_failed = false;
 
 /*
  * Earliest time to look for a token again (ESDM_PKCS11_RETRY_INTERVAL_SEC),
@@ -125,14 +140,17 @@ static const char *esdm_es_pkcs11_token_label_locked(void)
 					    ESDM_PKCS11_TOKEN_LABEL;
 }
 
-/* Caller must hold pkcs11_mutex. */
+/* Caller must hold pkcs11_mutex or pkcs11_status_mutex. */
 static const char *esdm_es_pkcs11_module_path_locked(void)
 {
 	return pkcs11_runtime_module_path ? pkcs11_runtime_module_path :
 					    ESDM_PKCS11_MODULE_PATH;
 }
 
-/* Is a module configured at all? Caller must hold pkcs11_mutex. */
+/*
+ * Is a module configured at all? Caller must hold pkcs11_mutex or
+ * pkcs11_status_mutex.
+ */
 static bool esdm_es_pkcs11_configured_locked(void)
 {
 	return esdm_es_pkcs11_module_path_locked()[0] != '\0';
@@ -168,13 +186,8 @@ static bool pkcs11_buf_alloced = false;
  */
 static uint32_t esdm_es_pkcs11_buf_credit(uint32_t requested_bits)
 {
-	bool failed;
-
-	mutex_reader_lock(&pkcs11_mutex);
-	failed = pkcs11_selftest_failed;
-	mutex_reader_unlock(&pkcs11_mutex);
-
-	if (failed)
+	/* Without pkcs11_mutex, a cached block is not to wait for a read */
+	if (pkcs11_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -183,6 +196,22 @@ static uint32_t esdm_es_pkcs11_buf_credit(uint32_t requested_bits)
 #endif
 
 static bool esdm_es_pkcs11_active(void);
+
+/*
+ * Tell the readers that do not take pkcs11_mutex which token is bound now.
+ * Caller must hold pkcs11_mutex (write lock).
+ */
+static void esdm_es_pkcs11_publish_locked(void)
+{
+	mutex_lock(&pkcs11_status_mutex);
+	snprintf(pkcs11_status_token, sizeof(pkcs11_status_token), "%s",
+		 pkcs11_slot && pkcs11_slot->token &&
+				 pkcs11_slot->token->label ?
+			 pkcs11_slot->token->label :
+			 "(none)");
+	mutex_unlock(&pkcs11_status_mutex);
+	atomic_store(&pkcs11_bound, pkcs11_slot != NULL);
+}
 
 /*
  * Caller must hold pkcs11_mutex (write lock).
@@ -196,6 +225,7 @@ static void esdm_es_pkcs11_drop_slot_locked(void)
 		PKCS11_logout(pkcs11_slot);
 	pkcs11_logged_in = false;
 	pkcs11_slot = NULL;
+	esdm_es_pkcs11_publish_locked();
 }
 
 /* Caller must hold pkcs11_mutex (write lock). */
@@ -369,6 +399,7 @@ static int esdm_es_pkcs11_open_module_locked(void)
 		pkcs11_slot = NULL;
 		return ret;
 	}
+	esdm_es_pkcs11_publish_locked();
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
 		    "PKCS#11 entropy source using token '%s' (module %s)\n",
@@ -402,36 +433,19 @@ static int esdm_es_pkcs11_init(void)
 	return 0;
 }
 
-/* Caller must hold pkcs11_mutex. */
-static uint32_t esdm_es_pkcs11_entropylevel_locked(uint32_t requested_bits)
+/* Without pkcs11_mutex, see pkcs11_status_mutex */
+static uint32_t esdm_es_pkcs11_entropylevel(uint32_t requested_bits)
 {
-	if (!pkcs11_slot || pkcs11_selftest_failed)
+	if (!pkcs11_bound || pkcs11_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
 		esdm_config_es_pkcs11_entropy_rate(), requested_bits);
 }
 
-static uint32_t esdm_es_pkcs11_entropylevel(uint32_t requested_bits)
-{
-	uint32_t ret;
-
-	mutex_reader_lock(&pkcs11_mutex);
-	ret = esdm_es_pkcs11_entropylevel_locked(requested_bits);
-	mutex_reader_unlock(&pkcs11_mutex);
-
-	return ret;
-}
-
 static uint32_t esdm_es_pkcs11_poolsize(void)
 {
-	uint32_t ret;
-
-	mutex_reader_lock(&pkcs11_mutex);
-	ret = esdm_es_pkcs11_entropylevel_locked(esdm_security_strength());
-	mutex_reader_unlock(&pkcs11_mutex);
-
-	return ret;
+	return esdm_es_pkcs11_entropylevel(esdm_security_strength());
 }
 
 /*
@@ -487,6 +501,7 @@ static int esdm_es_pkcs11_refresh_slot_locked(void)
 		pkcs11_slot = NULL;
 		return ret;
 	}
+	esdm_es_pkcs11_publish_locked();
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
 		    "PKCS#11 entropy source using token '%s'\n",
@@ -562,7 +577,7 @@ static void esdm_es_pkcs11_get_sync(struct entropy_es *eb_es,
 		done_bits += chunk_bits;
 	}
 
-	eb_es->e_bits = esdm_es_pkcs11_entropylevel_locked(requested_bits);
+	eb_es->e_bits = esdm_es_pkcs11_entropylevel(requested_bits);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "obtained %u bits of entropy from PKCS#11 entropy source\n",
 		    eb_es->e_bits);
@@ -647,24 +662,20 @@ static void esdm_es_pkcs11_get(struct entropy_es *eb_es,
 
 static void esdm_es_pkcs11_es_state(struct json_object *obj)
 {
-	uint32_t poolsize, entropy_rate;
-	/*
-	 * A PKCS#11 token label has 32 bytes. Copied, as a reconfiguration or
-	 * a re-discovery frees it once the lock is dropped.
-	 */
-	char token_label[33] = "(none)";
+	/* Without pkcs11_mutex, see pkcs11_status_mutex */
+	uint32_t poolsize =
+		esdm_es_pkcs11_entropylevel(esdm_security_strength());
+	uint32_t entropy_rate = esdm_es_pkcs11_entropylevel(256);
+	/* Copied, as a re-discovery replaces it once the lock is dropped */
+	char token_label[sizeof(pkcs11_status_token)];
 	/* Copied as well, as a new module path frees the old one */
 	char module_path[PATH_MAX];
 
-	mutex_reader_lock(&pkcs11_mutex);
+	mutex_reader_lock(&pkcs11_status_mutex);
 	snprintf(module_path, sizeof(module_path), "%s",
 		 esdm_es_pkcs11_module_path_locked());
-	poolsize = esdm_es_pkcs11_entropylevel_locked(esdm_security_strength());
-	entropy_rate = esdm_es_pkcs11_entropylevel_locked(256);
-	if (pkcs11_slot && pkcs11_slot->token && pkcs11_slot->token->label)
-		snprintf(token_label, sizeof(token_label), "%s",
-			 pkcs11_slot->token->label);
-	mutex_reader_unlock(&pkcs11_mutex);
+	memcpy(token_label, pkcs11_status_token, sizeof(token_label));
+	mutex_reader_unlock(&pkcs11_status_mutex);
 
 	json_object_object_add(obj, "available_entropy",
 			       json_object_new_int64(poolsize));
@@ -688,9 +699,9 @@ static bool esdm_es_pkcs11_active(void)
 	 * temporarily absent smartcard does not turn the source off — it just
 	 * delivers no entropy until the card comes back.
 	 */
-	mutex_reader_lock(&pkcs11_mutex);
+	mutex_reader_lock(&pkcs11_status_mutex);
 	ret = esdm_es_pkcs11_configured_locked();
-	mutex_reader_unlock(&pkcs11_mutex);
+	mutex_reader_unlock(&pkcs11_status_mutex);
 
 	return ret;
 }
@@ -874,8 +885,11 @@ int esdm_es_pkcs11_set_module_path(const char *path)
 
 	mutex_lock(&pkcs11_mutex);
 
+	/* The status reads the path under pkcs11_status_mutex alone */
+	mutex_lock(&pkcs11_status_mutex);
 	old = pkcs11_runtime_module_path;
 	pkcs11_runtime_module_path = new_copy;
+	mutex_unlock(&pkcs11_status_mutex);
 
 	/*
 	 * Set before esdm_init(), as the server does, the module is loaded by

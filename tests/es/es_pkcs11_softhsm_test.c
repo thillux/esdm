@@ -29,12 +29,13 @@
  * the run neither depends on nor disturbs any token on the machine.
  *
  * The source is compiled into the test, which reaches into its state to stand
- * in for a server that has dropped its privileges.
+ * in for a server that has dropped its privileges, and for a read in progress.
  */
 
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -354,6 +355,69 @@ static void test_state(void)
 	json_object_put(state);
 }
 
+struct pkcs11_test_hold {
+	int held[2], release[2];
+};
+
+/* A read in progress: holds pkcs11_mutex until told to let go */
+static void *pkcs11_test_hold(void *arg)
+{
+	struct pkcs11_test_hold *hold = arg;
+	char c = 0;
+
+	mutex_lock(&pkcs11_mutex);
+	CHECK(write(hold->held[1], &c, 1) == 1, "cannot signal the lock");
+	CHECK(read(hold->release[0], &c, 1) == 1, "cannot wait for the test");
+	mutex_unlock(&pkcs11_mutex);
+
+	return NULL;
+}
+
+/*
+ * The state, the entropy estimate and the status do not wait for a read in
+ * progress, which holds the lock of the source for as long as the token takes
+ * to answer: a slow network HSM held up every status request. Should they
+ * wait, the watchdog ends the test.
+ */
+static void test_status_nonblocking(void)
+{
+	struct pkcs11_test_hold hold;
+	struct json_object *state;
+	pthread_t holder;
+	char c = 0;
+
+	if (pipe(hold.held) || pipe(hold.release)) {
+		printf("cannot create the pipes - skipping that part\n");
+		return;
+	}
+	CHECK(!pthread_create(&holder, NULL, pkcs11_test_hold, &hold),
+	      "cannot start the thread holding the lock");
+	CHECK(read(hold.held[0], &c, 1) == 1, "the lock was not taken");
+
+	alarm(10);
+	if (esdm_config_es_pkcs11_entropy_rate()) {
+		CHECK(esdm_es[ES_IDX]->curr_entropy(esdm_security_strength()),
+		      "no entropy reported while a read is in progress");
+		CHECK(esdm_es[ES_IDX]->max_entropy(),
+		      "no entropy reported while a read is in progress");
+	}
+	CHECK(esdm_es[ES_IDX]->active(),
+	      "inactive while a read is in progress");
+	state = es_state_get(esdm_es[ES_IDX]);
+	CHECK(es_state_str_is(state, "token", TOKEN_LABEL),
+	      "the state does not name the token while a read is in progress: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	alarm(0);
+
+	CHECK(write(hold.release[1], &c, 1) == 1, "cannot release the lock");
+	pthread_join(holder, NULL);
+	close(hold.held[0]);
+	close(hold.held[1]);
+	close(hold.release[0]);
+	close(hold.release[1]);
+}
+
 /*
  * Clearing the runtime overrides must not leave the source wedged: an empty
  * string falls back to the compile-time defaults, and the source has to keep
@@ -505,6 +569,7 @@ int main(int argc, char *argv[])
 	test_get_entropy();
 	test_get_entropy_differs();
 	test_state();
+	test_status_nonblocking();
 	test_module_kept();
 	test_reject_null();
 	test_token_appears();

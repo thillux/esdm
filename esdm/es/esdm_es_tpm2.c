@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,7 +41,14 @@
 #include "helper.h"
 #include "mutex.h"
 
-static int tpm2_fd = -1;
+/*
+ * tpm2_mutex serializes the exchanges with the TPM and is held across them,
+ * which a busy TPM may take a while to answer. The device and the flags below
+ * are written under it, and are atomic for the readers that must not wait for
+ * an exchange: the state of the source for the status, its entropy estimate
+ * and whether it is active (esdm_es_mgr_cb.h).
+ */
+static atomic_int tpm2_fd = -1;
 static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
 
 /*
@@ -54,9 +62,9 @@ static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
  * tpm2_mutex.
  */
 #define ESDM_TPM2_REOPEN_INTERVAL_SEC 5
-static bool tpm2_lost = false;
+static atomic_bool tpm2_lost = false;
 /* Set by a self test that saw a repeated output, cleared by one that passes */
-static bool tpm2_selftest_failed = false;
+static atomic_bool tpm2_selftest_failed = false;
 /*
  * Set when a read from the TPM failed while its device is open, cleared by the
  * next read that delivers in full. A TPM answering with an error that is no
@@ -68,7 +76,7 @@ static bool tpm2_selftest_failed = false;
  * still asked - its data then goes in as additional data - which is how a TPM
  * that delivers again is noticed.
  */
-static bool tpm2_read_failed = false;
+static atomic_bool tpm2_read_failed = false;
 static time_t tpm2_reopen_at = 0;
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -354,8 +362,8 @@ static int esdm_es_tpm2_init(void)
 	return 0;
 }
 
-/* Caller must hold tpm2_mutex. */
-static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
+/* Without tpm2_mutex, see there */
+static uint32_t esdm_es_tpm2_entropylevel(uint32_t requested_bits)
 {
 	if (tpm2_fd < 0 || tpm2_lost || tpm2_selftest_failed ||
 	    tpm2_read_failed)
@@ -365,26 +373,9 @@ static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
 					    requested_bits);
 }
 
-static uint32_t esdm_es_tpm2_entropylevel(uint32_t requested_bits)
-{
-	uint32_t ret;
-
-	mutex_reader_lock(&tpm2_mutex);
-	ret = esdm_es_tpm2_entropylevel_locked(requested_bits);
-	mutex_reader_unlock(&tpm2_mutex);
-
-	return ret;
-}
-
 static uint32_t esdm_es_tpm2_poolsize(void)
 {
-	uint32_t ret;
-
-	mutex_reader_lock(&tpm2_mutex);
-	ret = esdm_es_tpm2_entropylevel_locked(esdm_security_strength());
-	mutex_reader_unlock(&tpm2_mutex);
-
-	return ret;
+	return esdm_es_tpm2_entropylevel(esdm_security_strength());
 }
 
 /*
@@ -518,7 +509,7 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 	}
 
 	tpm2_read_failed = false;
-	eb_es->e_bits = esdm_es_tpm2_entropylevel_locked(requested_bits);
+	eb_es->e_bits = esdm_es_tpm2_entropylevel(requested_bits);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "obtained %u bits of entropy from TPM 2.0 entropy source\n",
 		    eb_es->e_bits);
@@ -544,13 +535,8 @@ err:
  */
 static uint32_t esdm_es_tpm2_buf_credit(uint32_t requested_bits)
 {
-	bool failed;
-
-	mutex_reader_lock(&tpm2_mutex);
-	failed = tpm2_selftest_failed;
-	mutex_reader_unlock(&tpm2_mutex);
-
-	if (failed)
+	/* Without tpm2_mutex, a cached block is not to wait for an exchange */
+	if (tpm2_selftest_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
@@ -614,12 +600,9 @@ static void esdm_es_tpm2_es_state(struct json_object *obj)
 #else
 	const bool stir = 0;
 #endif
-	uint32_t poolsize, entropy_rate;
-
-	mutex_reader_lock(&tpm2_mutex);
-	poolsize = esdm_es_tpm2_entropylevel_locked(esdm_security_strength());
-	entropy_rate = esdm_es_tpm2_entropylevel_locked(256);
-	mutex_reader_unlock(&tpm2_mutex);
+	/* Without tpm2_mutex, see there */
+	uint32_t poolsize = esdm_es_tpm2_entropylevel(esdm_security_strength());
+	uint32_t entropy_rate = esdm_es_tpm2_entropylevel(256);
 
 	json_object_object_add(obj, "available_entropy",
 			       json_object_new_int64(poolsize));
@@ -629,15 +612,10 @@ static void esdm_es_tpm2_es_state(struct json_object *obj)
 	json_object_object_add(obj, "stir", json_object_new_int(stir));
 }
 
+/* Without tpm2_mutex, see there */
 static bool esdm_es_tpm2_active(void)
 {
-	bool ret;
-
-	mutex_reader_lock(&tpm2_mutex);
-	ret = tpm2_fd >= 0;
-	mutex_reader_unlock(&tpm2_mutex);
-
-	return ret;
+	return tpm2_fd >= 0;
 }
 
 /* Two reads of the TPM that have to succeed and have to differ. */

@@ -31,6 +31,10 @@
  * socket pair stands in for a device that answers again but cannot be opened
  * anew, the test answering its commands in advance.
  *
+ * The state, the entropy estimate and the status of the source waited for an
+ * exchange in progress, so a slow TPM held up every status request. A thread
+ * holding the lock of the source stands in for the exchange.
+ *
  * The device path is compile-time, so the source is compiled into the test
  * with the path pointing at the file.
  */
@@ -44,6 +48,7 @@ static char tpm2_test_path[256];
 /* The unit under test */
 #include "esdm_es_tpm2.c"
 
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
@@ -70,6 +75,62 @@ static uint32_t tpm2_test_get(void)
 	return eb_es.e_bits;
 }
 
+struct tpm2_test_hold {
+	int held[2], release[2];
+};
+
+/* An exchange in progress: holds tpm2_mutex until told to let go */
+static void *tpm2_test_hold(void *arg)
+{
+	struct tpm2_test_hold *hold = arg;
+	char c = 0;
+
+	mutex_lock(&tpm2_mutex);
+	CHECK_EQ(write(hold->held[1], &c, 1), 1);
+	CHECK_EQ(read(hold->release[0], &c, 1), 1);
+	mutex_unlock(&tpm2_mutex);
+
+	return NULL;
+}
+
+/* None of them waits for the exchange, or the watchdog ends the test */
+static void tpm2_test_status_nonblocking(void)
+{
+	struct tpm2_test_hold hold;
+	struct json_object *obj;
+	pthread_t holder;
+	char c = 0;
+
+	if (pipe(hold.held) || pipe(hold.release)) {
+		printf("cannot create the pipes - skipping that part\n");
+		return;
+	}
+	CHECK_EQ(pthread_create(&holder, NULL, tpm2_test_hold, &hold), 0);
+	CHECK_EQ(read(hold.held[0], &c, 1), 1);
+
+	alarm(10);
+	CHECK(esdm_es_tpm2.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS) > 0,
+	      "no entropy reported while an exchange is in progress");
+	CHECK(esdm_es_tpm2.max_entropy() > 0,
+	      "no entropy reported while an exchange is in progress");
+	CHECK(esdm_es_tpm2.active(),
+	      "inactive while an exchange is in progress");
+	obj = json_object_new_object();
+	CHECK(obj != NULL, "cannot allocate the state");
+	if (obj) {
+		esdm_es_tpm2.state(obj);
+		json_object_put(obj);
+	}
+	alarm(0);
+
+	CHECK_EQ(write(hold.release[1], &c, 1), 1);
+	pthread_join(holder, NULL);
+	close(hold.held[0]);
+	close(hold.held[1]);
+	close(hold.release[0]);
+	close(hold.release[1]);
+}
+
 /* Queue a successful answer to a TPM2 command with @payload_len bytes */
 static void tpm2_test_answer(int fd, uint16_t payload_len)
 {
@@ -91,9 +152,9 @@ static void tpm2_test_answer(int fd, uint16_t payload_len)
  */
 static void tpm2_test_retry_open_device(void)
 {
-	uint32_t expected = esdm_fast_noise_entropylevel(
-		ESDM_DRNG_SECURITY_STRENGTH_BITS,
-		ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	uint32_t expected =
+		esdm_fast_noise_entropylevel(ESDM_DRNG_SECURITY_STRENGTH_BITS,
+					     ESDM_DRNG_SECURITY_STRENGTH_BITS);
 	int sv[2], fd;
 
 	/* Each read takes one answer, an empty one is a 0-byte read */
@@ -159,6 +220,8 @@ int main(void)
 	esdm_config_es_tpm2_entropy_rate_set(ESDM_DRNG_SECURITY_STRENGTH_BITS);
 	CHECK_EQ(esdm_es_tpm2.init(), 0);
 	CHECK(esdm_es_tpm2.active(), "the stand-in device was not opened");
+
+	tpm2_test_status_nonblocking();
 
 	/* The short read loses the connection and credits nothing */
 	CHECK_EQ(tpm2_test_get(), 0);
