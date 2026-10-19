@@ -183,3 +183,34 @@ struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
 	*warned = false;
 	return obj;
 }
+
+bool esdm_es_ext_status_cache_due(const struct esdm_es_ext_status_cache *cache,
+				  time_t now)
+{
+	return !cache->at || now < cache->at ||
+	       now - cache->at >= ESDM_ES_EXT_STATUS_INTERVAL_SEC;
+}
+
+void esdm_es_ext_status_cache_set(struct esdm_es_ext_status_cache *cache,
+				  struct json_object *obj, time_t now)
+{
+	json_object_put(cache->obj);
+	cache->obj = now ? obj : NULL;
+	cache->at = now;
+	if (!now)
+		json_object_put(obj);
+}
+
+/*
+ * A copy rather than another reference: the count of references of json-c is
+ * not safe for threads, and the copy goes into an ESDM status of its own.
+ */
+struct json_object *
+esdm_es_ext_status_cache_get(const struct esdm_es_ext_status_cache *cache)
+{
+	struct json_object *copy = NULL;
+
+	if (!cache->obj || json_object_deep_copy(cache->obj, &copy, NULL))
+		return NULL;
+	return copy;
+}

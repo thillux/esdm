@@ -125,8 +125,9 @@ extern "C" {
  *		 Returns 0, -EMSGSIZE if the status does not fit, or another
  *		 negative errno. The ESDM shows it as the "provider" member of
  *		 the state of the source, and leaves out a status that is no
- *		 JSON object. Asked for whenever the ESDM status is, so it must
- *		 not block for long. Version 2 and later only; may be NULL.
+ *		 JSON object. Asked for when the ESDM status is, at most every
+ *		 5 seconds, so it must not block for long. Version 2 and later
+ *		 only; may be NULL.
  */
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -178,9 +179,10 @@ struct esdm_es_ext_plugin {
  * STATUS: the status of the source, as @status_json of a plugin reports it -
  * one JSON object, which the ESDM shows in its own status. A provider without
  * one answers -EOPNOTSUPP, one whose status does not fit into the length
- * -EMSGSIZE. The ESDM asks for it whenever its own status is asked for, and
- * not while a request is in progress. A provider older than STATUS closes the
- * connection on it: the ESDM connects again at once, and reports no status
+ * -EMSGSIZE. The ESDM asks for it when its own status is asked for, at most
+ * every 5 seconds - showing the last one in between - and not while a request
+ * is in progress, going without it then. A provider older than STATUS closes
+ * the connection on it: the ESDM connects again at once, and reports no status
  * of the provider until the connection is lost the next time.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its

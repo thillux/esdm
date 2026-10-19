@@ -103,9 +103,10 @@ member of the state of the source, in
 and as a section in the text of
 .BR esdm_status (),
 and leaves out a status that is no well-formed JSON object of up to 512 bytes
-and 8 levels of nesting. It is asked for whenever the ESDM status is, but not
-while a request of the ESDM to the source is in progress, and must not block
-for long.
+and 8 levels of nesting. It is asked for when the ESDM status is, at most
+every 5 seconds \- the last status obtained shown in between \- and not while
+a request of the ESDM to the source is in progress, the ESDM status going
+without it then. It must not block for long: the source waits for it.
 .PP
 The callbacks are never called concurrently. The ESDM calls
 .I init
@@ -243,8 +244,9 @@ is followed by exactly the length bytes of data, a STATUS answered with status
 A message that breaks any of this ends the connection, and so does a request
 of a type the provider does not know.
 .SS STATUS
-The ESDM asks the provider for its status whenever its own status is asked
-for, and not while another request is in progress. A provider whose plugin has
+The ESDM asks the provider for its status when its own status is asked for,
+at most every 5 seconds, and not while another request is in progress. A
+provider whose plugin has
 no
 .I status_json
 answers

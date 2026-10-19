@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 
 struct json_object;
 
@@ -48,5 +49,42 @@ struct json_object;
  */
 struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
 					     const char *who, bool *warned);
+
+/*
+ * The status of a plugin or a provider is asked for at most once per this many
+ * seconds, and the last one obtained shown in between: it is asked for with
+ * the source held, a request of a seeding waiting meanwhile - and whoever may
+ * ask for the ESDM status is not to make the seedings wait at will.
+ */
+#ifndef ESDM_ES_EXT_STATUS_INTERVAL_SEC
+#define ESDM_ES_EXT_STATUS_INTERVAL_SEC 5
+#endif
+
+/*
+ * The status a source reported last. The source guards it with a lock of its
+ * own, which is never held while the source is asked for a status.
+ *
+ * @obj: The status, NULL for none
+ * @at: When it was obtained, monotonic seconds - 0 for not yet
+ */
+struct esdm_es_ext_status_cache {
+	struct json_object *obj;
+	time_t at;
+};
+
+/* Is the status to be asked for anew at @now, monotonic seconds? */
+bool esdm_es_ext_status_cache_due(const struct esdm_es_ext_status_cache *cache,
+				  time_t now);
+
+/*
+ * Keep @obj, which the cache takes over - NULL for none - as the status
+ * obtained at @now. @now 0 forgets the status kept.
+ */
+void esdm_es_ext_status_cache_set(struct esdm_es_ext_status_cache *cache,
+				  struct json_object *obj, time_t now);
+
+/* A copy of the status kept, to be released with json_object_put(), or NULL */
+struct json_object *
+esdm_es_ext_status_cache_get(const struct esdm_es_ext_status_cache *cache);
 
 #endif /* _ESDM_ES_EXT_STATUS_H */

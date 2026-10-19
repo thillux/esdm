@@ -35,6 +35,9 @@
  *   nothing before its first self test: one loaded by the init of the source
  *   until the self test pass that follows, one loaded while the source runs
  *   is tested right away.
+ * - The status of the plugin is asked for at most once per interval, and
+ *   not while a request is in progress - which neither the ESDM status nor
+ *   the entropy available waits for.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
@@ -51,8 +54,10 @@
 #include "esdm_es_extlib.c"
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "common_test.h"
 #include "../es_state_check.h"
@@ -225,8 +230,19 @@ static void test_credit(const char *path)
 	CHECK_EQ(ctl->selftest_calls, 5);
 }
 
-/* The "provider" member of the state, NULL if there is none */
-static struct json_object *test_provider(struct json_object **state)
+/* Make the next state ask the plugin for its status anew */
+static void test_status_expire(void)
+{
+	mutex_lock(&extlib_state_mutex);
+	extlib_status.at = 0;
+	mutex_unlock(&extlib_state_mutex);
+}
+
+/*
+ * The "provider" member of the state, NULL if there is none - the status
+ * kept, if it is recent
+ */
+static struct json_object *test_provider_kept(struct json_object **state)
 {
 	struct json_object *provider = NULL;
 
@@ -234,6 +250,46 @@ static struct json_object *test_provider(struct json_object **state)
 	if (!json_object_object_get_ex(*state, "provider", &provider))
 		return NULL;
 	return provider;
+}
+
+/* The same, the plugin asked for its status anew */
+static struct json_object *test_provider(struct json_object **state)
+{
+	test_status_expire();
+	return test_provider_kept(state);
+}
+
+/* Is a request in progress, holding the source? */
+static bool test_busy(void)
+{
+	if (pthread_rwlock_tryrdlock(&extlib_mutex))
+		return true;
+	pthread_rwlock_unlock(&extlib_mutex);
+	return false;
+}
+
+static void *test_get_thread(void *arg)
+{
+	(void)arg;
+	test_get(ESDM_DRNG_SECURITY_STRENGTH_BITS, NULL);
+	return NULL;
+}
+
+/*
+ * Start a request the plugin takes @ms for, as a seeding does, and wait until
+ * it holds the source
+ */
+static bool test_busy_start(pthread_t *thread, unsigned int ms)
+{
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+	unsigned int i;
+
+	ctl->get_delay_ms = ms;
+	if (pthread_create(thread, NULL, test_get_thread, NULL))
+		return false;
+	for (i = 0; i < 1000 && !test_busy(); i++)
+		nanosleep(&ts, NULL);
+	return test_busy();
 }
 
 /*
@@ -255,9 +311,12 @@ static void test_status(const char *good, const char *v1)
 		"{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":{\"h\":{\"i\":1}}}}}}}}}",
 	};
 	char text[ESDM_ES_EXT_STATUS_MAX + 2], txt[2048];
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	struct esdm_es_ext_test_control *ctl_v1 = NULL;
 	struct json_object *state, *provider, *val;
 	unsigned int calls, i;
+	pthread_t getter;
+	bool busy;
 	void *dl;
 
 	provider = test_provider(&state);
@@ -316,19 +375,57 @@ static void test_status(const char *good, const char *v1)
 	json_object_put(state);
 	ctl->status_ret = 0;
 
-	/* Not asked while the plugin is busy */
+	/* Asked for once per interval, the last status shown in between */
 	calls = ctl->status_calls;
-	mutex_reader_lock(&extlib_mutex);
-	provider = test_provider(&state);
-	mutex_reader_unlock(&extlib_mutex);
-	CHECK(!provider, "a busy plugin was asked for its status");
-	CHECK_EQ(ctl->status_calls, calls);
-	CHECK(test_state_has("status", "delivering"),
-	      "the state of a busy plugin is gone");
-	json_object_put(state);
-
 	provider = test_provider(&state);
 	CHECK(provider != NULL, "the status is gone after a valid one");
+	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 1);
+	ctl->status_text = "{\"later\":1}";
+	provider = test_provider_kept(&state);
+	CHECK(provider && es_state_str_is(provider, "plugin", "es-ext-test"),
+	      "the status was asked for again within its interval: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 1);
+	provider = test_provider(&state);
+	CHECK(provider && es_state_int(provider, "later", 0) == 1,
+	      "the status was not asked for after its interval: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 2);
+	ctl->status_text = NULL;
+
+	/*
+	 * A request of a seeding in progress, which the plugin takes its time
+	 * for, is not waited for: the recent status is shown, one that is due
+	 * is not asked for but left out, and the rest of the state and the
+	 * entropy available are as they were before the request.
+	 */
+	provider = test_provider(&state);
+	json_object_put(state);
+	calls = ctl->status_calls;
+	CHECK(test_busy_start(&getter, 500),
+	      "the request does not hold the plugin");
+	provider = test_provider_kept(&state);
+	CHECK(provider != NULL, "the recent status is gone during a request");
+	json_object_put(state);
+	provider = test_provider(&state);
+	CHECK(!provider, "a busy plugin was asked for its status");
+	CHECK(es_state_str_has(state, "status", "delivering"),
+	      "the state of a busy plugin is gone: %s", es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+	CHECK_EQ(ES->max_entropy(), test_level(256, esdm_security_strength()));
+	CHECK(ES->active(), "a busy plugin is not active");
+	busy = test_busy();
+	pthread_join(getter, NULL);
+	ctl->get_delay_ms = 0;
+	CHECK(busy, "the state waited for the request");
+	CHECK_EQ(ctl->status_calls, calls);
+
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the status is gone after a request");
 	json_object_put(state);
 
 	/* A plugin of version 1 has none, whatever lies beyond its struct */

@@ -39,10 +39,11 @@
  *   its data is handed on. It is not connected to again before the retry
  *   interval is over.
  * - The status of the provider is the "provider" member of the state, if it
- *   is a JSON object; it is not asked for while a request is in progress. A
- *   provider that does not know STATUS - it closes the connection on it - or
- *   does not answer it is connected to again at once, and not asked again on
- *   that connection.
+ *   is a JSON object. It is asked for at most once per interval, and not
+ *   while a request is in progress - which neither the ESDM status nor the
+ *   entropy available waits for. A provider that does not know STATUS - it
+ *   closes the connection on it - or does not answer it is connected to again
+ *   at once, and not asked again on that connection.
  *
  * The source is compiled into the test, with a short retry interval and
  * timeout so that the test does not have to wait for long.
@@ -144,6 +145,7 @@ static atomic_int test_evil_status = TEST_EVIL_STATUS_DATA;
 static atomic_bool test_evil_old = false;
 static atomic_bool test_evil_stop = false;
 static atomic_uint test_evil_connections = 0;
+static atomic_uint test_evil_status_requests = 0;
 static int test_evil_listen = -1;
 
 static void *test_evil_run(void *arg)
@@ -209,6 +211,7 @@ static void *test_evil_run(void *arg)
 			if (type == ESDM_ES_EXT_PROTO_STATUS) {
 				int mode = atomic_load(&test_evil_status);
 
+				atomic_fetch_add(&test_evil_status_requests, 1);
 				if (mode == TEST_EVIL_STATUS_OLD)
 					break;
 				if (mode == TEST_EVIL_STATUS_SILENT)
@@ -311,8 +314,19 @@ static bool test_state_has(const char *key, const char *what)
 	return ret;
 }
 
-/* The "provider" member of the state, NULL if there is none */
-static struct json_object *test_provider(struct json_object **state)
+/* Make the next state ask the provider for its status anew */
+static void test_status_expire(void)
+{
+	mutex_lock(&extsock_state_mutex);
+	extsock_status.at = 0;
+	mutex_unlock(&extsock_state_mutex);
+}
+
+/*
+ * The "provider" member of the state, NULL if there is none - the status
+ * kept, if it is recent
+ */
+static struct json_object *test_provider_kept(struct json_object **state)
 {
 	struct json_object *provider = NULL;
 
@@ -320,6 +334,22 @@ static struct json_object *test_provider(struct json_object **state)
 	if (!json_object_object_get_ex(*state, "provider", &provider))
 		return NULL;
 	return provider;
+}
+
+/* The same, the provider asked for its status anew */
+static struct json_object *test_provider(struct json_object **state)
+{
+	test_status_expire();
+	return test_provider_kept(state);
+}
+
+/* Is a request in progress, holding the source? */
+static bool test_busy(void)
+{
+	if (pthread_rwlock_tryrdlock(&extsock_mutex))
+		return true;
+	pthread_rwlock_unlock(&extsock_mutex);
+	return false;
 }
 
 static void test_wait_retry(void)
@@ -528,20 +558,111 @@ static void test_status(void)
 	json_object_put(state);
 	ctl->status_text = NULL;
 
-	/* Not asked for while a request is in progress */
+	/* Asked for once per interval, the last status shown in between */
 	calls = ctl->status_calls;
-	mutex_reader_lock(&extsock_mutex);
 	provider = test_provider(&state);
-	mutex_reader_unlock(&extsock_mutex);
-	CHECK(!provider, "the status was asked for during a request");
-	CHECK_EQ(ctl->status_calls, calls);
+	CHECK(provider != NULL, "the status is gone");
 	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 1);
+	ctl->status_text = "{\"later\":1}";
+	provider = test_provider_kept(&state);
+	CHECK(provider && es_state_str_is(provider, "plugin", "es-ext-test"),
+	      "the status was asked for again within its interval: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 1);
+	provider = test_provider(&state);
+	CHECK(provider && es_state_int(provider, "later", 0) == 1,
+	      "the status was not asked for after its interval: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ctl->status_calls, calls + 2);
+	ctl->status_text = NULL;
 
 	/* And the provider delivers as before */
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
 	provider = test_provider(&state);
 	CHECK(provider != NULL, "the status is gone");
 	json_object_put(state);
+}
+
+static void *test_get_thread(void *arg)
+{
+	(void)arg;
+	test_get(ESDM_DRNG_SECURITY_STRENGTH_BITS, NULL);
+	return NULL;
+}
+
+/*
+ * A request in progress is not waited for - one the provider does not answer,
+ * which holds the source for the whole timeout, as a seeding asking a provider
+ * that hangs does: the recent status of the provider is shown, one that is due
+ * is not asked for but left out, and the rest of the state and the entropy
+ * available are as they were before the request.
+ */
+static void test_status_busy(void)
+{
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct json_object *state, *provider;
+	unsigned int requests, i;
+	pthread_t evil, getter;
+	bool busy;
+
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_JSON);
+	CHECK_EQ(test_evil_start(&evil), 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+
+	provider = test_provider(&state);
+	CHECK(provider != NULL, "the status of the provider is not taken");
+	json_object_put(state);
+	requests = atomic_load(&test_evil_status_requests);
+
+	atomic_store(&test_evil_mode, TEST_EVIL_SILENT);
+	CHECK_EQ(pthread_create(&getter, NULL, test_get_thread, NULL), 0);
+	for (i = 0; i < 1000 && !test_busy(); i++)
+		nanosleep(&ts, NULL);
+	CHECK(test_busy(), "the request does not hold the source");
+
+	provider = test_provider_kept(&state);
+	CHECK(provider && es_state_int(provider, "evil", 0) == 1,
+	      "the recent status is gone during a request: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	provider = test_provider(&state);
+	CHECK(!provider, "the status was asked for during a request");
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "the state of the connection is gone during a request: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+	CHECK_EQ(ES->max_entropy(), test_level(256, esdm_security_strength()));
+	CHECK(ES->active(), "the source is not active during a request");
+	busy = test_busy();
+	pthread_join(getter, NULL);
+	CHECK(busy, "the state waited for the request");
+	CHECK_EQ(atomic_load(&test_evil_status_requests), requests);
+
+	/* The request unanswered, the provider is connected to again */
+	CHECK(test_state_has("status", "not connected"),
+	      "an unanswered request kept the connection");
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	test_wait_retry();
+	CHECK_EQ(test_get(bits, NULL), 8);
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_status, TEST_EVIL_STATUS_DATA);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	CHECK_EQ(ES->init(), 0);
 }
 
 /*
@@ -957,6 +1078,7 @@ int main(void)
 	test_eavesdrop(false);
 	test_old_provider();
 	test_status_old_provider();
+	test_status_busy();
 	test_protocol_breaches();
 
 	if (test_server)

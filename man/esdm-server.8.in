@@ -269,8 +269,10 @@ status of the daemon shows it as the
 .B provider
 member of the state of the source, a section of its own in the text form
 .RB ( "esdm\-tool \-\-status" ).
-It is not asked for while the source serves a request, and left out when it is
-no well-formed JSON object of up to 512 bytes. A provider that does not know
+It is asked for at most every 5 seconds, the last one shown in between, and
+not while the source serves a request \- neither the status nor the seeding
+waits for the other. It is left out when it is no well-formed JSON object of up
+to 512 bytes, and while it is due but the source is busy. A provider that does not know
 the request closes the connection on it; the daemon connects again at once and
 does not ask again until the connection is lost.
 .PP

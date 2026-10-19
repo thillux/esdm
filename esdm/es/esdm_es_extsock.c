@@ -29,7 +29,10 @@
  * protocol - closes it: an answer arriving late would otherwise be taken for
  * the one to the next request. A new connection is made on demand, at most
  * every ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC seconds after a failed attempt or a
- * connection given up on.
+ * connection given up on. What the ESDM asks of the source while a request may
+ * be in progress - the entropy available, its state in the ESDM status - is
+ * taken from what the source publishes whenever it releases extsock_mutex, not
+ * waited for.
  *
  * Whoever can create the socket file at the configured path could feed the
  * ESDM with data credited as entropy, so the credentials of the provider are
@@ -50,6 +53,7 @@
 #include <json-c/json.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -140,6 +144,23 @@ static int extsock_last_logged = 0;
 static bool extsock_status_refused = false;
 static bool extsock_status_warned = false;
 
+/*
+ * What is read of the source without extsock_mutex, which a request holds for
+ * up to ESDM_EXT_SOCKET_TIMEOUT_MS: the ESDM status, and the entropy
+ * available, are not to wait for that - see esdm_es_mgr_cb.h. Published by
+ * esdm_es_extsock_unlock() whenever the write lock is released; the state and
+ * the status of the provider under extsock_state_mutex, which is held for
+ * copying only.
+ */
+static atomic_bool extsock_published_configured = false;
+static atomic_bool extsock_published_credited = false;
+static DEFINE_MUTEX_UNLOCKED(extsock_state_mutex);
+static char extsock_state_path[sizeof(((struct sockaddr_un *)0)->sun_path)] =
+	ESDM_EXT_SOCKET_PATH;
+static char extsock_state_status[64] = "not connected";
+static long extsock_state_peer_uid = ESDM_EXT_SOCKET_PEER_UID;
+static struct esdm_es_ext_status_cache extsock_status = { NULL, 0 };
+
 /* Caller must hold extsock_mutex. */
 static const char *esdm_es_extsock_path_locked(void)
 {
@@ -157,6 +178,61 @@ static bool esdm_es_extsock_configured_locked(void)
 static bool esdm_es_extsock_encrypted_locked(void)
 {
 	return extsock_dtls != NULL;
+}
+
+/* Is the provider credited at all? Caller must hold extsock_mutex. */
+static bool esdm_es_extsock_credited_locked(void)
+{
+	return extsock_fd >= 0 && !extsock_read_failed &&
+	       !extsock_selftest_failed && !extsock_selftest_due;
+}
+
+/*
+ * Publish what is read of the source without the lock, see above. Caller must
+ * hold extsock_mutex (write lock).
+ */
+static void esdm_es_extsock_publish_locked(void)
+{
+	atomic_store(&extsock_published_configured,
+		     esdm_es_extsock_configured_locked());
+	atomic_store(&extsock_published_credited,
+		     esdm_es_extsock_credited_locked());
+
+	mutex_lock(&extsock_state_mutex);
+	snprintf(extsock_state_path, sizeof(extsock_state_path), "%s",
+		 esdm_es_extsock_path_locked());
+	if (extsock_fd < 0)
+		snprintf(extsock_state_status, sizeof(extsock_state_status),
+			 "not connected");
+	else
+		snprintf(extsock_state_status, sizeof(extsock_state_status),
+			 "connected (uid %u), %s%s",
+			 (unsigned int)extsock_connected_uid,
+			 esdm_es_extsock_encrypted_locked() ? "DTLS" :
+							      "unencrypted",
+			 extsock_selftest_failed ? ", failing its self test" :
+			 extsock_read_failed	 ? ", failing" :
+						   "");
+	extsock_state_peer_uid = extsock_peer_uid;
+	mutex_unlock(&extsock_state_mutex);
+}
+
+/* Release extsock_mutex (write lock), publishing what changed under it */
+static void esdm_es_extsock_unlock(void)
+{
+	esdm_es_extsock_publish_locked();
+	mutex_unlock(&extsock_mutex);
+}
+
+/*
+ * Forget the status of the provider, which may be another one now. Caller must
+ * hold extsock_mutex (write lock).
+ */
+static void esdm_es_extsock_status_forget_locked(void)
+{
+	mutex_lock(&extsock_state_mutex);
+	esdm_es_ext_status_cache_set(&extsock_status, NULL, 0);
+	mutex_unlock(&extsock_state_mutex);
 }
 
 /* Caller must hold extsock_mutex (write lock). */
@@ -575,10 +651,11 @@ static int esdm_es_extsock_init(void)
 	extsock_selftest_failed = false;
 	extsock_selftest_due = true;
 	extsock_status_warned = false;
+	esdm_es_extsock_status_forget_locked();
 	/* A provider not there yet is connected to on demand */
 	if (esdm_es_extsock_configured_locked())
 		(void)esdm_es_extsock_connect_locked();
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_unlock();
 
 	return 0;
 }
@@ -591,29 +668,31 @@ static void esdm_es_extsock_fini(void)
 	extsock_dtls_ctx = NULL;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_status_forget_locked();
+	esdm_es_extsock_unlock();
 }
 
-/* Caller must hold extsock_mutex. */
-static uint32_t esdm_es_extsock_entropylevel_locked(uint32_t requested_bits)
+static uint32_t esdm_es_extsock_level(bool credited, uint32_t requested_bits)
 {
-	if (extsock_fd < 0 || extsock_read_failed || extsock_selftest_failed ||
-	    extsock_selftest_due)
+	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
 		esdm_config_es_ext_socket_entropy_rate(), requested_bits);
 }
 
+/* Caller must hold extsock_mutex. */
+static uint32_t esdm_es_extsock_entropylevel_locked(uint32_t requested_bits)
+{
+	return esdm_es_extsock_level(esdm_es_extsock_credited_locked(),
+				     requested_bits);
+}
+
+/* As published: a request in progress is not waited for */
 static uint32_t esdm_es_extsock_entropylevel(uint32_t requested_bits)
 {
-	uint32_t ret;
-
-	mutex_reader_lock(&extsock_mutex);
-	ret = esdm_es_extsock_entropylevel_locked(requested_bits);
-	mutex_reader_unlock(&extsock_mutex);
-
-	return ret;
+	return esdm_es_extsock_level(atomic_load(&extsock_published_credited),
+				     requested_bits);
 }
 
 static uint32_t esdm_es_extsock_poolsize(void)
@@ -681,7 +760,7 @@ fail:
 	extsock_read_failed = true;
 
 out:
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_unlock();
 	memset_secure(rsp, 0, sizeof(rsp));
 }
 
@@ -731,7 +810,7 @@ static int esdm_es_extsock_monitor(void)
 	}
 
 out:
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_unlock();
 	memset_secure(rsp, 0, sizeof(rsp));
 	return 0;
 }
@@ -811,38 +890,42 @@ out:
 static void esdm_es_extsock_es_state(struct json_object *obj)
 {
 	uint32_t poolsize, entropy_rate;
-	char path[PATH_MAX], status[64], accepted[48];
-	struct json_object *provider = NULL;
+	char path[sizeof(extsock_state_path)], status[64], accepted[48];
+	struct json_object *provider;
+	time_t now = esdm_es_extsock_now();
 	long peer_uid;
+	bool due;
+
+	mutex_lock(&extsock_state_mutex);
+	due = esdm_es_ext_status_cache_due(&extsock_status, now);
+	mutex_unlock(&extsock_state_mutex);
 
 	/*
-	 * The status of the provider, unless a request is in progress on the
-	 * connection - one of a seeding, which may take up to the timeout: the
-	 * ESDM status is not to wait for it. Before the state of the
-	 * connection is taken, which asking for it may change.
+	 * The status of the provider is asked for anew once the last one is
+	 * older than ESDM_ES_EXT_STATUS_INTERVAL_SEC - unless a request is in
+	 * progress on the connection, one of a seeding, which may take up to
+	 * the timeout: the ESDM status is not to wait for it, and goes without
+	 * the status of the provider then. Before the state of the connection
+	 * is taken, which asking for it may change.
 	 */
-	if (mutex_trylock(&extsock_mutex)) {
+	if (due && mutex_trylock(&extsock_mutex)) {
 		provider = esdm_es_extsock_status_locked();
-		mutex_unlock(&extsock_mutex);
+		mutex_lock(&extsock_state_mutex);
+		esdm_es_ext_status_cache_set(&extsock_status, provider, now);
+		mutex_unlock(&extsock_state_mutex);
+		esdm_es_extsock_unlock();
+		due = false;
 	}
 
-	mutex_reader_lock(&extsock_mutex);
-	poolsize =
-		esdm_es_extsock_entropylevel_locked(esdm_security_strength());
-	entropy_rate = esdm_es_extsock_entropylevel_locked(256);
-	snprintf(path, sizeof(path), "%s", esdm_es_extsock_path_locked());
-	if (extsock_fd < 0)
-		snprintf(status, sizeof(status), "not connected");
-	else
-		snprintf(status, sizeof(status), "connected (uid %u), %s%s",
-			 (unsigned int)extsock_connected_uid,
-			 esdm_es_extsock_encrypted_locked() ? "DTLS" :
-							      "unencrypted",
-			 extsock_selftest_failed ? ", failing its self test" :
-			 extsock_read_failed	 ? ", failing" :
-						   "");
-	peer_uid = extsock_peer_uid;
-	mutex_reader_unlock(&extsock_mutex);
+	mutex_lock(&extsock_state_mutex);
+	provider = due ? NULL : esdm_es_ext_status_cache_get(&extsock_status);
+	snprintf(path, sizeof(path), "%s", extsock_state_path);
+	snprintf(status, sizeof(status), "%s", extsock_state_status);
+	peer_uid = extsock_state_peer_uid;
+	mutex_unlock(&extsock_state_mutex);
+
+	poolsize = esdm_es_extsock_entropylevel(esdm_security_strength());
+	entropy_rate = esdm_es_extsock_entropylevel(256);
 
 	if (peer_uid >= 0)
 		snprintf(accepted, sizeof(accepted), "root and uid %ld",
@@ -870,13 +953,7 @@ static void esdm_es_extsock_es_state(struct json_object *obj)
  */
 static bool esdm_es_extsock_active(void)
 {
-	bool ret;
-
-	mutex_reader_lock(&extsock_mutex);
-	ret = esdm_es_extsock_configured_locked();
-	mutex_reader_unlock(&extsock_mutex);
-
-	return ret;
+	return atomic_load(&extsock_published_configured);
 }
 
 /*
@@ -940,7 +1017,7 @@ static int esdm_es_extsock_selftest(void)
 	ret = esdm_es_extsock_selftest_locked();
 
 out:
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_unlock();
 	return ret;
 }
 
@@ -974,7 +1051,8 @@ int esdm_es_ext_socket_set_path(const char *path)
 	extsock_selftest_failed = false;
 	extsock_selftest_due = true;
 	extsock_status_warned = false;
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_status_forget_locked();
+	esdm_es_extsock_unlock();
 
 	free(old);
 
@@ -990,7 +1068,7 @@ int esdm_es_ext_socket_set_peer_uid(long uid)
 
 	mutex_lock(&extsock_mutex);
 	extsock_peer_uid = uid;
-	mutex_unlock(&extsock_mutex);
+	esdm_es_extsock_unlock();
 
 	return 0;
 }

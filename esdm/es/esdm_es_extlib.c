@@ -26,7 +26,10 @@
  * The plugin is loaded and initialized by the init of the source, which
  * esdm_init() runs while the server still has its privileges. Its callbacks
  * are called under extlib_mutex, so never concurrently, as the plugin API
- * promises.
+ * promises. What the ESDM asks of the source while it may be busy with a
+ * request - the entropy available, its state in the ESDM status - is taken
+ * from what the source publishes whenever it releases that lock, not waited
+ * for.
  *
  * A block is credited with what the plugin claims for it, at most with what
  * the configured rate allows (esdm_config_es_ext_lib_entropy_rate()). A
@@ -44,6 +47,7 @@
 #include <errno.h>
 #include <json-c/json.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,10 +109,77 @@ static bool extlib_initialized = false;
 /* The last status of the plugin was none and logged as such */
 static bool extlib_status_warned = false;
 
+/*
+ * What is read of the source without extlib_mutex, which a request to the
+ * plugin holds for as long as the plugin takes: the ESDM status, and the
+ * entropy available, are not to wait for that - see esdm_es_mgr_cb.h.
+ * Published by esdm_es_extlib_unlock() whenever the write lock is released;
+ * the state and the status of the plugin under extlib_state_mutex, which is
+ * held for copying only.
+ */
+static atomic_bool extlib_published_loaded = false;
+static atomic_bool extlib_published_credited = false;
+static DEFINE_MUTEX_UNLOCKED(extlib_state_mutex);
+static char extlib_state_path[PATH_MAX] = ESDM_EXT_LIB_PATH;
+static char extlib_state_name[64] = "(none)";
+static const char *extlib_state_status = "not loaded";
+static struct esdm_es_ext_status_cache extlib_status = { NULL, 0 };
+
 /* Caller must hold extlib_mutex. */
 static const char *esdm_es_extlib_path_locked(void)
 {
 	return extlib_runtime_path ? extlib_runtime_path : ESDM_EXT_LIB_PATH;
+}
+
+/* Is the plugin credited at all? Caller must hold extlib_mutex. */
+static bool esdm_es_extlib_credited_locked(void)
+{
+	return extlib_plugin && !extlib_read_failed &&
+	       !extlib_selftest_failed && !extlib_selftest_due;
+}
+
+/*
+ * Publish what is read of the source without the lock, see above. Caller must
+ * hold extlib_mutex (write lock).
+ */
+static void esdm_es_extlib_publish_locked(void)
+{
+	const char *status = !extlib_plugin	    ? "not loaded" :
+			     extlib_selftest_due    ? "awaiting its self test" :
+			     extlib_selftest_failed ? "failing its self test" :
+			     extlib_read_failed	    ? "failing" :
+						      "delivering";
+
+	atomic_store(&extlib_published_loaded, extlib_plugin != NULL);
+	atomic_store(&extlib_published_credited,
+		     esdm_es_extlib_credited_locked());
+
+	mutex_lock(&extlib_state_mutex);
+	snprintf(extlib_state_path, sizeof(extlib_state_path), "%s",
+		 esdm_es_extlib_path_locked());
+	snprintf(extlib_state_name, sizeof(extlib_state_name), "%s",
+		 extlib_plugin && extlib_plugin->name ? extlib_plugin->name :
+							"(none)");
+	extlib_state_status = status;
+	mutex_unlock(&extlib_state_mutex);
+}
+
+/* Release extlib_mutex (write lock), publishing what changed under it */
+static void esdm_es_extlib_unlock(void)
+{
+	esdm_es_extlib_publish_locked();
+	mutex_unlock(&extlib_mutex);
+}
+
+/*
+ * Forget the status of the plugin, which is another one now. Caller must hold
+ * extlib_mutex (write lock).
+ */
+static void esdm_es_extlib_status_forget_locked(void)
+{
+	mutex_lock(&extlib_state_mutex);
+	esdm_es_ext_status_cache_set(&extlib_status, NULL, 0);
+	mutex_unlock(&extlib_state_mutex);
 }
 
 /* Caller must hold extlib_mutex (write lock). */
@@ -128,6 +199,7 @@ static void esdm_es_extlib_unload_locked(void)
 	extlib_selftest_failed = false;
 	extlib_selftest_due = false;
 	extlib_status_warned = false;
+	esdm_es_extlib_status_forget_locked();
 }
 
 /*
@@ -158,6 +230,7 @@ static int esdm_es_extlib_init_plugin_locked(const struct esdm_es_ext_plugin *p)
 	extlib_read_failed = false;
 	extlib_selftest_failed = false;
 	extlib_selftest_due = true;
+	esdm_es_extlib_status_forget_locked();
 	return 0;
 }
 
@@ -254,7 +327,7 @@ static int esdm_es_extlib_init(void)
 	/* A plugin that cannot be loaded leaves the source switched off */
 	(void)esdm_es_extlib_load_locked();
 	extlib_initialized = true;
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 
 	return 0;
 }
@@ -264,29 +337,30 @@ static void esdm_es_extlib_fini(void)
 	mutex_lock(&extlib_mutex);
 	esdm_es_extlib_unload_locked();
 	extlib_initialized = false;
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 }
 
-/* Caller must hold extlib_mutex. */
-static uint32_t esdm_es_extlib_entropylevel_locked(uint32_t requested_bits)
+static uint32_t esdm_es_extlib_level(bool credited, uint32_t requested_bits)
 {
-	if (!extlib_plugin || extlib_read_failed || extlib_selftest_failed ||
-	    extlib_selftest_due)
+	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
 		esdm_config_es_ext_lib_entropy_rate(), requested_bits);
 }
 
+/* Caller must hold extlib_mutex. */
+static uint32_t esdm_es_extlib_entropylevel_locked(uint32_t requested_bits)
+{
+	return esdm_es_extlib_level(esdm_es_extlib_credited_locked(),
+				    requested_bits);
+}
+
+/* As published: a request in progress is not waited for */
 static uint32_t esdm_es_extlib_entropylevel(uint32_t requested_bits)
 {
-	uint32_t ret;
-
-	mutex_reader_lock(&extlib_mutex);
-	ret = esdm_es_extlib_entropylevel_locked(requested_bits);
-	mutex_reader_unlock(&extlib_mutex);
-
-	return ret;
+	return esdm_es_extlib_level(atomic_load(&extlib_published_credited),
+				    requested_bits);
 }
 
 static uint32_t esdm_es_extlib_poolsize(void)
@@ -332,7 +406,7 @@ static void esdm_es_extlib_get(struct entropy_es *eb_es,
 		    eb_es->e_bits);
 
 out:
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 }
 
 /*
@@ -364,7 +438,7 @@ static int esdm_es_extlib_monitor(void)
 	}
 
 out:
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 	memset_secure(probe, 0, sizeof(probe));
 	return 0;
 }
@@ -399,33 +473,41 @@ static struct json_object *esdm_es_extlib_status_locked(void)
 static void esdm_es_extlib_es_state(struct json_object *obj)
 {
 	char path[PATH_MAX], name[64];
-	struct json_object *provider = NULL;
+	struct json_object *provider;
 	uint32_t poolsize, entropy_rate;
+	time_t now = (time_t)esdm_monotonic_now();
 	const char *status;
+	bool due;
+
+	mutex_lock(&extlib_state_mutex);
+	due = esdm_es_ext_status_cache_due(&extlib_status, now);
+	mutex_unlock(&extlib_state_mutex);
 
 	/*
-	 * The status of the plugin, unless the plugin is busy - with a
-	 * request of a seeding, which may take a while: the ESDM status is not
-	 * to wait for the noise source.
+	 * The status of the plugin is asked for anew once the last one is
+	 * older than ESDM_ES_EXT_STATUS_INTERVAL_SEC - unless the plugin is
+	 * busy with a request of a seeding, which may take a while: the ESDM
+	 * status is not to wait for the noise source, and goes without the
+	 * status of the plugin then.
 	 */
-	if (mutex_trylock(&extlib_mutex)) {
+	if (due && mutex_trylock(&extlib_mutex)) {
 		provider = esdm_es_extlib_status_locked();
-		mutex_unlock(&extlib_mutex);
+		mutex_lock(&extlib_state_mutex);
+		esdm_es_ext_status_cache_set(&extlib_status, provider, now);
+		mutex_unlock(&extlib_state_mutex);
+		esdm_es_extlib_unlock();
+		due = false;
 	}
 
-	mutex_reader_lock(&extlib_mutex);
-	poolsize = esdm_es_extlib_entropylevel_locked(esdm_security_strength());
-	entropy_rate = esdm_es_extlib_entropylevel_locked(256);
-	snprintf(path, sizeof(path), "%s", esdm_es_extlib_path_locked());
-	snprintf(name, sizeof(name), "%s",
-		 extlib_plugin && extlib_plugin->name ? extlib_plugin->name :
-							"(none)");
-	status = !extlib_plugin		 ? "not loaded" :
-		 extlib_selftest_due	 ? "awaiting its self test" :
-		 extlib_selftest_failed ? "failing its self test" :
-		 extlib_read_failed	 ? "failing" :
-					   "delivering";
-	mutex_reader_unlock(&extlib_mutex);
+	mutex_lock(&extlib_state_mutex);
+	provider = due ? NULL : esdm_es_ext_status_cache_get(&extlib_status);
+	snprintf(path, sizeof(path), "%s", extlib_state_path);
+	snprintf(name, sizeof(name), "%s", extlib_state_name);
+	status = extlib_state_status;
+	mutex_unlock(&extlib_state_mutex);
+
+	poolsize = esdm_es_extlib_entropylevel(esdm_security_strength());
+	entropy_rate = esdm_es_extlib_entropylevel(256);
 
 	json_object_object_add(obj, "available_entropy",
 			       json_object_new_int64(poolsize));
@@ -442,13 +524,7 @@ static void esdm_es_extlib_es_state(struct json_object *obj)
 
 static bool esdm_es_extlib_active(void)
 {
-	bool ret;
-
-	mutex_reader_lock(&extlib_mutex);
-	ret = extlib_plugin != NULL;
-	mutex_reader_unlock(&extlib_mutex);
-
-	return ret;
+	return atomic_load(&extlib_published_loaded);
 }
 
 /*
@@ -490,7 +566,7 @@ static int esdm_es_extlib_selftest(void)
 
 	mutex_lock(&extlib_mutex);
 	ret = esdm_es_extlib_selftest_locked();
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 
 	return ret;
 }
@@ -528,7 +604,7 @@ int esdm_es_ext_lib_set_path(const char *path)
 			(void)esdm_es_extlib_selftest_locked();
 	}
 
-	mutex_unlock(&extlib_mutex);
+	esdm_es_extlib_unlock();
 
 	free(old);
 

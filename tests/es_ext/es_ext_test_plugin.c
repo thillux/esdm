@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "es_ext_test_plugin.h"
 #include "esdm_es_ext.h"
@@ -66,6 +67,15 @@ static int es_ext_test_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 
 	ctl->get_calls++;
 	ctl->last_buflen = buflen;
+
+	if (ctl->get_delay_ms) {
+		const struct timespec ts = {
+			.tv_sec = ctl->get_delay_ms / 1000,
+			.tv_nsec = (long)(ctl->get_delay_ms % 1000) * 1000000L
+		};
+
+		nanosleep(&ts, NULL);
+	}
 
 	/* Filled in any case, so that a test sees whether the data is wiped */
 	memset(buf, (int)(ctl->get_calls & 0xff), buflen);
