@@ -117,8 +117,10 @@ interface can be selectively enabled and disabled at compile time:
   which offers a stable API.
 
 - The ESDM server optionally serves the protocol of the Entropy Gathering
-  Daemon (EGD) on a socket of its own for legacy consumers, and on a second
-  socket served by the prediction resistance DRNG.
+  Daemon (EGD) on a socket of its own for legacy consumers. ESDM-specific
+  commands on the same socket read from the prediction resistance DRNG
+  (0xe0, 0xe1), alongside the other commands the EGD protocol cannot
+  express.
 
 - OpenSSL 3 RAND providers route the random number requests of OpenSSL to the
   ESDM, either over the RPC interface or over the EGD interface.
