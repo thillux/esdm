@@ -525,11 +525,12 @@ static void test_status_fields(const char *serve, const char *plugin,
 
 	/* Offering DTLS - asked for or not - and with --no_dtls */
 	for (round = 0; round < 3; round++) {
-		bool ask = round == 1, dtls = false;
 		uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+		bool dtls = false;
 
+		/* Asked for in the second round, where there is DTLS */
 #ifdef ESDM_DTLS
-		dtls = ask;
+		dtls = round == 1;
 #endif
 		pid = es_ext_test_serve(serve, plugin, test_socket,
 					round == 2 ? no_dtls : named, NULL);

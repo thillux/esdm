@@ -602,7 +602,6 @@ err:
  */
 static int esdm_es_extsock_open_dtls_locked(struct esdm_es_extsock *sock)
 {
-	const char *path = esdm_es_extsock_path_locked(sock);
 	int ret = esdm_es_extsock_open_locked(sock);
 
 	if (ret)
@@ -620,7 +619,7 @@ static int esdm_es_extsock_open_dtls_locked(struct esdm_es_extsock *sock)
 		esdm_es_extsock_log_once(
 			sock, 3, LOGGER_WARN,
 			"no DTLS with it, using the connection unencrypted",
-			path);
+			esdm_es_extsock_path_locked(sock));
 		return esdm_es_extsock_open_locked(sock);
 	}
 #endif
