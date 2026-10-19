@@ -33,13 +33,15 @@
  * -----------
  * A small pool of connections, each serving one request at a time - EGD has
  * no request identifiers, so answers are matched to requests by their order.
- * A request takes a connection that is free, or waits for one. A connection
- * that failed in any way is closed, as the position of the stream is unknown
- * then, and made anew by the next request on it. One that cannot be made, or
- * that failed by the ESDM's fault, is not made again for a while, growing up to
- * ESDM_CDEV_BACKOFF_MAX_MS until a request on it succeeds, so that a missing or
- * frozen ESDM costs a failed connect or a timeout now and then rather than one
- * per read.
+ * A request takes a connection that is free, or waits for one, as long as a
+ * transfer at most. A request holds its connection for the ESDM's answers
+ * only: it brings what it sends along, rather than reading user memory then.
+ * A connection that failed in any way is closed, as the position of the
+ * stream is unknown then, and made anew by the next request on it. One that
+ * cannot be made, or that failed by the ESDM's fault, is not made again for a
+ * while, growing up to ESDM_CDEV_BACKOFF_MAX_MS until a request on it
+ * succeeds, so that a missing or frozen ESDM costs a failed connect or a
+ * timeout now and then rather than one per read.
  *
  * Every answer is untrusted input: its lengths are checked against what was
  * asked for and against the protocol's bounds before anything is read, and a
@@ -64,6 +66,7 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/un.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
@@ -102,6 +105,8 @@ struct esdm_cdev_conn {
 static struct esdm_cdev_conn *esdm_cdev_conns;
 static unsigned int esdm_cdev_nconns;
 static atomic_t esdm_cdev_conn_next = ATOMIC_INIT(0);
+/* Requests waiting for a connection to be freed */
+static DECLARE_WAIT_QUEUE_HEAD(esdm_cdev_conn_wait);
 static struct workqueue_struct *esdm_cdev_wq;
 
 /* Whether the last connect succeeded, -1 before the first: for the log only */
@@ -303,25 +308,49 @@ static void esdm_cdev_conn_drop(struct esdm_cdev_conn *conn, bool backoff)
 	}
 }
 
-/* A free connection, or the next one once it is free */
-static struct esdm_cdev_conn *esdm_cdev_conn_get(void)
+/* A free connection, locked, looking from the one at @start on */
+static struct esdm_cdev_conn *esdm_cdev_conn_try(unsigned int start)
 {
-	unsigned int start, i;
-	struct esdm_cdev_conn *conn;
-
-	start = (unsigned int)atomic_inc_return(&esdm_cdev_conn_next);
+	unsigned int i;
 
 	for (i = 0; i < esdm_cdev_nconns; i++) {
-		conn = &esdm_cdev_conns[(start + i) % esdm_cdev_nconns];
+		struct esdm_cdev_conn *conn =
+			&esdm_cdev_conns[(start + i) % esdm_cdev_nconns];
+
 		if (mutex_trylock(&conn->lock))
 			return conn;
 	}
 
-	conn = &esdm_cdev_conns[start % esdm_cdev_nconns];
-	if (mutex_lock_interruptible(&conn->lock))
+	return NULL;
+}
+
+/*
+ * A free connection, or the first one freed within the timeout. A request
+ * that gets none fails as one the ESDM did not answer: the connections are
+ * all busy with requests the ESDM takes its time for.
+ */
+static struct esdm_cdev_conn *esdm_cdev_conn_get(void)
+{
+	struct esdm_cdev_conn *conn = NULL;
+	unsigned int start;
+	long left;
+
+	start = (unsigned int)atomic_inc_return(&esdm_cdev_conn_next);
+	left = wait_event_interruptible_timeout(
+		esdm_cdev_conn_wait, (conn = esdm_cdev_conn_try(start)) != NULL,
+		msecs_to_jiffies(esdm_cdev_timeout_ms()));
+	if (left < 0)
 		return ERR_PTR(-ERESTARTSYS);
+	if (!conn)
+		return ERR_PTR(-ETIMEDOUT);
 
 	return conn;
+}
+
+static void esdm_cdev_conn_put(struct esdm_cdev_conn *conn)
+{
+	mutex_unlock(&conn->lock);
+	wake_up(&esdm_cdev_conn_wait);
 }
 
 /********************************* Transfers *********************************/
@@ -389,7 +418,8 @@ static bool esdm_cdev_interrupted(int ret)
  * tried once more on a fresh connection.
  *
  * Returns 0, -ERESTARTSYS when the caller was interrupted, -ENOTCONN when the
- * ESDM cannot be reached, or the error of @op.
+ * ESDM cannot be reached, -ETIMEDOUT when no connection was free in time, or
+ * the error of @op.
  */
 static int esdm_cdev_invoke(int (*op)(struct socket *sock, void *arg,
 				      bool *sent),
@@ -426,16 +456,12 @@ static int esdm_cdev_invoke(int (*op)(struct socket *sock, void *arg,
 			break;
 		}
 
-		/* User memory that is not readable is the caller's fault */
-		if (ret == -EFAULT && !sent)
-			break;
-
 		esdm_cdev_conn_drop(conn, sent);
 		if (sent)
 			break;
 	}
 
-	mutex_unlock(&conn->lock);
+	esdm_cdev_conn_put(conn);
 
 	return ret;
 }
@@ -522,101 +548,130 @@ int esdm_cdev_egd_read(u8 cmd, u8 *buf, size_t len)
 
 /********************************** Writes ***********************************/
 
+/* Insertions sent together, and the bytes they carry at most */
+#define ESDM_CDEV_INSERT_CMDS ESDM_CDEV_READ_CMDS
+#define ESDM_CDEV_INSERT_MAX (ESDM_CDEV_INSERT_CMDS * ESDM_EGD_MAX_TRANSFER)
+
 struct esdm_cdev_insert_op {
-	const char __user *ubuf;
-	size_t len;
-	u32 entropy_bits;
-	/* Command buffer: command, entropy, length and data */
+	/*
+	 * The insertions - command, entropy, length and data - and the entropy
+	 * count behind them, @len bytes
+	 */
 	u8 *cmd;
-	size_t done;
+	size_t len;
 };
 
+/*
+ * The insertions have no answer. The one of the entropy count behind them
+ * tells that the ESDM took them, as it serves the commands of a connection in
+ * order.
+ */
 static int esdm_cdev_insert_op(struct socket *sock, void *arg, bool *sent)
 {
 	struct esdm_cdev_insert_op *op = arg;
-	u8 barrier = ESDM_EGD_CMD_ENTROPY_COUNT, count[4];
-	u32 bits = op->entropy_bits;
-	int ret = 0;
+	u8 count[4];
+	int ret;
 
-	op->done = 0;
-
-	while (op->done < op->len) {
-		size_t chunk = min_t(size_t, op->len - op->done,
-				     ESDM_EGD_MAX_TRANSFER);
-		u32 credit = min3(bits, (u32)chunk * 8, (u32)U16_MAX);
-
-		if (copy_from_user(op->cmd + 4, op->ubuf + op->done, chunk)) {
-			ret = -EFAULT;
-			break;
-		}
-
-		op->cmd[0] = ESDM_EGD_CMD_WRITE_ENTROPY;
-		op->cmd[1] = (u8)(credit >> 8);
-		op->cmd[2] = (u8)credit;
-		op->cmd[3] = (u8)chunk;
-
-		ret = esdm_cdev_send(sock, op->cmd, 4 + chunk, sent);
-		memzero_explicit(op->cmd, 4 + ESDM_EGD_MAX_TRANSFER);
-		if (ret)
-			return ret;
-
-		bits -= credit;
-		op->done += chunk;
-
-		/*
-		 * As the kernel's /dev/random, stop at a signal with what was
-		 * written. The insertions have no answer, so the stream is in
-		 * order without the barrier below.
-		 */
-		if (signal_pending(current))
-			return 0;
-		cond_resched();
-	}
-
-	if (!op->done)
-		return ret;
-
-	/*
-	 * The insertions have no answer. The one of the entropy count behind
-	 * them tells that the ESDM took them, as it serves the commands of a
-	 * connection in order.
-	 */
-	ret = esdm_cdev_send(sock, &barrier, sizeof(barrier), sent);
+	ret = esdm_cdev_send(sock, op->cmd, op->len, sent);
 	if (!ret)
 		ret = esdm_cdev_recv(sock, count, sizeof(count));
 
 	return ret;
 }
 
+/*
+ * Copy up to ESDM_CDEV_INSERT_MAX bytes of user memory at @ubuf into the
+ * insertions of @op, crediting them with what is left of *@bits. Returns the
+ * number of bytes copied, fewer than @len when user memory was not readable.
+ */
+static size_t esdm_cdev_insert_fill(struct esdm_cdev_insert_op *op,
+				    const char __user *ubuf, size_t len,
+				    u32 *bits)
+{
+	size_t done = 0;
+	u8 *p = op->cmd;
+
+	while (done < len) {
+		size_t chunk = min_t(size_t, len - done, ESDM_EGD_MAX_TRANSFER);
+		size_t left = copy_from_user(p + 4, ubuf + done, chunk);
+		u32 credit;
+
+		chunk -= left;
+		if (chunk) {
+			credit = min3(*bits, (u32)chunk * 8, (u32)U16_MAX);
+			p[0] = ESDM_EGD_CMD_WRITE_ENTROPY;
+			p[1] = (u8)(credit >> 8);
+			p[2] = (u8)credit;
+			p[3] = (u8)chunk;
+			p += 4 + chunk;
+			*bits -= credit;
+			done += chunk;
+		}
+		if (left)
+			break;
+	}
+
+	if (done)
+		*p++ = ESDM_EGD_CMD_ENTROPY_COUNT;
+	op->len = (size_t)(p - op->cmd);
+
+	return done;
+}
+
 ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len,
 				  u32 entropy_bits)
 {
-	struct esdm_cdev_insert_op op = {
-		.ubuf = ubuf,
-		.len = len,
-		.entropy_bits = entropy_bits,
-	};
-	int ret;
+	struct esdm_cdev_insert_op op;
+	size_t done = 0;
+	int ret = 0;
 
 	if (!len)
 		return 0;
 
-	op.cmd = kmalloc(4 + ESDM_EGD_MAX_TRANSFER, GFP_KERNEL);
+	op.cmd = kmalloc(ESDM_CDEV_INSERT_CMDS * ESDM_EGD_MAX_CMD_SIZE + 1,
+			 GFP_KERNEL);
 	if (!op.cmd)
 		return -ENOMEM;
 
-	ret = esdm_cdev_invoke(esdm_cdev_insert_op, &op);
+	while (done < len) {
+		size_t want = min_t(size_t, len - done, ESDM_CDEV_INSERT_MAX);
+		size_t got;
+
+		/*
+		 * User memory is copied before a connection is taken: reading
+		 * it may take as long as somebody else wants - a page of a
+		 * file of a FUSE daemon that does not answer - and the
+		 * connection would be held for that long, with every request
+		 * of every other caller waiting for it.
+		 */
+		got = esdm_cdev_insert_fill(&op, ubuf + done, want,
+					    &entropy_bits);
+		if (!got) {
+			ret = -EFAULT;
+			break;
+		}
+
+		ret = esdm_cdev_invoke(esdm_cdev_insert_op, &op);
+		memzero_explicit(op.cmd, op.len);
+		if (ret)
+			break;
+		done += got;
+
+		if (got < want) {
+			ret = -EFAULT;
+			break;
+		}
+
+		/* As the kernel's devices: a signal ends the write */
+		if (signal_pending(current))
+			break;
+		cond_resched();
+	}
+
 	kfree_sensitive(op.cmd);
 
-	/* Interrupted after some was written: that much is done */
-	if (ret == -ERESTARTSYS && op.done)
-		return (ssize_t)op.done;
-	if (ret == -EFAULT && op.done)
-		return (ssize_t)op.done;
-	if (ret)
-		return ret;
-
-	return (ssize_t)op.done;
+	/* What was written is returned, an error only without any */
+	return done ? (ssize_t)done : ret;
 }
 
 /******************************** Queries ************************************/

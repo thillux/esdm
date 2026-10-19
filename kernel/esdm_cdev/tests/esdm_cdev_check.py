@@ -388,6 +388,62 @@ def cmd_throughput(args):
     s.close()
 
 
+def cmd_stalled_writers(args):
+    # Writers whose data does not come: their buffer is in a userfaultfd
+    # range nobody serves, so the module's copy from it waits for good. More
+    # of them than the module has connections must not keep anybody else
+    # from the ESDM.
+    import ctypes
+    import mmap
+
+    nr_userfaultfd = {"x86_64": 323, "aarch64": 282}[os.uname().machine]
+    UFFDIO_API = 0xC018AA3F
+    UFFDIO_REGISTER = 0xC020AA00
+    UFFDIO_REGISTER_MODE_MISSING = 1
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    uffd = libc.syscall(nr_userfaultfd, os.O_CLOEXEC)
+    if uffd < 0:
+        fail(f"userfaultfd: errno {ctypes.get_errno()}")
+    fcntl.ioctl(uffd, UFFDIO_API, bytearray(struct.pack("QQQ", 0xAA, 0, 0)))
+    size = 1 << 20
+    region = mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    addr = ctypes.addressof(ctypes.c_char.from_buffer(region))
+    fcntl.ioctl(uffd, UFFDIO_REGISTER,
+                bytearray(struct.pack("QQQQ", addr, size,
+                                      UFFDIO_REGISTER_MODE_MISSING, 0)))
+
+    def writer(dev):
+        fd = os.open(dev, os.O_WRONLY)
+        os.write(fd, region)
+
+    writers = [threading.Thread(target=writer, args=(DEVS[i % 2],),
+                                daemon=True) for i in range(16)]
+    for w in writers:
+        w.start()
+    time.sleep(2)
+    if not all(w.is_alive() for w in writers):
+        fail("the writers did not stall in the copy of their data")
+
+    def bounded(what, fn):
+        t = time.monotonic()
+        fn()
+        took = time.monotonic() - t
+        print(f"{what}: {took:.2f} s")
+        if took > 2:
+            fail(f"{what} took {took:.1f} s next to stalled writers")
+
+    for dev in DEVS:
+        bounded(f"{dev} read", lambda: read_exact(dev, 4096))
+        fd = os.open(dev, os.O_RDONLY)
+        bounded(f"{dev} RNDGETENTCNT", lambda: entcnt(fd))
+        os.close(fd)
+    bounded("/proc/esdm/status", lambda: proc("status"))
+    print("stalled-writers ok", flush=True)
+    # The writers are stuck in the page fault until the process goes
+    os._exit(0)
+
+
 def cmd_fake_egd(args):
     # An EGD server in place of the ESDM, for what the real one cannot be
     # made to do: answer like an ESDM that is not operational yet ("notop"),
@@ -496,6 +552,7 @@ CMDS = {
     "proc-empty": cmd_proc_empty,
     "loop": cmd_loop,
     "block": cmd_block,
+    "stalled-writers": cmd_stalled_writers,
     "fake-egd": cmd_fake_egd,
     "backoff": cmd_backoff,
 }

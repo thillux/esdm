@@ -1015,6 +1015,9 @@
                       "${check} ioctl-unpriv"
                   )
 
+              with subtest("writers whose data does not come keep nobody waiting"):
+                  machine.succeed("timeout 60 ${check} stalled-writers")
+
               with subtest("reconnect after a restart of the ESDM"):
                   machine.succeed(
                       "nohup ${check} loop /dev/esdm_urandom 20 > /tmp/loop.log 2>&1 &"
