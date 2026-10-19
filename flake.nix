@@ -1243,11 +1243,33 @@
                   ESDM_EGD_NET_SERVER_ARGS="-v --cert ${dir}/server.crt --key ${dir}/server.key --ca ${dir}/ca.crt --crl ${dir}/crl.pem --reload_interval 2 --allow 192.168.1.0/24 --allow 2001:db8:1::/64"
                 '';
 
+                # The CRLs downloaded by the timer of the package, from a web
+                # server of the test. The user the download runs as is a
+                # sysusers.d file of the package, which a NixOS without
+                # systemd-sysusers does not read; what the download runs, a
+                # unit of a package does not have in its PATH.
+                environment.etc."esdm/egd-net-crl/clients.env".text = ''
+                  CRL_URLS="http://127.0.0.1:8080/int.crl http://127.0.0.1:8080/ca.crl"
+                '';
+                users.users.esdm-egd-net-crl = {
+                  isSystemUser = true;
+                  group = "esdm-egd-net-crl";
+                };
+                users.groups.esdm-egd-net-crl = { };
+                systemd.services."esdm-egd-net-crl-update@".path = [
+                  pkgs.curl
+                  pkgs.openssl
+                  pkgs.gawk
+                ];
+
                 networking.firewall.allowedTCPPorts = [
                   port
                   (port + 1)
                 ];
-                environment.systemPackages = [ esdm ];
+                environment.systemPackages = [
+                  esdm
+                  pkgs.python3
+                ];
                 virtualisation = {
                   memorySize = 2048;
                   cores = 2;
@@ -1380,6 +1402,54 @@
                   )
                   client.succeed("${opensslTls}")
                   client.succeed("${gpg} --gen-random 2 32 > /dev/null")
+
+              with subtest("CRL updates"):
+                  # The CRLs on a web server: the intermediate CA's,
+                  # revoking client-revoked, and the root's
+                  server.succeed("install -d -m 0755 /srv/crl")
+                  server.succeed("cp ${pki}/int.crl ${pki}/ca.crl /srv/crl/")
+                  server.succeed(
+                      "systemd-run --unit=crl-http --working-directory=/srv/crl "
+                      "${pkgs.python3}/bin/python3 -m http.server 8080 --bind 127.0.0.1"
+                  )
+                  server.wait_for_open_port(8080)
+
+                  # The timer, and the download it starts
+                  server.succeed("test -f ${esdm}/lib/sysusers.d/esdm-egd-net-crl.conf")
+                  server.succeed("systemctl start esdm-egd-net-crl-update@clients.timer")
+                  server.succeed("systemctl is-active esdm-egd-net-crl-update@clients.timer")
+                  server.succeed("systemctl start esdm-egd-net-crl-update@clients.service")
+                  crls = "/var/lib/esdm-egd-net-crl/clients.pem"
+                  server.succeed(f"test $(grep -c 'BEGIN X509 CRL' {crls}) = 2")
+
+                  # Where the users of the daemons read it - not below the
+                  # /var/lib/private of a dynamic user
+                  server.succeed("test ! -L /var/lib/esdm-egd-net-crl")
+                  server.succeed(f"runuser -u nobody -- cat {crls} > /dev/null")
+
+                  # A server of a dynamic user, as the unit has, starts with
+                  # it, and takes up the next download
+                  server.succeed(
+                      "systemd-run --unit=egd-net-crl --property=DynamicUser=yes "
+                      "${esdm}/bin/esdm-egd-net-server -v "
+                      "--listen 127.0.0.1:${toString (port + 2)} "
+                      "--cert ${pki}/server.crt --key ${pki}/server.key --ca ${pki}/ca.crt "
+                      f"--crl {crls} --reload_interval 2"
+                  )
+                  server.wait_until_succeeds(
+                      "journalctl -u egd-net-crl.service | grep -q 'serving the EGD protocol'", 30
+                  )
+                  loaded = int(server.succeed(
+                      "journalctl -u egd-net-crl.service | grep -c 'loaded the TLS files' || true"
+                  ).strip() or 0)
+                  server.succeed("cp ${pki}/int-empty.crl /srv/crl/int.crl")
+                  server.succeed("systemctl start esdm-egd-net-crl-update@clients.service")
+                  server.wait_until_succeeds(
+                      "test $(journalctl -u egd-net-crl.service | grep -c 'loaded the TLS files') "
+                      f"-gt {loaded}", 30
+                  )
+                  server.succeed("systemctl is-active egd-net-crl.service")
+                  server.succeed("systemctl stop egd-net-crl.service crl-http.service")
 
               with subtest("Plain TCP"):
                   # Never without asking: no credentials and no --plain, or

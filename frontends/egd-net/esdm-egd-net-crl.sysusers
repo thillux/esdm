@@ -1,0 +1,4 @@
+# The user esdm-egd-net-crl-update@.service downloads the CRLs of the EGD
+# network daemons as - see the unit. Its state directory,
+# /var/lib/esdm-egd-net-crl, holds them, readable by the daemons.
+u esdm-egd-net-crl - "ESDM EGD network CRL download" - -

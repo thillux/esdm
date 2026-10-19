@@ -12,8 +12,14 @@
 #	systemctl enable --now esdm-egd-net-crl-update@clients.timer
 #	esdm-egd-net-server ... --crl /var/lib/esdm-egd-net-crl/clients.pem
 #
-# The download needs curl(1) and openssl(1). Nothing is written when one of
-# the CRLs cannot be fetched or does not parse.
+# The download needs curl(1), openssl(1) and awk(1). Nothing is written when
+# one of the CRLs cannot be fetched or does not parse.
+#
+# The download runs as the system user esdm-egd-net-crl (see sysusers.d), a
+# user of its own rather than a DynamicUser=: the state directory of a dynamic
+# user lies below /var/lib/private, which is open to root only, and the
+# daemons reading the CRLs run as users of their own. This one is
+# /var/lib/esdm-egd-net-crl itself, readable by everybody, as the CRLs are.
 
 [Unit]
 Description=Download the CRLs %i of the ESDM EGD network daemons
@@ -27,7 +33,8 @@ EnvironmentFile=/etc/esdm/egd-net-crl/%i.env
 StateDirectory=esdm-egd-net-crl
 StateDirectoryMode=0755
 ExecStart=@LIBEXECDIR@/esdm-egd-net-crl-update /var/lib/esdm-egd-net-crl/%i.pem $CRL_URLS
-DynamicUser=yes
+User=esdm-egd-net-crl
+Group=esdm-egd-net-crl
 CapabilityBoundingSet=
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
@@ -42,6 +49,7 @@ ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
+RemoveIPC=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

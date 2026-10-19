@@ -356,7 +356,17 @@ converts DER to PEM, and writes all of them atomically \- a file next to it,
 renamed into its place \- to
 .IR /var/lib/esdm\-egd\-net\-crl/INSTANCE.pem .
 A URL that fails leaves the file as it was. The daemon takes the file up by
-itself:
+itself. The service runs as the system user
+.BR esdm\-egd\-net\-crl ,
+which a
+.BR sysusers.d (5)
+file of the ESDM creates; its state directory and the CRL files are readable
+by everybody, as the daemons run as users of their own \- the state directory
+of a
+.B DynamicUser=
+lies below
+.IR /var/lib/private ,
+which would keep them out:
 .PP
 .nf
 # /etc/esdm/egd\-net\-crl/clients.env

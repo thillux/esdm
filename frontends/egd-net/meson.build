@@ -77,3 +77,7 @@ foreach unit : [ 'esdm-egd-net-server.service', 'esdm-egd-net-server.socket',
 endforeach
 install_data('esdm-egd-net-crl-update@.timer',
 	     install_dir: get_option('prefix') / 'lib/systemd/system')
+# The system user the download runs as, see its unit
+install_data('esdm-egd-net-crl.sysusers',
+	rename: 'esdm-egd-net-crl.conf',
+	install_dir: get_option('prefix') / 'lib/sysusers.d')
