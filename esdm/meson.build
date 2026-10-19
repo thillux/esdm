@@ -47,6 +47,26 @@ if get_option('es_jent').enabled()
 			      '); ESDM requires a newer jitterentropy library.')
 		endif
 	endforeach
+
+	# The NTG.1 mode, the memory size, the hash loop count and the use of
+	# all caches are flags of jitterentropy 3.7.0 and later. esdm_es_jent.c
+	# leaves them out for an older one, which would ignore the options
+	# without a word.
+	if get_option('es_jent_ntg1').enabled() or \
+	   get_option('es_jent_max_mem') != -1 or \
+	   get_option('es_jent_hash_loop_count') != -1 or \
+	   get_option('es_jent_all_caches').enabled()
+		jent_version = cc.compute_int('JENT_VERSION',
+					      prefix: '#include <jitterentropy.h>',
+					      dependencies: jitterentropy_dep)
+		if jent_version < 3070000
+			error('es_jent_ntg1, es_jent_max_mem, es_jent_hash_loop_count and es_jent_all_caches need jitterentropy 3.7.0 or later, found @0@.@1@.@2@'.format(
+			      jent_version / 1000000,
+			      jent_version % 1000000 / 10000,
+			      jent_version % 10000 / 100))
+		endif
+	endif
+
 	dependencies_esdm_lib += jitterentropy_dep
 	esdm_src += files('es/esdm_es_jent.c')
 endif
