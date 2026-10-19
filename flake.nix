@@ -923,6 +923,187 @@
             '';
           };
 
+        # The PKCS#11 entropy source as an operator sets it up: esdm-es-pkcs11
+        # started by its systemd unit as its system user, the PIN a systemd
+        # credential imported from the credential store, serving a SoftHSM
+        # token - and esdm-server reading it through its ExternalSocket
+        # source, told about the socket and the user with ESDM_SERVER_OPTIONS
+        # of its unit, nothing in it knowing of PKCS#11. The source has to be
+        # credited in the status, deliver on a reseed, and be read again once
+        # the daemon was restarted. Not kernel specific, so defined once.
+        mkPkcs11Check =
+          let
+            esdm = self.packages.${system}.esdm;
+            socket = "/run/esdm-es-pkcs11/esdm-es-pkcs11.socket";
+            label = "esdm-vm-token";
+            pin = "648219";
+            # nixpkgs' SoftHSM has no configuration at the path it compiles
+            # in, so the daemon and the token setup get this one. The token
+            # directory is the one the sandbox of the daemon lets it write.
+            softhsmConf = pkgs.writeText "softhsm2.conf" ''
+              directories.tokendir = /var/lib/softhsm/tokens
+              objectstore.backend = file
+              log.level = ERROR
+            '';
+          in
+          pkgs.testers.nixosTest {
+            name = "PKCS#11 entropy source served by esdm-es-pkcs11";
+
+            nodes.machine =
+              { ... }:
+              {
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                # The user the unit runs as. The package ships it as a
+                # sysusers.d file, which a NixOS without systemd-sysusers does
+                # not read - an administrator declares it like this.
+                users.users.esdm-es-pkcs11 = {
+                  isSystemUser = true;
+                  group = "esdm-es-pkcs11";
+                };
+                users.groups.esdm-es-pkcs11 = { };
+
+                # The token, created once, as the user of the daemon, before
+                # the daemon starts
+                systemd.services.softhsm-token = {
+                  wantedBy = [ "multi-user.target" ];
+                  before = [ "esdm-es-pkcs11.service" ];
+                  environment.SOFTHSM2_CONF = "${softhsmConf}";
+                  path = [ pkgs.softhsm ];
+                  serviceConfig = {
+                    Type = "oneshot";
+                    RemainAfterExit = true;
+                    User = "esdm-es-pkcs11";
+                    StateDirectory = "softhsm/tokens";
+                  };
+                  script = ''
+                    softhsm2-util --show-slots | grep -q 'Label: *${label}' ||
+                      softhsm2-util --init-token --free --label ${label} \
+                        --so-pin 1234567890 --pin ${pin}
+                  '';
+                };
+
+                # What the unit of the package leaves to the site: the module,
+                # the token, and SoftHSM's configuration
+                systemd.services.esdm-es-pkcs11 = {
+                  wantedBy = [ "multi-user.target" ];
+                  environment = {
+                    SOFTHSM2_CONF = "${softhsmConf}";
+                    ESDM_ES_PKCS11_OPTIONS = "--module ${pkgs.softhsm}/lib/softhsm/libsofthsm2.so --token_label ${label}";
+                  };
+                };
+
+                # The PIN, imported by the unit (ImportCredential=pkcs11-pin)
+                environment.etc."credstore/pkcs11-pin" = {
+                  text = pin;
+                  mode = "0400";
+                };
+
+                # The ESDM reads the daemon through its provider socket source
+                systemd.services.esdm-server.environment.ESDM_SERVER_OPTIONS =
+                  "--es_ext_socket ${socket} --es_ext_socket_uid esdm-es-pkcs11";
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.softhsm
+                ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import json
+              import time
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-es-pkcs11.service")
+              machine.wait_for_unit("esdm-server.service")
+
+              # Installed by the package, next to the unit
+              machine.succeed("test -f ${esdm}/lib/sysusers.d/esdm-es-pkcs11.conf")
+              machine.succeed("test -f ${esdm}/lib/systemd/system/esdm-es-pkcs11.service")
+
+              # Ordered before the ESDM, and ready - socket served, token
+              # looked for - before the ESDM was started
+              ready = int(machine.succeed(
+                  "systemctl show -P ActiveEnterTimestampMonotonic esdm-es-pkcs11.service"
+              ).strip())
+              started = int(machine.succeed(
+                  "systemctl show -P InactiveExitTimestampMonotonic esdm-server.service"
+              ).strip())
+              assert 0 < ready <= started, f"esdm-es-pkcs11 ready at {ready}, esdm-server started at {started}"
+
+              # The PIN is nowhere on a command line or in the environment
+              pid = machine.succeed("systemctl show -P MainPID esdm-es-pkcs11.service").strip()
+              machine.fail(f"tr '\\0' ' ' < /proc/{pid}/cmdline | grep -q ${pin}")
+              machine.fail("systemctl show -P Environment esdm-es-pkcs11.service | grep -q ${pin}")
+              # ... and the credential is not taken for a file open to all
+              machine.fail("journalctl -b -u esdm-es-pkcs11.service | grep -q 'open to every user'")
+
+              uid = machine.succeed("id -u esdm-es-pkcs11").strip()
+
+              def pkcs11_source():
+                  status = json.loads(machine.succeed("esdm-tool --status-json"))
+                  for es in status["entropy_sources"]:
+                      if es.get("instance") == "ExternalSocket":
+                          return es
+                  raise Exception(f"no ExternalSocket source in {status}")
+
+              # The provider status is asked for at most every 5 seconds, and
+              # not while a request is in progress
+              def credited_source(what):
+                  es = None
+                  for _ in range(30):
+                      es = pkcs11_source()
+                      plugin = (es.get("provider") or {}).get("plugin") or {}
+                      if (f"connected (uid {uid})" in es["status"]
+                              and "failing" not in es["status"]
+                              and es["available_entropy"] > 0
+                              and plugin.get("token") == "${label}"):
+                          return es
+                      time.sleep(1)
+                  raise Exception(f"{what}: the PKCS#11 source is not credited: {es}")
+
+              es = credited_source("at start up")
+              print(json.dumps(es, indent=2))
+              assert es["name"] == "PKCS#11 ${label}", es["name"]
+              assert es["entropy_rate"] == 128, es["entropy_rate"]
+              assert es["entropy_rate_source"] == "provider", es["entropy_rate_source"]
+              plugin = es["provider"]["plugin"]
+              assert plugin["token_present"] and plugin["logged_in"], plugin
+              assert plugin["pin"] == "set", plugin
+              assert plugin["repetition_test"] == "passed", plugin
+              assert plugin["last_error"] is None, plugin
+
+              # A reseed reads the token: still credited, and not failing,
+              # with the daemon having served requests since
+              requests = es["provider"]["server"]["requests"]
+              machine.succeed("esdm-tool --reseed-crng")
+              time.sleep(6)
+              es = credited_source("after a reseed")
+              assert es["provider"]["server"]["requests"] > requests, es
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              # The daemon restarted is read again, without the ESDM being
+              # restarted
+              server = machine.succeed("systemctl show -P MainPID esdm-server.service").strip()
+              machine.succeed("systemctl restart esdm-es-pkcs11.service")
+              machine.wait_for_unit("esdm-es-pkcs11.service")
+              machine.succeed("esdm-tool --reseed-crng")
+              time.sleep(6)
+              es = credited_source("after a restart of the daemon")
+              assert es["provider"]["server"]["uptime_seconds"] < 60, es
+              assert machine.succeed("systemctl show -P MainPID esdm-server.service").strip() == server
+            '';
+          };
+
         # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
         # /proc/esdm served by the ESDM over its EGD socket. On the stock
         # rolling kernel - the module needs no kernel patches - and once only,
@@ -1160,6 +1341,10 @@
             # mkEsdmCdevCheck.
             esdm_cdev = mkEsdmCdevCheck stockKernels.latest;
 
+            # esdm-es-pkcs11 from its unit, read by esdm-server - see
+            # mkPkcs11Check.
+            pkcs11 = mkPkcs11Check;
+
             # The test suite in a build without fips140 - see esdm-plain.
             plain = self.packages.${system}.esdm-plain;
           }
@@ -1261,29 +1446,27 @@
                   "-Dtestmode=enabled"
 
                   # Every entropy source that can be compiled in. Most disable
-                  # themselves at runtime for want of a TPM, a /dev/hwrng, a
-                  # token or a patched kernel, but their initialization,
-                  # configuration and refusal paths are code like any other.
-                  # The eBPF sources are left out on purpose - esdm-coverage-ebpf
-                  # covers those, since enabling them changes the credited source.
+                  # themselves at runtime for want of a TPM, a /dev/hwrng or a
+                  # patched kernel, but their initialization, configuration
+                  # and refusal paths are code like any other. The eBPF
+                  # sources are left out on purpose - esdm-coverage-ebpf
+                  # covers those, since enabling them changes the credited
+                  # source. esdm-es-pkcs11 comes with the package already.
                   "-Des_kernel=enabled"
                   "-Des_jent_kernel=enabled"
-                  "-Des_pkcs11=enabled"
 
-                  # Point the PKCS#11 source at SoftHSM, which needs no
-                  # hardware. Without a module path - given here at compile
-                  # time, or with --pkcs11_module - the source disables itself
-                  # at startup. Label and PIN stay unset
-                  # - the test installs both at runtime, as the server does from
-                  # its RPC handler.
+                  # The default module of esdm-es-pkcs11: SoftHSM, which needs
+                  # no hardware. Its tests take the SoftHSM next to the
+                  # softhsm2-util on the path in any case, creating the tokens
+                  # with it in a directory of their own.
                   "-Des_pkcs11_module_path=${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
                 ];
 
               # es_jent_kernel reaches the kernel crypto API through libkcapi.
               # es_pkcs11 needs libp11, which is already among the inputs;
-              # softhsm supplies the module it loads plus the softhsm2-util
-              # the test initializes the token with. ea_non_iid assesses the
-              # output's min-entropy.
+              # softhsm supplies the module esdm-es-pkcs11 is tested with plus
+              # the softhsm2-util its tests create their tokens with.
+              # ea_non_iid assesses the output's min-entropy.
               buildInputs = prev.buildInputs ++ [ self.packages.${system}.libkcapi ];
               nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [
                 pkgs.softhsm
@@ -1297,18 +1480,6 @@
               doCheck = true;
               checkPhase = ''
                 runHook preCheck
-
-                # Every ESDM this suite starts loads the SoftHSM module the
-                # PKCS#11 source was built against, and SoftHSM logs three
-                # errors per start when it finds no configuration - nixpkgs
-                # ships none at the path it compiles in. Point it at one of our
-                # own so the run stays readable; the PKCS#11 test overrides this
-                # with the config of the token it creates.
-                mkdir -p "$NIX_BUILD_TOP/softhsm/tokens"
-                printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' \
-                  "$NIX_BUILD_TOP/softhsm/tokens" \
-                  >"$NIX_BUILD_TOP/softhsm/softhsm2.conf"
-                export SOFTHSM2_CONF="$NIX_BUILD_TOP/softhsm/softhsm2.conf"
 
                 # The builder may be busy and is not necessarily fast - give the
                 # tests that wait for entropy room before they time out.
@@ -1415,8 +1586,8 @@
                   # pkill and umount for the cleanup of a failed run
                   pkgs.procps
                   pkgs.util-linux
-                  # softhsm2-util, which the PKCS#11 test initializes its own
-                  # token with - without it that test skips
+                  # softhsm2-util, which the tests of esdm-es-pkcs11 create
+                  # their tokens with - without it they skip the token part
                   pkgs.softhsm
                   # ea_non_iid for the output min-entropy test, which skips without it
                   pkgs.sp800-90b-entropyassessment
@@ -1543,20 +1714,6 @@
                     \( \( -type f -o -type l \) \
                        \( -name '*.so' -o -name '*.so.*' \) \) \
                     \) -exec ${fipsHmac} {} +
-
-                  # Every ESDM this suite starts loads the SoftHSM module the
-                  # PKCS#11 source was built against, and SoftHSM logs three
-                  # errors per start when it finds no configuration - nixpkgs
-                  # ships none at the path it compiles in. Point it at one of
-                  # our own so the run stays readable. Below $work, which the
-                  # privileged tests pin across their private /tmp, and which
-                  # the chmod below opens up for the daemons that drop
-                  # privileges. The PKCS#11 test overrides this with the config
-                  # of the token it creates.
-                  mkdir -p "$work/softhsm/tokens"
-                  printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' \
-                    "$work/softhsm/tokens" >"$work/softhsm/softhsm2.conf"
-                  export SOFTHSM2_CONF="$work/softhsm/softhsm2.conf"
 
                   # The esdm-server and the CUSE frontends drop privileges, and
                   # libgcov writes their counters into the build tree as the
@@ -1843,6 +2000,11 @@
                     # Opportunistic DTLS of the RPC and external entropy
                     # source connections, by the TLS stack of Botan
                     "-Ddtls=enabled"
+                    # esdm-es-pkcs11, the PKCS#11 entropy source - a provider
+                    # of its own, the only part of the ESDM linking libp11 -
+                    # with its systemd unit. It needs a --module, as no
+                    # default is built in. See mkPkcs11Check.
+                    "-Des_pkcs11=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
@@ -1942,6 +2104,9 @@
               ];
 
             doCheck = true;
+            # softhsm2-util for the tests of esdm-es-pkcs11, which skip their
+            # token part without it
+            nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [ pkgs.softhsm ];
 
             meta = prev.meta // {
               description = "ESDM built without fips140 and sp80090c, running the meson test suite";
@@ -1985,6 +2150,8 @@
             separateDebugInfo = false;
 
             doCheck = true;
+            # softhsm2-util for the tests of esdm-es-pkcs11, see esdm-plain
+            nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [ pkgs.softhsm ];
             checkPhase = ''
               runHook preCheck
 
@@ -2329,6 +2496,8 @@
               bpftop
               bpftools
               bpftrace
+              # softhsm2-util for the tests of esdm-es-pkcs11
+              softhsm
               sp800-90b-entropyassessment
             ];
           };
