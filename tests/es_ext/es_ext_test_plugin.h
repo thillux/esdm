@@ -37,6 +37,7 @@
  * @status_text: What status_json writes, NULL for ES_EXT_TEST_STATUS
  * @status_unterminated: status_json fills its buffer without a NUL
  * @get_delay_ms: get_entropy takes this long, a request in progress meanwhile
+ * @status_delay_ms: status_json takes this long
  */
 struct esdm_es_ext_test_control {
 	uint32_t claim_bits;
@@ -47,6 +48,7 @@ struct esdm_es_ext_test_control {
 	const char *status_text;
 	int status_unterminated;
 	unsigned int get_delay_ms;
+	unsigned int status_delay_ms;
 
 	unsigned int init_calls;
 	unsigned int fini_calls;

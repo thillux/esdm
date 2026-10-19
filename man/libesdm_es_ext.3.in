@@ -256,9 +256,12 @@ one whose status does not fit into the length
 The ESDM checks that the status is a well-formed JSON object before it shows
 it. A provider older than STATUS closes the connection on it, as on any
 request it does not know: the ESDM connects again at once, still crediting the
-provider, and does not ask again until it connects the next time. A provider
-not answering STATUS within the timeout of a request is connected to again the
-same way.
+provider, and does not ask again until it connects the next time. A connection
+found closed when STATUS is sent, as one to a provider restarted meanwhile, is
+no such refusal: the ESDM connects again and asks on the new connection. A
+provider not answering STATUS within the timeout of a request is disconnected
+as for any request, connected to again after the retry interval, and not asked
+for its status for a minute.
 .SS DTLS
 An ESDM built with DTLS (meson option
 .BR dtls ,

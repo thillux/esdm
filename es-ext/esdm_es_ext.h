@@ -183,7 +183,9 @@ struct esdm_es_ext_plugin {
  * every 5 seconds - showing the last one in between - and not while a request
  * is in progress, going without it then. A provider older than STATUS closes
  * the connection on it: the ESDM connects again at once, and reports no status
- * of the provider until the connection is lost the next time.
+ * of the provider until the connection is lost the next time. A provider that
+ * does not answer STATUS in time is disconnected as for any request, and not
+ * asked for its status for a minute.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
  * first request. A provider answering it with status 0 expects a DTLS 1.2

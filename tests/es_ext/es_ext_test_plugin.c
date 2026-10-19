@@ -38,6 +38,14 @@
 #include "es_ext_test_plugin.h"
 #include "esdm_es_ext.h"
 
+static void es_ext_test_sleep(unsigned int ms)
+{
+	const struct timespec ts = { .tv_sec = ms / 1000,
+				     .tv_nsec = (long)(ms % 1000) * 1000000L };
+
+	nanosleep(&ts, NULL);
+}
+
 ESDM_ES_EXT_PLUGIN_EXPORT
 struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 	.claim_bits = UINT32_MAX,
@@ -68,14 +76,8 @@ static int es_ext_test_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 	ctl->get_calls++;
 	ctl->last_buflen = buflen;
 
-	if (ctl->get_delay_ms) {
-		const struct timespec ts = {
-			.tv_sec = ctl->get_delay_ms / 1000,
-			.tv_nsec = (long)(ctl->get_delay_ms % 1000) * 1000000L
-		};
-
-		nanosleep(&ts, NULL);
-	}
+	if (ctl->get_delay_ms)
+		es_ext_test_sleep(ctl->get_delay_ms);
 
 	/* Filled in any case, so that a test sees whether the data is wiped */
 	memset(buf, (int)(ctl->get_calls & 0xff), buflen);
@@ -104,6 +106,9 @@ static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 
 	ctl->status_calls++;
 	ctl->last_status_buflen = buflen;
+
+	if (ctl->status_delay_ms)
+		es_ext_test_sleep(ctl->status_delay_ms);
 
 	if (ctl->status_unterminated) {
 		memset(buf, '{', buflen);

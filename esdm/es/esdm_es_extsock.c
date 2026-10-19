@@ -136,13 +136,18 @@ static bool extsock_was_connected = false;
 static int extsock_last_logged = 0;
 
 /*
- * The provider connected to answered no STATUS - it closed the connection on
- * it, as a provider does on a request it does not know, or did not answer in
- * time - and is not asked again on this connection. The last status it sent
- * was none and logged as such.
+ * The provider connected to refused STATUS - it closed the connection on it,
+ * as a provider does on a request it does not know - and is not asked again
+ * on this connection. The last status it sent was none and logged as such.
  */
 static bool extsock_status_refused = false;
 static bool extsock_status_warned = false;
+
+/*
+ * The provider did not answer STATUS in time, and is not asked for its status
+ * before this time, monotonic seconds
+ */
+static time_t extsock_status_backoff_until = 0;
 
 /*
  * What is read of the source without extsock_mutex, which a request holds for
@@ -346,6 +351,12 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 					       uint8_t *rsp);
 static int esdm_es_extsock_selftest_locked(void);
 
+/*
+ * Connect to the provider again at once, rather than after the retry interval.
+ * Caller must hold extsock_mutex (write lock).
+ */
+static int esdm_es_extsock_reconnect_locked(void);
+
 #ifdef ESDM_DTLS
 
 /* The milliseconds left until @deadline, 0 once it passed */
@@ -531,19 +542,22 @@ static bool esdm_es_extsock_ensure_locked(void)
 /*
  * Send a request of @type for @length bytes and receive the answer into @rsp,
  * which has room for ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA
- * bytes. Caller must hold extsock_mutex (write lock) with the provider
- * connected.
+ * bytes. *@sent tells whether the request went out - one that did not found
+ * the connection gone before it. Caller must hold extsock_mutex (write lock)
+ * with the provider connected.
  *
  * @return the size of the answer, or a negative errno, in which case the
- *	   connection is closed
+ *	   connection is closed: -ECONNRESET if the provider closed it, and
+ *	   -ETIMEDOUT if it did not answer in time
  */
-static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
-					       uint8_t *rsp)
+static ssize_t esdm_es_extsock_request_locked(uint16_t type, uint32_t length,
+					      uint8_t *rsp, bool *sent)
 {
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 	struct timespec start, now;
 	ssize_t n;
 
+	*sent = false;
 	esdm_es_ext_proto_req_pack(req, type, length);
 
 	/*
@@ -562,6 +576,7 @@ static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 			goto err;
 		}
 	}
+	*sent = true;
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (;;) {
@@ -636,6 +651,27 @@ err:
 	return n;
 }
 
+/* As above, for a caller that does not care whether the request went out */
+static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
+					       uint8_t *rsp)
+{
+	bool sent;
+
+	return esdm_es_extsock_request_locked(type, length, rsp, &sent);
+}
+
+static int esdm_es_extsock_reconnect_locked(void)
+{
+	int ret = esdm_es_extsock_connect_locked();
+
+	if (ret)
+		extsock_retry_at = esdm_es_extsock_now() +
+				   ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+	else
+		extsock_retry_at = 0;
+	return ret;
+}
+
 static int esdm_es_extsock_init(void)
 {
 	/* What the provider delivers per request fits into a seed buffer */
@@ -651,6 +687,7 @@ static int esdm_es_extsock_init(void)
 	extsock_selftest_failed = false;
 	extsock_selftest_due = true;
 	extsock_status_warned = false;
+	extsock_status_backoff_until = 0;
 	esdm_es_extsock_status_forget_locked();
 	/* A provider not there yet is connected to on demand */
 	if (esdm_es_extsock_configured_locked())
@@ -820,25 +857,67 @@ out:
  * extsock_mutex (write lock).
  *
  * A provider connected to only: the ESDM status does not wait for a provider
- * to be connected to. A provider that closes the connection on the request -
- * one older than it - or does not answer in time is connected to again right
- * away, as for STARTDTLS, rather than being given up on for the retry
- * interval, and not asked again on that connection.
+ * to be connected to. What a request that fails tells:
+ *
+ * - The request did not go out, the connection was gone before - the
+ *   provider was restarted, say: connected to again at once, and asked on
+ *   the new connection, once.
+ * - The provider closed the connection on the request, as one older than
+ *   STATUS does on a request it does not know: connected to again at once, as
+ *   for STARTDTLS, and not asked again on that connection.
+ * - No answer in time: given up on as for any request, and connected to again
+ *   after the retry interval only - the provider may still be busy with the
+ *   status, unable to take a new connection, whose STARTDTLS would time out
+ *   and leave it unencrypted. Nor is it asked for its status again for
+ *   ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC.
  */
 static struct json_object *esdm_es_extsock_status_locked(void)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	struct json_object *obj = NULL;
+	time_t now = esdm_es_extsock_now();
+	bool retried = false, sent;
 	const char *text;
 	size_t textlen;
 	int32_t status;
 	ssize_t n;
 
-	if (extsock_fd < 0 || extsock_status_refused)
+	if (extsock_fd < 0 || extsock_status_refused ||
+	    now < extsock_status_backoff_until)
 		return NULL;
 
-	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_STATUS,
-					    ESDM_ES_EXT_STATUS_MAX, rsp);
+again:
+	n = esdm_es_extsock_request_locked(ESDM_ES_EXT_PROTO_STATUS,
+					   ESDM_ES_EXT_STATUS_MAX, rsp, &sent);
+	if (n < 0 && !sent) {
+		if (retried)
+			goto out;
+		retried = true;
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ES,
+			"External ES provider: connection gone (%s), connecting again\n",
+			strerror((int)-n));
+		if (esdm_es_extsock_reconnect_locked())
+			goto out;
+		goto again;
+	}
+	if (n == -ECONNRESET) {
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ES,
+			"External ES provider: STATUS refused, connecting again\n");
+		(void)esdm_es_extsock_reconnect_locked();
+		extsock_status_refused = true;
+		goto out;
+	}
+	if (n == -ETIMEDOUT) {
+		extsock_status_backoff_until =
+			now + ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC;
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider: no answer to STATUS in time, disconnected - not asked for its status for %u seconds\n",
+			ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
+		goto out;
+	}
 	/* An answer larger than any: disconnected as for any other request */
 	if (n == -EPROTO || n == -EMSGSIZE) {
 		esdm_logger(
@@ -847,16 +926,9 @@ static struct json_object *esdm_es_extsock_status_locked(void)
 		goto out;
 	}
 	if (n < 0) {
-		esdm_logger(
-			LOGGER_VERBOSE, LOGGER_C_ES,
-			"External ES provider: no answer to STATUS (%s), connecting again\n",
-			strerror((int)-n));
-		if (esdm_es_extsock_connect_locked())
-			extsock_retry_at = esdm_es_extsock_now() +
-					   ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
-		else
-			extsock_retry_at = 0;
-		extsock_status_refused = true;
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+			    "External ES provider: no answer to STATUS: %s\n",
+			    strerror((int)-n));
 		goto out;
 	}
 
@@ -1051,6 +1123,7 @@ int esdm_es_ext_socket_set_path(const char *path)
 	extsock_selftest_failed = false;
 	extsock_selftest_due = true;
 	extsock_status_warned = false;
+	extsock_status_backoff_until = 0;
 	esdm_es_extsock_status_forget_locked();
 	esdm_es_extsock_unlock();
 

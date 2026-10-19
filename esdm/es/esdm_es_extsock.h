@@ -46,6 +46,16 @@
 #define ESDM_EXT_SOCKET_TIMEOUT_MS 2000
 #endif
 
+/*
+ * A provider that does not answer STATUS in time is disconnected as for any
+ * request - and not asked for its status again for this many seconds: a
+ * status taking that long would cost the connection, and hold up the
+ * seedings for the timeout, whenever the ESDM status is asked for.
+ */
+#ifndef ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC
+#define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 60
+#endif
+
 extern struct esdm_es_cb esdm_es_extsock;
 
 /**
