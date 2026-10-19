@@ -101,6 +101,15 @@ static uint32_t esdm_aux_avail_entropy_pool(struct esdm_pool *pool)
 #endif
 }
 
+/* Room for entropy left in aux pool, in the units of its count */
+static uint32_t esdm_aux_room_pool(struct esdm_pool *pool)
+{
+	uint32_t digestsize = esdm_get_digestsize();
+
+	return digestsize -
+	       min_uint32(digestsize, atomic_read_u32(&pool->aux_entropy_bits));
+}
+
 static uint32_t esdm_aux_avail_entropy(uint32_t __unused u)
 {
 	size_t i;
@@ -456,9 +465,14 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	 * as implementing it correctly without loosing entropy is not trivial.
 	 */
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
-		uint32_t unused_ent =
-			esdm_get_digestsize() -
-			esdm_aux_avail_entropy_pool(&esdm_pools[i]);
+		/*
+		 * The room is that of the count the insertion adds to and caps
+		 * at the digest size. The entropy the pool reports is less the
+		 * oversampling: a full pool would seem to have room for that
+		 * much and be picked, discarding the entropy of the data while
+		 * another pool has room for it.
+		 */
+		uint32_t unused_ent = esdm_aux_room_pool(&esdm_pools[i]);
 
 		/* Find the pool with the maximum capacity. */
 		if (max_entropy_capacity < unused_ent) {

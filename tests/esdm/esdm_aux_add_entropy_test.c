@@ -6,7 +6,8 @@
  * before the discount for the oversampling, up to the size of the pool:
  * credits add up, a credit of nothing changes nothing, the entropy of the other
  * pools is not credited once more, and a pool that holds no data - not
- * inserted into since its (re)initialization - is credited nothing.
+ * inserted into since its (re)initialization - is credited nothing. Data
+ * inserted with entropy goes into a pool with room for it.
  *
  * Driven through the entropy source callbacks without the rest of the ESDM, so
  * that nothing else is inserted into or taken from the pool between the steps.
@@ -171,6 +172,33 @@ static int esdm_axa_other_pools(struct esdm_es_cb *aux)
 		printf("The credit leaves the other pools out\n");
 	return ret;
 }
+
+/*
+ * Data with entropy goes into a pool with room for it, passing over a full one
+ * - which reports less than its size where it discounts the oversampling.
+ */
+static int esdm_axa_pool_room(void)
+{
+	unsigned int i;
+	int ret = 0;
+
+	esdm_pool_set_entropy(0);
+	if (esdm_axa_insert(ESDM_AXA_POOL_BITS))
+		return 1;
+
+	/* Each less than the discount, all of them more */
+	for (i = 0; i < 4; i++) {
+		if (esdm_axa_insert(32))
+			return 1;
+	}
+	ret += esdm_axa_check(esdm_axa_avail(ESDM_AXA_POOL_BITS) +
+				      esdm_axa_avail(4 * 32),
+			      "Data beside a full pool");
+
+	if (!ret)
+		printf("Data goes into a pool with room for its entropy\n");
+	return ret;
+}
 #endif
 
 int main(int argc, char *argv[])
@@ -203,6 +231,7 @@ int main(int argc, char *argv[])
 	ret += esdm_axa_add_up();
 #if ESDM_NUM_AUX_POOLS > 1
 	ret += esdm_axa_other_pools(aux);
+	ret += esdm_axa_pool_room();
 #endif
 
 	/* As esdm_reinit() does: the pools start over without data */
