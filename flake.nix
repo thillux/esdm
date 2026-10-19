@@ -2617,8 +2617,18 @@
             # backend (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68080).
             # gcovr treats that as fatal and produces no report at all, so warn
             # once per affected file and keep the rest of the data.
-            gcovrIgnoreParseErrors =
-              "--gcov-ignore-parse-errors negative_hits.warn_once_per_file";
+            #
+            # The same for counts gcovr finds suspiciously high (2^32 and up):
+            # in the VMs booted with fips=1, every program runs the FIPS
+            # integrity self test, which hashes the files of the module - so
+            # the compression of crypto/sha256.c runs billions of times in one
+            # suite, and gcovr 8 aborted on it with SuspiciousHits, leaving no
+            # report. Such a line is counted as not executed, and named in the
+            # warning.
+            gcovrIgnoreParseErrors = lib.concatMapStringsSep " " (e: "--gcov-ignore-parse-errors ${e}") [
+              "negative_hits.warn_once_per_file"
+              "suspicious_hits.warn_once_per_file"
+            ];
 
             # Turn one of the esdm packages above into a coverage build of
             # itself: instrument with gcov, run "meson test" and export the HTML
@@ -2976,6 +2986,11 @@
                   # gcov ships with the compiler itself rather than with its
                   # wrapper, and has to be the one matching the compiler that
                   # produced the notes - so name it instead of searching $PATH.
+                  #
+                  # Its status is kept apart from the suite's: a failing gcovr
+                  # must neither end the script before the status of the suite
+                  # is out, nor be mistaken for a failed test.
+                  report_status=0
                   gcovr \
                     --gcov-executable '${pkgs.stdenv.cc.cc}/bin/gcov' \
                     --root "$work/source" \
@@ -2989,22 +3004,34 @@
                     --html-title 'ESDM ${cov.version} test coverage' \
                     --txt "$work/report/coverage.txt" \
                     --print-summary \
-                    "$work/build"
+                    "$work/build" || report_status=$?
 
                   cp -r "$work/report/." "$report_dir/"
                   chmod -R u+w "$report_dir"
+                  echo "$test_status" >"$report_dir/suite-status"
+                  echo "$report_status" >"$report_dir/report-status"
 
                   echo
-                  echo "Coverage report written to $report_dir/index.html"
+                  if [ "$report_status" -ne 0 ]; then
+                    echo "WARNING: gcovr failed (exit $report_status) - no or" \
+                         "only a partial report in $report_dir"
+                  else
+                    echo "Coverage report written to $report_dir/index.html"
+                  fi
                   if [ "$test_status" -ne 0 ]; then
                     echo "WARNING: the test run failed (exit $test_status) - see" \
                          "$report_dir/testlog.txt"
-                  else
+                  elif [ "$report_status" -eq 0 ]; then
                     # Everything is out and every test passed - nothing left in
                     # the build tree that anybody would want to look at.
                     keep_work=0
                   fi
-                  exit "$test_status"
+                  # The suite's status first; a run whose tests passed still
+                  # fails without its report.
+                  if [ "$test_status" -ne 0 ]; then
+                    exit "$test_status"
+                  fi
+                  exit "$report_status"
                 '';
               };
 
@@ -3139,6 +3166,10 @@
                   echo "The coverage run as root failed (exit $status) - failed tests:"
                   grep -E '^ *[0-9]+/[0-9]+ .* (FAIL|TIMEOUT|ERROR) ' \
                     ${run}/coverage/coverage-run.log || true
+                  report_status="$(cat ${run}/coverage/report-status 2>/dev/null || echo 0)"
+                  if [ "$report_status" != 0 ]; then
+                    echo "gcovr failed (exit $report_status), see coverage-run.log"
+                  fi
                   echo "Report and test log of the run: ${run}/coverage"
                   exit 1
                 fi
