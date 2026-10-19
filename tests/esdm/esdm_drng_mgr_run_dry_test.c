@@ -33,7 +33,11 @@
  *     goes by it along,
  *   - every node DRNG that ran dry is reseeded, not only the first few: once
  *     the load stops, all of them are back in service right away, without a
- *     request asking for any of them.
+ *     request asking for any of them,
+ *   - every blocking request is answered in full: running dry is the normal
+ *     case here, and no reason for esdm_get_random_bytes_full() to give up -
+ *     nor for esdm_get_random_bytes_full_noblock(), which the RPC server
+ *     serves its clients with, to fail: it may answer short.
  *
  * A build without the cap gets it applied here, so the path is covered by every
  * build with test mode. Several threads, each pinned to a CPU of its own, keep
@@ -100,6 +104,8 @@
 static atomic_bool test_stop = false;
 static atomic_ullong test_bytes = 0, test_failed = 0, test_short = 0;
 static atomic_llong test_first_error = 0;
+static atomic_ullong test_nb_failed = 0, test_nb_short = 0;
+static atomic_llong test_nb_first_error = 0;
 
 struct test_node {
 	bool seen;
@@ -130,7 +136,32 @@ static void *test_load(void *arg)
 	pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 
 	while (!atomic_load(&test_stop)) {
-		ssize_t rc = esdm_get_random_bytes_full(buf, sizeof(buf));
+		ssize_t rc;
+
+		/*
+		 * Half the threads ask without blocking in between, as the RPC
+		 * server does: such a request may come back short - a DRNG ran
+		 * into its limit on the way - but not fail while the ESDM is
+		 * operational.
+		 */
+		if (!(cpu & 1)) {
+			rc = esdm_get_random_bytes_full_noblock(buf,
+								sizeof(buf));
+			if (rc < 0) {
+				long long expected = 0;
+
+				atomic_fetch_add(&test_nb_failed, 1);
+				atomic_compare_exchange_strong(
+					&test_nb_first_error, &expected, rc);
+			} else {
+				if ((size_t)rc != sizeof(buf))
+					atomic_fetch_add(&test_nb_short, 1);
+				atomic_fetch_add(&test_bytes,
+						 (unsigned long long)rc);
+			}
+		}
+
+		rc = esdm_get_random_bytes_full(buf, sizeof(buf));
 
 		if (rc < 0) {
 			long long expected = 0;
@@ -314,11 +345,25 @@ static int esdm_drng_mgr_run_dry_test(void)
 	       atomic_load(&test_short));
 	printf("%lu samples: all DRNGs seeded in %lu, ESDM not operational in %lu; esdm_get_seed() served %lu of %lu calls\n",
 	       samples, all_seeded, nonop, seed_ok, seed_calls);
-	printf("%lu node DRNGs ran dry, %u not back in service %.3f s after the load stopped\n",
-	       dried, unseeded, recovered);
+	printf("%lu node DRNGs ran dry, %lu of them reseeded under load, %u not back in service %.3f s after the load stopped\n",
+	       dried, reseeded, unseeded, recovered);
+
+	if (atomic_load(&test_failed) || atomic_load(&test_short)) {
+		printf("FAIL: %llu blocking requests failed, %llu were answered short\n",
+		       atomic_load(&test_failed), atomic_load(&test_short));
+		ret = 1;
+	}
+
+	printf("%llu non-blocking requests failed (first %lld), %llu answered short\n",
+	       atomic_load(&test_nb_failed), atomic_load(&test_nb_first_error),
+	       atomic_load(&test_nb_short));
+	if (atomic_load(&test_nb_failed)) {
+		printf("FAIL: non-blocking requests failed while the ESDM is operational\n");
+		ret = 1;
+	}
 
 	if (!dried) {
-		printf("No node DRNG ran dry - nothing to check here\n");
+		printf("No node DRNG ran dry - nothing more to check here\n");
 		goto out;
 	}
 

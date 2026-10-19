@@ -1177,6 +1177,37 @@ static bool esdm_drng_reseed_async_capable(struct esdm_drng *drng);
 static bool esdm_drng_node_spent(struct esdm_drng *drng);
 
 /*
+ * Reseed @drng, which reached its maximum output without full reseed, in the
+ * caller's thread - waiting for the pool lock, in the order of every seeding.
+ * Returns whether it is reseeded: told under the DRNG lock, before other
+ * requests may have generated it up to its limit once more - which under load
+ * they do at once, and which is no reason to give up on it.
+ *
+ * The reseed is forced: unforced, a seeding of a fully seeded DRNG collects
+ * nothing while the entropy sources report less than a reseed needs, see
+ * esdm_get_seed_buffers() - which a source caching its entropy ahead does
+ * while the reseeds drain it faster than it refills. Nothing is lost by asking
+ * them anyway: a DRNG that cannot be reseeded now may generate nothing at all.
+ */
+static bool esdm_drng_reseed_spent(struct esdm_drng *drng)
+{
+	bool reseeded;
+
+	esdm_pool_lock();
+	mutex_w_lock(&drng->lock);
+	/* Another path may have reseeded it in the meantime */
+	if (esdm_drng_spent(drng)) {
+		atomic_store(&drng->force_reseed, true);
+		esdm_drng_seed_nolock(drng);
+	}
+	reseeded = !esdm_drng_spent(drng);
+	mutex_w_unlock(&drng->lock);
+	esdm_pool_unlock();
+
+	return reseeded;
+}
+
+/*
  * May @drng generate output? If it reached its disable threshold, it reverts
  * to the unseeded state and is brought up again - by a forced seeding right
  * here only if the ESDM is not operational any more, that is for the initial
@@ -1203,6 +1234,21 @@ static bool esdm_drng_may_generate(struct esdm_drng *drng, bool pr)
 
 	if (esdm_drng_reseed_async_capable(drng))
 		return esdm_drng_node_spent(drng);
+
+	/*
+	 * The initial DRNG is reseeded before it is given up on, the request
+	 * waiting for the pool lock. It is the DRNG every request falls back
+	 * to while the node DRNGs wait for their reseeds - all the time under
+	 * sustained load in a build capping the output of a seed - and the
+	 * pool lock is held by their seedings just as often: skipping its
+	 * reseed for a busy pool, or another request generating it up to its
+	 * limit between the reseed check of this one and here, ran it dry,
+	 * which takes the ESDM out of operation. Waiting costs this request one
+	 * seeding; running dry costs every request until the ESDM is back. It
+	 * is spent only if that reseed did not bring it back either.
+	 */
+	if (drng == esdm_drng_init_instance() && esdm_drng_reseed_spent(drng))
+		return true;
 
 	/*
 	 * Spent - unless a seeding brought it back while this request generated
@@ -1314,9 +1360,15 @@ static bool esdm_drng_must_reseed(struct esdm_drng *drng)
 
 	check_time += (time_t)atomic_load(&esdm_drng_reseed_max_time);
 
+	/*
+	 * A DRNG that may generate nothing more without a full reseed is due
+	 * for one whatever the threshold says. A build sets the threshold no
+	 * higher than that maximum, but a test lowering the maximum at run
+	 * time does not move the threshold along.
+	 */
 	return (requests_check || atomic_load(&drng->force_reseed) ||
 		request_bits_since_fully_seeded_reached ||
-		esdm_time_after_now(check_time));
+		esdm_time_after_now(check_time) || esdm_drng_spent(drng));
 }
 
 /* Seconds until the reseed of @drng falls due, zero if it is due already. */
@@ -2402,22 +2454,28 @@ static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr)
 	 * seeded and is skipped by the next request - serve this one from the
 	 * initial DRNG right away, as the next request would be, instead of
 	 * failing callers that do not retry. Once only, and with no more than
-	 * the initial DRNG has left: finding it spent takes the ESDM out of
-	 * the operational state, which is up to a request the initial DRNG
-	 * serves itself, not to one it serves on behalf of a node DRNG. If
-	 * nothing is left, -EAGAIN stands - a caller retrying on it makes that
-	 * request.
+	 * the initial DRNG has left - or, if it has nothing left, than one of
+	 * its seeds gives: it is reseeded first then, the request waiting for
+	 * the pool lock, see esdm_drng_may_generate(). So the request waits
+	 * for one seeding at most, and only a reseed that failed takes the
+	 * ESDM out of operation - which the initial DRNG's next request would
+	 * find just the same. Under sustained load in a build capping the
+	 * output of a seed, every DRNG the request could go to is at its limit
+	 * time and again, and -EAGAIN for it would be the rule for the callers
+	 * that cannot block, the RPC server's.
 	 */
 	if (ret == -EAGAIN && drng != &esdm_drng_init) {
 		uint32_t left = esdm_drng_bytes_left(&esdm_drng_init);
 
-		if (left) {
-			esdm_logger(
-				LOGGER_DEBUG, LOGGER_C_DRNG,
-				"Node DRNG spent, using DRNG instance on node 0 to service generate request\n");
-			ret = esdm_drng_get(&esdm_drng_init, outbuf,
-					    min_size(outbuflen, left));
-		}
+		if (!left)
+			left = max_uint32(
+				esdm_config_drng_max_wo_reseed_bits() >> 3, 1);
+
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_DRNG,
+			"Node DRNG spent, using DRNG instance on node 0 to service generate request\n");
+		ret = esdm_drng_get(&esdm_drng_init, outbuf,
+				    min_size(outbuflen, left));
 	}
 
 	esdm_drng_put_instances();
@@ -2780,11 +2838,98 @@ ssize_t esdm_get_random_bytes_full_noblock(uint8_t *buf, size_t nbytes)
 	return esdm_drng_get_sleep(buf, nbytes, false);
 }
 
+/*
+ * May a blocking request go on after esdm_drng_get_sleep() answered @ret? It
+ * may not after an error that no wait cures - a self test that failed, an ESDM
+ * that is not set up or that is shutting down - and not after one it does not
+ * know, but it does after:
+ *
+ *   - -EAGAIN: the DRNG it went to reached its maximum output without full
+ *     reseed before generating anything, and so did the initial DRNG it fell
+ *     back to. Under sustained load in a build capping that output, this is
+ *     the normal case rather than an exception. The reseed is on its way - the
+ *     worker's of a node DRNG, and the initial DRNG's in the next request it
+ *     serves, which reseeds it first, see esdm_drng_get().
+ *   - -EOPNOTSUPP from an ESDM that left the operational state on the way: its
+ *     initial DRNG reached that limit, and the request waits for it to come
+ *     back, as for an ESDM that was never operational. Whether it still is out
+ *     of operation when asked here says nothing: another request may have
+ *     brought it back meanwhile.
+ *   - 0, which nothing but a request of no bytes ought to be answered with.
+ */
+static bool esdm_drng_get_retry(ssize_t ret)
+{
+	if (atomic_load(&esdm_drng_mgr_terminate))
+		return false;
+
+	if (ret == -EAGAIN || !ret)
+		return true;
+
+	return ret == -EOPNOTSUPP && esdm_get_available() &&
+	       esdm_selftest_crypto_passed();
+}
+
+/*
+ * The first retry of a blocking request follows at once - it usually goes to
+ * a DRNG that was reseeded meanwhile, or to the initial DRNG, which reseeds
+ * itself first. Should that keep failing, the request waits a little more
+ * before every further one rather than spinning on the DRNGs while their
+ * reseeds collect entropy, up to ESDM_DRNG_GET_RETRY_MAX_NS.
+ */
+#define ESDM_DRNG_GET_RETRY_MAX_NS (10 * 1000 * 1000)
+
+static void esdm_drng_get_backoff(unsigned int attempt)
+{
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 0 };
+	long ns = 100 * 1000;
+
+	if (attempt <= 1) {
+		sched_yield();
+		return;
+	}
+
+	while (--attempt > 1 && ns < ESDM_DRNG_GET_RETRY_MAX_NS)
+		ns *= 2;
+	ts.tv_nsec = (ns < ESDM_DRNG_GET_RETRY_MAX_NS) ?
+			     ns :
+			     ESDM_DRNG_GET_RETRY_MAX_NS;
+	nanosleep(&ts, NULL);
+}
+
+/*
+ * Blocks until the ESDM is operational, and until all of @nbytes are
+ * generated: a DRNG reaching its maximum output without full reseed answers
+ * with what it had left or with nothing at all, and that is not an answer the
+ * caller of a blocking call is prepared for - see esdm_drng_get_retry(). Only
+ * an error that no wait cures ends it early, with the bytes generated until
+ * then, or with the error if there are none.
+ */
 DSO_PUBLIC
 ssize_t esdm_get_random_bytes_full(uint8_t *buf, size_t nbytes)
 {
-	esdm_drng_sleep_while_nonoperational(0);
-	return esdm_drng_get_sleep(buf, nbytes, false);
+	unsigned int attempt = 0;
+	size_t done = 0;
+
+	nbytes = min_size(nbytes, SSIZE_MAX);
+
+	while (done < nbytes) {
+		ssize_t ret;
+
+		esdm_drng_sleep_while_nonoperational(0);
+		ret = esdm_drng_get_sleep(buf + done, nbytes - done, false);
+		if (ret > 0) {
+			done += (size_t)ret;
+			attempt = 0;
+			continue;
+		}
+
+		if (!esdm_drng_get_retry(ret))
+			return done ? (ssize_t)done : ret;
+
+		esdm_drng_get_backoff(++attempt);
+	}
+
+	return (ssize_t)done;
 }
 
 DSO_PUBLIC

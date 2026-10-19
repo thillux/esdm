@@ -79,10 +79,21 @@ The ESDM cannot be initialized again afterwards.
 Random data without a guarantee that the ESDM is fully seeded.
 .TP
 .BI "ssize_t esdm_get_random_bytes_full(uint8_t *" buf ", size_t " nbytes ");"
-Random data, blocking until the ESDM is fully seeded.
+Random data, blocking until the ESDM is fully seeded and until all
+.I nbytes
+are generated \- also while the DRNGs reached the most they may generate
+without a full reseed and wait for it, which in a build capping that output
+(SP800\-90C, FIPS 140, AIS 20/31 DRG.4) sustained load makes them do all the
+time. Fewer bytes, or an error, are returned only after an error that no wait
+cures, such as a failed self test.
 .TP
 .BI "ssize_t esdm_get_random_bytes_full_noblock(uint8_t *" buf ", size_t " nbytes ");"
-The same, but returning an error instead of blocking.
+The same, but returning an error instead of blocking:
+.B \-EAGAIN
+while the ESDM is not operational. It may also return fewer bytes than asked
+for, when a DRNG reached that limit on the way. When every DRNG the request
+could go to is at that limit, it is served by the initial DRNG after its
+reseed, for which it waits.
 .TP
 .BI "ssize_t esdm_get_random_bytes_pr(uint8_t *" buf ", size_t " nbytes ");"
 Random data with prediction resistance: the DRNG is reseeded from the entropy

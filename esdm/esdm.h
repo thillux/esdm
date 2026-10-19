@@ -96,6 +96,14 @@ ssize_t esdm_get_random_bytes(uint8_t *buf, size_t nbytes);
  * switchable DRNG support, that may support other DRNGs such as the SP800-90A
  * DRBG.
  *
+ * The call blocks until the ESDM is operational and until all @nbytes are
+ * generated - also while the DRNGs it could be served from reached the most
+ * they may generate without a full reseed, which in a build capping that
+ * output (SP800-90C, FIPS 140, AIS 20/31 DRG.4) sustained load makes them do
+ * all the time, and are waiting for their reseed. It returns fewer bytes, or
+ * an error if there are none, only after an error that no wait cures, such as
+ * a failed self test or an ESDM being finalized.
+ *
  * @buf: buffer to store the random bytes
  * @nbytes: size of the buffer
  *
@@ -106,6 +114,12 @@ ssize_t esdm_get_random_bytes_full(uint8_t *buf, size_t nbytes);
 /**
  * @brief see esdm_get_random_bytes_full except that in case of blocking,
  * it returns -EAGAIN.
+ *
+ * It returns -EAGAIN while the ESDM is not operational. It may return fewer
+ * bytes than asked for, when a DRNG reached the most it may generate without
+ * a full reseed on the way - asking again for the rest is the caller's
+ * business. When every DRNG the request could go to is at that limit, it is
+ * served by the initial DRNG after its reseed, for which it waits.
  */
 ssize_t esdm_get_random_bytes_full_noblock(uint8_t *buf, size_t nbytes);
 

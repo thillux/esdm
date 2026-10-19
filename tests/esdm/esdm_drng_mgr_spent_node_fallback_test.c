@@ -75,13 +75,15 @@ static int esdm_drng_mgr_spent_node_fallback_test(void)
 	 * Use up the node DRNG and then the initial one. The request finding
 	 * the node DRNG spent with nothing generated yet must be served by the
 	 * initial DRNG, not fail: neither esdm_get_random_bytes() nor
-	 * esdm_get_random_bytes_full() may fail while the ESDM is operational.
-	 * Only once the initial DRNG is spent as well, the ESDM leaves the
-	 * operational state and requests fail.
+	 * esdm_get_random_bytes_full_noblock() may fail while the ESDM is
+	 * operational. Only once the initial DRNG is spent as well, the ESDM
+	 * leaves the operational state and requests fail - all but the
+	 * blocking esdm_get_random_bytes_full(), which waits for the ESDM to
+	 * come back, and is not asked here for that reason.
 	 */
 	for (i = 0; i < 3 * TEST_REQUESTS_PER_DRNG; i++) {
-		ssize_t rc = (i & 1) ? esdm_get_random_bytes_full(buf,
-								  sizeof(buf)) :
+		ssize_t rc = (i & 1) ? esdm_get_random_bytes_full_noblock(
+					       buf, sizeof(buf)) :
 				       esdm_get_random_bytes(buf, sizeof(buf));
 
 		if (rc == (ssize_t)sizeof(buf)) {
