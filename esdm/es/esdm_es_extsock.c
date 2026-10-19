@@ -39,7 +39,10 @@
  * the configured rate allows (esdm_config_es_ext_socket_entropy_rate()). A
  * provider that fails is credited with nothing until it delivers again, on a
  * seeding that asks it or on a probe of the ES monitor; one failing its self
- * test is credited with nothing until a self test passes.
+ * test is credited with nothing until a self test passes. Nor is a provider
+ * credited before its first self test since the source was set up: the self
+ * test pass of the ESDM runs before its first seeding, and a provider that was
+ * not connected then is tested on the first connection to it.
  */
 
 #define _GNU_SOURCE
@@ -104,6 +107,13 @@ static struct esdm_dtls *extsock_dtls = NULL;
  */
 static bool extsock_read_failed = false;
 static bool extsock_selftest_failed = false;
+
+/*
+ * No self test of the provider was answered since the source was set up, and
+ * the provider is credited with nothing until one was: the next connection
+ * runs one first. Under the same lock as the failures.
+ */
+static bool extsock_selftest_due = false;
 
 /*
  * Earliest time to connect again, and to probe a provider whose request
@@ -258,6 +268,7 @@ err:
 
 static ssize_t esdm_es_extsock_transact_locked(uint16_t type, uint32_t length,
 					       uint8_t *rsp);
+static int esdm_es_extsock_selftest_locked(void);
 
 #ifdef ESDM_DTLS
 
@@ -405,6 +416,14 @@ static int esdm_es_extsock_connect_locked(void)
 		esdm_es_extsock_encrypted_locked() ? "DTLS" : "unencrypted",
 		esdm_config_es_ext_socket_entropy_rate());
 	extsock_was_connected = true;
+
+	/* A provider not tested yet is tested before it is asked for anything */
+	if (extsock_selftest_due) {
+		(void)esdm_es_extsock_selftest_locked();
+		if (extsock_fd < 0)
+			return -ECONNRESET;
+	}
+
 	return 0;
 }
 
@@ -554,6 +573,7 @@ static int esdm_es_extsock_init(void)
 	extsock_was_connected = false;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
+	extsock_selftest_due = true;
 	extsock_status_warned = false;
 	/* A provider not there yet is connected to on demand */
 	if (esdm_es_extsock_configured_locked())
@@ -577,7 +597,8 @@ static void esdm_es_extsock_fini(void)
 /* Caller must hold extsock_mutex. */
 static uint32_t esdm_es_extsock_entropylevel_locked(uint32_t requested_bits)
 {
-	if (extsock_fd < 0 || extsock_read_failed || extsock_selftest_failed)
+	if (extsock_fd < 0 || extsock_read_failed || extsock_selftest_failed ||
+	    extsock_selftest_due)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -859,16 +880,52 @@ static bool esdm_es_extsock_active(void)
 }
 
 /*
- * The self test of the provider. One that is not connected is no failure:
- * it is credited with nothing until it is, and connected to on demand.
+ * The self test of the provider connected to. Caller must hold extsock_mutex
+ * (write lock) with the provider connected.
+ *
+ * @return 0 if it passed, -EFAULT if it failed or was not answered - the
+ *	   connection is closed then
  */
-static int esdm_es_extsock_selftest(void)
+static int esdm_es_extsock_selftest_locked(void)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint32_t bits;
 	const uint8_t *data;
 	int32_t status;
 	ssize_t n;
+
+	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_SELFTEST, 0, rsp);
+	if (n < 0 || esdm_es_ext_proto_rsp_unpack(rsp, (size_t)n,
+						  ESDM_ES_EXT_PROTO_SELFTEST, 0,
+						  &status, &bits, &data)) {
+		/* No verdict on the noise source, but no working connection */
+		esdm_es_extsock_drop_locked();
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "External ES provider: self test not answered\n");
+		extsock_read_failed = true;
+		return -EFAULT;
+	}
+
+	extsock_selftest_due = false;
+
+	if (status) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "External ES provider: self test failed: %s\n",
+			    strerror(-status));
+		extsock_selftest_failed = true;
+		return -EFAULT;
+	}
+	extsock_selftest_failed = false;
+
+	return 0;
+}
+
+/*
+ * The self test of the provider. One that is not connected is no failure:
+ * it is credited with nothing until it is, and tested once connected to.
+ */
+static int esdm_es_extsock_selftest(void)
+{
 	int ret = 0;
 
 	mutex_lock(&extsock_mutex);
@@ -880,28 +937,7 @@ static int esdm_es_extsock_selftest(void)
 		goto out;
 	}
 
-	n = esdm_es_extsock_transact_locked(ESDM_ES_EXT_PROTO_SELFTEST, 0, rsp);
-	if (n < 0 || esdm_es_ext_proto_rsp_unpack(rsp, (size_t)n,
-						  ESDM_ES_EXT_PROTO_SELFTEST, 0,
-						  &status, &bits, &data)) {
-		/* No verdict on the noise source, but no working connection */
-		esdm_es_extsock_drop_locked();
-		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-			    "External ES provider: self test not answered\n");
-		extsock_read_failed = true;
-		ret = -EFAULT;
-		goto out;
-	}
-
-	if (status) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-			    "External ES provider: self test failed: %s\n",
-			    strerror(-status));
-		extsock_selftest_failed = true;
-		ret = -EFAULT;
-		goto out;
-	}
-	extsock_selftest_failed = false;
+	ret = esdm_es_extsock_selftest_locked();
 
 out:
 	mutex_unlock(&extsock_mutex);
@@ -936,6 +972,7 @@ int esdm_es_ext_socket_set_path(const char *path)
 	extsock_was_connected = false;
 	extsock_read_failed = false;
 	extsock_selftest_failed = false;
+	extsock_selftest_due = true;
 	extsock_status_warned = false;
 	mutex_unlock(&extsock_mutex);
 

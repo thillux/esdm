@@ -34,7 +34,10 @@
  * counts as a failure - is credited with nothing until it delivers again: on
  * a seeding that asks it, its data then going into the additional data, or on
  * a probe of the ES monitor. A plugin failing its self test is credited with
- * nothing until a self test passes.
+ * nothing until a self test passes - and a plugin is credited with nothing
+ * before its first self test passed: at start up and on a re-init, the self
+ * test pass of the ESDM runs before the first seeding; a plugin loaded while
+ * the source runs is tested right away.
  */
 
 #include <dlfcn.h>
@@ -87,6 +90,12 @@ static char extlib_loaded_path[PATH_MAX];
 static bool extlib_read_failed = false;
 static bool extlib_selftest_failed = false;
 
+/*
+ * The plugin initialized has not been through a self test yet, and is credited
+ * with nothing until it was. Under the same lock as the failures.
+ */
+static bool extlib_selftest_due = false;
+
 /* Earliest time to probe a plugin whose request failed, monotonic seconds */
 static time_t extlib_probe_at = 0;
 
@@ -117,6 +126,7 @@ static void esdm_es_extlib_unload_locked(void)
 	extlib_loaded_path[0] = '\0';
 	extlib_read_failed = false;
 	extlib_selftest_failed = false;
+	extlib_selftest_due = false;
 	extlib_status_warned = false;
 }
 
@@ -147,6 +157,7 @@ static int esdm_es_extlib_init_plugin_locked(const struct esdm_es_ext_plugin *p)
 	extlib_ctx = ctx;
 	extlib_read_failed = false;
 	extlib_selftest_failed = false;
+	extlib_selftest_due = true;
 	return 0;
 }
 
@@ -259,7 +270,8 @@ static void esdm_es_extlib_fini(void)
 /* Caller must hold extlib_mutex. */
 static uint32_t esdm_es_extlib_entropylevel_locked(uint32_t requested_bits)
 {
-	if (!extlib_plugin || extlib_read_failed || extlib_selftest_failed)
+	if (!extlib_plugin || extlib_read_failed || extlib_selftest_failed ||
+	    extlib_selftest_due)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -409,6 +421,7 @@ static void esdm_es_extlib_es_state(struct json_object *obj)
 		 extlib_plugin && extlib_plugin->name ? extlib_plugin->name :
 							"(none)");
 	status = !extlib_plugin		 ? "not loaded" :
+		 extlib_selftest_due	 ? "awaiting its self test" :
 		 extlib_selftest_failed ? "failing its self test" :
 		 extlib_read_failed	 ? "failing" :
 					   "delivering";
@@ -438,19 +451,22 @@ static bool esdm_es_extlib_active(void)
 	return ret;
 }
 
-/* The self test of the plugin, if it has one */
-static int esdm_es_extlib_selftest(void)
+/*
+ * The self test of the plugin, if it has one. Caller must hold extlib_mutex
+ * (write lock).
+ */
+static int esdm_es_extlib_selftest_locked(void)
 {
-	int ret = 0;
-
-	mutex_lock(&extlib_mutex);
+	int ret;
 
 	if (!extlib_plugin) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
 			"External ES plugin: none loaded - nothing to test\n");
-		goto out;
+		return 0;
 	}
+
+	extlib_selftest_due = false;
 
 	if (extlib_plugin->selftest) {
 		ret = extlib_plugin->selftest(extlib_ctx);
@@ -460,14 +476,22 @@ static int esdm_es_extlib_selftest(void)
 				"External ES plugin: self test failed: %d\n",
 				ret);
 			extlib_selftest_failed = true;
-			ret = -EFAULT;
-			goto out;
+			return -EFAULT;
 		}
 	}
 	extlib_selftest_failed = false;
 
-out:
+	return 0;
+}
+
+static int esdm_es_extlib_selftest(void)
+{
+	int ret;
+
+	mutex_lock(&extlib_mutex);
+	ret = esdm_es_extlib_selftest_locked();
 	mutex_unlock(&extlib_mutex);
+
 	return ret;
 }
 
@@ -494,11 +518,15 @@ int esdm_es_ext_lib_set_path(const char *path)
 
 	/*
 	 * Set before esdm_init(), as the server does, the plugin is loaded by
-	 * the init of the source. Once the source runs, the plugin is replaced
-	 * right away.
+	 * the init of the source, and tested by the self test pass following
+	 * it. Once the source runs, the plugin is replaced right away - and
+	 * tested right away, as it is credited with nothing until it was.
 	 */
-	if (extlib_initialized)
+	if (extlib_initialized) {
 		ret = esdm_es_extlib_load_locked();
+		if (!ret)
+			(void)esdm_es_extlib_selftest_locked();
+	}
 
 	mutex_unlock(&extlib_mutex);
 

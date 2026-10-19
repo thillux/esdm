@@ -57,14 +57,20 @@ int esdm_init(void)
 	if (ret)
 		goto fini;
 
-	/* Initialize all nodes */
-	esdm_drngs_node_alloc();
-
 	/*
 	 * The initial self test pass, now that there are entropy sources to
-	 * ask.
+	 * ask - and before the DRNG is seeded from them: a source failing its
+	 * self test is not to be credited for that seed.
 	 */
 	esdm_selftest_run();
+
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+		    "Force fully seeding of all DRBGs\n");
+	esdm_force_fully_seeded_all_drbgs();
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES, "All DRBGs fully seeded\n");
+
+	/* Initialize all nodes */
+	esdm_drngs_node_alloc();
 
 	/* Initialize the status ESDM shared memory segment */
 	ret = esdm_shm_status_init();
@@ -122,9 +128,12 @@ int esdm_reinit(void)
 
 	/*
 	 * The implementations and the entropy sources may all be different ones
-	 * now, so they are put through the same pass as at start up.
+	 * now, so they are put through the same pass as at start up - before
+	 * the DRNG is seeded from them, as there.
 	 */
 	esdm_selftest_run();
+
+	esdm_force_fully_seeded();
 
 	/* Reinitialize the status ESDM shared memory segment */
 	CKINT(esdm_shm_status_reinit());

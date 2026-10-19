@@ -112,8 +112,11 @@ extern "C" {
  *		 not deliver - the data is discarded then. Must not block for
  *		 long: it runs while a DRNG waits for its seed.
  * @selftest: Check that the source still works, without consuming the data
- *	      the ESDM is handed. Returns 0 or a negative errno. Run at start up
- *	      and on the interval of the ESDM self tests. May be NULL.
+ *	      the ESDM is handed. Returns 0 or a negative errno. Run before the
+ *	      ESDM credits the source for the first time - at start up before
+ *	      it seeds its DRNGs, for a provider that is not there then on the
+ *	      first connection to it - and on the interval of the ESDM self
+ *	      tests. May be NULL.
  * @status_json: Write the status of the source - whatever helps whoever looks
  *		 at the ESDM status, e.g. the device read or the health of the
  *		 noise source - into @buf of @buflen bytes as one JSON object,

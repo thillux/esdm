@@ -1107,7 +1107,10 @@ int esdm_es_mgr_reinitialize(void)
 		}
 	}
 
-	esdm_force_fully_seeded();
+	/*
+	 * The DRNG is seeded by esdm_reinit(), once the sources went through
+	 * their self tests.
+	 */
 
 out:
 	return ret;
@@ -1184,10 +1187,10 @@ int esdm_es_mgr_initialize(void)
 					   0));
 	}
 
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-		    "Force fully seeding of all DRBGs\n");
-	esdm_force_fully_seeded_all_drbgs();
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES, "All DRBGs fully seeded\n");
+	/*
+	 * The DRNGs are seeded by esdm_init(), once the sources went through
+	 * their self tests: none is to be credited before.
+	 */
 
 out:
 	memset_secure(&seed, 0, sizeof(seed));

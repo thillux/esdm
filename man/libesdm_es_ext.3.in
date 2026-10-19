@@ -80,8 +80,10 @@ seed it is part of. The other callbacks may be NULL;
 .I init
 returns the context handed to the others,
 .I selftest
-checks the source without consuming the data it delivers and runs on the
-interval of the ESDM self tests.
+checks the source without consuming the data it delivers. It runs before the
+ESDM credits the source for the first time \- at start up before the ESDM
+seeds its DRNGs, for a provider that is not there then on the first connection
+to it \- and on the interval of the ESDM self tests.
 .PP
 .I status_json
 writes the status of the source \- whatever helps whoever looks at the ESDM
@@ -130,9 +132,9 @@ as they are; that of a provider to 0, so that a provider is credited only once
 a rate is configured. A claim beyond the size of the block is a failure: the
 block is discarded, and the source is credited with nothing until it delivers
 properly again \- the ESDM asks a failed source again on its own to find out.
-A source failing its
-.I selftest
-is credited with nothing until a self test passes.
+A source is credited with nothing before its first
+.IR selftest ,
+and a source failing it with nothing until a self test passes.
 .SH FUNCTIONS
 .SS Provider server
 .TP

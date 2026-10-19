@@ -130,6 +130,20 @@ if get_option('es_ext').enabled()
 		args: es_ext_plugin_args, depends: es_ext_plugins,
 		suite: 'es_ext')
 
+	# The self test of a plugin before the initial seeding of esdm_init()
+	es_ext_init_test = executable('es_ext_init_test',
+		[ esdm_ipc_ns, 'es_ext_init_test.c' ],
+		dependencies: dependencies_server + [ dl_dep ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('External ES self test before the initial seeding',
+		es_ext_init_test,
+		args: [ es_ext_test_plugin.full_path() ],
+		depends: [ es_ext_test_plugin ],
+		suite: 'es_ext', timeout: 60)
+
 	# The socket source is compiled into the test - see the file header -
 	# against the provider server of the library serving the test plugin.
 	if get_option('esdm-es-ext').enabled()

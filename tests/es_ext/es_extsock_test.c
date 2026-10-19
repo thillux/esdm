@@ -31,7 +31,8 @@
  *   seeding, or by the monitor of the source when no seeding asks; the same
  *   for a provider that was not there at start up.
  * - A provider failing its self test is credited with nothing until a self
- *   test passes, whatever it delivers meanwhile.
+ *   test passes, whatever it delivers meanwhile. Its first self test runs
+ *   on the first connection to it, before it is credited.
  * - A provider answering what the protocol does not allow - a wrong magic,
  *   more data than asked for, more entropy than the data holds - or not
  *   answering at all is disconnected and credited with nothing, and none of
@@ -183,6 +184,16 @@ static void *test_evil_run(void *arg)
 				break;
 
 			memset(data, 0xee, sizeof(data));
+
+			/* Its noise source is in order, whatever it answers else */
+			if (type == ESDM_ES_EXT_PROTO_SELFTEST) {
+				len = esdm_es_ext_proto_rsp_pack(rsp, type, 0,
+								 0, NULL, 0);
+				if (send(fd, rsp, len, MSG_NOSIGNAL) !=
+				    (ssize_t)len)
+					break;
+				continue;
+			}
 
 			/* No DTLS here: refused, or unknown to an old provider */
 			if (type == ESDM_ES_EXT_PROTO_STARTDTLS) {
@@ -349,6 +360,7 @@ static void test_arguments(void)
 static void test_credit(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	unsigned int selftest_calls = ctl->selftest_calls;
 	uint8_t first;
 
 	CHECK_EQ(esdm_es_ext_socket_set_path(test_good), 0);
@@ -356,6 +368,9 @@ static void test_credit(void)
 	CHECK(ES->active(), "the source is not active with a provider");
 	CHECK(test_state_has("status", "connected (uid"),
 	      "the provider is not connected");
+
+	/* Tested on the first connection, before it is credited */
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
 
 	esdm_config_es_ext_socket_entropy_rate_set(256);
 	CHECK_EQ(ES->max_entropy(), test_level(256, esdm_security_strength()));
@@ -630,10 +645,15 @@ static void test_status_old_provider(void)
 	CHECK_EQ(ES->init(), 0);
 }
 
-/* A provider that is not there when the source starts is connected later */
+/*
+ * A provider that is not there when the source starts is connected later -
+ * and tested then, before it is credited: the self test pass of the ESDM
+ * found nothing to test.
+ */
 static void test_late_provider(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	unsigned int selftest_calls;
 
 	test_server_stop();
 	ES->fini();
@@ -641,10 +661,34 @@ static void test_late_provider(void)
 	CHECK(test_state_has("status", "not connected"),
 	      "connected to nothing");
 	CHECK_EQ(ES->max_entropy(), 0);
+	CHECK_EQ(ES->selftest(), 0);
 
+	/* Failing that test, it is connected and credited with nothing */
+	ctl->selftest_ret = -ENODEV;
+	selftest_calls = ctl->selftest_calls;
 	CHECK_EQ(test_server_start(), 0);
 	test_wait_retry();
 	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+	CHECK(test_state_has("status", "failing its self test"),
+	      "the first self test of a late provider did not run");
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+
+	/* Until a self test passes */
+	ctl->selftest_ret = 0;
+	CHECK_EQ(ES->selftest(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+
+	/* Passing it, credited at once */
+	test_server_stop();
+	ES->fini();
+	CHECK_EQ(ES->init(), 0);
+	selftest_calls = ctl->selftest_calls;
+	CHECK_EQ(test_server_start(), 0);
+	test_wait_retry();
+	CHECK_EQ(ES->monitor_es(), 0);
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
 	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
 }
 

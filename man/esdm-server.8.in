@@ -236,8 +236,9 @@ Each block is credited with the entropy the plugin claims for it, but with at
 most what the configured rate allows. A plugin that fails to deliver, or claims
 more entropy than the block can hold, is credited with nothing until it
 delivers again; the daemon asks it again on its own, at most every 5 seconds,
-to find out. A plugin failing its self test is credited with nothing until a
-self test passes.
+to find out. A plugin is credited with nothing before its first self test,
+which runs before the daemon seeds its DRNGs, and a plugin failing its self
+test with nothing until a self test passes.
 .PP
 A provider given with
 .B \-\-es_ext_socket
@@ -259,7 +260,9 @@ protocol does not allow, is disconnected and not connected to again for 5
 seconds; one that is not connected, or failed, is credited with nothing until
 it delivers again, which the daemon finds out on its own. The same entropy credit
 applies as for a plugin, with the rate of
-.BR \-\-es_ext_socket_entropy_rate .
+.BR \-\-es_ext_socket_entropy_rate ;
+a provider that is not there at start up has its first self test on the first
+connection to it.
 .PP
 A plugin, or a provider, may report a status of its own, a JSON object: the
 status of the daemon shows it as the

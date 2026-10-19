@@ -31,7 +31,10 @@
  *   refused block is not handed on. The monitor of the source finds out on
  *   its own that it delivers again.
  * - A plugin failing its self test is credited with nothing until a self test
- *   passes, whatever it delivers meanwhile.
+ *   passes, whatever it delivers meanwhile - and a plugin is credited with
+ *   nothing before its first self test: one loaded by the init of the source
+ *   until the self test pass that follows, one loaded while the source runs
+ *   is tested right away.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
@@ -119,8 +122,28 @@ static void test_credit(const char *path)
 	CHECK(test_state_has("plugin", "es-ext-test"),
 	      "the state does not name the plugin");
 
-	/* The claim of the plugin, all of the block, at the full rate */
+	/*
+	 * Nothing credited before its first self test, which the self test
+	 * pass of the ESDM runs before the first seeding - one that fails
+	 * keeps it that way.
+	 */
 	esdm_config_es_ext_lib_entropy_rate_set(256);
+	CHECK(test_state_has("status", "awaiting its self test"),
+	      "the state does not say the self test is due");
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(ES->max_entropy(), 0);
+	CHECK_EQ(test_get(bits, &first), 0);
+	CHECK_EQ(first, ctl->get_calls & 0xff);
+	ctl->selftest_ret = -ENODEV;
+	CHECK_EQ(ES->selftest(), -EFAULT);
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	ctl->selftest_ret = 0;
+	CHECK_EQ(ES->selftest(), 0);
+	CHECK(test_state_has("status", "delivering"),
+	      "the state does not say it delivers");
+
+	/* The claim of the plugin, all of the block, at the full rate */
 	CHECK_EQ(ES->max_entropy(), test_level(256, esdm_security_strength()));
 	CHECK_EQ(test_get(bits, &first), test_level(256, bits));
 	CHECK_EQ(ctl->last_buflen, bits / 8);
@@ -199,7 +222,7 @@ static void test_credit(const char *path)
 	ctl->selftest_ret = 0;
 	CHECK_EQ(ES->selftest(), 0);
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
-	CHECK_EQ(ctl->selftest_calls, 3);
+	CHECK_EQ(ctl->selftest_calls, 5);
 }
 
 /* The "provider" member of the state, NULL if there is none */
@@ -331,14 +354,22 @@ static void test_status(const char *good, const char *v1)
 
 static void test_reinit(void)
 {
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	unsigned int init_calls = ctl->init_calls;
 	unsigned int fini_calls = ctl->fini_calls;
+	unsigned int selftest_calls = ctl->selftest_calls;
 
 	/* Initialized anew, not loaded again */
 	CHECK_EQ(ES->init(), 0);
 	CHECK(ES->active(), "the plugin is gone after a re-init");
 	CHECK_EQ(ctl->fini_calls, fini_calls + 1);
 	CHECK_EQ(ctl->init_calls, init_calls + 1);
+
+	/* And credited with nothing until the self test pass that follows */
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(ctl->selftest_calls, selftest_calls);
+	CHECK_EQ(ES->selftest(), 0);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
 
 	/* The path outlives the fini of the source */
 	ES->fini();
@@ -359,9 +390,23 @@ static void test_reinit(void)
 static void test_bad_plugins(const char *good, const char *bad_version,
 			     const char *no_get, const char *no_plugin)
 {
-	/* Set while the source runs, a plugin is loaded at once */
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	unsigned int selftest_calls = ctl->selftest_calls;
+
+	/* Set while the source runs, a plugin is loaded - and tested - at once */
 	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
 	CHECK(ES->active(), "the plugin was not loaded at once");
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+
+	/* One failing the self test is used, but credited with nothing */
+	ctl->selftest_ret = -ENODEV;
+	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
+	CHECK(ES->active(), "a plugin failing its self test is not used");
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK(test_state_has("status", "failing its self test"),
+	      "the state does not say the self test fails");
+	ctl->selftest_ret = 0;
 
 	CHECK_EQ(esdm_es_ext_lib_set_path(bad_version), -EPROTO);
 	CHECK(!ES->active(), "a plugin of another version is used");
