@@ -149,7 +149,10 @@ The local provider socket, which
 .B esdm\-server \-\-es_ext_socket
 names. A socket left behind by an earlier relay is replaced, one served by a
 running process is not. The default is
-.IR /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket .
+.IR /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket ,
+in a directory the unit creates (see
+.BR SYSTEMD );
+a relay started otherwise needs it to exist, or a socket of its own.
 .TP
 .BR \-m ", " \-\-mode " \fIMODE\fR"
 Access mode of the socket, octal. The default is 0666: the ESDM connects as

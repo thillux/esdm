@@ -336,10 +336,14 @@ esdm-es-ext-serve --plugin /usr/lib/esdm/my_es.so --listen :7379 \
 # the host of the ESDM, 192.0.2.10
 esdm-es-ext-relay --connect source.example \
 	--cert client.crt --key client.key --ca ca.crt \
-	--socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket
-esdm-server --es_ext_socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket \
+	--socket /run/esdm-es-ext-relay.socket
+esdm-server --es_ext_socket /run/esdm-es-ext-relay.socket \
 	--es_ext_socket_uid esdm-es-ext-relay
 ```
+
+The relay serves `/run/esdm-es-ext-relay/esdm-es-ext-relay.socket` unless told
+otherwise - a directory its unit creates, so a relay started by hand names a
+socket of its own, as here.
 
 The ESDM credits the source at the rate the remote provider declares unless
 one is configured for it: accepting the user of the relay is trusting every
@@ -361,10 +365,14 @@ PKCS#11 module or link libp11.
 
 ```
 esdm-es-pkcs11 --module /usr/lib/softhsm/libsofthsm2.so \
-	--token_label my-token --pin_file /etc/esdm/pkcs11-pin
-esdm-server --es_ext_socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket \
+	--token_label my-token --pin_file /etc/esdm/pkcs11-pin \
+	--socket /run/esdm-es-pkcs11.socket
+esdm-server --es_ext_socket /run/esdm-es-pkcs11.socket \
 	--es_ext_socket_uid esdm-es-pkcs11
 ```
+
+Without `--socket`, the daemon serves
+`/run/esdm-es-pkcs11/esdm-es-pkcs11.socket`, in a directory its unit creates.
 
 The daemon takes the token of the given label, or the first one with a random
 number generator, logs in only if a PIN is configured and the token asks for

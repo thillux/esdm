@@ -253,6 +253,9 @@ takes precedence.
 .BR \-s ", " \-\-socket " \fIPATH\fR"
 The socket to serve on, by default
 .IR /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket .
+The directory of the default is created by the unit (see
+.BR SYSTEMD );
+a daemon started otherwise needs it to exist, or a socket of its own.
 A socket left at the path by an earlier instance is replaced, any other file is
 not.
 .TP
@@ -466,16 +469,18 @@ of its unit:
 Environment="ESDM_SERVER_OPTIONS=\-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \-\-es_ext_socket_uid esdm\-es\-pkcs11"
 .fi
 .SH EXAMPLE
-A SoftHSM token, the PIN in a file only root can read, the daemon running as
-the user
-.BR esdm\-es\-pkcs11 :
+A SoftHSM token, the PIN in a file only root can read, the daemon started by
+root on a socket of its own \- the ESDM accepts a provider running as root,
+while the unit runs it as the user
+.B esdm\-es\-pkcs11
+in the directory it creates, see
+.BR SYSTEMD :
 .PP
 .nf
 esdm\-es\-pkcs11 \-\-module /usr/lib/softhsm/libsofthsm2.so \\
 	\-\-token_label my\-token \-\-pin_file /etc/esdm/pkcs11\-pin \\
-	\-\-socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket
-esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
-	\-\-es_ext_socket_uid esdm\-es\-pkcs11
+	\-\-socket /run/esdm\-es\-pkcs11.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11.socket
 .fi
 .SH SEE ALSO
 .BR esdm\-server (8),
