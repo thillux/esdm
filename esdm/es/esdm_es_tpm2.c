@@ -44,10 +44,14 @@ static int tpm2_fd = -1;
 static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
 
 /*
- * A connection lost to an I/O error is reopened on demand, at most once per
- * interval: a resource manager restart must not take the source out for good,
- * nor a TPM that is gone cost an open() per request. A device absent at init
- * stays disabled, as before. Monotonic seconds, written under tpm2_mutex.
+ * A connection lost to an I/O error is tried again on demand, at most once per
+ * interval: a resource manager hiccup must not take the source out for good,
+ * nor a TPM that is gone cost an exchange per request. The device stays open
+ * meanwhile. It is opened anew for the next try where that works, and the
+ * descriptor the source has is tried again where it does not - the device is
+ * root:tss 0660, and the server has dropped its privileges by then. A device
+ * absent at init stays disabled, as before. Monotonic seconds, written under
+ * tpm2_mutex.
  */
 #define ESDM_TPM2_REOPEN_INTERVAL_SEC 5
 static bool tpm2_lost = false;
@@ -72,8 +76,6 @@ static uint32_t esdm_es_tpm2_buf_credit(uint32_t requested_bits);
 static struct esdm_es_buf tpm2_buf;
 static bool tpm2_buf_alloced = false;
 #endif
-
-static bool esdm_es_tpm2_active(void);
 
 /* session type */
 typedef uint16_t TPM2_ST;
@@ -126,10 +128,9 @@ static void esdm_es_tpm2_finalize_locked(void)
 	tpm2_fd = -1;
 }
 
-/* Caller must hold tpm2_mutex (write lock). */
+/* Caller must hold tpm2_mutex (write lock). The device stays open. */
 static void esdm_es_tpm2_lost_locked(void)
 {
-	esdm_es_tpm2_finalize_locked();
 	tpm2_lost = true;
 	tpm2_reopen_at = esdm_es_tpm2_now() + ESDM_TPM2_REOPEN_INTERVAL_SEC;
 }
@@ -140,7 +141,7 @@ static void esdm_es_tpm2_reopen_locked(void)
 	time_t now;
 	int fd;
 
-	if (tpm2_fd >= 0 || !tpm2_lost)
+	if (tpm2_fd < 0 || !tpm2_lost)
 		return;
 
 	now = esdm_es_tpm2_now();
@@ -150,23 +151,28 @@ static void esdm_es_tpm2_reopen_locked(void)
 
 	fd = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-			    "TPM 2.0 reopen failed: %s\n", strerror(errno));
-		return;
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_ES,
+			"TPM 2.0 reopen failed: %s - trying the open device again\n",
+			strerror(errno));
+	} else {
+		close(tpm2_fd);
+		tpm2_fd = fd;
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+			    "TPM 2.0 entropy source reopened its device\n");
 	}
 
-	tpm2_fd = fd;
+	/* The next exchange tells, no entropy is claimed until it delivers */
 	tpm2_lost = false;
-	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-		    "TPM 2.0 entropy source reopened its device\n");
+	tpm2_read_failed = true;
 }
 
 /*
  * Send a TPM 2.0 command and receive the response.
  *
  * Returns 0 on success, -1 on failure (I/O error or TPM error).
- * Caller must hold tpm2_mutex (write lock), since tpm2_fd may be reset on
- * I/O failure.
+ * Caller must hold tpm2_mutex (write lock), since an I/O failure marks the
+ * connection lost.
  *
  * rsp_buffer may be NULL only when rsp_buffer_len is 0.
  */
@@ -351,7 +357,8 @@ static int esdm_es_tpm2_init(void)
 /* Caller must hold tpm2_mutex. */
 static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
 {
-	if (tpm2_fd < 0 || tpm2_selftest_failed || tpm2_read_failed)
+	if (tpm2_fd < 0 || tpm2_lost || tpm2_selftest_failed ||
+	    tpm2_read_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
@@ -488,13 +495,13 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 	uint32_t done_bits = 0;
 
 	/*
-	 * Use an exclusive lock: transceive may close and reset tpm2_fd on
-	 * I/O errors, which is a write to shared state.
+	 * Use an exclusive lock: transceive marks the connection lost on I/O
+	 * errors, which is a write to shared state.
 	 */
 	mutex_lock(&tpm2_mutex);
 
 	esdm_es_tpm2_reopen_locked();
-	if (tpm2_fd < 0)
+	if (tpm2_fd < 0 || tpm2_lost)
 		goto err;
 
 	while (done_bits < requested_bits) {
@@ -560,13 +567,15 @@ static void esdm_es_tpm2_buf_fill(struct entropy_es *eb_es,
 static int esdm_es_tpm2_monitor(void)
 {
 	uint32_t requested_bits = esdm_get_seed_entropy_osr(false, true);
+	bool connected;
 
 	/* A cache hit never reaches the reopen in esdm_es_tpm2_get_sync() */
 	mutex_lock(&tpm2_mutex);
 	esdm_es_tpm2_reopen_locked();
+	connected = tpm2_fd >= 0 && !tpm2_lost;
 	mutex_unlock(&tpm2_mutex);
 
-	if (!esdm_es_tpm2_active())
+	if (!connected)
 		return 0;
 
 	return esdm_es_buf_monitor(&tpm2_buf, requested_bits,
@@ -640,16 +649,16 @@ static int esdm_es_tpm2_selftest(void)
 	mutex_lock(&tpm2_mutex);
 
 	esdm_es_tpm2_reopen_locked();
+	/* A device that went away is a failure, one never there not */
+	if (tpm2_lost) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "TPM2 ES: connection to the TPM lost\n");
+		ret = -EFAULT;
+		goto out;
+	}
 	if (tpm2_fd < 0) {
-		/* A device that went away is a failure, one never there not */
-		if (tpm2_lost) {
-			esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-				    "TPM2 ES: connection to the TPM lost\n");
-			ret = -EFAULT;
-		} else {
-			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-				    "TPM2 ES: no device - nothing to test\n");
-		}
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+			    "TPM2 ES: no device - nothing to test\n");
 		goto out;
 	}
 

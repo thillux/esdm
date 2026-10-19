@@ -27,6 +27,9 @@
  * selecting it by token label, logging in and pulling bytes out of
  * C_GenerateRandom. The token is created in a directory of this test's own, so
  * the run neither depends on nor disturbs any token on the machine.
+ *
+ * The source is compiled into the test, which reaches into its state to stand
+ * in for a server that has dropped its privileges.
  */
 
 #define _GNU_SOURCE
@@ -41,6 +44,10 @@
 #include <unistd.h>
 
 #include "config.h"
+
+/* The unit under test */
+#include "esdm_es_pkcs11.c"
+
 #include "esdm_config.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
@@ -422,6 +429,46 @@ static void test_token_appears(void)
 		      "the token that turned up delivered no entropy");
 }
 
+/*
+ * A token lost - to a failed read, a smartcard pulled - or looked for by a new
+ * label is looked for among the slots of the module loaded. The module was
+ * unloaded and loaded anew instead, which a server that has dropped its
+ * privileges since cannot do for a module needing them: the source was gone
+ * for good. Here the source runs as another user than it was initialized
+ * with, and a configuration SoftHSM no longer finds fails a module loaded anew.
+ */
+static void test_module_kept(void)
+{
+	struct entropy_es eb_es;
+
+	mutex_lock(&pkcs11_mutex);
+	pkcs11_init_uid = geteuid() + 1;
+	mutex_unlock(&pkcs11_mutex);
+	setenv("SOFTHSM2_CONF", "/nonexistent/softhsm2.conf", 1);
+
+	CHECK(esdm_es_pkcs11_set_token_label("esdm-no-such-token") == -ENOENT,
+	      "an unknown token label was not looked for on the loaded module");
+	CHECK(esdm_es_pkcs11_set_token_label(TOKEN_LABEL) == 0,
+	      "the token was not found again on the loaded module");
+
+	/* As a failed read does */
+	mutex_lock(&pkcs11_mutex);
+	esdm_es_pkcs11_drop_slot_locked();
+	pkcs11_retry_at = 0;
+	mutex_unlock(&pkcs11_mutex);
+
+	memset(&eb_es, 0, sizeof(eb_es));
+	esdm_es[ES_IDX]->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS, false);
+	if (esdm_config_es_pkcs11_entropy_rate())
+		CHECK(eb_es.e_bits > 0,
+		      "the token was not picked up again on the loaded module");
+
+	setenv("SOFTHSM2_CONF", confpath, 1);
+	mutex_lock(&pkcs11_mutex);
+	pkcs11_init_uid = geteuid();
+	mutex_unlock(&pkcs11_mutex);
+}
+
 static void test_reject_null(void)
 {
 	CHECK(esdm_es_pkcs11_set_pin(NULL) == -EINVAL,
@@ -458,6 +505,7 @@ int main(int argc, char *argv[])
 	test_get_entropy();
 	test_get_entropy_differs();
 	test_state();
+	test_module_kept();
 	test_reject_null();
 	test_token_appears();
 	/* Last: it drops the overrides the tests above rely on */

@@ -67,11 +67,13 @@ int esdm_es_pkcs11_set_pin(const char *pin);
 /**
  * @brief Install a runtime token label for the PKCS#11 entropy source.
  *
- * The label replaces any previously configured runtime token label and
- * triggers a re-open of the PKCS#11 module so that a slot whose token label
- * matches is selected. Pass an empty string to clear the runtime override;
- * the module is then re-opened against the compile-time default (or the
- * first usable slot if none is configured).
+ * The label replaces any previously configured runtime token label, and the
+ * source looks for a slot whose token label matches at once: among the slots
+ * of the PKCS#11 module it has loaded, which is loaded anew only while the
+ * process runs with the user and group the source was initialized with, or
+ * when it is not loaded. Pass an empty string to clear the runtime override;
+ * the token is then looked for by the compile-time default (or the first
+ * usable slot is taken if none is configured).
  *
  * The label is held in process memory only and is not persisted across
  * server restarts.

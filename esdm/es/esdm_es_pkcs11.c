@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <libp11.h>
 
@@ -92,6 +93,22 @@ static bool pkcs11_selftest_failed = false;
  * monotonic seconds, written under pkcs11_mutex.
  */
 static time_t pkcs11_retry_at = 0;
+
+/*
+ * The effective user and group the source was initialized with. The module is
+ * kept loaded across a failure and loaded anew only while they are the ones in
+ * effect: once the server has dropped its privileges, a module needing them -
+ * for a configuration or a device only root may open - would not load again,
+ * and the source would have lost the one it had. Written under pkcs11_mutex.
+ */
+static uid_t pkcs11_init_uid = 0;
+static gid_t pkcs11_init_gid = 0;
+
+/* Can the module be loaded anew? Caller must hold pkcs11_mutex. */
+static bool esdm_es_pkcs11_may_load_locked(void)
+{
+	return geteuid() == pkcs11_init_uid && getegid() == pkcs11_init_gid;
+}
 
 /* Caller must hold pkcs11_mutex (write lock). */
 static const char *esdm_es_pkcs11_pin_locked(void)
@@ -288,7 +305,8 @@ static int esdm_es_pkcs11_login_locked(void)
 /*
  * Open the PKCS#11 module and select a usable slot. Caller must hold
  * pkcs11_mutex (write lock). Any previously held module/slot state is torn
- * down first.
+ * down first. A module that loads stays loaded without a usable token, for
+ * esdm_es_pkcs11_refresh_slot_locked() to look among its slots again.
  *
  * Returns 0 on success. Negative errno otherwise: -ENODEV when the module
  * cannot be loaded, -ENOENT when no matching token is found, -EACCES when
@@ -334,7 +352,6 @@ static int esdm_es_pkcs11_open_module_locked(void)
 			"Disabling PKCS#11 entropy source: failed to enumerate slots\n");
 		pkcs11_slots = NULL;
 		pkcs11_nslots = 0;
-		esdm_es_pkcs11_finalize_locked();
 		return -EIO;
 	}
 
@@ -343,14 +360,13 @@ static int esdm_es_pkcs11_open_module_locked(void)
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
 			"Disabling PKCS#11 entropy source: no usable token with RNG found\n");
-		esdm_es_pkcs11_finalize_locked();
 		return -ENOENT;
 	}
 
 	/* The refusal is logged there */
 	ret = esdm_es_pkcs11_login_locked();
 	if (ret) {
-		esdm_es_pkcs11_finalize_locked();
+		pkcs11_slot = NULL;
 		return ret;
 	}
 
@@ -366,6 +382,8 @@ static int esdm_es_pkcs11_open_module_locked(void)
 static int esdm_es_pkcs11_init(void)
 {
 	mutex_lock(&pkcs11_mutex);
+	pkcs11_init_uid = geteuid();
+	pkcs11_init_gid = getegid();
 	(void)esdm_es_pkcs11_open_module_locked();
 	pkcs11_initialized = true;
 	mutex_unlock(&pkcs11_mutex);
@@ -419,9 +437,14 @@ static uint32_t esdm_es_pkcs11_poolsize(void)
 /*
  * Caller must hold pkcs11_mutex (write lock).
  * Try to (re-)bind to a usable token without unloading the module. Used after
- * a read failure or when the smartcard has been physically removed and
- * re-inserted: PKCS#11 only refreshes its slot view via release_all_slots +
- * enumerate_slots.
+ * a read failure, when the smartcard has been physically removed and
+ * re-inserted, and for a new token label: PKCS#11 only refreshes its slot view
+ * via release_all_slots + enumerate_slots.
+ *
+ * The module is loaded anew only where that can work out
+ * (esdm_es_pkcs11_may_load_locked()): when it is not loaded, or when its slots
+ * carry no usable token - some modules, SoftHSM among them, only see a token
+ * added after they were loaded once they are loaded again.
  *
  * Returns 0 on success, -ENODEV when the module is not loaded and reloading
  * fails, -EIO when slot enumeration fails, -ENOENT when no usable token is
@@ -429,14 +452,13 @@ static uint32_t esdm_es_pkcs11_poolsize(void)
  */
 static int esdm_es_pkcs11_refresh_slot_locked(void)
 {
-	int ret;
+	int ret = -ENODEV;
 
 	/* Drop any previous slot binding before refreshing. */
 	esdm_es_pkcs11_drop_slot_locked();
 
-	/* Module isn't loaded — try a full open. */
 	if (!pkcs11_ctx)
-		return esdm_es_pkcs11_open_module_locked();
+		goto reload;
 
 	/* Refresh the slot list so newly-inserted tokens become visible. */
 	if (pkcs11_slots) {
@@ -450,12 +472,15 @@ static int esdm_es_pkcs11_refresh_slot_locked(void)
 	    0) {
 		pkcs11_slots = NULL;
 		pkcs11_nslots = 0;
-		return -EIO;
+		ret = -EIO;
+		goto reload;
 	}
 
 	pkcs11_slot = esdm_es_pkcs11_pick_slot();
-	if (!pkcs11_slot)
-		return -ENOENT;
+	if (!pkcs11_slot) {
+		ret = -ENOENT;
+		goto reload;
+	}
 
 	ret = esdm_es_pkcs11_login_locked();
 	if (ret) {
@@ -464,11 +489,17 @@ static int esdm_es_pkcs11_refresh_slot_locked(void)
 	}
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-		    "PKCS#11 entropy source recovered token '%s'\n",
+		    "PKCS#11 entropy source using token '%s'\n",
 		    pkcs11_slot->token->label ? pkcs11_slot->token->label :
 						"(no label)");
 
 	return 0;
+
+reload:
+	/* Without the privileges of the init, the loaded module is kept */
+	if (!esdm_es_pkcs11_may_load_locked())
+		return ret;
+	return esdm_es_pkcs11_open_module_locked();
 }
 
 /*
@@ -804,8 +835,13 @@ int esdm_es_pkcs11_set_token_label(const char *label)
 	old = pkcs11_runtime_token_label;
 	pkcs11_runtime_token_label = new_copy;
 
-	/* Re-open the module so the new label is honored immediately. */
-	ret = esdm_es_pkcs11_open_module_locked();
+	/*
+	 * Look for the token of the new label at once - among the slots of the
+	 * module loaded, which may not load again with the privileges of the
+	 * server dropped. One that is not loaded is loaded, as asked for.
+	 */
+	ret = pkcs11_ctx ? esdm_es_pkcs11_refresh_slot_locked() :
+			   esdm_es_pkcs11_open_module_locked();
 
 	mutex_unlock(&pkcs11_mutex);
 

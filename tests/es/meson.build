@@ -285,10 +285,12 @@ if get_option('es_pkcs11').enabled()
 	# one this test creates a token and drives the source against it for
 	# real. It skips at runtime if softhsm2-util is not installed.
 	if get_option('es_pkcs11_module_path') != ''
+		# The source is compiled into the test - see the file header.
 		es_pkcs11_softhsm_tester = executable(
 			'es_pkcs11_softhsm_tester',
 			[ esdm_ipc_ns, 'es_pkcs11_softhsm_test.c' ],
-			dependencies: dependencies_server,
+			dependencies: [ dependencies_server,
+					dependency('libp11') ],
 			include_directories: include_dirs_server,
 			link_with: esdm_static_lib,
 		)

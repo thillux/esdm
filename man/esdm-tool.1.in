@@ -180,8 +180,9 @@ the build was configured with until a PIN is set with this option.
 Requires root.
 .TP
 .BR \-\-pkcs11\-token\-label " \fILABEL\fR"
-Set the token label of the PKCS#11 entropy source and re\-open the module. Pass
-an empty string to clear the override. Requires root.
+Set the token label of the PKCS#11 entropy source, which then looks for that
+token among the slots of its module at once. Pass an empty string to clear the
+override. Requires root.
 .SS Benchmarking and stress testing
 .TP
 .BR \-b ", " \-\-benchmark

@@ -41,7 +41,15 @@ unprivileged user; see
 and
 .BR \-\-groupname .
 Entropy sources that need privileges for their setup are initialized before
-the privileges are dropped.
+the privileges are dropped, and keep what they opened then: the TPM 2.0 entropy
+source its device, the PKCS#11 entropy source its module. After a failure \-
+an I/O error of the TPM, a token that fails or is removed \- they try again at
+most every 5 seconds, on what they keep: the TPM device is opened anew only
+where the privileges left still allow it, and a token is looked for among the
+slots of the loaded module, which sees a token added later only if the module
+reports one without being loaded again (SoftHSM does not). A device or module
+that could not be opened at startup is not opened again once the privileges
+are dropped.
 .PP
 On systemd installations the daemon is normally not started by hand but
 through the shipped
@@ -137,8 +145,10 @@ Load the PKCS#11 provider module
 for the PKCS#11 entropy source instead of the module the build was configured
 with (meson option
 .BR es_pkcs11_module_path ).
-The module is loaded while the daemon still has its privileges. Refused by a
-build without the PKCS#11 entropy source (meson option
+The module is loaded while the daemon still has its privileges, and not loaded
+again once they are dropped (see
+.BR DESCRIPTION ).
+Refused by a build without the PKCS#11 entropy source (meson option
 .BR es_pkcs11 ).
 .TP
 .BR \-\-es_ext_lib " \fIPATH\fR"
