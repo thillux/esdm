@@ -25,6 +25,48 @@
 
 #include "../status_json_check.h"
 
+/*
+ * Every status call fails while there is no server to answer it, and leaves
+ * @buf empty rather than holding what an earlier call put there.
+ */
+static int esdm_rpcc_status_stale_check(char *buf, size_t buflen,
+					const char *what)
+{
+	static const char stale[] = "{\"stale\":true}";
+	static const struct {
+		const char *name;
+		int (*call)(char *buf, size_t buflen);
+	} calls[] = {
+		{ "esdm_rpcc_status", esdm_rpcc_status },
+		{ "esdm_rpcc_status_json", esdm_rpcc_status_json },
+		{ "esdm_rpcc_jent_status", esdm_rpcc_jent_status },
+		{ "esdm_rpcc_drng_status_pr_json",
+		  esdm_rpcc_drng_status_pr_json },
+	};
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < sizeof(calls) / sizeof(calls[0]); i++) {
+		snprintf(buf, buflen, "%s", stale);
+
+		ret = calls[i].call(buf, buflen);
+		if (ret >= 0) {
+			printf("%s succeeded with %s: %d\n", calls[i].name,
+			       what, ret);
+			return 1;
+		}
+
+		if (buf[0]) {
+			printf("%s with %s (%d) left a stale document: %s\n",
+			       calls[i].name, what, ret, buf);
+			return 1;
+		}
+	}
+
+	printf("Status calls with %s leave the buffer empty\n", what);
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	/*
@@ -77,6 +119,22 @@ int main(int argc, char *argv[])
 		ret = 1;
 		goto out;
 	}
+
+	/*
+	 * A caller reusing its buffer must not take the document of an
+	 * earlier call for the answer of a failed one: once the server is
+	 * gone, and once the client has no connection to ask it with, every
+	 * status call leaves the buffer empty.
+	 */
+	env_fini();
+	ret = esdm_rpcc_status_stale_check(buf, sizeof(buf), "server gone");
+	if (ret)
+		goto out;
+
+	esdm_rpcc_fini_unpriv_service();
+	ret = esdm_rpcc_status_stale_check(buf, sizeof(buf), "no connection");
+	if (ret)
+		goto out;
 
 out:
 	esdm_rpcc_fini_unpriv_service();

@@ -72,6 +72,10 @@ int esdm_rpcc_jent_status_int(char *buf, size_t buflen, void *int_data)
 	};
 	int ret;
 
+	/* Emptied before anything can fail - see esdm_rpcc_status_json_int */
+	if (buf && buflen)
+		buf[0] = '\0';
+
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
 	msg.maxlen = ESDM_RPC_MAX_DATA;

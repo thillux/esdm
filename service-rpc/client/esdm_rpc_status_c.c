@@ -76,6 +76,14 @@ int esdm_rpcc_status_int(char *buf, size_t buflen, void *int_data)
 	};
 	int ret;
 
+	/*
+	 * Emptied before anything can fail: without a connection, or without
+	 * a response, the callback never runs, and the buffer would still
+	 * hold the report of an earlier call.
+	 */
+	if (buf && buflen)
+		buf[0] = '\0';
+
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
 	msg.maxlen = ESDM_RPC_MAX_DATA;

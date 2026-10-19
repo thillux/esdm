@@ -192,6 +192,9 @@ is cut short there, still NUL\-terminated, and
 is returned. The server caps the report at just under 64 KiB
 .RB ( ESDM_RPC_MAX_STATUS_DATA );
 a longer one arrives cut short in the same way, with the same return value.
+On any other error,
+.I buf
+holds the empty string rather than the report of an earlier call.
 .TP
 .BI "int esdm_rpcc_status_json(char *" buf ", size_t " buflen ");"
 The same information as a JSON document. A document is never cut short: when it
