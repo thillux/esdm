@@ -148,6 +148,28 @@ if get_option('esdm-es-ext').enabled()
 			suite: 'es_ext', timeout: 120)
 	endif
 
+	# esdm-es-pkcs11 against SoftHSM, behind a PKCS#11 module of the test
+	# counting the logins - see the file header. The token part is skipped
+	# without softhsm2-util on the path.
+	if get_option('es_pkcs11').enabled()
+		es_pkcs11_shim = shared_module('esdm_es_pkcs11_shim',
+			'es_pkcs11_shim.c',
+			dependencies: [ dl_dep ],
+		)
+		es_pkcs11_test = executable('es_pkcs11_test',
+			'es_pkcs11_test.c',
+			include_directories: include_dirs_es_ext_test,
+			dependencies: [ dependencies_client,
+					dependency('threads'), json_c_dep ],
+			link_with: esdm_common_static_lib,
+		)
+		test('esdm-es-pkcs11', es_pkcs11_test,
+			args: [ esdm_es_pkcs11.full_path(),
+				es_pkcs11_shim.full_path() ],
+			depends: [ esdm_es_pkcs11, es_pkcs11_shim ],
+			suite: 'es_ext', timeout: 120)
+	endif
+
 	test('esdm-es-ext-serve', es_ext_serve_test,
 		args: [ esdm_es_ext_serve.full_path(),
 			es_ext_test_plugin.full_path(),
@@ -203,6 +225,23 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 				     esdm_es_ext_lib.get_static_lib() ],
 		)
 		test('External ES provider socket', es_extsock_test,
+			suite: 'es_ext', timeout: 60)
+	endif
+
+	# esdm-es-pkcs11 read by the provider socket source, which is compiled
+	# into the test - see the file header
+	if get_option('es_pkcs11').enabled()
+		es_pkcs11_esdm_test = executable('es_pkcs11_esdm_test',
+			[ esdm_ipc_ns, 'es_pkcs11_esdm_test.c' ],
+			dependencies: dependencies_server + [ dl_dep ],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			link_with: esdm_static_lib,
+		)
+		test('esdm-es-pkcs11 read by the ESDM', es_pkcs11_esdm_test,
+			args: [ esdm_es_pkcs11.full_path(),
+				es_pkcs11_shim.full_path() ],
+			depends: [ esdm_es_pkcs11, es_pkcs11_shim ],
 			suite: 'es_ext', timeout: 60)
 	endif
 endif
