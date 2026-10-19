@@ -106,3 +106,27 @@ if egd_net_tls
 		depends: [ esdm_egd_net_server, esdm_egd_tls_module ],
 		timeout: 120, suite: 'egd-net')
 endif
+
+if get_option('esdm-server').enabled()
+	# Throughput of the EGD socket, the RPC interface and the EGD protocol
+	# on the network, for comparison - see bench.c. A benchmark, run by
+	# meson test --benchmark only; it starts an esdm-server, which takes
+	# root, and skips (77) otherwise.
+	egd_net_bench = executable(
+			'egd_net_bench',
+			[ 'bench.c' ],
+			c_args: egd_net_test_args,
+			include_directories: [ include_dirs_egd_net ],
+			dependencies: [ dependencies_client ] + egd_net_tls_deps,
+			link_with: [ esdm_egd_client_linked_lib,
+				     esdm_rpc_client_lib.get_static_lib(),
+				     esdm_common_static_lib ]
+		)
+
+	benchmark('EGD and RPC throughput', egd_net_bench,
+		env: [ 'ESDM_SERVER=' + esdm_server.full_path(),
+		       'ESDM_EGD_NET_SERVER=' + esdm_egd_net_server.full_path(),
+		       'ESDM_EGD_NET_RELAY=' + esdm_egd_net_relay.full_path() ],
+		depends: [ esdm_server, esdm_egd_net_server, esdm_egd_net_relay ],
+		timeout: 600, suite: 'egd-net')
+endif
