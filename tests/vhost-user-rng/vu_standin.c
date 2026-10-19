@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -239,9 +240,15 @@ int standin_start(void)
 	if (fd < 0)
 		return -errno;
 
+	/*
+	 * Open to everybody, as the unprivileged RPC socket of the esdm-server
+	 * is: run as root, the daemon drops its privileges to nobody before it
+	 * connects. The umask would leave the socket without write access for
+	 * it.
+	 */
 	unlink(addr.sun_path);
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
-	    listen(fd, 16)) {
+	    chmod(addr.sun_path, 0666) || listen(fd, 16)) {
 		int errsv = errno;
 
 		printf("Cannot listen on %s: %s\n", addr.sun_path,
