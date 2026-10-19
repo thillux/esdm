@@ -40,7 +40,8 @@ int esdm_init(void);
  * @brief esdm_reinit() - reinitialize the ESDM library
  *
  * The reinitialization implies that all parts re-initialized like the entropy
- * sources or the configuration but without loosing any state or entropy.
+ * sources or the configuration but without losing any state or entropy - the
+ * auxiliary pool keeps what it absorbed and the entropy credited to it.
  *
  * It is intended to re-initialize the ESDM after configuration changes or
  * entropy source changes, i.e. after esdm_init() was run.

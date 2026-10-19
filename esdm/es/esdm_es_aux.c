@@ -170,10 +170,8 @@ static int esdm_aux_init(void)
 		/*
 		 * Allow this to be called multiple times: it is also the reinit
 		 * callback (esdm_es_mgr_reinitialize()), where the pool still
-		 * carries the previous round's XOF context and a live lock.
-		 * Release the context rather than overwriting the pointer, which
-		 * leaks it on every esdm_reinit(), and touch the lock only once,
-		 * as re-running mutex_w_init() on an initialized mutex is
+		 * carries its XOF context and a live lock. Touch the lock only
+		 * once, as re-running mutex_w_init() on an initialized mutex is
 		 * undefined. The lock outlives esdm_aux_fini(), so an init after
 		 * a fini takes the same path with the context already NULL.
 		 */
@@ -183,17 +181,24 @@ static int esdm_aux_init(void)
 		}
 
 		/*
-		 * Replace the XOF context and reset the entropy count under the
-		 * pool lock as a whole: a concurrent esdm_pool_insert_aux()
-		 * must neither see the context released or not yet allocated
-		 * nor have the entropy it credits in between wiped out.
+		 * A pool that has its XOF context is kept as it is, with what
+		 * it absorbed and the entropy credited to it: esdm_reinit()
+		 * re-initializes the ESDM without losing any state or entropy,
+		 * and the XOF is the one of the build, so there is nothing to
+		 * replace it with. Only a pool without one - never set up, or
+		 * released by esdm_aux_fini() - starts over, empty.
+		 *
+		 * Allocated and the entropy count reset under the pool lock as
+		 * a whole: a concurrent esdm_pool_insert_aux() must neither
+		 * see the context not yet allocated nor have the entropy it
+		 * credits in between wiped out.
 		 */
 		mutex_w_lock(&pool->lock);
-		if (pool->xdrbg.xof)
-			esdm_aux_fini_pool(pool);
-		atomic_store(&pool->aux_entropy_bits, 0);
 		pool->idx = i;
-		ret = esdm_aux_init_pool(pool);
+		if (!pool->xdrbg.xof) {
+			atomic_store(&pool->aux_entropy_bits, 0);
+			ret = esdm_aux_init_pool(pool);
+		}
 		mutex_w_unlock(&pool->lock);
 		CKINT(ret);
 	}
@@ -201,8 +206,8 @@ static int esdm_aux_init(void)
 	esdm_set_wakeup_bits();
 
 	/*
-	 * Announce that the aux pool needs entropy - after startup, the aux
-	 * pool is empty and should wake up any waiters right away.
+	 * Announce whether the aux pool needs entropy - after startup, it is
+	 * empty and should wake up any waiters right away.
 	 */
 	esdm_shm_status_set_need_entropy();
 

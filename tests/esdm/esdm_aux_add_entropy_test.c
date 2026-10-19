@@ -201,6 +201,38 @@ static int esdm_axa_pool_room(void)
 }
 #endif
 
+/*
+ * The reinitialization esdm_reinit() performs: the pools keep what they
+ * absorbed and the entropy credited to it - only a pool released by the
+ * finalization starts over.
+ */
+static int esdm_axa_reinit(struct esdm_es_cb *aux)
+{
+	uint32_t before;
+	int ret = 0;
+
+	esdm_pool_set_entropy(0);
+	if (esdm_axa_insert(256))
+		return 1;
+	before = esdm_get_aux_ent();
+
+	if (aux->init()) {
+		printf("Auxiliary pool reinitialization failed\n");
+		return 1;
+	}
+	ret += esdm_axa_check(before, "Entropy after the reinitialization");
+
+	/* What the pool absorbed is still there to be credited */
+	esdm_pool_set_entropy(0);
+	esdm_pool_add_entropy(64);
+	ret += esdm_axa_check(esdm_axa_avail(64),
+			      "Credit after the reinitialization");
+
+	if (!ret)
+		printf("Reinitialized: the pools keep their data and entropy\n");
+	return ret;
+}
+
 int main(int argc, char *argv[])
 {
 	struct esdm_es_cb *aux = esdm_es[esdm_ext_es_aux];
@@ -234,12 +266,15 @@ int main(int argc, char *argv[])
 	ret += esdm_axa_pool_room();
 #endif
 
-	/* As esdm_reinit() does: the pools start over without data */
+	ret += esdm_axa_reinit(aux);
+
+	/* Released, a pool starts over without data */
+	aux->fini();
 	if (aux->init()) {
-		printf("Auxiliary pool reinitialization failed\n");
+		printf("Auxiliary pool initialization after its finalization failed\n");
 		ret++;
 	} else {
-		ret += esdm_axa_no_data("Reinitialized");
+		ret += esdm_axa_no_data("Initialized after the finalization");
 	}
 
 	aux->fini();
