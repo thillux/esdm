@@ -28,12 +28,25 @@ Linking against it with
 redirects the calls at link time; the library then also provides
 .BR __wrap_getrandom ()
 and
-.BR __wrap_getentropy (),
-and keeps
+.BR __wrap_getentropy ().
+In such a program,
 .BR __real_getrandom ()
 and
 .BR __real_getentropy ()
-available for the original kernel behaviour.
+do not reach the kernel: the linker turns them into references to
+.BR getrandom ()
+and
+.BR getentropy (),
+which this library exports as well, so they are answered by the ESDM, too. A
+program that needs the kernel RNG calls the system call itself, e.g.
+.IR "syscall(SYS_getrandom, buf, len, flags)" .
+Only a program linked without
+.B \-\-wrap
+that calls the library's
+.BR __real_getrandom ()
+or
+.BR __real_getentropy ()
+by name gets the system call from them.
 .PP
 Should the ESDM be unreachable, the call falls back to the
 .BR getrandom (2)
