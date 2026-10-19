@@ -1,0 +1,77 @@
+# Systemd configuration file
+#
+# The vhost-user back-end of the virtio entropy device of VM %i, started by
+# esdm-vhost-user-rng@%i.socket - see there and esdm-vhost-user-rng(8).
+#
+# Options of the daemon go into ESDM_VHOST_USER_RNG_OPTS, for one VM or all of
+# them with a drop-in, e.g. to serve a guest that credits the device as full
+# entropy from the prediction resistant DRNG, at 1 KiB per second at most:
+#
+#	systemctl edit esdm-vhost-user-rng@vm1.service
+#
+#	[Service]
+#	Environment=ESDM_VHOST_USER_RNG_OPTS="--pr --max_bytes 1024 --period_ms 1000"
+
+[Unit]
+Description=ESDM vhost-user RNG back-end of VM %i
+Documentation=man:esdm-vhost-user-rng(8)
+Requires=esdm-vhost-user-rng@%i.socket
+After=esdm-vhost-user-rng@%i.socket
+# The random bytes come from the ESDM. Without it, the requests of the guest
+# wait until it is there.
+Wants=esdm-server.service
+After=esdm-server.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+Environment=ESDM_VHOST_USER_RNG_OPTS=
+ExecStart=@PATH@/esdm-vhost-user-rng --syslog $ESDM_VHOST_USER_RNG_OPTS
+Restart=on-failure
+RestartSec=1s
+
+# --- Sandboxing / hardening ---
+#
+# The daemon parses memory the guest writes, and is confined accordingly. It
+# never needs privileges: the socket is handed over by systemd, the memory of
+# the guest and the notifiers by the VMM over that socket, and the ESDM is
+# reached through its unprivileged RPC socket - a Unix domain socket on the file
+# system, which neither the private network namespace nor the read-only file
+# system keep it from. So it runs as a user of its own, one per instance.
+DynamicUser=yes
+PrivateUsers=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# The guest memory is mapped read-write, never executable
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+LimitMEMLOCK=0
+# The control thread and the worker
+TasksMax=8
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@aio @chown @clock @cpu-emulation @debug @keyring @memlock @module @mount @obsolete @pkey @privileged @raw-io @reboot @sandbox @setuid @swap

@@ -251,6 +251,14 @@ interface can be selectively enabled and disabled at compile time:
   CUSE daemons in the kernel, which leaves the kernel's own devices untouched.
   It talks to the ESDM over the EGD interface, see section @sec:egd.
 
+- `esdm-vhost-user-rng`: The vhost-user back-end of a virtio entropy device,
+  giving QEMU and Cloud Hypervisor guests a virtio-rng device served from the
+  fully seeded or the prediction resistant DRNG. It parses the memory of the
+  guest, so it is a process of its own per VM without privileges, which
+  reaches the ESDM server over the unprivileged RPC interface like any other
+  client; the template units `esdm-vhost-user-rng@.socket` and `@.service` run
+  it, see `esdm-vhost-user-rng(8)`.
+
 == ESDM Components <sec:components>
 
 The ESDM consists of the following components shown in figure

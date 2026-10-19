@@ -53,6 +53,10 @@ if get_option('openssl-rand-provider').enabled()
 	man_pages += [ 'esdm-openssl-provider.7' ]
 endif
 
+if get_option('vhost-user-rng').enabled()
+	man_pages += [ 'esdm-vhost-user-rng.8' ]
+endif
+
 # Raw entropy measurement tooling - only built for validation, so only
 # documented where it is actually installed.
 if get_option('validation-helpers').enabled()

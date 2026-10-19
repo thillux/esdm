@@ -220,14 +220,17 @@ This subpackage holds the OpenSSL 3 RAND provider
 %{_bindir}/esdm-es-ext-serve
 %{_bindir}/esdm-kernel-seeder
 %{_bindir}/esdm-tool
+%{_bindir}/esdm-vhost-user-rng
 %{_unitdir}/esdm-server*
 %{_unitdir}/esdm-kernel-seeder*
 %{_unitdir}/esdm-wait-until-fully-seeded*
+%{_unitdir}/esdm-vhost-user-rng@*
 %{_mandir}/man1/esdm-tool.1*
 %{_mandir}/man3/lib%{name}*.3*
 %{_mandir}/man8/esdm-server*.8*
 %{_mandir}/man8/esdm-es-ext-serve.8*
 %{_mandir}/man8/esdm-kernel-seeder.8*
+%{_mandir}/man8/esdm-vhost-user-rng.8*
 
 %files -n %{name}-cuse
 %{_bindir}/esdm-cuse*

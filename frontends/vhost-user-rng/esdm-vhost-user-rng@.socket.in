@@ -1,0 +1,42 @@
+# Systemd configuration file
+#
+# The socket of the vhost-user back-end serving a virtio entropy device from
+# the ESDM, one instance per VM - esdm-vhost-user-rng@<vm>.socket listens on
+# /run/esdm-vhost-user-rng/<vm>.sock for the VMM of that VM, and the first
+# connection starts esdm-vhost-user-rng@<vm>.service:
+#
+#	systemctl enable --now esdm-vhost-user-rng@vm1.socket
+#
+# QEMU connects with -chardev socket,id=rng0,path=/run/esdm-vhost-user-rng/vm1.sock
+# and -device vhost-user-rng-pci,chardev=rng0, Cloud Hypervisor with
+# --generic-vhost-user socket=/run/esdm-vhost-user-rng/vm1.sock,device_type=rng,...
+# - see esdm-vhost-user-rng(8).
+#
+# The VMM has to be able to connect: the socket belongs to the group
+# @SOCKET_GROUP@ (meson option vhost-user-rng-socket-group) with mode 0660. A
+# VMM running as another user or group gets its socket with a drop-in, e.g.
+#
+#	systemctl edit esdm-vhost-user-rng@vm1.socket
+#
+#	[Socket]
+#	SocketUser=libvirt-qemu
+#	SocketGroup=libvirt-qemu
+#	SocketMode=0600
+#
+# Whoever can connect controls the back-end of the VM, so the socket should be
+# reachable by the VMM of that VM only.
+
+[Unit]
+Description=ESDM vhost-user RNG socket of VM %i
+Documentation=man:esdm-vhost-user-rng(8)
+
+[Socket]
+ListenStream=/run/esdm-vhost-user-rng/%i.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=@SOCKET_GROUP@
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

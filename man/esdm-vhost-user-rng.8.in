@@ -1,0 +1,356 @@
+.TH ESDM\-VHOST\-USER\-RNG 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-vhost\-user\-rng \- vhost\-user back\-end of a virtio entropy device served from the ESDM
+.SH SYNOPSIS
+.B esdm\-vhost\-user\-rng
+.RB { \-\-socket
+.IR PATH " | "
+.B \-\-fd
+.IR N " | socket activation}"
+.RB [ \-\-mode
+.IR MODE ]
+.RB [ \-\-socket_group
+.IR GROUP ]
+.RB [ \-\-pr ]
+.RB [ \-\-max_bytes
+.IR N
+.RB [ \-\-period_ms
+.IR MS ]]
+.RB [ \-\-user
+.IR USER ]
+.RB [ \-\-group
+.IR GROUP ]
+.RB [ \-\-syslog ]
+.RB [ \-v ]...
+.SH DESCRIPTION
+.B esdm\-vhost\-user\-rng
+gives a virtual machine a virtio entropy device (virtio\-rng, virtio device
+ID 4) whose random bytes come from the ESDM. It is the back\-end of the
+vhost\-user protocol: the VMM \- QEMU or Cloud Hypervisor \- connects to its
+UNIX domain socket, shares the memory of the guest with it and hands it the
+request queue of the device, and the daemon serves the requests of the guest's
+driver directly from that memory, without the VMM in between.
+.PP
+The daemon obtains the random bytes from the ESDM over its unprivileged RPC
+interface, like any other client of
+.BR libesdm_rpc_client (3).
+It parses memory the guest writes, the most hostile input the ESDM has to deal
+with anywhere, and therefore is a process of its own rather than part of
+.BR esdm\-server (8),
+and one process per VM: a guest that took over its back\-end has gained what
+any local user has \- the unprivileged RPC interface \- and neither the ESDM nor
+the back\-end of another guest.
+.SS Random bytes
+By default, a request is served from the fully seeded DRNG of the ESDM
+(esdm_rpcc_get_random_bytes_full() of
+.BR libesdm_rpc_client (3)):
+nothing is handed to the guest before the ESDM is fully seeded, the requests
+of the guest wait until it is. With
+.BR \-\-pr ,
+they are served from the prediction resistant DRNG, which reseeds for every
+request from the entropy sources and hands out no more than they delivered.
+That is the one for guests crediting the device with full entropy, as Linux
+does with the input of a hardware random number generator.
+.PP
+While the ESDM cannot be reached, the requests of the guest wait as well, and
+the daemon asks again, backing off up to every 5 seconds, until it can. A
+request is served with at most 4096 bytes, the used length telling the driver
+how many it got, and the daemon looks at its descriptors again after
+65536 bytes or 256 requests in a row, so a guest asking without end keeps
+neither the daemon nor the ESDM busy at the expense of everything else. With
+.BR \-\-max_bytes ,
+the bytes served are limited the way the
+.B max\-bytes
+and
+.B period
+properties of QEMU's own virtio\-rng do: a token bucket of
+.I N
+bytes refilled at
+.I N
+bytes per
+.IR MS ;
+a request waits until the bucket holds all of it, or as much as the bucket
+holds at most.
+.PP
+The bytes pass through a buffer of the daemon on their way into guest memory,
+which is excluded from core dumps and wiped after every request, as is the
+memory of the guest from core dumps.
+.SS The guest
+Everything of the request queue in guest memory is read once, into the daemon,
+and only that copy is looked at: the guest changing the memory meanwhile
+changes nothing the daemon decides by. A request whose descriptors the device
+may only read, that loops, runs beyond the queue size or beyond guest memory,
+wraps around the address space, or has an indirect table that is not where
+guest memory is, not a multiple of a descriptor, nested or longer than the
+queue, is completed with nothing written and a used length of 0. A queue
+whose available index moves by more than the queue size or that names a
+descriptor beyond it is not processed any more until the VMM restarts it, and
+the VMM is told on the error file descriptor of the queue once. A buffer may
+span adjacent memory regions.
+.PP
+The daemon offers the split virtqueue with indirect descriptors and the event
+index (VIRTIO_F_VERSION_1, VIRTIO_RING_F_INDIRECT_DESC,
+VIRTIO_RING_F_EVENT_IDX), and the protocol features MQ (one queue),
+REPLY_ACK, RESET_DEVICE and CONFIGURE_MEM_SLOTS (up to 509 memory regions,
+so memory can be plugged into the guest). A legacy driver is served as on a
+little endian machine.
+.SS The VMM
+The daemon serves one VMM at a time. When the VMM disconnects, everything it
+set up is dropped \- the memory unmapped, the queue and the negotiated features
+forgotten \- and the next connection starts from scratch. A VMM that reconnects
+to a restarted daemon has a request the old connection did not complete served
+on the new one, also where it tells the daemon to resume at a later index, as
+Cloud Hypervisor does. When the daemon ends, it stops listening before it lets
+the VMM go, so a VMM reconnecting at once is refused until the next instance
+listens \- or, with socket activation, waits in the socket of systemd for it.
+A VMM
+breaking the protocol in a way no reply can tell it \- a message of a size or
+with file descriptors its request does not have, a version other than 1, a
+request whose reply the daemon cannot give \- is disconnected; a request that
+fails is refused with REPLY_ACK, and a request the daemon does not know is
+refused or ignored.
+.PP
+Nothing of the protocol waits for the ESDM: stopping the queue
+(GET_VRING_BASE), a reset, a new memory table or the end of the connection
+take effect at once, also while a request of the guest waits to be seeded.
+The index GET_VRING_BASE reports does not count that request, which is
+served once the queue runs again.
+.SH OPTIONS
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR, " \-\-socket\-path=\fIPATH\fR
+Listen on a UNIX domain socket at
+.IR PATH ,
+created with
+.BR \-\-mode .
+A socket left at the path by an earlier instance is replaced, unless an
+instance still listens on it; any other file is not.
+.TP
+.B \-\-fd \fIN\fR
+Serve the socket on file descriptor
+.IR N :
+a listening socket, or one connected to the VMM, which is served once.
+.TP
+.BR \-m ", " \-\-mode " \fIMODE\fR"
+Access mode of the socket of
+.BR \-\-socket ,
+octal. The default is 0600, and 0660 with
+.BR \-\-socket_group .
+.TP
+.B \-\-socket_group \fIGROUP\fR
+Create the socket of
+.B \-\-socket
+with group
+.I GROUP
+\- the one the VMM runs with. This needs CAP_SETGID, or
+.I GROUP
+being the group of the daemon.
+.TP
+.BR \-p ", " \-\-pr
+Serve the guest from the prediction resistant DRNG.
+.TP
+.B \-\-max_bytes \fIN\fR
+Serve at most
+.I N
+bytes per period, see above. 0, the default, is no limit.
+.TP
+.B \-\-period_ms \fIMS\fR
+Length of the period of
+.B \-\-max_bytes
+in milliseconds, 1000 by default.
+.TP
+.BR \-u ", " \-\-user " \fIUSER\fR"
+Started as root, the daemon drops its privileges for good once the socket is
+there \- to
+.IR USER ,
+by default
+.BR nobody .
+Nothing it does afterwards needs privileges: the memory and the notifiers of
+the guest come as file descriptors over the socket.
+.TP
+.BR \-g ", " \-\-group " \fIGROUP\fR"
+Started as root, drop to
+.IR GROUP ,
+by default the group of
+.IR USER .
+.TP
+.B \-\-syslog
+Log to syslog.
+.TP
+.BR \-v ", " \-\-verbose
+Verbose logging; repeat for more. Errors and warnings are logged in any case.
+.TP
+.B \-\-print\-capabilities
+Print the capabilities as the vhost\-user back\-end conventions of QEMU have it
+(the type "rng") and exit.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.SH SYSTEMD
+The template units
+.B esdm\-vhost\-user\-rng@.socket
+and
+.B esdm\-vhost\-user\-rng@.service
+run one instance per VM. The socket of VM
+.I vm1
+is
+.IR /run/esdm\-vhost\-user\-rng/vm1.sock ,
+with mode 0660 and the group of the meson option
+.B vhost\-user\-rng\-socket\-group
+(by default
+.BR kvm );
+the first connection starts the daemon:
+.PP
+.nf
+systemctl enable \-\-now esdm\-vhost\-user\-rng@vm1.socket
+.fi
+.PP
+The daemon runs as a user of its own
+.RB ( DynamicUser= )
+without capabilities, in a private network namespace and with a read\-only
+file system \- the RPC socket of the ESDM is reachable regardless. A VMM
+running as another user or group gets its socket with a drop\-in of the
+socket unit
+.RB ( "systemctl edit esdm\-vhost\-user\-rng@vm1.socket" ),
+for example:
+.PP
+.nf
+[Socket]
+SocketUser=libvirt\-qemu
+SocketGroup=libvirt\-qemu
+SocketMode=0600
+.fi
+.PP
+Whoever can connect to the socket controls the back\-end of the VM, so it
+should be reachable by the VMM of that VM alone. Options of the daemon go into
+the environment variable ESDM_VHOST_USER_RNG_OPTS of the service, for one VM or
+all of them:
+.PP
+.nf
+[Service]
+Environment=ESDM_VHOST_USER_RNG_OPTS="\-\-pr \-\-max_bytes 1024"
+.fi
+.SH QEMU
+The memory of the guest has to be shared with the daemon: a memory backend
+with
+.BR share=on .
+The device is
+.B vhost\-user\-rng\-pci
+on PCI:
+.PP
+.nf
+qemu\-system\-x86_64 \-machine q35,memory\-backend=mem \-m 1G \\
+	\-object memory\-backend\-memfd,id=mem,size=1G,share=on \\
+	\-chardev socket,id=rng0,path=/run/esdm\-vhost\-user\-rng/vm1.sock \\
+	\-device vhost\-user\-rng\-pci,chardev=rng0 ...
+.fi
+.PP
+and
+.B vhost\-user\-rng
+on virtio\-mmio, e.g. on the microvm machine. microvm uses the legacy
+virtio\-mmio transport unless told otherwise, which the daemon serves as well;
+.B "\-global virtio\-mmio.force\-legacy=false"
+gives the guest a virtio 1.0 device. The guest finds the device through ACPI,
+or, with
+.BR acpi=off ,
+through the
+.B virtio_mmio.device=
+parameter QEMU adds to the kernel command line:
+.PP
+.nf
+qemu\-system\-x86_64 \-machine microvm,memory\-backend=mem,acpi=off \-m 1G \\
+	\-object memory\-backend\-memfd,id=mem,size=1G,share=on \\
+	\-global virtio\-mmio.force\-legacy=false \\
+	\-chardev socket,id=rng0,path=/run/esdm\-vhost\-user\-rng/vm1.sock \\
+	\-device vhost\-user\-rng,chardev=rng0 \-kernel ... \-append ...
+.fi
+.PP
+With ACPI, microvm's ACPI is hardware\-reduced, and a Linux guest then ticks
+neither on the PIT nor the PIC: it needs to know the frequency of its TSC.
+Under KVM, kvmclock tells it; under TCG, the guest measures the TSC against
+the PIT, which fails on a busy host and leaves the guest waiting early in its
+boot, before the device is ever used.
+.B tsc_early_khz=
+on the guest's kernel command line spares it the measurement.
+.PP
+QEMU (up to 11.1 at least) does not reconnect these devices to a restarted
+back\-end. With
+.B reconnect\-ms
+on the chardev, the device fails to start ("Failed to set msg fds"): unlike
+vhost\-user\-blk, it talks to the back\-end before the chardev connected. A
+device hot\-plugged once the chardev is connected starts, but its reconnect
+aborts QEMU in vhost_dev_start, as the device starts the vhost device it tore
+down without setting it up again. So after a restart of the daemon, the device
+of a running VM serves no more requests \- its guest waits \- and the next start
+of the VM is served.
+.PP
+QEMU declares a VM with a vhost\-user\-rng device unmigratable, so the daemon
+does not support migration (VHOST_F_LOG_ALL) either.
+.SH CLOUD HYPERVISOR
+The generic vhost\-user device of Cloud Hypervisor (52.0 and later), with the
+memory shared:
+.PP
+.nf
+cloud\-hypervisor \-\-memory size=1G,shared=on \\
+	\-\-generic\-vhost\-user socket=/run/esdm\-vhost\-user\-rng/vm1.sock,device_type=rng,queue_sizes=[256] ...
+.fi
+.PP
+Cloud Hypervisor reconnects to a restarted daemon. It retries the connection,
+not the set\-up on it, though: a connection reset in the middle of the set\-up
+leaves the device broken until the guest resets it.
+.PP
+Cloud Hypervisor has an entropy device of its own besides, which it always
+gives the guest: the guest sees two virtio\-rng devices. That one reads the
+file of
+.B \-\-rng src=
+(by default
+.IR /dev/urandom );
+pointing it at a device of the ESDM \-
+.I /dev/esdm_urandom
+of the esdm_cdev kernel module, or the device files of
+.BR esdm\-cuse\-urandom (8)
+\- makes both of them ESDM devices, though that one hands out bytes before the
+ESDM is fully seeded. Cloud Hypervisor does not save, restore or migrate the
+PCI configuration space of a generic device.
+.SH THE GUEST
+A Linux guest drives the device with the
+.B virtio_rng
+driver, which registers it as a hardware random number generator
+.BR virtio_rng.N .
+.I /sys/class/misc/hw_random/rng_available
+lists them,
+.I /sys/class/misc/hw_random/rng_current
+is the one
+.I /dev/hwrng
+reads and the kernel feeds its entropy pool from; writing a name to it
+selects another one. Which name is which device the links of
+.I /sys/bus/virtio/drivers/virtio_rng/
+tell, pointing to the PCI or virtio\-mmio device each virtio device sits on;
+with the device of the ESDM at a known PCI address \- in Cloud Hypervisor
+.B pci_device_id=
+of
+.B \-\-generic\-vhost\-user
+\- the other one can be unbound
+.RB ( "echo virtioM > /sys/bus/virtio/drivers/virtio_rng/unbind" ),
+leaving the device of the ESDM the only one.
+.SH EXIT STATUS
+0 when ended by SIGTERM, SIGINT or SIGHUP, or when the VMM of
+.B \-\-fd
+on a connected socket went away; 1 when the daemon cannot start.
+.SH EXAMPLE
+Without systemd, as root, for a QEMU running as user and group
+.BR qemu :
+.PP
+.nf
+esdm\-vhost\-user\-rng \-\-socket /run/vm1\-rng.sock \-\-socket_group qemu
+.fi
+.SH SEE ALSO
+.BR esdm\-server (8),
+.BR libesdm_rpc_client (3),
+.BR esdm\-cuse\-urandom (8),
+.BR qemu\-system\-x86_64 (1),
+.BR cloud\-hypervisor (1)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

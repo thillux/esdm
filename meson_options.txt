@@ -1096,6 +1096,13 @@ reaches the ESDM through the unprivileged RPC interface, as it parses the memory
 of the guest. Linux only.
 ''')
 
+option('vhost-user-rng-socket-group', type: 'string', value: 'kvm',
+       description: '''Group of the sockets of the esdm-vhost-user-rng@.socket unit
+
+The VMM connects to the socket of its VM, which has mode 0660: this is the group
+it has to run with. A drop-in of the socket unit can set another one per VM.
+''')
+
 option('linux-reseed-interval', type: 'integer', value: 120,
        description: 'interval between forced Linux kernel RNG reseeds (in seconds)')
 option('linux-reseed-entropy-count', type: 'integer', value: 0, min: 0, max: 512,

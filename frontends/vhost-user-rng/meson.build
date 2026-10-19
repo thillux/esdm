@@ -35,3 +35,15 @@ esdm_vhost_user_rng = executable(
 			     esdm_rpc_client_lib ],
 		install: true
 		)
+
+vhost_user_rng_conf_data = configuration_data()
+vhost_user_rng_conf_data.set('PATH', get_option('prefix') / get_option('bindir'))
+vhost_user_rng_conf_data.set('SOCKET_GROUP', get_option('vhost-user-rng-socket-group'))
+
+foreach unit : [ 'esdm-vhost-user-rng@.socket', 'esdm-vhost-user-rng@.service' ]
+	install_data(configure_file(
+			input : unit + '.in',
+			output : unit,
+			configuration : vhost_user_rng_conf_data),
+		     install_dir: get_option('prefix') / 'lib/systemd/system')
+endforeach

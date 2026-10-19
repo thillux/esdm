@@ -484,6 +484,36 @@ The ESDM consists of the following components:
   ESDM. Configure its interval and entropy rate via the respective meson options
   (`linux-reseed-interval` and `linux-reseed-entropy-count`).
 
+* `esdm-vhost-user-rng`: The vhost-user back-end of a virtio entropy device:
+  QEMU and Cloud Hypervisor guests get a virtio-rng device whose random bytes
+  come from the ESDM - by default from its fully seeded DRNG, so a guest gets
+  nothing before the ESDM is fully seeded, with `--pr` from the prediction
+  resistant DRNG for guests crediting the device as full entropy, and
+  optionally rate limited (`--max_bytes`, `--period_ms`). The daemon parses
+  memory the guest writes, so it runs as a process of its own, one per VM,
+  without privileges, and reaches the ESDM over the unprivileged RPC interface
+  like any other client. The template units `esdm-vhost-user-rng@.socket` and
+  `esdm-vhost-user-rng@.service` provide the socket of a VM at
+  `/run/esdm-vhost-user-rng/<vm>.sock`:
+
+  ```
+  systemctl enable --now esdm-vhost-user-rng@vm1.socket
+
+  qemu-system-x86_64 -machine q35,memory-backend=mem \
+      -object memory-backend-memfd,id=mem,size=1G,share=on \
+      -chardev socket,id=rng0,path=/run/esdm-vhost-user-rng/vm1.sock \
+      -device vhost-user-rng-pci,chardev=rng0 ...
+
+  cloud-hypervisor --memory size=1G,shared=on \
+      --generic-vhost-user socket=/run/esdm-vhost-user-rng/vm1.sock,device_type=rng,queue_sizes=[256] ...
+  ```
+
+  The memory of the guest has to be shared with the daemon. On QEMU's microvm
+  machine the device is `vhost-user-rng` on virtio-mmio. Cloud Hypervisor
+  always adds an entropy device of its own, so its guest sees two - see
+  `esdm-vhost-user-rng(8)` on telling them apart, and on the rest of the set-up.
+  The build option is `vhost-user-rng`, Linux only.
+
 * `esdm-tool`: This tool can be used to test ESDM and interact with it without
   building an own tool with the rpc_client library or using the CUSE devices.
   With the help of esdm-tool `esdm-wait-unti-fully-seeded.service` is implemented.
