@@ -62,4 +62,21 @@ if get_option('es_pkcs11').enabled()
 				dependency('libp11', required: true) ] + dtls_deps,
 		install: true
 		)
+
+	# Its systemd unit, and the system user it runs as - see the unit
+	es_pkcs11_conf_data = configuration_data()
+	es_pkcs11_conf_data.set('PATH',
+		get_option('prefix') + '/' + get_option('bindir'))
+	# Ready once it serves, which it tells systemd where it can
+	es_pkcs11_conf_data.set('SERVICE_TYPE',
+		get_option('systemd').enabled() ? 'Type=notify' : 'Type=exec')
+	esdm_es_pkcs11_service = configure_file(
+		input: 'pkcs11/esdm-es-pkcs11.service.in',
+		output: 'esdm-es-pkcs11.service',
+		configuration: es_pkcs11_conf_data)
+	install_data(esdm_es_pkcs11_service,
+		install_dir: get_option('prefix') / 'lib/systemd/system')
+	install_data('pkcs11/esdm-es-pkcs11.sysusers',
+		rename: 'esdm-es-pkcs11.conf',
+		install_dir: get_option('prefix') / 'lib/sysusers.d')
 endif

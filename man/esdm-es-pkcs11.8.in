@@ -296,6 +296,77 @@ is lost, at most every 5 seconds \- by a seeding, or by its monitor: it need
 not be started after the daemon, and a daemon restarted is read again on its
 own. Started before the ESDM, the daemon is read already for the initial
 seeding.
+.SH SYSTEMD
+The shipped
+.B esdm\-es\-pkcs11.service
+runs the daemon as the system user
+.B esdm\-es\-pkcs11
+\- created by its
+.BR sysusers.d (5)
+file \- on
+.IR /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket ,
+in a sandbox without network, devices or capabilities. A user of its own
+rather than a
+.B DynamicUser=
+because the ESDM accepts the daemon by the user it runs as, which it resolves
+when it starts. The module, the token label and further options go into
+.BR ESDM_ES_PKCS11_OPTIONS ,
+set in a drop\-in:
+.PP
+.nf
+# /etc/systemd/system/esdm\-es\-pkcs11.service.d/token.conf
+[Service]
+Environment="ESDM_ES_PKCS11_OPTIONS=\-\-module /usr/lib/softhsm/libsofthsm2.so \-\-token_label my\-token"
+.fi
+.PP
+The unit imports the credential
+.B pkcs11\-pin
+from the credential store
+.RB ( ImportCredential= ,
+systemd 254 and later) \- the file
+.IR /etc/credstore/pkcs11\-pin ,
+or one encrypted with
+.B "systemd\-creds encrypt \-\-name=pkcs11\-pin"
+in
+.I /etc/credstore.encrypted
+\- and runs without a PIN if there is none. With an older systemd, a
+.B LoadCredential=pkcs11\-pin:/etc/esdm/pkcs11\-pin
+in the drop\-in gives it.
+.PP
+The user needs access to the token: a smartcard or USB token is reached
+through pcscd, whose polkit rules have to let the user use the reader
+(actions
+.B org.debian.pcsc\-lite.access_pcsc
+and
+.BR org.debian.pcsc\-lite.access_card );
+a SoftHSM token is a directory of files the user has to be allowed to read and
+write, e.g. with
+.B SupplementaryGroups=
+of the group owning it \- the default token directory
+.I /var/lib/softhsm
+is writable in the sandbox. A module reaching its device directly needs
+.B PrivateDevices=no
+and a
+.BR DeviceAllow= ,
+a network HSM
+.B PrivateNetwork=no
+and
+.B "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
+in the drop\-in.
+.PP
+The unit is ordered before
+.BR esdm\-server.service :
+started together, the ESDM finds the token ready for its initial seeding;
+otherwise it does without the token until the daemon is there. The ESDM is
+told about the daemon with
+.B ESDM_SERVER_OPTIONS
+of its unit:
+.PP
+.nf
+# /etc/systemd/system/esdm\-server.service.d/pkcs11.conf
+[Service]
+Environment="ESDM_SERVER_OPTIONS=\-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \-\-es_ext_socket_uid esdm\-es\-pkcs11"
+.fi
 .SH EXAMPLE
 A SoftHSM token, the PIN in a file only root can read, the daemon running as
 the user
@@ -312,6 +383,7 @@ esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
 .BR esdm\-server (8),
 .BR esdm\-es\-ext\-serve (8),
 .BR libesdm_es_ext (3),
-.BR systemd.exec (5)
+.BR systemd.exec (5),
+.BR systemd\-creds (1)
 .SH AUTHOR
 Markus Theil <theil.markus@gmail.com>

@@ -359,6 +359,13 @@ status of the source:
 esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
 	\-\-es_ext_socket_uid esdm\-es\-pkcs11
 .fi
+.PP
+The shipped
+.B esdm\-server.service
+adds the options in its environment variable
+.B ESDM_SERVER_OPTIONS
+to its command line, which a drop\-in sets \- see
+.BR esdm\-es\-pkcs11 (8).
 .SH ENCRYPTION
 A daemon built with DTLS (meson option
 .BR dtls )
