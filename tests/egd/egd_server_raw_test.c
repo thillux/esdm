@@ -1615,7 +1615,7 @@ static void test_esdm_priv(void)
 {
 	uint32_t orig[ESDM_EGD_STATE_NUM_FIELDS];
 	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
-	uint32_t wakeup, secs, credited;
+	uint32_t wakeup, secs, credited, credits, max_credits;
 	uint8_t count = 0;
 	int32_t status = 1;
 	int fd, wstatus;
@@ -1671,17 +1671,45 @@ static void test_esdm_priv(void)
 	      "the pool holds %u bits after crediting 64 to its %u",
 	      fields[ESDM_EGD_STATE_ENT_CNT], credited);
 
-	/* A credit beyond the pool is capped, not wrapped around */
-	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, UINT32_MAX,
-			    &status, TEST_RESPONSE_MS) == 0 &&
-		      status == 0,
-	      "crediting the largest count was not carried out: %d", status);
-	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
-		      fields[ESDM_EGD_STATE_ENT_CNT] > 0 &&
-		      fields[ESDM_EGD_STATE_ENT_CNT] <=
+	/*
+	 * A credit beyond the pool is capped, not wrapped around.
+	 *
+	 * A full pool is handed to a DRNG still wanting a full seed right away,
+	 * though, see esdm_pool_add_entropy(): a node DRNG nothing seeded yet,
+	 * or one that reached its limit - early in an SP800-90C build - with
+	 * the reads before. What is left of the pool then may be less than its
+	 * oversampling, which it reports as nothing. The DRNG is fully seeded
+	 * by it, so the credit is repeated until no DRNG wants it any more and
+	 * it stays in the pool: at most once per DRNG - one per node, the
+	 * initial and the prediction resistance one - and once more. The cap
+	 * holds throughout.
+	 */
+	max_credits = esdm_config_online_nodes() + 3;
+	for (credits = 0; credits < max_credits; credits++) {
+		CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT,
+				    UINT32_MAX, &status,
+				    TEST_RESPONSE_MS) == 0 &&
+			      status == 0,
+		      "crediting the largest count was not carried out: %d",
+		      status);
+		if (test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS)) {
+			CHECK(0, "the state was not answered");
+			break;
+		}
+		CHECK(fields[ESDM_EGD_STATE_ENT_CNT] <=
 			      fields[ESDM_EGD_STATE_POOLSIZE],
-	      "the pool holds %u of %u bits after crediting the largest count",
-	      fields[ESDM_EGD_STATE_ENT_CNT], fields[ESDM_EGD_STATE_POOLSIZE]);
+		      "the pool holds %u of %u bits after crediting the largest count",
+		      fields[ESDM_EGD_STATE_ENT_CNT],
+		      fields[ESDM_EGD_STATE_POOLSIZE]);
+		if (fields[ESDM_EGD_STATE_ENT_CNT])
+			break;
+	}
+	CHECK(fields[ESDM_EGD_STATE_ENT_CNT] > 0,
+	      "the pool holds nothing after crediting the largest count %u times",
+	      credits);
+	if (credits)
+		printf("  the largest count credited %u times until no DRNG took it\n",
+		       credits + 1);
 
 	wakeup = (orig[ESDM_EGD_STATE_WRITE_WAKEUP] == 64) ? 128 : 64;
 	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP, wakeup,
