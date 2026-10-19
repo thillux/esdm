@@ -60,6 +60,15 @@ static bool pkcs11_module_loaded = false;
  */
 static char *pkcs11_runtime_pin = NULL;
 /*
+ * Set once the token refused the compile-time PIN ESDM_PKCS11_PIN, cleared when
+ * a PIN is set at runtime; a refused runtime PIN is discarded instead. Every
+ * failed login uses up one of the retries of the token, after which it locks
+ * its PIN: a PIN the token refused is not tried again - neither by the look-ups
+ * for a token every ESDM_PKCS11_RETRY_INTERVAL_SEC nor by a re-open - until a
+ * new one is set.
+ */
+static bool pkcs11_default_pin_refused = false;
+/*
  * Optional runtime override for the token label. NULL means "use the
  * compile-time default ESDM_PKCS11_TOKEN_LABEL". Owned by this module.
  */
@@ -87,7 +96,9 @@ static time_t pkcs11_retry_at = 0;
 /* Caller must hold pkcs11_mutex (write lock). */
 static const char *esdm_es_pkcs11_pin_locked(void)
 {
-	return pkcs11_runtime_pin ? pkcs11_runtime_pin : ESDM_PKCS11_PIN;
+	if (pkcs11_runtime_pin)
+		return pkcs11_runtime_pin;
+	return pkcs11_default_pin_refused ? "" : ESDM_PKCS11_PIN;
 }
 
 /* Caller must hold pkcs11_mutex (write lock). */
@@ -196,6 +207,7 @@ static void esdm_es_pkcs11_finalize(void)
 	mutex_lock(&pkcs11_mutex);
 	esdm_es_pkcs11_finalize_locked();
 	esdm_es_pkcs11_clear_runtime_pin_locked();
+	pkcs11_default_pin_refused = false;
 	esdm_es_pkcs11_clear_runtime_token_label_locked();
 	pkcs11_initialized = false;
 	mutex_unlock(&pkcs11_mutex);
@@ -234,6 +246,46 @@ static PKCS11_SLOT *esdm_es_pkcs11_pick_slot(void)
 }
 
 /*
+ * Log in to the token of the bound slot with the PIN in effect, if there is
+ * one and the token asks for it. Caller must hold pkcs11_mutex (write lock).
+ *
+ * A PIN the token refuses is not tried again (pkcs11_default_pin_refused): the
+ * runtime PIN is discarded, the compile-time one set aside until a PIN is set.
+ *
+ * Returns 0 when logged in or when no login is needed, -EACCES when the token
+ * refused the PIN.
+ */
+static int esdm_es_pkcs11_login_locked(void)
+{
+	const char *pin = esdm_es_pkcs11_pin_locked();
+	int logged_in = 0;
+
+	if (pin[0] == '\0' || !pkcs11_slot->token->loginRequired)
+		return 0;
+
+	/* As before, a token that cannot tell is not logged in to */
+	if (PKCS11_is_logged_in(pkcs11_slot, 0, &logged_in) || logged_in)
+		return 0;
+
+	if (PKCS11_login(pkcs11_slot, 0, pin) != 0) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"PKCS#11 entropy source: token '%s' refused the %s PIN, which is not tried again until a new one is set\n",
+			pkcs11_slot->token->label ? pkcs11_slot->token->label :
+						    "(no label)",
+			pkcs11_runtime_pin ? "runtime" : "configured");
+		if (pkcs11_runtime_pin)
+			esdm_es_pkcs11_clear_runtime_pin_locked();
+		else
+			pkcs11_default_pin_refused = true;
+		return -EACCES;
+	}
+	pkcs11_logged_in = true;
+
+	return 0;
+}
+
+/*
  * Open the PKCS#11 module and select a usable slot. Caller must hold
  * pkcs11_mutex (write lock). Any previously held module/slot state is torn
  * down first.
@@ -245,8 +297,7 @@ static PKCS11_SLOT *esdm_es_pkcs11_pick_slot(void)
 static int esdm_es_pkcs11_open_module_locked(void)
 {
 	const char *module_path = esdm_es_pkcs11_module_path_locked();
-	const char *pin = esdm_es_pkcs11_pin_locked();
-	int logged_in = 0;
+	int ret;
 
 	esdm_es_pkcs11_finalize_locked();
 
@@ -296,21 +347,11 @@ static int esdm_es_pkcs11_open_module_locked(void)
 		return -ENOENT;
 	}
 
-	if (pin[0] != '\0' && pkcs11_slot->token->loginRequired) {
-		if (PKCS11_is_logged_in(pkcs11_slot, 0, &logged_in) == 0 &&
-		    !logged_in) {
-			if (PKCS11_login(pkcs11_slot, 0, pin) != 0) {
-				esdm_logger(
-					LOGGER_WARN, LOGGER_C_ES,
-					"Disabling PKCS#11 entropy source: login to token '%s' failed\n",
-					pkcs11_slot->token->label ?
-						pkcs11_slot->token->label :
-						"(no label)");
-				esdm_es_pkcs11_finalize_locked();
-				return -EACCES;
-			}
-			pkcs11_logged_in = true;
-		}
+	/* The refusal is logged there */
+	ret = esdm_es_pkcs11_login_locked();
+	if (ret) {
+		esdm_es_pkcs11_finalize_locked();
+		return ret;
 	}
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
@@ -388,8 +429,7 @@ static uint32_t esdm_es_pkcs11_poolsize(void)
  */
 static int esdm_es_pkcs11_refresh_slot_locked(void)
 {
-	const char *pin = esdm_es_pkcs11_pin_locked();
-	int logged_in = 0;
+	int ret;
 
 	/* Drop any previous slot binding before refreshing. */
 	esdm_es_pkcs11_drop_slot_locked();
@@ -417,15 +457,10 @@ static int esdm_es_pkcs11_refresh_slot_locked(void)
 	if (!pkcs11_slot)
 		return -ENOENT;
 
-	if (pin[0] != '\0' && pkcs11_slot->token->loginRequired) {
-		if (PKCS11_is_logged_in(pkcs11_slot, 0, &logged_in) == 0 &&
-		    !logged_in) {
-			if (PKCS11_login(pkcs11_slot, 0, pin) != 0) {
-				pkcs11_slot = NULL;
-				return -EACCES;
-			}
-			pkcs11_logged_in = true;
-		}
+	ret = esdm_es_pkcs11_login_locked();
+	if (ret) {
+		pkcs11_slot = NULL;
+		return ret;
 	}
 
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
@@ -720,30 +755,21 @@ int esdm_es_pkcs11_set_pin(const char *pin)
 
 	old = pkcs11_runtime_pin;
 	pkcs11_runtime_pin = new_copy;
+	/* A PIN is set: the compile-time one may be tried again, too */
+	pkcs11_default_pin_refused = false;
 
 	/*
 	 * If the module is already initialized, the token requires login, and
 	 * we have not logged in yet, log in now using the new PIN. If the new
 	 * PIN is empty, do not attempt a login (this is a "clear PIN"
-	 * request).
+	 * request). A PIN the token refuses is discarded.
 	 */
-	if (new_copy && pkcs11_slot && pkcs11_slot->token &&
-	    pkcs11_slot->token->loginRequired && !pkcs11_logged_in) {
-		int logged_in = 0;
-
-		if (PKCS11_is_logged_in(pkcs11_slot, 0, &logged_in) == 0 &&
-		    !logged_in) {
-			if (PKCS11_login(pkcs11_slot, 0, new_copy) == 0) {
-				pkcs11_logged_in = true;
-				esdm_logger(
-					LOGGER_VERBOSE, LOGGER_C_ES,
-					"PKCS#11 entropy source: login with runtime PIN succeeded\n");
-			} else {
-				esdm_logger(
-					LOGGER_WARN, LOGGER_C_ES,
-					"PKCS#11 entropy source: login with runtime PIN failed\n");
-				ret = -EACCES;
-			}
+	if (new_copy && pkcs11_slot && !pkcs11_logged_in) {
+		ret = esdm_es_pkcs11_login_locked();
+		if (pkcs11_logged_in) {
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_ES,
+				"PKCS#11 entropy source: login with runtime PIN succeeded\n");
 		}
 	}
 

@@ -48,6 +48,11 @@ extern struct esdm_es_cb esdm_es_pkcs11;
  * Pass an empty string to clear the runtime PIN; subsequent re-inits then
  * fall back to the compile-time default (if any).
  *
+ * Every failed login uses up one of the PIN retries of the token, after which
+ * it locks the PIN. A PIN the token refuses is therefore not tried again: a
+ * runtime PIN is discarded, the compile-time default is no longer used until
+ * a PIN is set with this function.
+ *
  * The PIN is held in process memory only and is not persisted across server
  * restarts.
  *

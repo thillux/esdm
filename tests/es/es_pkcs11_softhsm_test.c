@@ -244,6 +244,23 @@ static void test_select_token(void)
 	      "cannot re-select the SoftHSM token");
 }
 
+/*
+ * Every failed login uses up one of the PIN retries of a token, which then
+ * locks the PIN. A wrong PIN was kept and tried again on every re-open and on
+ * every look-up for a token, every ESDM_PKCS11_RETRY_INTERVAL_SEC - a mistyped
+ * esdm-tool --pkcs11-pin locked a smartcard within seconds. The token refuses
+ * it once, and then it is gone.
+ */
+static void test_wrong_pin(void)
+{
+	CHECK(esdm_es_pkcs11_set_pin("000000") == -EACCES,
+	      "a wrong PIN was not refused");
+
+	/* The re-open logged in with the refused PIN again */
+	CHECK(esdm_es_pkcs11_set_token_label(TOKEN_LABEL) == 0,
+	      "the refused PIN was tried again");
+}
+
 static void test_login(void)
 {
 	CHECK(esdm_es_pkcs11_set_pin(TOKEN_PIN) == 0,
@@ -434,6 +451,8 @@ int main(int argc, char *argv[])
 
 	test_active();
 	test_select_token();
+	/* Before the login: a token logged in to is not logged in to again */
+	test_wrong_pin();
 	test_login();
 	test_entropy_level();
 	test_get_entropy();

@@ -639,6 +639,10 @@ option('es_pkcs11_pin', type: 'string', value: '',
 
 C_GenerateRandom usually does not require a login. Set this only for tokens
 that require an authenticated session before random data can be obtained.
+
+Every failed login uses up one of the PIN retries of the token: a PIN the token
+refuses is not tried again until one is set at runtime (esdm-tool
+--pkcs11-pin).
 ''')
 
 ################################################################################

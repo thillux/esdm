@@ -174,6 +174,9 @@ Set the user PIN of the PKCS#11 entropy source. Pass
 to read the PIN from standard input with terminal echo disabled, which keeps
 it out of the process table. May be combined with
 .BR \-\-pkcs11\-token\-label .
+A PIN the token refuses is discarded rather than tried again, as every failed
+login uses up one of the PIN retries of the token; the same holds for the PIN
+the build was configured with until a PIN is set with this option.
 Requires root.
 .TP
 .BR \-\-pkcs11\-token\-label " \fILABEL\fR"
