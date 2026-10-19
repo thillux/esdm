@@ -212,6 +212,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * Add a fuzz harness per shipped OpenSSL RAND provider module (build option 'openssl-rand-provider'), each loading its provider the way libcrypto does and holding it to the contract of <openssl/core_dispatch.h>
 
+* Add fuzz harnesses for the vhost-user control messages and the request ring of esdm-vhost-user-rng, with memory regions to map and control messages between taking a request and completing it; beyond crashes they check that replies are framed as the request has it, that no file descriptor leaks, that nothing is written to guest memory outside the buffers the guest offered, and that used elements stay within the queue
+
 * Add a stress test of the RPC request path under concurrent load, every request carrying an ID the answer has to carry back
 
 * FIPS 140 integrity test: a missing HMAC file is now a failed integrity test rather than a pass; the reference values are written at installation time with esdm-tool (see README.usage.md)
@@ -241,6 +243,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 * esdm-tool: add --drng-status [=NODE|pr] and --drng-status-json [=NODE|pr] to print one DRNG instance or, without an argument, all of them as a JSON array
 
 * libesdm: export only the supported API, versioned by a linker version script (symbol versions LIBESDM_1.0 for the API of esdm.h and esdm_config.h, LIBESDM_PRIVATE_1.0 for in-tree consumers); every other DSO_PUBLIC symbol is hidden
+
+* libesdm_rpc_client, libesdm_egd_client and libesdm_aux_client: export only the functions their installed headers declare, versioned by linker version scripts - the thread pool of the common library they link is no longer exported, and the logger only in a private node of the RPC and the aux client, where the ESDM frontends linking them interpose their own; every function of 1.2.3 an installed header declares is still exported. The OpenSSL RAND providers export nothing but OSSL_provider_init, so the EGD client linked into the EGD providers no longer binds to a libesdm_egd_client.so of the application loading them
 
 * Add man pages for esdm-server, esdm-tool, the CUSE daemons, esdm-proc, esdm-kernel-seeder, esdm-server-signal-helper, esdm-ebpf-collect, esdm-getrawentropy, esdm-extractlsb, the OpenSSL providers and the libesdm, libesdm_rpc_client, libesdm_egd_client, libesdm_getrandom and libesdm_aux_client libraries
 
