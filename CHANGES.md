@@ -540,6 +540,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC client: waits for the answer before reading it rather than first finding the socket empty, which took a system call - and on an encrypted connection the receive path of the DTLS - per request
 
+* RPC client: reads the coarse monotonic clock for its own timeouts and the age of a connection, which a clocksource without a vDSO serves without a system call; a deadline of the caller keeps the precise clock
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

@@ -195,7 +195,7 @@ static void drop_conn_socket(esdm_rpc_client_connection_t *rpc_conn,
 		close(rpc_conn->fd);
 	}
 	rpc_conn->fd = -1;
-	memset(&rpc_conn->last_used, 0, sizeof(rpc_conn->last_used));
+	rpc_conn->last_used_ms = 0;
 }
 
 static void reset_conn_socket(esdm_rpc_client_connection_t *rpc_conn)
@@ -344,20 +344,24 @@ static int esdm_rpcc_open(esdm_rpc_client_connection_t *rpc_conn)
 		reset_conn_socket(rpc_conn);
 	} else {
 		/* only update this time on a successful connection */
-		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		rpc_conn->last_used_ms = esdm_monotonic_coarse_ms();
 	}
 
 	return -errsv;
 }
 
-/* CLOCK_MONOTONIC in milliseconds */
+/*
+ * CLOCK_MONOTONIC in milliseconds, for the timeouts of the client's own: the
+ * wait for one answer, ESDM_RPCC_RX_TIMEOUT_MS over all of them, the DTLS
+ * setup and its retry. None is shorter than a hundred milliseconds, so the
+ * coarse clock does, which a request reads several times - a few nanoseconds
+ * each, against microseconds for the precise clock on a clocksource the vDSO
+ * cannot read. A deadline of the caller goes by the precise clock instead,
+ * see esdm_rpcc_deadline_passed().
+ */
 static int64_t esdm_rpcc_now_ms(void)
 {
-	struct timespec now;
-
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	return (int64_t)now.tv_sec * 1000LL + (int64_t)now.tv_nsec / 1000000LL;
+	return esdm_monotonic_coarse_ms();
 }
 
 #ifdef ESDM_DTLS
@@ -1200,7 +1204,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 				memset_secure(tbuf->unpack_buf, 0,
 					      tlh.consumed);
 		}
-		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		rpc_conn->last_used_ms = esdm_rpcc_now_ms();
 	} else if (interrupted) {
 		const bool privileged = (rpc_conn->service.descriptor ==
 					 &priv_access__descriptor);
@@ -1297,17 +1301,6 @@ out:
 }
 #endif /* ESDM_FUZZING */
 
-/* Milliseconds passed since @start on CLOCK_MONOTONIC. */
-static int64_t esdm_rpcc_elapsed_ms(const struct timespec *start)
-{
-	struct timespec now;
-
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	return ((int64_t)now.tv_sec - (int64_t)start->tv_sec) * 1000LL +
-	       ((int64_t)now.tv_nsec - (int64_t)start->tv_nsec) / 1000000LL;
-}
-
 static void esdm_client_invoke(ProtobufCService *service,
 			       unsigned int method_index,
 			       const ProtobufCMessage *input,
@@ -1317,8 +1310,9 @@ static void esdm_client_invoke(ProtobufCService *service,
 	const ProtobufCMethodDescriptor *method = desc->methods + method_index;
 	esdm_rpc_client_connection_t *rpc_conn =
 		(esdm_rpc_client_connection_t *)service;
-	static const int64_t half_server_timeout_ns =
-		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC * 1000 / 2;
+	/* Half the idle timeout of the server, in esdm_rpcc_now_ms() */
+	static const int64_t half_server_timeout_ms =
+		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC / 1000 / 2;
 	/* See ESDM_RPCC_PRIV_RX_TIMEOUT_MS and ESDM_RPCC_RX_TIMEOUT_MS */
 	const bool privileged = (desc == &priv_access__descriptor);
 	const unsigned int rx_retries =
@@ -1328,8 +1322,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 				   ESDM_RPCC_RX_SUBMISSION_MS /
 					   ESDM_RPCC_RX_POLL_MS);
 	struct esdm_rpcc_tbuf *tbuf = esdm_rpcc_tbuf_get();
-	struct timespec current_time, start_time;
-	int64_t used_before_ns;
+	int64_t start_ms;
 	bool reconnected = false;
 	int ret;
 
@@ -1350,17 +1343,9 @@ static void esdm_client_invoke(ProtobufCService *service,
 		goto out;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &start_time);
+	start_ms = esdm_rpcc_now_ms();
 
 	do {
-		clock_gettime(CLOCK_MONOTONIC, &current_time);
-		used_before_ns =
-			((int64_t)current_time.tv_sec -
-			 (int64_t)rpc_conn->last_used.tv_sec) *
-				1000000000LL +
-			((int64_t)current_time.tv_nsec -
-			 (int64_t)rpc_conn->last_used.tv_nsec);
-
 		/*
 		 * Connect to the server if we do not have a connection,
 		 * otherwise reuse the session.
@@ -1369,7 +1354,8 @@ static void esdm_client_invoke(ProtobufCService *service,
 		 * ESDM_RPC_IDLE_TIMEOUT_USEC, consider it closed a bit earlier.
 		 */
 		if (rpc_conn->fd == -1 ||
-		    used_before_ns >= half_server_timeout_ns) {
+		    esdm_rpcc_now_ms() - rpc_conn->last_used_ms >=
+			    half_server_timeout_ms) {
 			reset_conn_socket(rpc_conn);
 			CKINT(esdm_connect_proto_service(rpc_conn));
 		}
@@ -1401,7 +1387,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 			ret = -EAGAIN;
 		} else if (ret == -EAGAIN &&
 			   (privileged ||
-			    esdm_rpcc_elapsed_ms(&start_time) >=
+			    esdm_rpcc_now_ms() - start_ms >=
 				    ESDM_RPCC_RX_TIMEOUT_MS)) {
 			/*
 			 * The answer did not come in time, again and again - or,

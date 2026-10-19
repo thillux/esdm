@@ -59,6 +59,27 @@ static inline long long esdm_monotonic_now(void)
 	return (long long)now.tv_sec;
 }
 
+/*
+ * Milliseconds on CLOCK_MONOTONIC, from the coarse clock as well, 0 if the
+ * clock cannot be read.
+ *
+ * The coarse clock lags the precise one by up to a tick - 1 to 10 ms, as
+ * CONFIG_HZ has it - so a time span measured with it can come out shorter or
+ * longer by as much. That suits the timeouts of hundreds of milliseconds and
+ * more that a request runs into, and the age of a connection; not a deadline a
+ * caller handed in, which may be shorter than a tick, nor a time compared with
+ * one of the precise clock, such as the deadline of pthread_mutex_clocklock().
+ */
+static inline int64_t esdm_monotonic_coarse_ms(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == -1)
+		return 0;
+
+	return (int64_t)now.tv_sec * 1000 + (int64_t)now.tv_nsec / 1000000;
+}
+
 /* Seconds elapsed since timeout_sec (CLOCK_MONOTONIC), 0 if not yet reached */
 static inline time_t esdm_time_after_now(time_t timeout_sec)
 {

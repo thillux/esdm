@@ -139,8 +139,15 @@ struct esdm_rpc_client_connection {
 	 * Only update this, when data is received or on new connections.
 	 * Otherwise, we may update on writes without answer and keep
 	 * dead connections open for too long.
+	 *
+	 * In milliseconds of esdm_monotonic_coarse_ms(), 0 without a
+	 * connection: it is compared with half the idle timeout of the server,
+	 * a second by default. The server closes a connection only once it was
+	 * idle for the whole timeout, so the tick the coarse clock may be off
+	 * by is covered by the other half - for any idle timeout above two
+	 * ticks, 20 ms at the lowest CONFIG_HZ.
 	 */
-	struct timespec last_used;
+	int64_t last_used_ms;
 
 	/*
 	 * Outcome of the most recent esdm_client_invoke() on this connection: 0
