@@ -79,8 +79,21 @@ static bool bench_selected(const char *name)
 	return false;
 }
 
-/* One request of @len bytes into @buf: 0, or a negative errno */
+/*
+ * One request of @len bytes into @buf: 0, or a negative errno. The bytes it
+ * delivered are @len, or what it sets bench_got to.
+ */
 typedef int (*bench_fn)(void *ctx, uint8_t *buf, size_t len);
+
+/*
+ * Bytes the last request delivered, and the answers shorter than asked for
+ * of a figure. The non-blocking reads are answered short when the DRNG serving
+ * them reaches the most it may generate without a full reseed on the way - in
+ * a build for SP800-90C every 16 KiB of output -, and empty while every DRNG
+ * waits for its reseed.
+ */
+static size_t bench_got;
+static unsigned long bench_short;
 
 static int bench_cmp(const void *a, const void *b)
 {
@@ -110,6 +123,7 @@ static void bench(const char *name, bench_fn fn, void *ctx, size_t len)
 	}
 
 	/* Warm up: the connections are made, the DRNG is there */
+	bench_got = len;
 	if (fn(ctx, buf, len)) {
 		printf("%-36s %7zu  failed\n", name, len);
 		failures++;
@@ -122,7 +136,10 @@ static void bench(const char *name, bench_fn fn, void *ctx, size_t len)
 
 		end = start + (uint64_t)BENCH_RUN_MS * 1000000ULL;
 		do {
-			int ret = fn(ctx, buf, len);
+			int ret;
+
+			bench_got = len;
+			ret = fn(ctx, buf, len);
 
 			if (ret) {
 				printf("%-36s %7zu  failed: %s\n", name, len,
@@ -131,7 +148,7 @@ static void bench(const char *name, bench_fn fn, void *ctx, size_t len)
 				free(buf);
 				return;
 			}
-			total += len;
+			total += bench_got;
 		} while (bench_now_ns() < end);
 
 		mbs[run] = (double)total / ((double)(bench_now_ns() - start) /
@@ -139,9 +156,13 @@ static void bench(const char *name, bench_fn fn, void *ctx, size_t len)
 	}
 
 	qsort(mbs, BENCH_RUNS, sizeof(mbs[0]), bench_cmp);
-	printf("%-36s %7zu  %9.2f MB/s  %9.0f req/s  (%.2f .. %.2f)\n", name,
+	printf("%-36s %7zu  %9.2f MB/s  %9.0f req/s  (%.2f .. %.2f)", name,
 	       len, mbs[BENCH_RUNS / 2], mbs[BENCH_RUNS / 2] * 1e6 / (double)len,
 	       mbs[0], mbs[BENCH_RUNS - 1]);
+	if (bench_short)
+		printf("  %lu short", bench_short);
+	printf("\n");
+	bench_short = 0;
 
 	memset(buf, 0, len);
 	free(buf);
@@ -174,21 +195,88 @@ static int bench_lib_unseeded(void *ctx, uint8_t *buf, size_t len)
 							  chunk, &got);
 		if (ret)
 			return ret;
-		if (!got)
-			return -EAGAIN;
 		done += got;
+		if (got < chunk) {
+			bench_short++;
+			break;
+		}
 	}
+	bench_got = done;
 	return 0;
+}
+
+/* A connection spoken to in raw protocol bytes */
+struct bench_raw_ctx {
+	int fd;
+	/* The answers taken in bulk rather than one by one */
+	bool bulk;
+};
+
+/*
+ * Receive the answers to the @num unseeded reads of @req into @buf, in bulk:
+ * as much as there is with each recv(2), the count bytes taken out after.
+ */
+static int bench_raw_recv_bulk(int fd, const uint8_t *req, size_t num,
+			       uint8_t *buf)
+{
+	uint8_t *stage = malloc(num * (1 + ESDM_EGD_MAX_TRANSFER));
+	size_t have = 0, pos = 0, done = 0, i = 0;
+	int ret = 0;
+
+	if (!stage)
+		return -ENOMEM;
+
+	while (i < num) {
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		ssize_t n;
+
+		/* The answers complete so far */
+		while (i < num && pos < have && pos + 1 + stage[pos] <= have) {
+			if (stage[pos] > req[2 * i + 1]) {
+				ret = -EIO;
+				goto out;
+			}
+			if (stage[pos] < req[2 * i + 1])
+				bench_short++;
+			memcpy(buf + done, stage + pos + 1, stage[pos]);
+			done += stage[pos];
+			pos += 1 + (size_t)stage[pos];
+			i++;
+		}
+		if (i == num)
+			break;
+
+		if (poll(&pfd, 1, TEST_IO_MS) != 1) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+		n = recv(fd, stage + have, num * (1 + ESDM_EGD_MAX_TRANSFER) - have,
+			 MSG_DONTWAIT);
+		if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
+			ret = -EIO;
+			goto out;
+		}
+		if (n > 0)
+			have += (size_t)n;
+	}
+
+	bench_got = done;
+
+out:
+	memset(stage, 0, num * (1 + ESDM_EGD_MAX_TRANSFER));
+	free(stage);
+	return ret;
 }
 
 /*
  * Raw protocol bytes on the EGD socket: the unseeded read the esdm_cdev
  * module sends, as many commands at a time as @len takes - all of them sent
- * at once, the answers collected after, as the module does.
+ * at once, the answers collected after, one by one as the module took them,
+ * or in bulk.
  */
 static int bench_raw(void *ctx, uint8_t *buf, size_t len)
 {
-	int fd = *(int *)ctx;
+	struct bench_raw_ctx *raw = ctx;
 	uint8_t req[2 * 256];
 	size_t num = (len + ESDM_EGD_MAX_TRANSFER - 1) / ESDM_EGD_MAX_TRANSFER;
 	size_t i, done = 0;
@@ -204,17 +292,23 @@ static int bench_raw(void *ctx, uint8_t *buf, size_t len)
 						   ESDM_EGD_MAX_TRANSFER :
 						   chunk);
 	}
-	if (test_send(fd, req, 2 * num))
+	if (test_send(raw->fd, req, 2 * num))
 		return -EIO;
+
+	if (raw->bulk)
+		return bench_raw_recv_bulk(raw->fd, req, num, buf);
 
 	for (i = 0; i < num; i++) {
 		uint8_t n;
 
-		if (test_recv(fd, &n, 1) || n != req[2 * i + 1] ||
-		    test_recv(fd, buf + done, n))
+		if (test_recv(raw->fd, &n, 1) || n > req[2 * i + 1] ||
+		    test_recv(raw->fd, buf + done, n))
 			return -EIO;
+		if (n < req[2 * i + 1])
+			bench_short++;
 		done += n;
 	}
+	bench_got = done;
 
 	return 0;
 }
@@ -484,15 +578,24 @@ int main(int argc, char *argv[])
 	if (fd < 0) {
 		failures++;
 	} else {
+		struct bench_raw_ctx raw = { .fd = fd };
+
 		for (i = 0; i < ARRAY_SIZE(bench_sizes); i++) {
 			if (bench_sizes[i] > 16 * ESDM_EGD_MAX_TRANSFER)
 				continue;
-			bench("egd raw unseeded pipelined", bench_raw, &fd,
+			bench("egd raw unseeded pipelined", bench_raw, &raw,
 			      bench_sizes[i]);
 		}
 		/* A batch of the module: 16 commands */
-		bench("egd raw unseeded pipelined", bench_raw, &fd,
+		bench("egd raw unseeded pipelined", bench_raw, &raw,
 		      16 * ESDM_EGD_MAX_TRANSFER);
+
+		/* The answers taken in bulk, up to 256 commands at a time */
+		raw.bulk = true;
+		bench("egd raw unseeded bulk", bench_raw, &raw,
+		      16 * ESDM_EGD_MAX_TRANSFER);
+		bench("egd raw unseeded bulk", bench_raw, &raw,
+		      256 * ESDM_EGD_MAX_TRANSFER);
 		close(fd);
 	}
 

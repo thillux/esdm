@@ -128,10 +128,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 /*
  * One well formed command each - the standard ones and the ESDM's own - plus
- * the two shapes that only a stream protocol has: several commands in one
- * read, and one command split across two.
+ * the shapes that only a stream protocol has: several commands in one read,
+ * runs of reads among them, and one command split across two.
  */
-#define FUZZ_MAX_SEEDS 24
+#define FUZZ_MAX_SEEDS 32
 static struct fuzz_seed fuzz_seeds[FUZZ_MAX_SEEDS];
 static uint8_t fuzz_seed_data[FUZZ_MAX_SEEDS][64];
 static size_t fuzz_num_seeds;
@@ -249,6 +249,41 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 					  ESDM_EGD_CMD_ESDM_GET_STATE };
 
 		fuzz_seed_add("batched-status", batch, sizeof(batch));
+	}
+
+	/*
+	 * Runs of reads, which the server answers together - see
+	 * esdm_egd_read_run() -, of each read it does that for, and one that
+	 * changes the read half way and carries reads of nothing
+	 */
+	if (fuzz_num_seeds + 4 <= FUZZ_MAX_SEEDS) {
+		static const uint8_t runs[][16] = {
+			{ ESDM_EGD_CMD_READ_BLOCK, 255, ESDM_EGD_CMD_READ_BLOCK,
+			  255, ESDM_EGD_CMD_READ_BLOCK, 255,
+			  ESDM_EGD_CMD_READ_BLOCK, 17 },
+			{ ESDM_EGD_CMD_READ_NONBLOCK, 255,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 255,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 3 },
+			{ ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255 },
+			{ ESDM_EGD_CMD_READ_NONBLOCK, 32,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 0,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 64,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 0,
+			  ESDM_EGD_CMD_READ_BLOCK, 0, ESDM_EGD_CMD_READ_BLOCK,
+			  8, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, 16,
+			  ESDM_EGD_CMD_GET_PID },
+		};
+		static const size_t run_len[] = { 8, 6, 6, 15 };
+		static const char *const run_name[] = { "read-block-run",
+							"read-nonblock-run",
+							"read-unseeded-run",
+							"read-mixed-runs" };
+		unsigned int i;
+
+		for (i = 0; i < 4; i++)
+			fuzz_seed_add(run_name[i], runs[i], run_len[i]);
 	}
 
 	/* And one command split across two reads, which is the harder case */

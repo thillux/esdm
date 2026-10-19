@@ -116,6 +116,13 @@
 #define ESDM_EGD_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
 
 /*
+ * Largest response of a run of reads answered together, see
+ * esdm_egd_read_run(): that of a status report, the largest response a
+ * connection holds anyway - so a connection holds no more than it did before.
+ */
+#define ESDM_EGD_RUN_MAX (4 + ESDM_EGD_MAX_STATUS)
+
+/*
  * Upper bound of concurrently served clients. EGD clients may hold their
  * connection open for their entire lifetime, so this limits clients, not
  * requests; beyond it, connections stay queued in the listen backlog. Generous
@@ -272,9 +279,10 @@ struct esdm_egd_conn {
 	 */
 	uint8_t out[1 + ESDM_EGD_MAX_TRANSFER];
 	/*
-	 * A status report does not fit into out: it comes in a buffer of its
-	 * own, which the connection holds instead for as long as the report is
-	 * on its way out. NULL otherwise.
+	 * A status report does not fit into out, nor do the answers of a run
+	 * of reads, see esdm_egd_read_run(): they come in a buffer of their
+	 * own, which the connection holds instead for as long as they are on
+	 * their way out. NULL otherwise.
 	 */
 	uint8_t *out_heap;
 	size_t out_len;
@@ -1104,6 +1112,154 @@ static int esdm_egd_cmd_read_unseeded(struct esdm_egd_conn *conn,
 	return rc;
 }
 
+/*
+ * A run of reads: the same read command - 0x01, 0x02 or 0xe2 - several times
+ * in a row at the head of the input, as a client pipelining a read beyond the
+ * 255 bytes of one transfer sends it, the esdm_cdev module and
+ * libesdm_egd_client among them. The run is answered by one response, and one
+ * generation where the DRNGs allow, see max_piece, rather than one of each per
+ * command: what a read of ESDM_EGD_MAX_TRANSFER bytes costs is mostly the
+ * send(2) of its answer and the generator's cost per call, not the bytes.
+ *
+ * The answers are ones the commands get one by one where each is served in
+ * full: the bytes asked for, preceded by their count where the command has
+ * one. Only that case is taken here, the one of an operational ESDM.
+ *
+ * A generation may fall short. When a DRNG reaches the most it may generate
+ * without a full reseed, it hands out what it had left - in a build for
+ * SP800-90C after 2^17 bits, which a long run always reaches. The reads of the
+ * run it covers in full are answered, the share of the next one is wiped, and
+ * the rest of the run stays in the input for the next pass, which a DRNG with
+ * output left serves - rather than the whole generation being wiped, which
+ * would throw away all the DRNG had left and make it reseed that much sooner.
+ * A generation that does not cover even the first read - the ESDM is not
+ * operational, which the blocking read defers and the others answer short -
+ * leaves the reads to the commands one by one, which ask the generator again,
+ * see *@fallback.
+ *
+ * Nothing changes about the bounds of a connection. The run was in the input
+ * buffer, so the work of a round stays within the read budget, as for the
+ * commands one by one; its response is held in a buffer of its own of at most
+ * ESDM_EGD_RUN_MAX bytes, as a status report is; and it is wiped once it went
+ * out, as every response.
+ *
+ * @return the number of input bytes the run took, 0 when there is none - fewer
+ *	   than two reads, or a generation that did not cover the first, see
+ *	   *@fallback -, < 0 when the connection has to be closed
+ */
+static ssize_t esdm_egd_read_run(struct esdm_egd_conn *conn, bool *fallback)
+{
+	uint8_t cmd = conn->in[0];
+	/* The non-blocking reads answer with a count byte, 0x02 without */
+	size_t counted = (cmd == ESDM_EGD_CMD_READ_BLOCK) ? 0 : 1;
+	size_t num = 0, data = 0, len = 0, generated, served, covered, off;
+	size_t pos, i;
+	/*
+	 * The DRNG is asked for all of the run at once - unless a DRNG may
+	 * generate only a bounded number of bits without a full reseed, as in
+	 * a build for SP800-90C: then for the share of one command at a time,
+	 * as before. Its reseed is triggered by the request that crosses three
+	 * quarters of that bound and has to land in the quarter left; requests
+	 * of several KiB use that quarter up at once, and the DRNGs ran dry
+	 * before their reseeds landed - measured, 1.4 MB/s with calls of one
+	 * transfer, 1.1 MB/s with calls of 4 KiB.
+	 */
+	size_t max_piece =
+		(esdm_config_drng_max_wo_reseed_bits() == UINT32_MAX) ?
+			ESDM_EGD_RUN_MAX :
+			ESDM_EGD_MAX_TRANSFER;
+	uint8_t *buf;
+	ssize_t ret;
+
+	/* Complete commands of the same read, as many as the bound allows */
+	while (2 * (num + 1) <= conn->in_len && conn->in[2 * num] == cmd) {
+		size_t requested = conn->in[2 * num + 1];
+
+		if (len + counted + requested > ESDM_EGD_RUN_MAX)
+			break;
+		len += counted + requested;
+		data += requested;
+		num++;
+	}
+
+	if (num < 2 || !data)
+		return 0;
+
+	buf = malloc(len);
+	if (!buf)
+		return 0;
+
+	/*
+	 * All of it at the tail of the buffer, from where each command's share
+	 * moves to the front behind its count byte.
+	 */
+	off = len - data;
+	for (generated = 0; generated < data;) {
+		size_t piece = data - generated;
+
+		if (piece > max_piece)
+			piece = max_piece;
+		if (cmd == ESDM_EGD_CMD_ESDM_READ_UNSEEDED)
+			ret = esdm_get_random_bytes(buf + off + generated, piece);
+		else
+			ret = esdm_get_random_bytes_full_noblock(
+				buf + off + generated, piece);
+		if (ret <= 0)
+			break;
+		if ((size_t)ret > piece)
+			ret = (ssize_t)piece;
+		generated += (size_t)ret;
+		if ((size_t)ret < piece)
+			break;
+	}
+
+	/* The reads the generation covers in full */
+	for (served = 0, covered = 0; served < num; served++) {
+		size_t requested = conn->in[2 * served + 1];
+
+		if (covered + requested > generated)
+			break;
+		covered += requested;
+	}
+
+	if (!served) {
+		memset_secure(buf, 0, len);
+		free(buf);
+		*fallback = true;
+		return 0;
+	}
+
+	if (counted) {
+		/*
+		 * The share of command i moves from off to pos, which is
+		 * ahead of it by the count bytes of the commands behind it,
+		 * so no share is overwritten before it moved.
+		 */
+		for (i = 0, pos = 0; i < served; i++) {
+			uint8_t requested = conn->in[2 * i + 1];
+
+			buf[pos] = requested;
+			memmove(buf + pos + 1, buf + off, requested);
+			pos += 1 + (size_t)requested;
+			off += requested;
+		}
+	}
+
+	/*
+	 * Behind the answers: nothing when all reads were served, otherwise
+	 * the share of the first one that was not, and what the moves above
+	 * left of the others.
+	 */
+	memset_secure(buf + served * counted + covered, 0,
+		      len - served * counted - covered);
+
+	ret = esdm_egd_write_heap(conn, buf, served * counted + covered);
+	if (ret)
+		return ret;
+
+	return (ssize_t)(2 * served);
+}
+
 /* Command 0xe3: report the state, see ESDM_EGD_STATE_* */
 static int esdm_egd_cmd_get_state(struct esdm_egd_conn *conn)
 {
@@ -1383,6 +1539,8 @@ static bool esdm_egd_cmd_changes(uint8_t cmd)
  */
 static int esdm_egd_process(struct esdm_egd_conn *conn)
 {
+	/* A run of reads was not served in full, see esdm_egd_read_run() */
+	bool run_fallback = false;
 	int ret;
 
 	conn->yielded = false;
@@ -1483,6 +1641,28 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		    !conn->status_budget) {
 			conn->yielded = true;
 			return 0;
+		}
+
+		/*
+		 * Several reads in a row are answered together, see
+		 * esdm_egd_read_run(). Once a generation for them fell short,
+		 * the rest of the input is served command by command: asking
+		 * the generator for the run again at every command would
+		 * mostly come up short again.
+		 */
+		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_ESDM_READ_UNSEEDED) &&
+		    !run_fallback) {
+			ssize_t taken = esdm_egd_read_run(conn, &run_fallback);
+
+			if (taken < 0)
+				return (int)taken;
+			if (taken) {
+				cmd_len = (size_t)taken;
+				ret = 0;
+				goto consume;
+			}
 		}
 
 		switch (conn->in[0]) {

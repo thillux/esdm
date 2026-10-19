@@ -872,7 +872,15 @@ static void test_max_transfer(void)
  */
 static void test_deferred_read(void)
 {
-	uint8_t buf[32];
+	/*
+	 * A run of blocking reads, which the server answers together once it
+	 * is operational: before, the first is deferred, and the rest waits
+	 * behind it.
+	 */
+	const uint8_t run[] = { ESDM_EGD_CMD_READ_BLOCK, 32,
+				ESDM_EGD_CMD_READ_BLOCK, 16,
+				ESDM_EGD_CMD_READ_BLOCK, 32 };
+	uint8_t buf[32 + 16 + 32];
 	uint8_t delivered = 0;
 	uint32_t bits = 0;
 	pid_t pid = 0;
@@ -897,16 +905,16 @@ static void test_deferred_read(void)
 	 * is nothing to be had - it says so with a delivery of zero bytes
 	 * rather than by waiting.
 	 */
-	CHECK(test_cmd_read_nonblock(fd, sizeof(buf), buf, &delivered,
+	CHECK(test_cmd_read_nonblock(fd, 32, buf, &delivered,
 				     TEST_RESPONSE_MS) == 0,
 	      "the non-blocking read was not answered while the ESDM had no entropy");
 	CHECK(delivered == 0,
 	      "%u bytes were delivered by an ESDM that is not operational",
 	      delivered);
 
-	/* Now the request that has to wait. */
-	CHECK(test_send_read_block(fd, sizeof(buf)) == 0,
-	      "the blocking read could not be sent");
+	/* Now the requests that have to wait. */
+	CHECK(test_send(fd, run, sizeof(run)) == 0,
+	      "the blocking reads could not be sent");
 	CHECK(test_quiet(fd, TEST_SILENCE_MS),
 	      "the blocking read was answered by an ESDM that is not operational");
 
@@ -947,9 +955,10 @@ static void test_deferred_read(void)
 
 	memset(buf, 0, sizeof(buf));
 	CHECK(test_recv(fd, buf, sizeof(buf), TEST_RESPONSE_MS) == 0,
-	      "the waiting request was not served after the ESDM became operational");
-	CHECK(!test_all_zero(buf, sizeof(buf)),
-	      "the waiting request was served with nothing but zeroes");
+	      "the waiting requests were not served after the ESDM became operational");
+	CHECK(!test_all_zero(buf, 32) && !test_all_zero(buf + 32, 16) &&
+		      !test_all_zero(buf + 48, 32),
+	      "the waiting requests were served with nothing but zeroes");
 
 	/* And only now the command that was sent behind it. */
 	{
@@ -976,6 +985,114 @@ out:
 		close(fd);
 	if (other >= 0)
 		close(other);
+}
+
+/*
+ * Runs of reads - the same read command several times in a row, as a client
+ * pipelining a large read sends them - are answered together by the server,
+ * see esdm_egd_read_run(). The answers have to be the ones of the commands one
+ * by one: in order, each of the size asked for, with its count byte where the
+ * command has one, and a share of its own.
+ */
+static void test_read_runs(void)
+{
+	/*
+	 * More than the largest run, so the server splits it - unless a DRNG
+	 * may generate only a bounded number of bits without a full reseed, as
+	 * in a build for SP800-90C: no entropy source reseeds it here, so the
+	 * run takes no more than an eighth of that, and leaves the rest to the
+	 * tests behind it.
+	 */
+	uint32_t bound = esdm_config_drng_max_wo_reseed_bits();
+	const unsigned int num =
+		(bound == UINT32_MAX) ?
+			300 :
+			(unsigned int)(bound / 8 / 8 / ESDM_EGD_MAX_TRANSFER) + 2;
+	const uint8_t mixed[] = { ESDM_EGD_CMD_READ_NONBLOCK,	   200,
+				  ESDM_EGD_CMD_READ_NONBLOCK,	   0,
+				  ESDM_EGD_CMD_READ_NONBLOCK,	   255,
+				  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 100,
+				  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+				  ESDM_EGD_CMD_READ_BLOCK,	   10,
+				  ESDM_EGD_CMD_READ_BLOCK,	   0,
+				  ESDM_EGD_CMD_READ_BLOCK,	   7,
+				  ESDM_EGD_CMD_GET_PID };
+	uint8_t *cmds = malloc(2 * num);
+	uint8_t *data = malloc(num * ESDM_EGD_MAX_TRANSFER);
+	uint8_t count, buf[ESDM_EGD_MAX_TRANSFER];
+	char pidstr[UINT8_MAX + 1];
+	unsigned int i;
+	int fd;
+
+	printf("EGD raw: runs of reads, %u blocking reads in a row\n", num);
+
+	fd = test_connect();
+	if (fd < 0 || !cmds || !data) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		goto out;
+	}
+
+	/* Blocking reads of the largest transfer, in one write */
+	for (i = 0; i < num; i++) {
+		cmds[2 * i] = ESDM_EGD_CMD_READ_BLOCK;
+		cmds[2 * i + 1] = ESDM_EGD_MAX_TRANSFER;
+	}
+	CHECK(test_send(fd, cmds, 2 * num) == 0,
+	      "the run of blocking reads could not be sent");
+	memset(data, 0, num * ESDM_EGD_MAX_TRANSFER);
+	CHECK(test_recv(fd, data, num * ESDM_EGD_MAX_TRANSFER,
+			TEST_RESPONSE_MS) == 0,
+	      "the run of %u blocking reads was not answered", num);
+	CHECK(test_quiet(fd, TEST_SILENCE_MS),
+	      "the run of blocking reads was answered with more than asked for");
+	for (i = 0; i < num; i++) {
+		if (test_all_zero(data + i * ESDM_EGD_MAX_TRANSFER, 32))
+			break;
+		if (i && !memcmp(data + i * ESDM_EGD_MAX_TRANSFER,
+				 data + (i - 1) * ESDM_EGD_MAX_TRANSFER, 32))
+			break;
+	}
+	CHECK(i == num,
+	      "the answer of blocking read %u of the run is zeroes or that of the one before",
+	      i);
+
+	/* Runs of each read, empty and full ones among them, in one write */
+	CHECK(test_send(fd, mixed, sizeof(mixed)) == 0,
+	      "the runs of reads could not be sent");
+	for (i = 0; i < 5; i++) {
+		static const uint8_t expect[] = { 200, 0, 255, 100, 255 };
+
+		count = 0xff;
+		CHECK(test_recv(fd, &count, 1, TEST_RESPONSE_MS) == 0 &&
+			      count == expect[i],
+		      "counted read %u of the runs: %u bytes, asked for %u", i,
+		      count, expect[i]);
+		if (count != expect[i])
+			goto out;
+		memset(buf, 0, sizeof(buf));
+		CHECK(test_recv(fd, buf, count, TEST_RESPONSE_MS) == 0 &&
+			      (count < 32 || !test_all_zero(buf, count)),
+		      "counted read %u of the runs is not answered", i);
+	}
+	memset(buf, 0, sizeof(buf));
+	CHECK(test_recv(fd, buf, 10 + 7, TEST_RESPONSE_MS) == 0,
+	      "the blocking reads of the runs were not answered");
+	CHECK(test_recv(fd, &count, 1, TEST_RESPONSE_MS) == 0 && count > 0 &&
+		      test_recv(fd, pidstr, count, TEST_RESPONSE_MS) == 0,
+	      "the command behind the runs was not answered");
+	if (count > 0) {
+		pidstr[count] = '\0';
+		CHECK((pid_t)strtol(pidstr, NULL, 10) == getpid(),
+		      "the answer behind the runs is %s, not the PID", pidstr);
+	}
+	CHECK(test_quiet(fd, TEST_SILENCE_MS),
+	      "the runs were answered with more than asked for");
+
+out:
+	if (fd >= 0)
+		close(fd);
+	free(cmds);
+	free(data);
 }
 
 /****************************
@@ -1182,6 +1299,39 @@ static void test_esdm_unseeded(void)
 	CHECK(delivered == 0,
 	      "%u prediction resistant bytes were delivered by an ESDM that is not operational",
 	      delivered);
+
+	/*
+	 * Runs of the counted reads, which the server answers together once
+	 * it is operational: before, each one by one and empty, in order.
+	 */
+	{
+		const uint8_t run[] = { ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 64,
+					ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+					ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 1,
+					ESDM_EGD_CMD_READ_NONBLOCK, 32,
+					ESDM_EGD_CMD_READ_NONBLOCK, 255,
+					ESDM_EGD_CMD_GET_PID };
+		uint8_t answers[5], len = 0;
+		char pidstr[UINT8_MAX + 1];
+
+		CHECK(test_send(fd, run, sizeof(run)) == 0,
+		      "the runs of reads could not be sent");
+		CHECK(test_recv(fd, answers, sizeof(answers),
+				TEST_RESPONSE_MS) == 0 &&
+			      test_all_zero(answers, sizeof(answers)),
+		      "the runs of reads were not answered empty");
+		CHECK(test_recv(fd, &len, sizeof(len), TEST_RESPONSE_MS) == 0 &&
+			      len > 0 &&
+			      test_recv(fd, pidstr, len, TEST_RESPONSE_MS) ==
+				      0,
+		      "the command behind the runs was not answered");
+		if (len > 0) {
+			pidstr[len] = '\0';
+			CHECK((pid_t)strtol(pidstr, NULL, 10) == getpid(),
+			      "the answer behind the runs is %s, not the PID",
+			      pidstr);
+		}
+	}
 
 	close(fd);
 }
@@ -1898,6 +2048,7 @@ int main(int argc, char *argv[])
 	test_esdm_split_command();
 	test_esdm_priv_peer_gone();
 	test_pipelining();
+	test_read_runs();
 	test_split_command();
 	test_write_entropy();
 	test_max_transfer();
