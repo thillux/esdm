@@ -81,8 +81,6 @@ LIBESDM_RPC_CLIENT_1.0 {
 		esdm_rpcc_get_min_reseed_secs_int;
 		esdm_rpcc_set_min_reseed_secs;
 		esdm_rpcc_set_min_reseed_secs_int;
-		esdm_rpcc_set_pkcs11_config;
-		esdm_rpcc_set_pkcs11_config_int;
 		esdm_rpcc_selftest;
 		esdm_rpcc_selftest_int;
 		esdm_rpcc_jent_status;

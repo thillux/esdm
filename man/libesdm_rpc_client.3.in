@@ -256,9 +256,6 @@ Set the write wakeup threshold.
 Set that time. Zero seconds reseeds before every request, values above one hour
 are capped to it.
 .TP
-.BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
-Set the token label and user PIN of the PKCS#11 entropy source.
-.TP
 .BI "int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *" result ");"
 Run the self tests of the server now. Returns 0 if every self test passed and
 the ESDM hands out random bits, otherwise the error of the failing test, or

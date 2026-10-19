@@ -264,10 +264,12 @@ void esdm_rpc_jent_status(UnprivAccess_Service *service,
 			  const StatusRequest *request,
 			  StatusResponse_Closure closure,
 			  void *closure_data);
-void esdm_rpc_set_pkcs11_config(PrivAccess_Service *service,
-				const SetPkcs11ConfigRequest *request,
-				RetResponse_Closure closure,
-				void *closure_data);
+
+/* the reserved slot of the PKCS#11 configuration, see priv_access.proto */
+void esdm_rpc_reserved_set_pkcs11_config(PrivAccess_Service *service,
+					 const EmptyRequest *request,
+					 RetResponse_Closure closure,
+					 void *closure_data);
 
 /* self tests */
 void esdm_rpc_selftest(PrivAccess_Service *service, const EmptyRequest *request,

@@ -120,20 +120,6 @@ static size_t fuzz_len(struct fuzz_input *in, size_t max)
 	return (val % (max + 1));
 }
 
-/* Fill a NUL terminated string of at most @max characters from the input. */
-static char *fuzz_text(struct fuzz_input *in, char *buf, size_t max)
-{
-	size_t len = fuzz_len(in, max - 1);
-	size_t avail = in->len - in->pos;
-	size_t take = (avail < len) ? avail : len;
-
-	memcpy(buf, in->data + in->pos, take);
-	in->pos += take;
-	buf[take] = '\0';
-
-	return buf;
-}
-
 static uint8_t *fuzz_buf(size_t len)
 {
 	uint8_t *buf = (uint8_t *)fuzz_area;
@@ -218,6 +204,11 @@ static void fuzz_priv_call(struct fuzz_input *in)
 	uint8_t *buf;
 	size_t len;
 
+	/*
+	 * 6 was the call configuring the PKCS#11 entropy source, which is gone:
+	 * it takes the self test as well, so that the inputs of the corpus keep
+	 * picking the calls they picked.
+	 */
 	switch (fuzz_u8(in) % 8) {
 	case 0:
 		len = fuzz_len(in, FUZZ_BUF_MAX);
@@ -240,22 +231,6 @@ static void fuzz_priv_call(struct fuzz_input *in)
 	case 5:
 		esdm_rpcc_set_min_reseed_secs(fuzz_u32(in));
 		break;
-	case 6: {
-		/*
-		 * The one call carrying text rather than numbers, and the only
-		 * place a client packs a string into a request: two of them,
-		 * either of which may be absent - which the packing has to
-		 * tell apart from an empty one.
-		 */
-		static char label[64], pin[64];
-		uint8_t which = fuzz_u8(in);
-
-		esdm_rpcc_set_pkcs11_config(
-			(which & 1) ? NULL :
-				      fuzz_text(in, label, sizeof(label)),
-			(which & 2) ? NULL : fuzz_text(in, pin, sizeof(pin)));
-		break;
-	}
 	default:
 		memset(&selftest, 0, sizeof(selftest));
 		esdm_rpcc_selftest(&selftest);

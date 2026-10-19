@@ -125,6 +125,10 @@ and
 proceed even though the ESDM is not fully seeded yet. The data is then not of
 full quality.
 .SS Administration
+The token label and the PIN of the PKCS#11 entropy source are no longer set
+here: the source is
+.BR esdm\-es\-pkcs11 (8),
+which takes them from its own configuration.
 .TP
 .BR \-W ", " \-\-write\-to\-aux\-pool " \fIDATA\fR"
 Write the string
@@ -167,22 +171,6 @@ part of the output of
 and
 .BR \-\-status\-json ,
 which need no privileges. Requires root.
-.TP
-.BR \-\-pkcs11\-pin " \fIPIN\fR"
-Set the user PIN of the PKCS#11 entropy source. Pass
-.B \-
-to read the PIN from standard input with terminal echo disabled, which keeps
-it out of the process table. May be combined with
-.BR \-\-pkcs11\-token\-label .
-A PIN the token refuses is discarded rather than tried again, as every failed
-login uses up one of the PIN retries of the token; the same holds for the PIN
-the build was configured with until a PIN is set with this option.
-Requires root.
-.TP
-.BR \-\-pkcs11\-token\-label " \fILABEL\fR"
-Set the token label of the PKCS#11 entropy source, which then looks for that
-token among the slots of its module at once. Pass an empty string to clear the
-override. Requires root.
 .SS Benchmarking and stress testing
 .TP
 .BR \-b ", " \-\-benchmark
@@ -300,6 +288,7 @@ esdm\-tool \-\-drng\-status\-json | jq '.[] | select(.fully_seeded == false)'
 .RE
 .SH SEE ALSO
 .BR esdm\-server (8),
+.BR esdm\-es\-pkcs11 (8),
 .BR esdm\-kernel\-seeder (8),
 .BR libesdm_rpc_client (3)
 .SH AUTHOR

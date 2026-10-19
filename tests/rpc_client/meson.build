@@ -119,6 +119,8 @@ if get_option('esdm-server').enabled()
 
 	# One test over the whole client API: most of its calls are a file each
 	# and had never been executed.
+	# The static library: the reserved slot of the privileged interface is
+	# called with the generated stub, which the shared one does not export
 	rpc_api_test = executable(
 			'rpc_api_test',
 			[ esdm_tester_common, 'rpc_api_test.c' ],
@@ -126,7 +128,8 @@ if get_option('esdm-server').enabled()
 					       include_dirs_server,
 					       include_directories('../common') ],
 			dependencies: [ dependencies_client ],
-			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib.get_static_lib() ]
 		)
 
 	rpc_get_seed_test = executable(
