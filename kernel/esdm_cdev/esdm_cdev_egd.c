@@ -201,11 +201,19 @@ int esdm_cdev_run_in_init(int (*fn)(void *out), void (*discard)(void *out),
 /* Runs on the workqueue, see above */
 static int esdm_cdev_connect_fn(void *out)
 {
-	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	/*
+	 * In a struct sockaddr_storage, as the system calls pass addresses:
+	 * unix_mkname_bsd() terminates the path at sun_path[108], past the
+	 * end of a struct sockaddr_un. Kernels without "net: avoid address
+	 * overwrite in kernel_connect", such as early 6.1 ones, do that on the
+	 * caller's address.
+	 */
+	struct sockaddr_storage addr = { .ss_family = AF_UNIX };
+	struct sockaddr_un *sun = (struct sockaddr_un *)&addr;
 	struct socket **res = out, *sock;
 	int ret;
 
-	strscpy(addr.sun_path, egd_socket, sizeof(addr.sun_path));
+	strscpy(sun->sun_path, egd_socket, sizeof(sun->sun_path));
 
 	ret = sock_create_kern(&init_net, AF_UNIX, SOCK_STREAM, 0, &sock);
 	if (ret)
@@ -216,7 +224,7 @@ static int esdm_cdev_connect_fn(void *out)
 	 * connect rather than a wait. The address type of kernel_connect()
 	 * differs between kernel versions, the void pointer fits both.
 	 */
-	ret = kernel_connect(sock, (void *)&addr, sizeof(addr), O_NONBLOCK);
+	ret = kernel_connect(sock, (void *)&addr, sizeof(*sun), O_NONBLOCK);
 	if (ret) {
 		sock_release(sock);
 		return ret;
