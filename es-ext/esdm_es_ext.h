@@ -182,7 +182,55 @@ struct esdm_es_ext_plugin {
  * with exactly one response. Requests and responses are one message each. All
  * integers are little endian.
  *
- * Request, ESDM_ES_EXT_PROTO_REQ_LEN bytes:
+ *	esdm-server                                  provider process
+ *	+--------------------------+                 +-----------------------+
+ *	| ExternalSocket n         |  SOCK_SEQPACKET | esdm-es-ext-serve,    |
+ *	| connects, as the user it |---------------->| esdm-es-pkcs11, or a  |
+ *	| dropped its privileges to|  Unix socket    | server of your own;   |
+ *	| (nobody); checks the uid |                 | listens, checks the   |
+ *	| of the provider          |                 | uid of the ESDM       |
+ *	+--------------------------+                 +-----------------------+
+ *
+ * A connection, from the ESDM's side:
+ *
+ *	ESDM                                                        provider
+ *	  |-- connect(2) ------------------------------------------------->|
+ *	  |                                                                |
+ *	  |-- STARTDTLS, length 0 ---------------------------------------->|
+ *	  |<-------------------------- status 0, or -EOPNOTSUPP: no DTLS --|
+ *	  |                                                                |
+ *	  |== DTLS 1.2 handshake, the ESDM the client ====================>|
+ *	  |<======================================== only after status 0 ==|
+ *	  |                                                                |
+ *	  |-- INFO, length 0 --------------------------------------------->|
+ *	  |<------------------------------- status 0, entropy_rate, name --|
+ *	  |                                                                |
+ *	  |-- SELFTEST, length 0 ----------------------------------------->|
+ *	  |<----------------------------------------------------- status --|
+ *	  |                                                                |
+ *	  |-- GET_ENTROPY, length ---------------------------------------->|
+ *	  |<------------------------- status, entropy_bits, length bytes --|
+ *	  |                                                                |
+ *	  |-- STATUS, length --------------------------------------------->|
+ *	  |<------------------------------- status, JSON of up to length --|
+ *	  :                                                                :
+ *
+ * STARTDTLS only by an ESDM built with DTLS, and only first; INFO once per
+ * connection, before anything else but STARTDTLS; SELFTEST before the ESDM
+ * credits the source for the first time and on the interval of its self
+ * tests; GET_ENTROPY whenever the ESDM collects a seed; STATUS when the
+ * status of the ESDM is asked for. One request at a time, each answered
+ * before the next is sent.
+ *
+ * Request, ESDM_ES_EXT_PROTO_REQ_LEN (12) bytes:
+ *
+ *	0               4       6       8               12
+ *	+---------------+-------+-------+---------------+
+ *	|     magic     |version| type  |    length     |
+ *	|  45 53 45 58  | 01 00 |       |               |
+ *	|    "ESEX"     |       |       |               |
+ *	+---------------+-------+-------+---------------+
+ *
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
  *	u16 type		ESDM_ES_EXT_PROTO_GET_ENTROPY,
@@ -195,7 +243,14 @@ struct esdm_es_ext_plugin {
  *				ESDM_ES_EXT_PROTO_STATUS_MAX, for STATUS; 0
  *				otherwise
  *
- * Response, ESDM_ES_EXT_PROTO_RSP_LEN bytes followed by the data:
+ * Response, ESDM_ES_EXT_PROTO_RSP_LEN (16) bytes followed by the data:
+ *
+ *	0               4       6       8               12              16
+ *	+---------------+-------+-------+---------------+---------------+- - -
+ *	|     magic     |version| type  |    status     | entropy_bits  | data
+ *	|    "ESEX"     |   1   |       |  0 or -errno  |               |
+ *	+---------------+-------+-------+---------------+---------------+- - -
+ *
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
  *	u16 type		type of the request answered
@@ -243,6 +298,12 @@ struct esdm_es_ext_plugin {
  * per connection - right after STARTDTLS and the DTLS handshake, inside the
  * DTLS session where there is one, before any other request. The request has
  * length 0. A provider answers it with status 0 and the data
+ *
+ *	16              20                                    20 + n
+ *	+---------------+-------------------------------------+
+ *	| entropy_rate  | name, n = 0 to ESDM_ES_EXT_NAME_MAX |
+ *	+---------------+-------------------------------------+
+ *
  *	u32 entropy_rate	the entropy rate the provider declares for its
  *				data, bits per 256 bits of data, 0 to
  *				ESDM_ES_EXT_ENTROPY_RATE_MAX - one beyond is
@@ -272,7 +333,18 @@ struct esdm_es_ext_plugin {
  * record, handshake records included, is one message. All later requests and
  * responses are DTLS application data, each one carried by records with one
  * byte in front - 1 if more parts of it follow, 0 for the last one, see
- * esdm_dtls.h - and STARTDTLS is not sent again. A
+ * esdm_dtls.h - and STARTDTLS is not sent again:
+ *
+ *	one message, cut into parts of at most ESDM_DTLS_PART_SIZE bytes
+ *	+-----------------------------------------------------------+
+ *	|                 request or response                       |
+ *	+-----------------------------------------------------------+
+ *	each part one DTLS record, one SOCK_SEQPACKET message each
+ *	+---+------------------------------+  +---+------------------+
+ *	| 1 | part 1                       |  | 0 | last part        |
+ *	+---+------------------------------+  +---+------------------+
+ *
+ * A
  * provider that cannot do DTLS answers -EOPNOTSUPP, and the connection goes on
  * unencrypted. A provider that does not know STARTDTLS closes the connection,
  * and the ESDM connects again without asking - so do a failed handshake.
