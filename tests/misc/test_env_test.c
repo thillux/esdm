@@ -18,16 +18,23 @@
  */
 
 /*
- * The helpers the tests start their daemons with, see tests/test_wait.h:
+ * The helpers the tests start their daemons with, see tests/test_wait.h and
+ * tests/test_env.h:
  *
  * - a daemon is ready once it accepts connections: a socket bound but not
  *   listening yet is there as a file, and refuses them - which a test
- *   connecting on seeing the file ran into on a loaded machine.
+ *   connecting on seeing the file ran into on a loaded machine;
+ * - the options of the sanitizers reach the daemon, what the test has for
+ *   itself alone does not;
+ * - a daemon that aborts - a finding of ASan or UBSan -, exits with the exit
+ *   code of TSan, or crashes fails the test, one ending for SIGTERM does not.
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +45,7 @@
 #include <unistd.h>
 
 #include "common_test.h"
+#include "../test_env.h"
 #include "../test_wait.h"
 
 /* How long the socket below stays bound before it listens */
@@ -102,9 +110,85 @@ out:
 	rmdir(dir);
 }
 
+/* Is @var among the variables of @envp? */
+static bool test_envp_has(char *const *envp, const char *var)
+{
+	for (; *envp; envp++) {
+		if (!strcmp(*envp, var))
+			return true;
+	}
+	return false;
+}
+
+static void test_daemon_env(void)
+{
+	char *envp[TEST_ENV_MAX_VARS + 1];
+
+	setenv("ASAN_OPTIONS", "abort_on_error=1", 1);
+	setenv("UBSAN_OPTIONS", "halt_on_error=1", 1);
+	setenv("TSAN_OPTIONS", "halt_on_error=0", 1);
+	setenv("LD_PRELOAD", "libtest-only.so", 1);
+
+	test_env_daemon_envp(envp, TEST_ENV_MAX_VARS + 1);
+
+	CHECK(test_envp_has(envp, "ASAN_OPTIONS=abort_on_error=1"),
+	      "ASAN_OPTIONS does not reach the daemon");
+	CHECK(test_envp_has(envp, "UBSAN_OPTIONS=halt_on_error=1"),
+	      "UBSAN_OPTIONS does not reach the daemon");
+	CHECK(test_envp_has(envp, "TSAN_OPTIONS=halt_on_error=0"),
+	      "TSAN_OPTIONS does not reach the daemon");
+	CHECK(!test_envp_has(envp, "LD_PRELOAD=libtest-only.so"),
+	      "LD_PRELOAD of the test reaches the daemon");
+}
+
+/* A daemon that ends with @how: an exit code >= 0, or a negative signal */
+static pid_t test_daemon(int how)
+{
+	pid_t pid = fork();
+
+	if (pid)
+		return pid;
+
+	if (how >= 0)
+		_exit(how);
+
+	/* As the sanitizers abort, and as a crash ends a process */
+	signal(-how, SIG_DFL);
+	raise(-how);
+	_exit(0);
+}
+
+/* What test_env_reap_daemon() says about a daemon ending with @how */
+static int test_reap(int how)
+{
+	pid_t pid = test_daemon(how);
+
+	if (pid < 0) {
+		CHECK(0, "cannot fork: %s", strerror(errno));
+		return -1;
+	}
+
+	return test_env_reap_daemon(pid, "test daemon");
+}
+
+static void test_daemon_exit(void)
+{
+	CHECK_EQ(test_reap(0), 0);
+	CHECK_EQ(test_reap(1), 0);
+	CHECK_EQ(test_reap(-SIGTERM), 0);
+	CHECK_EQ(test_reap(-SIGKILL), 0);
+
+	CHECK_EQ(test_reap(-SIGABRT), 1);
+	CHECK_EQ(test_reap(TEST_ENV_SANITIZER_EXIT), 1);
+	CHECK_EQ(test_reap(-SIGSEGV), 1);
+	CHECK_EQ(test_reap(-SIGBUS), 1);
+}
+
 int main(void)
 {
 	test_listener();
+	test_daemon_env();
+	test_daemon_exit();
 
 	return common_test_result("test environment");
 }

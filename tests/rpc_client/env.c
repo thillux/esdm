@@ -44,7 +44,7 @@ void env_fini(void)
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 
@@ -114,7 +114,7 @@ void env_kill_server(void)
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 	nanosleep(&ts, NULL);

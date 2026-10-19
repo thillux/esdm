@@ -102,7 +102,7 @@ static void test_terminate(pid_t pid)
 	if (pid <= 0)
 		return;
 	kill(pid, SIGTERM);
-	waitpid(pid, NULL, 0);
+	test_env_reap_daemon_or_fail(pid, "daemon");
 }
 
 /* The status of the daemon, once it answers */

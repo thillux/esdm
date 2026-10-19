@@ -227,10 +227,10 @@ int main(int argc, char *argv[])
 	char *server_envp[TEST_ENV_MAX_VARS + 1];
 	/* Those of server_envp, the preload and the sanitizer options */
 	char *unlink_envp[TEST_ENV_MAX_VARS + 3];
-	char preload_var[FILENAME_MAX + 16];
+	char preload_var[FILENAME_MAX + 16], asan_var[4096];
 	const char *server = getenv("ESDM_SERVER");
 	const char *preload = getenv("ESDM_PIDFILE_UNLINK_PRELOAD");
-	unsigned int i;
+	unsigned int i, j;
 	struct stat sb;
 	long pid;
 
@@ -280,14 +280,24 @@ int main(int argc, char *argv[])
 
 	/*
 	 * The preload is built without the sanitizers and comes ahead of their
-	 * runtime, which ASan refuses unless told otherwise.
+	 * runtime, which ASan refuses unless told otherwise - in the options
+	 * the test passes on to the daemon, if any, as only the first of two
+	 * variables of a name counts.
 	 */
-	for (i = 0; server_envp[i]; i++)
-		unlink_envp[i] = server_envp[i];
+	snprintf(asan_var, sizeof(asan_var), "ASAN_OPTIONS=%s",
+		 "verify_asan_link_order=0");
+	for (i = 0, j = 0; server_envp[i]; i++) {
+		if (!strncmp(server_envp[i], "ASAN_OPTIONS=", 13)) {
+			snprintf(asan_var, sizeof(asan_var),
+				 "%s:verify_asan_link_order=0", server_envp[i]);
+			continue;
+		}
+		unlink_envp[j++] = server_envp[i];
+	}
 	snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload);
-	unlink_envp[i++] = preload_var;
-	unlink_envp[i++] = (char *)"ASAN_OPTIONS=verify_asan_link_order=0";
-	unlink_envp[i] = NULL;
+	unlink_envp[j++] = preload_var;
+	unlink_envp[j++] = asan_var;
+	unlink_envp[j] = NULL;
 
 	/*
 	 * Without a privileged process left, the file stays. Emptied, it names

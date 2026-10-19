@@ -23,9 +23,13 @@
 #define TEST_ENV_H
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 extern char **environ;
 
@@ -45,9 +49,17 @@ extern "C" {
  * The ESDM daemons no longer do since the PKCS#11 entropy source became
  * esdm-es-pkcs11, which its tests start with an environment of their own, but
  * a setup pointing the ESDM at a provider loading it still may.
+ *
+ * The options of the sanitizers are the other ones: without them, a daemon of
+ * a sanitized build runs with the defaults - UBSan reports and goes on, ASan
+ * exits with 1 -, and a finding in it fails no test. With the options of the
+ * test, as meson and the CI set them, it aborts on its first finding, or exits
+ * with 66 for TSan, which test_env_reap_daemon() below fails the test on, as
+ * it does a crash.
  */
 static const char *const test_env_pass[] = {
-	"SOFTHSM2_CONF=",
+	"SOFTHSM2_CONF=", "ASAN_OPTIONS=", "UBSAN_OPTIONS=", "TSAN_OPTIONS=",
+	"LSAN_OPTIONS=",  "MSAN_OPTIONS=",
 };
 
 /* Slots a caller has to provide, terminator excluded */
@@ -103,6 +115,58 @@ static inline int test_env_check_file(const char *path)
 	}
 
 	return 0;
+}
+
+/* The exit code of a process TSan found something in, its exitcode option */
+#define TEST_ENV_SANITIZER_EXIT 66
+
+/*
+ * Wait for the daemon @pid the test started, and tell whether a sanitizer
+ * found something in it - an abort, as ASan and UBSan do with abort_on_error,
+ * or the exit code of TSan -, or whether it crashed. @name says which daemon
+ * in the message.
+ *
+ * Returns 0, or 1 if the daemon ended so; the caller fails the test then.
+ */
+static inline int test_env_reap_daemon(pid_t pid, const char *name)
+{
+	int status;
+
+	if (pid <= 0 || waitpid(pid, &status, 0) != pid)
+		return 0;
+
+	if (WIFSIGNALED(status) &&
+	    (WTERMSIG(status) == SIGABRT || WTERMSIG(status) == SIGSEGV ||
+	     WTERMSIG(status) == SIGBUS || WTERMSIG(status) == SIGILL ||
+	     WTERMSIG(status) == SIGFPE)) {
+		printf("FAIL: %s (PID %d) was killed by signal %d - %s\n",
+		       name, (int)pid, WTERMSIG(status),
+		       WTERMSIG(status) == SIGABRT ?
+			       "a sanitizer finding?" :
+			       "it crashed");
+		return 1;
+	}
+	if (WIFEXITED(status) &&
+	    WEXITSTATUS(status) == TEST_ENV_SANITIZER_EXIT) {
+		printf("FAIL: %s (PID %d) exited with %d - a sanitizer finding?\n",
+		       name, (int)pid, TEST_ENV_SANITIZER_EXIT);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * test_env_reap_daemon() for a helper that cannot hand a failure back: the
+ * test ends at once with a failure - exit(3), so that what the test wrote,
+ * its coverage counters included, is kept.
+ */
+static inline void test_env_reap_daemon_or_fail(pid_t pid, const char *name)
+{
+	if (test_env_reap_daemon(pid, name)) {
+		fflush(stdout);
+		exit(1);
+	}
 }
 
 #ifdef __cplusplus

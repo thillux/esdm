@@ -106,7 +106,8 @@ if get_option('linux-devfiles').enabled()
 		suite: 'cuse')
 endif
 
-# The helpers the tests start their daemons with - tests/test_wait.h
+# The helpers the tests start their daemons with - tests/test_wait.h and
+# tests/test_env.h
 test_env_test = executable(
 		'test_env_test',
 		[ 'test_env_test.c' ],

@@ -117,7 +117,7 @@ static void server_stop(void)
 		return;
 
 	kill(server_pid, SIGTERM);
-	waitpid(server_pid, NULL, 0);
+	test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	server_pid = 0;
 }
 
