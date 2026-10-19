@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <pthread.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -45,10 +46,26 @@
 
 static struct esdm_es_ext_server *serve_server;
 
-static void serve_stop(int sig)
+/*
+ * The signals ending the provider. They are blocked in every thread from the
+ * start - those a plugin may start in its init included - and taken by a
+ * thread of its own with sigwait(2) rather than by a handler: a handler is
+ * run whenever the signal arrives only as long as nothing defers it. A thread
+ * sanitizer does - until the thread enters a function it intercepts - and the
+ * poll(2) of the server, built with _FORTIFY_SOURCE, is __poll_chk(), which it
+ * does not intercept: the signal arrived while the server polled, the server
+ * went on polling, the handler never ran, and the provider ignored SIGTERM.
+ */
+static sigset_t serve_signal_set;
+
+static void *serve_signals(void *arg)
 {
-	(void)sig;
-	esdm_es_ext_server_stop(serve_server);
+	int sig;
+
+	(void)arg;
+	if (!sigwait(&serve_signal_set, &sig))
+		esdm_es_ext_server_stop(serve_server);
+	return NULL;
 }
 
 /* Clients to be served next to root */
@@ -122,13 +139,19 @@ int main(int argc, char *argv[])
 	struct esdm_es_ext_plugin_handle *handle = NULL;
 	const struct esdm_es_ext_plugin *plugin;
 	const char *plugin_path = NULL, *socket_path = NULL, *name = NULL;
-	struct sigaction sa;
+	pthread_t signal_thread;
 	uid_t client_uids[SERVE_MAX_CLIENT_UIDS];
 	unsigned int client_uids_num = 0, i;
 	uint32_t rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	mode_t mode = 0666;
 	bool dtls = true;
 	int c, ret;
+
+	sigemptyset(&serve_signal_set);
+	sigaddset(&serve_signal_set, SIGTERM);
+	sigaddset(&serve_signal_set, SIGINT);
+	sigaddset(&serve_signal_set, SIGHUP);
+	pthread_sigmask(SIG_BLOCK, &serve_signal_set, NULL);
 
 	while ((c = getopt_long(argc, argv, "l:s:m:u:vh", opts, NULL)) != -1) {
 		switch (c) {
@@ -273,14 +296,16 @@ int main(int argc, char *argv[])
 	if (rate != ESDM_ES_EXT_PROTO_RATE_NONE)
 		(void)esdm_es_ext_server_set_entropy_rate(serve_server, rate);
 
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = serve_stop;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGTERM, &sa, NULL);
-	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGHUP, &sa, NULL);
 	/* A client gone mid-answer is no reason to terminate */
 	signal(SIGPIPE, SIG_IGN);
+
+	ret = -pthread_create(&signal_thread, NULL, serve_signals, NULL);
+	if (ret) {
+		fprintf(stderr, "Cannot wait for signals: %s\n", strerror(-ret));
+		esdm_es_ext_server_free(serve_server);
+		esdm_es_ext_plugin_unload(handle);
+		return 1;
+	}
 
 	if (!name)
 		name = esdm_es_ext_name_or_null(plugin->name);
@@ -292,6 +317,10 @@ int main(int argc, char *argv[])
 	if (ret)
 		fprintf(stderr, "Serving %s failed: %s\n", socket_path,
 			strerror(-ret));
+
+	/* The signal thread ended with the signal, or waits for one still */
+	pthread_kill(signal_thread, SIGTERM);
+	pthread_join(signal_thread, NULL);
 
 	esdm_es_ext_server_free(serve_server);
 	esdm_es_ext_plugin_unload(handle);
