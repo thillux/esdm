@@ -36,6 +36,52 @@ es_ext_net_server_test = executable(
 		link_with: esdm_common_static_lib
 	)
 
+# The esdm-es-ext-relay between a client speaking the protocol as the ESDM
+# does and esdm-es-ext-serve on the network. Needs no privileges.
+es_ext_net_relay_test = executable(
+		'es_ext_net_relay_test',
+		[ 'relay_test.c' ],
+		c_args: es_ext_net_test_args,
+		include_directories: include_dirs_es_ext_net_test,
+		dependencies: [ dependency('threads'), json_c_dep ] +
+			      dtls_deps + es_ext_net_deps,
+		link_with: esdm_common_static_lib
+	)
+
+test('External ES relay', es_ext_net_relay_test,
+	args: [ esdm_es_ext_relay.full_path(), esdm_es_ext_serve.full_path(),
+		es_ext_test_plugin_rated.full_path() ],
+	depends: [ esdm_es_ext_relay, esdm_es_ext_serve,
+		   es_ext_test_plugin_rated ],
+	timeout: 300, suite: 'es-ext-net')
+
+if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
+	# The esdm-server reading a provider on the network through the
+	# relay - which takes root: skips (77) otherwise. Isolated in
+	# namespaces of its own, like the other tests of the server.
+	es_ext_net_esdm_test = executable(
+			'es_ext_net_esdm_test',
+			[ 'esdm_test.c' ],
+			c_args: es_ext_net_test_args,
+			include_directories: [ include_dirs_es_ext_net_test,
+					       include_dirs_client ],
+			dependencies: [ dependency('threads'), json_c_dep ] +
+				      dependencies_client,
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib ]
+		)
+
+	test('External ES on the network read by the ESDM',
+		es_ext_net_esdm_test,
+		args: [ esdm_server.full_path(), esdm_es_ext_relay.full_path(),
+			esdm_es_ext_serve.full_path(),
+			es_ext_test_plugin_rated.full_path() ],
+		env: [ 'ESDM_SERVER=' + esdm_server.full_path() ],
+		depends: [ esdm_server, esdm_es_ext_relay, esdm_es_ext_serve,
+			   es_ext_test_plugin_rated ],
+		timeout: 300, suite: 'es-ext-net')
+endif
+
 test('External ES provider on the network', es_ext_net_server_test,
 	args: [ esdm_es_ext_serve.full_path(),
 		es_ext_test_plugin.full_path() ],
