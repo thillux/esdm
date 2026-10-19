@@ -408,7 +408,8 @@ static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
 
 /*
  * The ioctls of drivers/char/random.c, with its checks: the caller's
- * capability first, then the arguments.
+ * capability first, then the arguments - stricter ones for the size of
+ * RNDADDENTROPY, see there.
  *
  * The module is root towards the ESDM, which therefore carries out whatever it
  * sends. That makes the CAP_SYS_ADMIN check here the one that keeps an
@@ -460,6 +461,13 @@ static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (get_user(size, p++))
 			return -EFAULT;
+		/*
+		 * Stricter than random.c, deliberately: a negative size is
+		 * refused before any data is read, where random.c mixes in
+		 * what it can read of that much memory and fails with -EFAULT,
+		 * and a size of 0 credits nothing, where random.c credits the
+		 * entropy count without any data.
+		 */
 		if (size < 0)
 			return -EINVAL;
 		if (!size)
@@ -483,7 +491,10 @@ static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
 		if (written != size)
 			return -EFAULT;
 
-		/* No more than the data has bits */
+		/*
+		 * No more than the data has bits, where random.c credits the
+		 * count, up to the size of its pool
+		 */
 		bits = (u32)min_t(u64, (u64)ent_count, (u64)size * 8);
 		if (!bits)
 			return 0;

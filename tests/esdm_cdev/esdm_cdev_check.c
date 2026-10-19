@@ -674,7 +674,8 @@ static void cmd_writes(int argc, char *argv[])
 
 /*
  * ioctl-priv: as root, every ioctl does what it does to the kernel's pool,
- * and is refused with the arguments random.c refuses.
+ * and is refused with the arguments random.c refuses - and with a negative
+ * size of RNDADDENTROPY, where random.c fails with EFAULT.
  */
 static void cmd_ioctl_priv(int argc, char *argv[])
 {
@@ -744,12 +745,16 @@ static void cmd_ioctl_priv(int argc, char *argv[])
 		ok_or_fail(rnd_ioctl(fd, RNDRESEEDCRNG, NULL), dev,
 			   "RNDRESEEDCRNG");
 
-		/* Argument checks of random.c */
+		/*
+		 * Argument checks: those of random.c, and the stricter one of
+		 * the module for the size of RNDADDENTROPY - random.c reads
+		 * what it can of a negative size and fails with EFAULT.
+		 */
 		bits = -1;
 		if (rnd_ioctl(fd, RNDADDTOENTCNT, &bits) != EINVAL)
 			fail("%s: negative RNDADDTOENTCNT not refused", dev);
 		if (rnd_add_entropy(fd, 8, -1, NULL, 0) != EINVAL)
-			fail("%s: negative RNDADDENTROPY size not refused",
+			fail("%s: negative RNDADDENTROPY size not refused with EINVAL",
 			     dev);
 		/* A command of the type of random.c that it does not have */
 		if (rnd_ioctl(fd, _IO('R', 0x99), NULL) != EINVAL)

@@ -80,7 +80,8 @@ written.
 
 ### ioctls
 
-The ioctls of `drivers/char/random.c`, with its checks:
+The ioctls of `drivers/char/random.c`, with its checks - and stricter ones
+for the size of `RNDADDENTROPY`, see below:
 
 | ioctl                            | Who                                  | Effect in the ESDM |
 |----------------------------------|--------------------------------------|--------------------|
@@ -91,10 +92,19 @@ The ioctls of `drivers/char/random.c`, with its checks:
 | `RNDRESEEDCRNG`                  | `CAP_SYS_ADMIN`                      | reseeds the DRNGs at their next use |
 
 Every other command is answered with `EINVAL`, as by the kernel. As there, the
-caller's capability is checked first and the arguments after it; a negative
-entropy count or size is `EINVAL`. As there, `RNDADDENTROPY` inserts all of its
-data before it credits the entropy, and credits nothing when not all of it went
-in.
+caller's capability is checked first and the arguments after it, a negative
+entropy count is `EINVAL`, and `RNDADDENTROPY` inserts all of its data before
+it credits the entropy, and credits nothing when not all of it went in.
+
+With the size of the data of `RNDADDENTROPY`, the module is stricter than
+`random.c`, deliberately:
+
+* a negative size is `EINVAL` before any data is read, where `random.c` mixes
+  in what it can read of that much memory and fails with `EFAULT`,
+* a size of 0 credits nothing, where `random.c` credits the entropy count
+  without any data,
+* no more bits are credited than the data has, 8 per byte, where `random.c`
+  credits the entropy count, up to the size of its pool.
 
 The ioctls that change something in the ESDM are carried out by the ESDM once
 their command went out, whether the module waits for the answer or not. So
@@ -166,7 +176,7 @@ long after the ESDM came back.
   privileged commands of the module. The module therefore checks the
   capability of its own caller, `CAP_SYS_ADMIN` as `random.c` does, before it
   sends any of those, and validates the arguments of the ioctls like
-  `random.c`.
+  `random.c`, stricter for the size of `RNDADDENTROPY`.
 * **Untrusted answers.** The ESDM runs in user space. Every length in its
   answers is checked against what was asked for and the protocol's bounds
   before anything is read; a connection with an answer that does not fit is
