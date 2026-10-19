@@ -248,6 +248,8 @@ such as
 .BR esdm\-es\-ext\-serve (8).
 The daemon connects to it at start up and whenever the connection was lost,
 at most every 5 seconds after a failed attempt, and sends one request at a time.
+A connection the provider closed while it was idle \- the provider was
+restarted, or made room for another client \- is made again at once.
 It checks the credentials of the provider on every connection: anybody who can
 create the socket file could otherwise feed the daemon with data credited as
 entropy, so only a provider running as root, or as the user given with

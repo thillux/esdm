@@ -280,7 +280,12 @@ int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable);
  * @brief Serve requests until esdm_es_ext_server_stop() is called
  *
  * Serves the clients connected at a time one request after the other. A
- * client that breaks the protocol is disconnected.
+ * client that breaks the protocol is disconnected. Up to 8 clients are served
+ * at a time: when another one connects, the client that sent nothing for the
+ * longest time is disconnected to make room for it - one running as root only
+ * for another one running as root, as the ESDM connects as root at start up.
+ * Clients holding their slots without using them so cannot lock the ESDM out,
+ * which connects again at once when it finds its connection closed.
  *
  * @param [in] server The server
  *

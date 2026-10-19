@@ -58,6 +58,15 @@ are served \- by default root and
 the user the ESDM runs as unless told otherwise. Any other client is
 disconnected at once, so that it can neither take the few client slots the
 ESDM needs nor drain the noise source.
+.PP
+Up to 8 clients are served at a time. When all slots are taken and another
+client connects, the client that sent nothing for the longest time is
+disconnected to make room for it, so that clients of an allowed user holding
+their slots without using them cannot lock the ESDM out: the ESDM connects
+again at once when it finds its connection closed, and gets a slot back the
+same way. A client running as root makes room only for another client running
+as root, as the ESDM connects as root at start up; a client that finds no
+slot is disconnected at once.
 .SH OPTIONS
 .TP
 .BR \-l ", " \-\-plugin " \fILIBRARY\fR"

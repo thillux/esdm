@@ -35,6 +35,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -617,6 +618,80 @@ static void test_server_startdtls(const char *good)
 	esdm_es_ext_plugin_unload(handle);
 }
 
+/* The clients the server of the library serves at a time */
+#define TEST_SERVER_SLOTS 8
+
+/* Apart in time, as the server tells which client was idle the longest */
+static void test_pause(void)
+{
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 5000000 };
+
+	nanosleep(&ts, NULL);
+}
+
+/* Is the client on @fd served? */
+static bool test_served(int fd)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + 16];
+
+	return test_request(fd, ESDM_ES_EXT_PROTO_GET_ENTROPY, 16, rsp,
+			    sizeof(rsp)) == (ssize_t)sizeof(rsp);
+}
+
+/*
+ * With all slots taken, a client connecting takes the slot of the client idle
+ * the longest: clients that only hold their slots do not lock out another
+ * one - the ESDM connecting again.
+ */
+static void test_server_slots(const char *good)
+{
+	struct esdm_es_ext_plugin_handle *handle;
+	const struct esdm_es_ext_plugin *plugin;
+	struct esdm_es_ext_server *server;
+	int fds[TEST_SERVER_SLOTS], fd;
+	pthread_t thread;
+	unsigned int i;
+
+	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
+	if (!plugin)
+		return;
+	CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0600, &server),
+		 0);
+	if (!server)
+		goto out;
+	CHECK_EQ(pthread_create(&thread, NULL, test_server_thread, server), 0);
+
+	/* All slots taken, the first client idle the longest */
+	for (i = 0; i < TEST_SERVER_SLOTS; i++) {
+		fds[i] = test_connect();
+		CHECK(fds[i] >= 0 && test_served(fds[i]),
+		      "client %u is not served", i);
+		test_pause();
+	}
+
+	/* A client used meanwhile is not the one idle the longest */
+	CHECK(test_served(fds[0]), "the first client is not served");
+	test_pause();
+
+	fd = test_connect();
+	CHECK(fd >= 0 && test_served(fd),
+	      "a client is refused while others only hold their slots");
+	CHECK(test_closed(fds[1]), "the client idle the longest kept its slot");
+	close(fds[1]);
+	fds[1] = fd;
+	for (i = 0; i < TEST_SERVER_SLOTS; i++)
+		CHECK(test_served(fds[i]), "client %u lost its slot", i);
+
+	for (i = 0; i < TEST_SERVER_SLOTS; i++)
+		close(fds[i]);
+	esdm_es_ext_server_stop(server);
+	pthread_join(thread, NULL);
+	esdm_es_ext_server_free(server);
+
+out:
+	esdm_es_ext_plugin_unload(handle);
+}
+
 /* The example plugin of es-ext/example, built to read /dev/urandom */
 static void test_example(const char *path)
 {
@@ -670,6 +745,7 @@ int main(int argc, char *argv[])
 	test_server(argv[1]);
 	test_server_status(argv[1], argv[6]);
 	test_server_allow(argv[1]);
+	test_server_slots(argv[1]);
 	test_server_startdtls(argv[1]);
 	test_example(argv[5]);
 

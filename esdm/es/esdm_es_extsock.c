@@ -515,15 +515,41 @@ static int esdm_es_extsock_connect_locked(void)
 }
 
 /*
+ * Did the provider close the connection while it was idle - it was restarted,
+ * or made room for another client? Nothing is to be read on a connection
+ * between two requests, so anything poll(2) reports on it is its end. Caller
+ * must hold extsock_mutex (write lock) with the provider connected.
+ */
+static bool esdm_es_extsock_closed_locked(void)
+{
+	struct pollfd pfd = { .fd = extsock_fd, .events = POLLIN };
+
+	if (extsock_dtls && esdm_dtls_pending(extsock_dtls))
+		return true;
+	return poll(&pfd, 1, 0) > 0;
+}
+
+/*
  * Connected, or connected now if the time has come to try again. Caller must
  * hold extsock_mutex (write lock).
+ *
+ * A connection the provider closed while it was idle is no failed attempt: it
+ * is made again at once, so that the request about to be sent is not lost on
+ * it.
  */
 static bool esdm_es_extsock_ensure_locked(void)
 {
 	time_t now;
 
-	if (extsock_fd >= 0)
-		return true;
+	if (extsock_fd >= 0) {
+		if (!esdm_es_extsock_closed_locked())
+			return true;
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ES,
+			"External ES provider: connection closed by the provider, connecting again\n");
+		esdm_es_extsock_disconnect_locked();
+		extsock_retry_at = 0;
+	}
 	if (!esdm_es_extsock_configured_locked())
 		return false;
 

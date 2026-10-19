@@ -173,7 +173,12 @@ default; enabling it in one built without returns
 .BI "int esdm_es_ext_server_run(struct esdm_es_ext_server *" server );
 Serve the connected clients, one request after the other, until
 .BR esdm_es_ext_server_stop ()
-is called. A client that breaks the protocol is disconnected.
+is called. A client that breaks the protocol is disconnected. Up to 8 clients
+are served at a time: when another one connects, the client that sent nothing
+for the longest time is disconnected to make room for it \- one running as
+root only for another one running as root, as the ESDM connects as root at
+start up. Clients holding their slots without using them so cannot lock the
+ESDM out, which connects again at once when it finds its connection closed.
 .TP
 .BI "void esdm_es_ext_server_stop(struct esdm_es_ext_server *" server );
 Make

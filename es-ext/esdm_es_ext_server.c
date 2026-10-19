@@ -53,8 +53,15 @@
 /*
  * Clients served at a time. The ESDM holds one connection; the room beyond is
  * for a restarted ESDM whose old connection is not closed yet, and for tools.
- * A client beyond is accepted and closed at once, so that it does not wait in
- * the backlog for nothing.
+ *
+ * A client beyond takes the slot of the client idle the longest, which is
+ * disconnected: clients that hold their slots without using them - which any
+ * process of an allowed user can open - must not lock the ESDM out, which
+ * connects again whenever it lost its connection, and so gets its slot back.
+ * A client running as root only gives way to another client running as root:
+ * the ESDM connects as root at start up. A client that finds no slot that way
+ * is accepted and closed at once, so that it does not wait in the backlog for
+ * nothing.
  */
 #define ESDM_ES_EXT_SERVER_MAX_CLIENTS 8
 
@@ -84,6 +91,12 @@ struct esdm_es_ext_server {
 	int clients[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
 	enum esdm_es_ext_client_state
 		client_state[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
+	/*
+	 * When the client was accepted or sent something last, nanoseconds of
+	 * the monotonic clock, and whether it runs as root - see above
+	 */
+	uint64_t client_active[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
+	bool client_root[ESDM_ES_EXT_SERVER_MAX_CLIENTS];
 
 	/* The DTLS context with the ephemeral key, NULL while not offered */
 	struct esdm_dtls_ctx *dtls_ctx;
@@ -98,6 +111,15 @@ struct esdm_es_ext_server {
 	dev_t dev;
 	ino_t ino;
 };
+
+static uint64_t esdm_es_ext_server_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return 0;
+	return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
 
 static void esdm_es_ext_server_close_client(struct esdm_es_ext_server *server,
 					    unsigned int i)
@@ -116,21 +138,25 @@ static void esdm_es_ext_server_close_client(struct esdm_es_ext_server *server,
 /*
  * May the client on @fd be served? With users allowed, only those and root
  * are - anybody else who can connect could otherwise take the slots the ESDM
- * needs, and drain the noise source.
+ * needs, and drain the noise source. *@root tells whether it runs as root.
  */
 static bool esdm_es_ext_server_client_allowed(struct esdm_es_ext_server *server,
-					      int fd)
+					      int fd, bool *root)
 {
 	struct ucred cred;
 	socklen_t len = sizeof(cred);
 	unsigned int i;
+	bool known;
+
+	known = !getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len);
+	*root = known && cred.uid == 0;
 
 	if (!server->allowed_uids_num)
 		return true;
 
-	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
+	if (!known)
 		return false;
-	if (cred.uid == 0)
+	if (*root)
 		return true;
 	for (i = 0; i < server->allowed_uids_num; i++) {
 		if (cred.uid == server->allowed_uids[i])
@@ -143,9 +169,35 @@ static bool esdm_es_ext_server_client_allowed(struct esdm_es_ext_server *server,
 	return false;
 }
 
+/*
+ * The slot of the client idle the longest that gives way to a new client -
+ * running as root if @root - or ESDM_ES_EXT_SERVER_MAX_CLIENTS if none does,
+ * see ESDM_ES_EXT_SERVER_MAX_CLIENTS. All slots are taken.
+ */
+static unsigned int
+esdm_es_ext_server_evictee(const struct esdm_es_ext_server *server, bool root)
+{
+	unsigned int i, ret = ESDM_ES_EXT_SERVER_MAX_CLIENTS;
+
+	for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++) {
+		if (server->client_root[i] && !root)
+			continue;
+
+		/* Not root before root, then the one idle the longest */
+		if (ret == ESDM_ES_EXT_SERVER_MAX_CLIENTS ||
+		    (server->client_root[ret] && !server->client_root[i]) ||
+		    (server->client_root[ret] == server->client_root[i] &&
+		     server->client_active[i] < server->client_active[ret]))
+			ret = i;
+	}
+
+	return ret;
+}
+
 static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
 {
 	unsigned int i;
+	bool root;
 	int fd;
 
 	fd = accept4(server->listen_fd, NULL, NULL,
@@ -165,23 +217,36 @@ static void esdm_es_ext_server_accept(struct esdm_es_ext_server *server)
 	}
 
 	/* Refused before it takes a slot */
-	if (!esdm_es_ext_server_client_allowed(server, fd)) {
+	if (!esdm_es_ext_server_client_allowed(server, fd, &root)) {
 		close(fd);
 		return;
 	}
 
 	for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++) {
-		if (server->clients[i] < 0) {
-			server->clients[i] = fd;
-			server->client_state[i] = ESDM_ES_EXT_CLIENT_PLAIN;
-			return;
-		}
+		if (server->clients[i] < 0)
+			break;
 	}
 
-	esdm_logger(
-		LOGGER_WARN, LOGGER_C_ANY,
-		"External ES provider: too many clients, connection refused\n");
-	close(fd);
+	if (i == ESDM_ES_EXT_SERVER_MAX_CLIENTS) {
+		i = esdm_es_ext_server_evictee(server, root);
+		if (i == ESDM_ES_EXT_SERVER_MAX_CLIENTS) {
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ANY,
+				"External ES provider: too many clients, connection refused\n");
+			close(fd);
+			return;
+		}
+
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ANY,
+			"External ES provider: too many clients, the one idle the longest disconnected\n");
+		esdm_es_ext_server_close_client(server, i);
+	}
+
+	server->clients[i] = fd;
+	server->client_state[i] = ESDM_ES_EXT_CLIENT_PLAIN;
+	server->client_active[i] = esdm_es_ext_server_now();
+	server->client_root[i] = root;
 }
 
 /*
@@ -331,6 +396,8 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	ssize_t n;
 	int status;
 	bool ret = false;
+
+	server->client_active[i] = esdm_es_ext_server_now();
 
 	if (server->client_state[i] == ESDM_ES_EXT_CLIENT_HANDSHAKE)
 		return esdm_es_ext_server_handshake(server, i);

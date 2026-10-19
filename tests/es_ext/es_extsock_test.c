@@ -29,7 +29,9 @@
  * - A provider running as a user that is not accepted is not used.
  * - A provider that goes away is connected to again once it is back - by a
  *   seeding, or by the monitor of the source when no seeding asks; the same
- *   for a provider that was not there at start up.
+ *   for a provider that was not there at start up. A connection the provider
+ *   closed while it was idle, to make room for another client, is made again
+ *   at once, the request about to be sent not lost on it.
  * - A provider failing its self test is credited with nothing until a self
  *   test passes, whatever it delivers meanwhile. Its first self test runs
  *   on the first connection to it, before it is credited.
@@ -887,6 +889,54 @@ static void test_status_old_provider(void)
 }
 
 /*
+ * The provider makes room for another client by closing the connection idle
+ * the longest when all its slots are taken - the one of the source, between
+ * two seedings: the next request connects again at once, and is served.
+ */
+static void test_evicted(void)
+{
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 5000000 };
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	/* The slots of the provider, the source holding one */
+	int fds[8];
+	bool closed = false;
+	unsigned int i;
+
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	nanosleep(&ts, NULL);
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", test_good);
+	for (i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
+		fds[i] = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+		CHECK(fds[i] >= 0 && !connect(fds[i], (struct sockaddr *)&addr,
+					      sizeof(addr)),
+		      "cannot connect client %u", i);
+		nanosleep(&ts, NULL);
+	}
+
+	/* Closed to make room for the last client, once that is accepted */
+	for (i = 0; i < 200; i++) {
+		mutex_lock(&extsock_mutex);
+		closed = extsock_fd >= 0 && esdm_es_extsock_closed_locked();
+		mutex_unlock(&extsock_mutex);
+		if (closed)
+			break;
+		nanosleep(&ts, NULL);
+	}
+	CHECK(closed, "the provider kept the connection idle the longest");
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK(test_state_has("status", "connected (uid"),
+	      "the source is not connected again");
+	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+
+	for (i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
+		if (fds[i] >= 0)
+			close(fds[i]);
+	}
+}
+
+/*
  * A provider that is not there when the source starts is connected later -
  * and tested then, before it is credited: the self test pass of the ESDM
  * found nothing to test.
@@ -1193,6 +1243,7 @@ int main(void)
 	test_status();
 	test_status_restarted();
 	test_status_slow();
+	test_evicted();
 	test_peer_check();
 	test_reconnect();
 	test_late_provider();
