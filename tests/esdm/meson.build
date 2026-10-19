@@ -130,6 +130,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_drng_mgr_run_dry_test = executable(
+		'esdm_drng_mgr_run_dry_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_run_dry_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_drng_mgr_max_wo_reseed_bits_test = executable(
 		'esdm_drng_mgr_max_wo_reseed_bits_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_max_wo_reseed_bits_test.c' ],
@@ -441,6 +449,15 @@ if get_option('esdm-server').enabled()
 	# suite has the machine says more about the suite than about the ESDM.
 	test('ESDM DRNG manager sustained generation', esdm_drng_mgr_throughput_test,
 		timeout: 300,
+		is_parallel: false,
+		priority: -10)
+
+	# Serial as well: it keeps several CPUs busy generating, and the node
+	# DRNGs coming back in time is a matter of the reseed worker getting a
+	# CPU of its own.
+	test('ESDM DRNG manager node DRNGs running dry under load',
+		esdm_drng_mgr_run_dry_test,
+		timeout: 120,
 		is_parallel: false,
 		priority: -10)
 
