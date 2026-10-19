@@ -1,0 +1,42 @@
+@startuml
+' An external entropy source on the network: DTLS 1.2 over SCTP with
+' SCTP-AUTH, as RFC 6083 has it - see "Network" in es-ext/esdm_es_ext.h and
+' "DTLS over SCTP" in common/esdm_tls.h
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #000000
+skinparam SequenceLifeLineBorderColor #000000
+skinparam ParticipantBorderColor #000000
+skinparam ParticipantBackgroundColor #EEEEEE
+skinparam NoteBackgroundColor #FFFFFF
+skinparam NoteBorderColor #000000
+hide footbox
+
+participant "esdm-server" as E
+participant "esdm-es-ext-relay\n(DTLS client)" as R
+participant "esdm-es-ext-serve\n(DTLS server)" as P
+
+E -> R: INFO\n(local provider socket, uid of the relay checked)
+R -> P: INIT, SCTP-AUTH required for DATA and FORWARD-TSN
+P --> R: INIT ACK, the same - or the association is refused
+note over R, P: key 0, the empty key, active on both sides
+R -> P: ClientHello
+P --> R: ServerHello, Certificate, ServerKeyExchange,\nCertificateRequest, ServerHelloDone
+R -> P: Certificate, ClientKeyExchange, CertificateVerify
+note over R: all acknowledged (sender dry);\nkey 1 = TLS exporter "EXPORTER_DTLS_OVER_SCTP",\n64 bytes, installed
+R -> P: ChangeCipherSpec, Finished (key 0)
+note over R: key 1 active
+note over P: all acknowledged; key 1 installed
+P --> R: ChangeCipherSpec (key 0)
+note over P: key 1 active
+P --> R: Finished (key 1)
+note over R, P: handshake complete: key 0 deleted on both sides,\ncertificates and the name of the server verified
+R -> P: INFO (DTLS record, key 1)
+P --> R: name and entropy rate the provider declares
+R --> E: the answer, checked as the ESDM checks it
+E -> R: GET_ENTROPY, SELFTEST, STATUS
+R -> P: forwarded one to one (key 1)
+P --> R: answers
+R --> E: answers, checked
+@enduml

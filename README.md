@@ -29,8 +29,9 @@ It is extensible as follows:
 
 * Entropy sources can be developed outside of the ESDM against
   `libesdm_es_ext` and loaded into it as a plugin library, or served to it
-  by a process of their own over a Unix domain socket - see
-  [External Entropy Sources].
+  by a process of their own over a Unix domain socket, on the same host or
+  on another one - see [External Entropy Sources] and
+  [External Entropy Sources on the Network].
 
 * The cryptographic primitives can be altered by simply providing a new
   backend for hash algorithms or DRNG algorithms. See the `drng_chacha20`
@@ -307,6 +308,38 @@ esdm-server --es_ext_socket /run/esdm-es-a.socket \
 	--es_ext_socket /run/esdm-es-b.socket
 ```
 
+### External Entropy Sources on the Network
+
+A provider may serve the ESDM of another host (meson option `es-ext-net`,
+Linux, with the TLS stack of OpenSSL, GnuTLS or Botan): `esdm-es-ext-serve`
+and `esdm-es-pkcs11` serve on SCTP with `--listen`, or on the socket of
+`esdm-es-ext-serve-net.socket`, with DTLS 1.2 as RFC 6083 maps it onto SCTP,
+certificates on both sides and SCTP-AUTH keyed from the DTLS session. The
+`esdm-server` still reaches no network and parses no certificate: the
+`esdm-es-ext-relay` of its host serves it a local provider socket and forwards
+each request.
+
+```
+# the host of the noise source
+esdm-es-ext-serve --plugin /usr/lib/esdm/my_es.so --listen :7379 \
+	--cert server.crt --key server.key --ca ca.crt --allow 192.0.2.10
+# the host of the ESDM, 192.0.2.10
+esdm-es-ext-relay --connect source.example \
+	--cert client.crt --key client.key --ca ca.crt \
+	--socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket
+esdm-server --es_ext_socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket \
+	--es_ext_socket_uid esdm-es-ext-relay
+```
+
+The ESDM credits the source at the rate the remote provider declares unless
+one is configured for it: accepting the user of the relay is trusting every
+holder of a certificate the relay accepts for the provider. The provider bounds
+its connections and takes an allowlist of client networks; both ends take up
+renewed certificates and CRLs without a restart, as egd-net does. The kernel
+needs SCTP, and SCTP-AUTH, which the daemons enable per socket since Linux 5.4.
+See `esdm-es-ext-relay(8)` and NETWORK in `esdm-es-ext-serve(8)`; the units
+are `esdm-es-ext-relay.service` and `esdm-es-ext-serve-net.socket`/`.service`.
+
 ### PKCS#11 Entropy Source
 
 The random number generator of a PKCS#11 token - a smartcard, a USB token, an
@@ -487,6 +520,12 @@ The ESDM consists of the following components:
   WireGuard, say. Plain TCP is never a default and builds with every crypto
   backend; TLS needs the TLS stack of OpenSSL, GnuTLS or Botan. See
   `esdm-egd-net-server(8)` and `esdm-egd-net-relay(8)`.
+
+* `esdm-es-ext-relay` (meson option `es-ext-net`): the other direction - an
+  external entropy source on another host, served there on SCTP by
+  `esdm-es-ext-serve` or `esdm-es-pkcs11`, read by the ESDM of this host
+  through a local provider socket. See
+  [External Entropy Sources on the Network] and `esdm-es-ext-relay(8)`.
 
 * `esdm-server-signal-helper`: This small tool is used to support proper
   quiescing of the ESDM server when the system suspends or sleeps. When invoking

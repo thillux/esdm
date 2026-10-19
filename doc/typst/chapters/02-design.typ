@@ -1382,6 +1382,82 @@ uptime, next to the status of its plugin, null where there is none. The ESDM
 asks each source for its status at most every 5 seconds, never waiting for a
 source busy with a request.
 
+=== External Entropy Sources on the Network <sec:ext-es-net>
+
+A noise source on another host is read by the ESDM through an ExternalSocket
+source as well (meson option `es-ext-net`, disabled per default, Linux only,
+with the TLS stack of OpenSSL, GnuTLS or Botan). The ESDM server itself does
+not change: it leaves the network namespace of the host as it starts, so it
+reaches no network, and it parses no certificate. The `esdm-es-ext-relay` of
+its host serves it a local provider socket, which the ESDM reads and checks
+as any other provider - by the user the relay runs as -, and forwards each
+request to a provider served on the network by the provider server of
+`libesdm_es_ext`, i.e. `esdm-es-ext-serve` or `esdm-es-pkcs11` started with
+`--listen` or by socket activation, as depicted in figure @fig:dtls-sctp.
+
+#par(first-line-indent: 0pt)[The relay forwards the requests INFO, SELFTEST,
+GET_ENTROPY and STATUS one to one rather than serving them from a plugin of
+its own: the name and the rate the ESDM credits a connection with are those
+the remote provider declared on that very connection - each local connection
+has an upstream connection of its own, opened when the ESDM asks INFO, which
+has to come first - and the status is the remote provider's, unwrapped. Every
+answer is checked as the ESDM checks it before it is passed back, so that the
+remote side can do nothing a local provider could not. A provider that is not
+reachable has INFO answered with an errno, so that the ESDM shows the source
+as not connected; a provider lost while idle closes the local connection, and
+the ESDM connects anew with its next request; every step upstream is bounded
+below the 2 seconds the ESDM gives a request. Accepting the user of the relay
+means trusting the rate every holder of a certificate the relay accepts for
+the provider declares, unless a rate is configured for the source.]
+
+The transport is SCTP of the one-to-one style with DTLS 1.2 as RFC 6083 maps
+it onto SCTP (`common/esdm_tls_sctp.c`, `common/esdm_tls.h`): every DTLS
+record is one SCTP message on stream 0, ordered, the DTLS does not retransmit,
+and every message is DTLS from the first one on - the STARTDTLS of the Unix
+domain socket has no place there. Both sides authenticate with certificates,
+the client checks the name of the server, and CRLs are checked within the
+verification of the TLS stack with the code of the EGD protocol over the
+network: the TLS with certificates, its rotation on SIGHUP and when the files
+change, and its revocation checks are one implementation for TLS over TCP and
+DTLS over SCTP, for every TLS stack, the transport an option of the context.
+
+#par(first-line-indent: 0pt)[The SCTP association authenticates its DATA and
+FORWARD-TSN chunks with SCTP-AUTH (RFC 4895): both ends require it with
+`SCTP_AUTH_CHUNK` before they connect or listen, and refuse an association
+whose peer does not authenticate them. The handshake runs under key 0, the
+empty key. Before it sends its ChangeCipherSpec, each side waits until the peer
+acknowledged all it sent (`SCTP_SENDER_DRY_EVENT`, RFC 6083 section 4.7) and
+installs key 1, the 64 bytes of the TLS exporter `EXPORTER_DTLS_OVER_SCTP`
+without a context; the server makes it the active key after its
+ChangeCipherSpec, the client after its Finished, and both delete key 0 once
+the handshake is complete - the key handling of
+draft-ietf-tsvwg-dtls-over-sctp-bis for DTLS 1.2, and the one of OpenSSL's own
+DTLS over SCTP, with which all three TLS stacks interoperate. The key comes
+from `SSL_export_keying_material()` of OpenSSL and `gnutls_prf_rfc5705()` of
+GnuTLS; Botan exports keys only once its channel is active, so its key is
+computed with the TLS 1.2 PRF of the session from the master secret and the
+randoms of the handshake, and compared with Botan's export once the handshake
+completed - as the exports of the other stacks are, a mismatch failing the
+connection. The DTLS is not renegotiated, so the key is set once per
+association. Linux enables SCTP-AUTH per socket (`SCTP_AUTH_SUPPORTED`) since
+5.4; on an older kernel without the sysctl `net.sctp.auth_enable=1`, the
+daemons fail with an error naming it.]
+
+#figure(
+  image("../figures/dtls-sctp-auth.svg", width: 85%),
+  caption: [External Entropy Source on the Network: DTLS over SCTP with
+    SCTP-AUTH],
+) <fig:dtls-sctp>
+
+The listener of the provider faces the network, so it bounds its connections
+as the EGD network server does: in all, in their handshake in all and per
+source address, per client certificate, by a handshake and an idle timeout,
+and by an allowlist of source networks. Its status tells `sctp` as the
+`transport` of the server and the SHA-256 of the client certificate as its
+`peer`. After every reload of the TLS files, provider and relay check their
+established connections against the new CRLs and close those of a revoked
+peer, and every 30 seconds those of an expired one.
+
 == PKCS\#11 Entropy Source - ESDM-external Entropy Source <sec:pkcs11>
 
 The random number generator of a PKCS\#11 token is read with

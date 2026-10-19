@@ -132,6 +132,34 @@ tests/es_ebpf_testing
 
 * Add esdm-es-ext-serve, serving an external entropy source plugin library on the socket esdm-server --es_ext_socket reads, so that the same plugin runs in the daemon or in a process of its own; it serves root and nobody, or the users of --client_uid, and nobody else; several providers run as several processes, each on a socket of its own
 
+* Add external entropy sources on the network (meson option es-ext-net, Linux
+only, with the TLS stack of OpenSSL, GnuTLS or Botan): the provider server of
+libesdm_es_ext - and with it esdm-es-ext-serve and esdm-es-pkcs11 - serves on
+SCTP with --listen or socket activation (esdm_es_ext_server_alloc_net()), and
+the new esdm-es-ext-relay on the host of the ESDM serves a local provider
+socket the ESDM reads as any ExternalSocket source and forwards INFO, SELFTEST,
+GET_ENTROPY and STATUS one to one, checked as the ESDM checks them, so the
+esdm-server keeps leaving the network namespace and parses no certificate.
+DTLS 1.2 over SCTP as RFC 6083 has it - every record one SCTP message, DTLS
+from the first message on - with mutual authentication by certificates and
+the checks of the server name, the CRLs (--crl, --crl_check_all,
+--crl_allow_expired) and the rotation on SIGHUP and file change of egd-net,
+shared with it; the association authenticates its DATA and FORWARD-TSN chunks
+with SCTP-AUTH, keyed from the TLS exporter EXPORTER_DTLS_OVER_SCTP with the
+key switch of RFC 6083 and draft-ietf-tsvwg-dtls-over-sctp-bis, on every TLS
+stack and interoperable with OpenSSL's own DTLS over SCTP, enabled per socket
+(Linux 5.4 or later, else net.sctp.auth_enable=1), and a peer without it is
+refused. The provider bounds its connections in all, in their handshake, per
+source address and per client certificate, in time, and by an allowlist of
+source networks (--allow), and tells "sctp" as its "transport" and the
+SHA-256 of the client certificate as its "peer" in its status; the relay
+answers INFO with an errno while the provider is not reachable and bounds
+every step upstream below the timeout of the ESDM (--timeout_ms). Units
+esdm-es-ext-relay.service (system user esdm-es-ext-relay, which the ESDM
+accepts with --es_ext_socket_uid) and esdm-es-ext-serve-net.socket/.service on
+port 7379 (es-ext-net-port); see esdm-es-ext-relay(8) and NETWORK in
+esdm-es-ext-serve(8)
+
 * Incompatible with the 1.2.4 development versions, whose PKCS#11 entropy source was part of the ESDM: esdm-tool --pkcs11-pin and --pkcs11-token-label, esdm-server --pkcs11_module, esdm_rpcc_set_pkcs11_config[_int]() of libesdm_rpc_client, esdm_config_es_pkcs11_entropy_rate[_set]() of libesdm and the meson options es_pkcs11_pin and es_pkcs11_entropy_blocks are removed - the module, the token label and the PIN are configuration of esdm-es-pkcs11, and es_pkcs11_module_path, es_pkcs11_token_label and es_pkcs11_entropy_rate are its defaults; the slot of the RPC call stays as RpcReservedSetPkcs11Config, which the server answers with -EOPNOTSUPP, so that the calls after it keep their index on the wire
 
 * External entropy sources: a provider can report a JSON status of its own - the plugin callback status_json and the STATUS request of the socket protocol; the ESDM accepts a JSON object of at most 512 bytes from a plugin and of at most 1024 bytes (ESDM_ES_EXT_PROTO_STATUS_MAX) from a provider, and shows it as the "provider" member of the ExternalLib and ExternalSocket ES status, skipping it rather than waiting while the source is read; esdm-es-ext-serve, and any provider served by libesdm_es_ext, answers STATUS with {"server": {...}, "plugin": ...}, fields of its own - version, plugin_api, the name and the entropy_rate it declares, dtls of the connection, clients, client_slots, requests, the selftest verdict, uptime_seconds - next to the status of the plugin, which is null for a plugin without one, a failing one, one that is no valid JSON object and one that does not fit
