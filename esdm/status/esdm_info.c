@@ -74,6 +74,21 @@ static void esdm_time_str(long long wtime, char *buf, size_t buflen)
 
 /****************************** JSON status ***********************************/
 
+/*
+ * A member of @stats that follows the requests the DRNG served: one of its
+ * counters or seeding times. The prediction resistance DRNG is seeded anew for
+ * every request, so for it these are the figures of the last requests - of
+ * other users, while the status goes to every local user, who would learn from
+ * them how much prediction resistant data was asked for, and when. For that
+ * DRNG they are reported as null, the way a DRNG reports what it does not
+ * have.
+ */
+static struct json_object *
+esdm_drng_status_usage(const struct esdm_drng_stats *stats, long long val)
+{
+	return stats->pr ? NULL : json_object_new_int64(val);
+}
+
 /* Render the statistics of one DRNG instance as a JSON object. */
 static struct json_object *
 esdm_drng_status_obj(const struct esdm_drng_stats *stats)
@@ -114,23 +129,27 @@ esdm_drng_status_obj(const struct esdm_drng_stats *stats)
 		json_object_new_int64(stats->requests_until_reseed));
 	json_object_object_add(
 		obj, "seconds_until_reseed",
-		json_object_new_int64(stats->seconds_until_reseed));
+		esdm_drng_status_usage(stats, stats->seconds_until_reseed));
 	json_object_object_add(
 		obj, "requests_since_fully_seeded",
-		json_object_new_int64(stats->requests_since_fully_seeded));
+		esdm_drng_status_usage(stats,
+				       stats->requests_since_fully_seeded));
 	json_object_object_add(
 		obj, "generated_bits_since_fully_seeded",
-		json_object_new_int64(stats->bits_since_fully_seeded));
+		esdm_drng_status_usage(stats, stats->bits_since_fully_seeded));
 	json_object_object_add(obj, "seed_generation",
-			       json_object_new_int64(stats->seed_generation));
-	if (stats->seeded_wtime_valid)
+			       esdm_drng_status_usage(stats,
+						      stats->seed_generation));
+	/* A seeding time - see esdm_drng_status_usage() */
+	if (stats->seeded_wtime_valid && !stats->pr)
 		esdm_time_str(stats->seeded_wtime, stamp, sizeof(stamp));
 	json_object_object_add(obj, "last_seeding_time",
 			       stamp[0] ? json_object_new_string(stamp) : NULL);
 	json_object_object_add(
 		obj, "seconds_since_last_reseed",
 		stats->seeded_time_valid ?
-			json_object_new_int64(stats->seconds_since_reseed) :
+			esdm_drng_status_usage(stats,
+					       stats->seconds_since_reseed) :
 			NULL);
 
 	return obj;

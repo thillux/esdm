@@ -71,13 +71,53 @@ static inline int esdm_status_json_member_or_null(struct json_object *obj,
 }
 
 /*
+ * The members of a DRNG instance that follow the requests it served. The
+ * prediction resistance DRNG is seeded for every request, so for it they would
+ * tell any local user about the requests of others: it reports them as null.
+ */
+static const char *const esdm_status_json_drng_usage[] = {
+	"seconds_until_reseed",
+	"requests_since_fully_seeded",
+	"generated_bits_since_fully_seeded",
+	"seed_generation",
+	"last_seeding_time",
+	"seconds_since_last_reseed",
+};
+
+/* Returns 0 if the prediction resistance DRNG @drng withholds them */
+static inline int esdm_status_json_drng_pr(struct json_object *drng)
+{
+	struct json_object *val;
+	size_t i;
+
+	for (i = 0; i < sizeof(esdm_status_json_drng_usage) /
+				sizeof(esdm_status_json_drng_usage[0]);
+	     i++) {
+		const char *key = esdm_status_json_drng_usage[i];
+
+		if (!json_object_object_get_ex(drng, key, &val)) {
+			printf("JSON status: member \"%s\" is missing\n", key);
+			return 1;
+		}
+
+		if (!json_object_is_type(val, json_type_null)) {
+			printf("JSON status: the prediction resistance DRNG reports \"%s\": %s\n",
+			       key, json_object_to_json_string(val));
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/*
  * Returns 0 if @drng is a well-formed DRNG instance object - the shape the
  * status document carries below "drngs" and esdm_status_drng_json() returns
  * on its own.
  */
 static inline int esdm_status_json_drng(struct json_object *drng)
 {
-	struct json_object *generation;
+	struct json_object *generation, *type;
 
 	if (!json_object_is_type(drng, json_type_object)) {
 		printf("JSON status: DRNG instance is no object\n");
@@ -89,12 +129,18 @@ static inline int esdm_status_json_drng(struct json_object *drng)
 	    esdm_status_json_member(drng, "fully_seeded", json_type_boolean) ||
 	    esdm_status_json_member(drng, "requests_until_reseed",
 				    json_type_int) ||
-	    esdm_status_json_member(drng, "requests_since_fully_seeded",
+	    esdm_status_json_member_or_null(drng, "node", json_type_int))
+		return 1;
+
+	json_object_object_get_ex(drng, "type", &type);
+	if (!strcmp(json_object_get_string(type), "prediction resistance"))
+		return esdm_status_json_drng_pr(drng);
+
+	if (esdm_status_json_member(drng, "requests_since_fully_seeded",
 				    json_type_int) ||
 	    esdm_status_json_member(drng, "generated_bits_since_fully_seeded",
 				    json_type_int) ||
 	    esdm_status_json_member(drng, "seed_generation", json_type_int) ||
-	    esdm_status_json_member_or_null(drng, "node", json_type_int) ||
 	    esdm_status_json_member_or_null(drng, "last_seeding_time",
 					    json_type_string) ||
 	    esdm_status_json_member_or_null(drng, "seconds_since_last_reseed",

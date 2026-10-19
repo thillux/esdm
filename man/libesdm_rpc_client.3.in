@@ -215,7 +215,12 @@ as a JSON document, with the error handling of
 means the node has no DRNG instance.
 .TP
 .BI "int esdm_rpcc_drng_status_pr_json(char *" buf ", size_t " buflen ");"
-The same for the DRNG instance serving prediction resistant requests.
+The same for the DRNG instance serving prediction resistant requests. Its
+counters and seeding times are null, as they would tell about the requests of
+other users \- see
+.BR esdm_status_drng_pr_json ()
+in
+.BR libesdm (3).
 .TP
 .BI "int esdm_rpcc_jent_status(char *" buf ", size_t " buflen ");"
 Internal status of the Jitter RNG entropy source as a JSON document, with the

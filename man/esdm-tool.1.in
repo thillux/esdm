@@ -57,6 +57,10 @@ reports the initial and the prediction resistance DRNG only: there is one node
 instance per CPU, so a document carrying all of them would grow with the size
 of the machine and outgrow the buffer it is transported in. The node instances
 are obtained through this option instead.
+.IP
+The prediction resistance instance is seeded anew for every request, so its
+counters and seeding times would tell every local user about the requests of
+others. They are null in its status, wherever it is reported.
 .TP
 .BR \-\-drng\-status\-json " [=" \fINODE\fR | pr ]
 The same information on a single line, for a JSON consumer rather than a

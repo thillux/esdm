@@ -149,7 +149,21 @@ string as for
 .BR esdm_status_json ().
 .TP
 .BI "int esdm_status_drng_pr_json(char *" buf ", size_t " buflen ");"
-The same for the DRNG instance serving prediction resistance requests.
+The same for the DRNG instance serving prediction resistance requests. That
+DRNG is seeded anew for every request, so its counters and seeding times
+would tell every local user how much prediction resistant data others asked
+for, and when:
+.IR seconds_until_reseed ,
+.IR requests_since_fully_seeded ,
+.IR generated_bits_since_fully_seeded ,
+.IR seed_generation ,
+.I last_seeding_time
+and
+.I seconds_since_last_reseed
+are null for it, here and in the status of
+.BR esdm_status_json ()
+and
+.BR esdm_status ().
 .TP
 .BI "void esdm_version(char *" buf ", size_t " buflen ");"
 Version information.

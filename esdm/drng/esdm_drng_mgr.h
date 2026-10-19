@@ -114,6 +114,11 @@ struct esdm_drng {
 struct esdm_drng_stats {
 	/* Role of the DRNG: "initial", "node" or "prediction resistance" */
 	const char *type;
+	/*
+	 * The prediction resistance DRNG, which is seeded anew for every
+	 * request it serves.
+	 */
+	bool pr;
 	/* Node served by this DRNG, only set when @node_valid is true */
 	uint32_t node;
 	bool node_valid;

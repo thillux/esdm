@@ -558,6 +558,7 @@ static void esdm_drng_stats_one(struct esdm_drng *drng, const char *type,
 		return;
 
 	stats.type = type;
+	stats.pr = (drng == &esdm_drng_pr);
 	stats.node = node;
 	stats.node_valid = node_valid;
 	/*
