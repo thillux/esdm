@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -1902,14 +1903,81 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 }
 
 /*
- * Is something owed to the client, or is it in the middle of a command? Its
- * connection is then closed to make room only when no other one is left, see
- * esdm_egd_evict_candidate().
+ * Did the client send something the server has not read yet? It waits in the
+ * socket's receive queue, out of sight of conn->in_len, until the event loop
+ * takes it - in the next round if it came after the events of this one were
+ * collected. Nothing counts as sent if the queue cannot be told.
+ */
+static bool esdm_egd_input_queued(const struct esdm_egd_conn *conn)
+{
+	int queued = 0;
+
+	if (ioctl(conn->fd, FIONREAD, &queued) < 0)
+		return false;
+
+	return queued > 0;
+}
+
+/*
+ * Close a connection the server gives up on by itself - one idle for too long,
+ * or one closed to make room for a new one. Unlike one whose client hung up,
+ * its client may be writing to it right now: what it wrote last waits in the
+ * socket's receive queue, and closing the socket would discard it although the
+ * client's write succeeded. For an insertion, which has no answer, nothing
+ * would ever tell the client that its data never arrived.
+ *
+ * So the reading side is shut down first. Every later write of the client
+ * fails from then on, while what came before stays readable: if anything did,
+ * the connection is not closed yet but drained as one whose client is gone,
+ * see esdm_egd_peer_gone(). Its insertions are carried out, nothing is answered
+ * any more, and the event loop closes it at the end of its input, see
+ * esdm_egd_read(). Its slot and its account's count are given up right away
+ * all the same, which also keeps it from being chosen to be closed once more.
+ *
+ * @return true if the connection was closed, false if it is left to drain
+ */
+static bool esdm_egd_reclaim(int epfd, struct esdm_egd_conn_list *list,
+			     struct esdm_egd_conn *conn)
+{
+	shutdown(conn->fd, SHUT_RD);
+
+	if (!esdm_egd_input_queued(conn)) {
+		epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
+		TAILQ_REMOVE(list, conn, tailq);
+		esdm_egd_release_conn(conn);
+		return true;
+	}
+
+	esdm_logger(
+		LOGGER_DEBUG, LOGGER_C_SERVER,
+		"EGD server: taking what the client on FD %d sent before closing its connection\n",
+		conn->fd);
+
+	esdm_egd_peer_gone(conn);
+
+	if (conn->peer_counted) {
+		esdm_peer_limit_put(&esdm_egd_peer_limit, conn->peer_account);
+		conn->peer_counted = false;
+	}
+	if (conn->slot_counted) {
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+		conn->slot_counted = false;
+	}
+
+	esdm_egd_conn_arm(epfd, conn);
+
+	return false;
+}
+
+/*
+ * Is something owed to the client, or is it in the middle of a command - or
+ * did it send one the server has yet to read? Its connection is then closed to
+ * make room only when no other one is left, see esdm_egd_evict_candidate().
  */
 static bool esdm_egd_conn_busy(const struct esdm_egd_conn *conn)
 {
 	return conn->deferred || conn->yielded || conn->in_len ||
-	       esdm_egd_out_pending(conn);
+	       esdm_egd_out_pending(conn) || esdm_egd_input_queued(conn);
 }
 
 /*
@@ -2005,12 +2073,14 @@ esdm_egd_evict_candidate(struct esdm_egd_conn_list *list, uid_t newcomer,
 
 /*
  * Close a connection of this worker to make room for a new one of the account
- * @newcomer, see esdm_egd_evict_candidate(). Its slot is handed on to the new
- * connection rather than given back: another worker would otherwise be free to
- * take it in between. The events still to be handled in this round, @num of
- * @pending, are voided for the closed connection.
+ * @newcomer, see esdm_egd_evict_candidate(), once what its client sent is taken
+ * - see esdm_egd_reclaim(). Its slot is handed on to the new connection rather
+ * than given back: another worker would otherwise be free to take it in
+ * between. The events still to be handled in this round, @num of @pending, are
+ * voided for the closed connection - one left to drain is reported again in
+ * the next round.
  *
- * @return true when a connection was closed and its slot is the caller's
+ * @return true when a connection gave up its slot, which is the caller's now
  */
 static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
 			       struct epoll_event *pending, int num,
@@ -2034,10 +2104,8 @@ static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
 			pending[i].data.ptr = NULL;
 	}
 
-	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->fd, NULL);
-	TAILQ_REMOVE(list, victim, tailq);
 	victim->slot_counted = false;
-	esdm_egd_release_conn(victim);
+	esdm_egd_reclaim(epfd, list, victim);
 
 	return true;
 }
@@ -2195,8 +2263,9 @@ static bool esdm_egd_scarce(uint64_t now)
 /*
  * May the idle connection be closed? See ESDM_EGD_IDLE_TIMEOUT_MS.
  *
- * Only when nothing is owed to it, it was silent for the idle timeout, and its
- * slot or descriptor is wanted:
+ * Only when nothing is owed to it, it was silent for the idle timeout - nothing
+ * it sent waits to be read either, see esdm_egd_reclaim() - and its slot or
+ * descriptor is wanted:
  *
  *   - the server is short of them (@scarce) and the connection's account is
  *     among those holding the most connections, @top as told by
@@ -2221,12 +2290,17 @@ static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
 	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
 		return false;
 
-	if (scarce && esdm_peer_limit_count(&esdm_egd_peer_limit,
-					    conn->peer_account) >= top)
-		return true;
+	if (!(scarce && esdm_peer_limit_count(&esdm_egd_peer_limit,
+					      conn->peer_account) >= top) &&
+	    !esdm_peer_limit_exhausted(&esdm_egd_peer_limit,
+				       conn->peer_account))
+		return false;
 
-	return esdm_peer_limit_exhausted(&esdm_egd_peer_limit,
-					 conn->peer_account);
+	/*
+	 * Silent up to the events of this round - what came in after them is
+	 * taken in the next one, and a connection just used again is not idle.
+	 */
+	return !esdm_egd_input_queued(conn);
 }
 
 /*
@@ -2609,9 +2683,7 @@ static int esdm_egd_handler(void *args)
 					LOGGER_DEBUG, LOGGER_C_SERVER,
 					"EGD server: closing idle connection on FD %d of UID %u\n",
 					conn->fd, (unsigned int)conn->peer_uid);
-				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
-				TAILQ_REMOVE(&conn_list, conn, tailq);
-				esdm_egd_release_conn(conn);
+				esdm_egd_reclaim(epfd, &conn_list, conn);
 
 				/*
 				 * The slot may have been the one wanted, and

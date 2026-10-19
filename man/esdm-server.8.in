@@ -563,7 +563,10 @@ are taken, a new
 connection is not left waiting but a connection is closed to make room for it
 \- one of a user holding the most connections of all, preferably of the user
 of the new connection, the least recently active one with nothing owed to its
-client if there is one, and never one of root or of a user holding fewer. A
+client if there is one, and never one of root or of a user holding fewer.
+Whatever the client of a connection closed so \- idle, or to make room \- sent
+before is still taken, its insertions in particular, which have no answer that
+could tell it otherwise; a write after that fails. A
 server thread that serves no connection of such a user leaves the new
 connection to the others, or turns it away.
 .BR libesdm_egd_client (3)

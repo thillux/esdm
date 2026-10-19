@@ -38,7 +38,10 @@
  *     are one user, the one holding the most, and not each a UID holding one
  *     next to a UID holding two, which would make the latter the first to go,
  *   - root's connections are not closed for anybody, idle or not, even while
- *     root is the only one holding any (root only).
+ *     root is the only one holding any (root only),
+ *   - what a client sends while its connection is being closed - idle, or to
+ *     make room - is not lost: the insertion that has no answer to tell the
+ *     client it never arrived.
  *
  * Like egd_server_conn_test, the server runs in this process, so no daemon is
  * needed. Its build bounds it to a handful of connections, and it runs a single
@@ -57,11 +60,13 @@
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -76,6 +81,16 @@
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
 #include "threading_support.h"
+
+/* The real ones, which the build renamed in the headers above. */
+#undef esdm_pool_insert_aux
+int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
+			 uint32_t entropy_bits);
+#undef epoll_wait
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+	       int timeout);
+#undef shutdown
+int shutdown(int fd, int how);
 
 /* See esdm_server_remove_stale_socket() in egd_server_raw_test.c. */
 void esdm_server_remove_stale_socket(const char *path, int socktype);
@@ -161,6 +176,134 @@ static uint64_t test_now_ms(void)
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/****************************
+ * Server hooks
+ ****************************/
+
+/*
+ * The build renames the server's call into the auxiliary pool, its wait for the
+ * events of a round and its shutdown(2) of a connection to the wrappers below.
+ * The first counts the bytes inserted, the others send an insertion on a
+ * connection of this process at a moment of the server's choosing - as a
+ * client writing just then would, see test_reclaim_idle() and the tests after
+ * it.
+ */
+enum test_late_at {
+	TEST_LATE_NONE,
+	/*
+	 * Once the events of a round were collected, which then waits long
+	 * enough for the scan for idle connections to follow in it
+	 */
+	TEST_LATE_ROUND_SCAN,
+	/* Once the events of a round were collected, if there are any */
+	TEST_LATE_ROUND_EVENTS,
+	/* Right before the server shuts down a connection, whichever */
+	TEST_LATE_SHUTDOWN,
+};
+
+/* Length of the data of the insertion */
+#define TEST_LATE_LEN 32
+
+/* Time a round of TEST_LATE_ROUND_SCAN waits */
+#define TEST_LATE_HOLD_MS (ESDM_EGD_IDLE_TIMEOUT_MS + 1500)
+
+/* Bytes the server handed to the auxiliary pool */
+static atomic_size_t test_inserted;
+
+/* When to send the insertion, and on which connection */
+static atomic_int test_late_at;
+static atomic_int test_late_fd = -1;
+
+/* The insertion went out: 1, or its send failed: -1 */
+static atomic_int test_late_sent;
+
+int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
+			 uint32_t entropy_bits);
+int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
+			 uint32_t entropy_bits)
+{
+	int rc = esdm_pool_insert_aux(inbuf, inbuflen, entropy_bits);
+
+	atomic_fetch_add(&test_inserted, inbuflen);
+
+	return rc;
+}
+
+/* Send the insertion if it is due at @at, which it is only once. */
+static void test_late_send(int at)
+{
+	uint8_t cmd[4 + TEST_LATE_LEN];
+	int expected = at;
+	ssize_t rc;
+
+	if (!atomic_compare_exchange_strong(&test_late_at, &expected,
+					    TEST_LATE_NONE))
+		return;
+
+	/* No entropy claimed - only root's would count anyway */
+	cmd[0] = ESDM_EGD_CMD_WRITE_ENTROPY;
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = TEST_LATE_LEN;
+	memset(cmd + 4, 0x5a, TEST_LATE_LEN);
+
+	rc = send(atomic_load(&test_late_fd), cmd, sizeof(cmd), MSG_NOSIGNAL);
+	atomic_store(&test_late_sent, rc == (ssize_t)sizeof(cmd) ? 1 : -1);
+}
+
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout);
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout)
+{
+	int nfds = epoll_wait(epfd, events, maxevents, timeout);
+
+	if (nfds > 0)
+		test_late_send(TEST_LATE_ROUND_EVENTS);
+
+	if (atomic_load(&test_late_at) == TEST_LATE_ROUND_SCAN) {
+		test_late_send(TEST_LATE_ROUND_SCAN);
+
+		/*
+		 * The scan comes once a second, and the connections idle the
+		 * timeout at the latest when it does after this.
+		 */
+		test_sleep_ms(TEST_LATE_HOLD_MS);
+	}
+
+	return nfds;
+}
+
+int test_shutdown(int fd, int how);
+int test_shutdown(int fd, int how)
+{
+	test_late_send(TEST_LATE_SHUTDOWN);
+
+	return shutdown(fd, how);
+}
+
+/* Have the insertion sent on @fd at @at. */
+static void test_late_arm(int fd, enum test_late_at at)
+{
+	atomic_store(&test_late_sent, 0);
+	atomic_store(&test_late_fd, fd);
+	atomic_store(&test_late_at, (int)at);
+}
+
+/* Wait until the server inserted @expected bytes in total. */
+static bool test_wait_inserted(size_t expected, unsigned int timeout_ms)
+{
+	uint64_t deadline = test_now_ms() + timeout_ms;
+
+	while (atomic_load(&test_inserted) < expected) {
+		if (test_now_ms() > deadline)
+			return false;
+		test_sleep_ms(10);
+	}
+
+	return true;
 }
 
 /****************************
@@ -1006,6 +1149,271 @@ out:
 }
 
 /****************************
+ * Insertions in flight
+ ****************************/
+
+/*
+ * All slots taken by connections of one unprivileged user, held by this
+ * process so that the hooks above can send on them: the test's own as an
+ * unprivileged user, else opened as TEST_UID_A - root's connections are not
+ * closed for anybody. Each is served once.
+ *
+ * @return the number of connections opened, TEST_SLOTS unless one failed
+ */
+static unsigned int test_held_open(int fds[TEST_SLOTS])
+{
+	unsigned int n;
+
+	for (n = 0; n < TEST_SLOTS; n++) {
+		if (geteuid() == 0) {
+			fds[n] = test_connect_as(TEST_UID_A);
+		} else {
+			fds[n] = test_connect();
+			if (fds[n] >= 0 &&
+			    test_cmd_entropy_count(fds[n], TEST_RESPONSE_MS)) {
+				close(fds[n]);
+				fds[n] = -1;
+			}
+		}
+		if (fds[n] < 0)
+			break;
+	}
+
+	return n;
+}
+
+/*
+ * A request on each connection: the first, then the second, then the rest, a
+ * while apart as activity is tracked in milliseconds. The first is the least
+ * recently active connection then, and the second the next in line.
+ *
+ * @return the number of connections not served
+ */
+static unsigned int test_held_touch(int fds[TEST_SLOTS])
+{
+	unsigned int i, failed = 0;
+
+	for (i = 0; i < TEST_SLOTS; i++) {
+		if (test_cmd_entropy_count(fds[i], TEST_RESPONSE_MS))
+			failed++;
+		if (i < 2)
+			test_sleep_ms(50);
+	}
+
+	return failed;
+}
+
+/*
+ * Which of the connections the server closed, as a mask. Nothing else is ever
+ * readable on them: an insertion has no answer.
+ */
+static uint64_t test_held_closed(int fds[TEST_SLOTS])
+{
+	uint64_t mask = 0;
+	unsigned int i;
+
+	for (i = 0; i < TEST_SLOTS; i++) {
+		if (test_closed(fds[i]))
+			mask |= (uint64_t)1 << i;
+	}
+
+	return mask;
+}
+
+/*
+ * Wait for the server to close the connection: -EPIPE once it did - having read
+ * everything that was sent, a socket closed with input left to read reports
+ * -ECONNRESET instead.
+ */
+static int test_held_closes(int fd)
+{
+	uint8_t byte;
+
+	return test_recv(fd, &byte, sizeof(byte), TEST_RESPONSE_MS);
+}
+
+static void test_held_close(int fds[TEST_SLOTS], unsigned int n)
+{
+	atomic_store(&test_late_at, TEST_LATE_NONE);
+	while (n--)
+		close(fds[n]);
+	test_settle();
+}
+
+/*
+ * With slots short, idle connections are closed - but not one whose client
+ * sent something after the events of the round were collected: it is not idle
+ * any more, and the next round takes what it sent. Closing it would discard an
+ * insertion the client's write had delivered, and nothing would tell it.
+ */
+static void test_reclaim_idle(void)
+{
+	int fds[TEST_SLOTS];
+	unsigned int n;
+	uint64_t closed;
+	size_t inserted;
+
+	printf("EGD evict: an idle connection sending in the round it is to be closed in\n");
+
+	n = test_held_open(fds);
+	if (n < TEST_SLOTS) {
+		CHECK(0, "could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+	CHECK(test_held_touch(fds) == 0,
+	      "a connection was not served with all slots taken");
+
+	/* Held until the connections are idle and the scan for them comes */
+	inserted = atomic_load(&test_inserted);
+	test_late_arm(fds[0], TEST_LATE_ROUND_SCAN);
+
+	CHECK(test_wait_inserted(inserted + TEST_LATE_LEN,
+				 TEST_LATE_HOLD_MS + TEST_RESPONSE_MS),
+	      "the insertion sent after the events of the round were collected was lost (sent: %d)",
+	      atomic_load(&test_late_sent));
+	closed = test_held_closed(fds);
+	CHECK(!(closed & 1),
+	      "a connection was closed as idle with input waiting: mask 0x%llx",
+	      (unsigned long long)closed);
+	CHECK(closed, "no idle connection was closed with slots short");
+
+out:
+	test_held_close(fds, n);
+}
+
+/*
+ * The same with what a client sends while its connection is being closed as
+ * idle: the server shuts the connection down for reading first - every later
+ * write fails - and takes what came before, then closes it.
+ */
+static void test_reclaim_idle_closing(void)
+{
+	int fds[TEST_SLOTS], rc;
+	unsigned int n;
+	size_t inserted;
+
+	printf("EGD evict: an idle connection sending while it is closed\n");
+
+	n = test_held_open(fds);
+	if (n < TEST_SLOTS) {
+		CHECK(0, "could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+	CHECK(test_held_touch(fds) == 0,
+	      "a connection was not served with all slots taken");
+
+	/* The scan closes the least recently active connection first */
+	inserted = atomic_load(&test_inserted);
+	test_late_arm(fds[0], TEST_LATE_SHUTDOWN);
+	test_sleep_ms(TEST_IDLE_WAIT_MS);
+
+	CHECK(atomic_load(&test_late_sent) == 1,
+	      "the insertion was not sent while an idle connection was closed: %d",
+	      atomic_load(&test_late_sent));
+	CHECK(test_wait_inserted(inserted + TEST_LATE_LEN, TEST_RESPONSE_MS),
+	      "the insertion sent while its connection was closed as idle was lost");
+	rc = test_held_closes(fds[0]);
+	CHECK(rc == -EPIPE,
+	      "the idle connection was not closed once all its client sent was taken: %d",
+	      rc);
+
+out:
+	test_held_close(fds, n);
+}
+
+/*
+ * With all slots taken, the least recently active idle connection makes room
+ * for a new client - but not one whose client sent something after the events
+ * of the round were collected: the next one in line does.
+ */
+static void test_reclaim_room(void)
+{
+	int fds[TEST_SLOTS], other = -1;
+	unsigned int n;
+	uint64_t closed;
+	size_t inserted;
+
+	printf("EGD evict: a connection sending in the round room is made in\n");
+
+	n = test_held_open(fds);
+	if (n < TEST_SLOTS) {
+		CHECK(0, "could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+	CHECK(test_held_touch(fds) == 0,
+	      "a connection was not served with all slots taken");
+
+	/* The new client is the only event of its round */
+	inserted = atomic_load(&test_inserted);
+	test_late_arm(fds[0], TEST_LATE_ROUND_EVENTS);
+	other = test_connect();
+	CHECK(other >= 0 && test_cmd_entropy_count(other, TEST_RESPONSE_MS) == 0,
+	      "a new client was not served with all slots taken");
+
+	CHECK(atomic_load(&test_late_sent) == 1,
+	      "the insertion was not sent in the round of the new client: %d",
+	      atomic_load(&test_late_sent));
+	CHECK(test_wait_inserted(inserted + TEST_LATE_LEN, TEST_RESPONSE_MS),
+	      "the insertion sent in the round room was made in was lost");
+	closed = test_held_closed(fds);
+	CHECK(closed == 2,
+	      "not the next least recently active connection made room for the new client: mask 0x%llx",
+	      (unsigned long long)closed);
+
+out:
+	if (other >= 0)
+		close(other);
+	test_held_close(fds, n);
+}
+
+/*
+ * The same with what the client of the connection making room sends while the
+ * connection is being closed: it is taken before the connection is closed.
+ */
+static void test_reclaim_room_closing(void)
+{
+	int fds[TEST_SLOTS], other = -1, rc;
+	unsigned int n;
+	uint64_t closed;
+	size_t inserted;
+
+	printf("EGD evict: a connection sending while it is closed to make room\n");
+
+	n = test_held_open(fds);
+	if (n < TEST_SLOTS) {
+		CHECK(0, "could not take all %u slots", TEST_SLOTS);
+		goto out;
+	}
+	CHECK(test_held_touch(fds) == 0,
+	      "a connection was not served with all slots taken");
+
+	inserted = atomic_load(&test_inserted);
+	test_late_arm(fds[0], TEST_LATE_SHUTDOWN);
+	other = test_connect();
+	CHECK(other >= 0 && test_cmd_entropy_count(other, TEST_RESPONSE_MS) == 0,
+	      "a new client was not served with all slots taken");
+
+	CHECK(atomic_load(&test_late_sent) == 1,
+	      "the insertion was not sent while a connection was closed to make room: %d",
+	      atomic_load(&test_late_sent));
+	CHECK(test_wait_inserted(inserted + TEST_LATE_LEN, TEST_RESPONSE_MS),
+	      "the insertion sent while its connection was closed to make room was lost");
+	rc = test_held_closes(fds[0]);
+	CHECK(rc == -EPIPE,
+	      "the connection making room was not closed once all its client sent was taken: %d",
+	      rc);
+	closed = test_held_closed(fds);
+	CHECK(closed == 1,
+	      "not only the least recently active connection made room for the new client: mask 0x%llx",
+	      (unsigned long long)closed);
+
+out:
+	if (other >= 0)
+		close(other);
+	test_held_close(fds, n);
+}
+
+/****************************
  * ESDM state
  ****************************/
 
@@ -1086,6 +1494,10 @@ int main(int argc, char *argv[])
 	test_scarce_top_uid();
 	test_full_subordinate();
 	test_scarce_subordinate();
+	test_reclaim_idle();
+	test_reclaim_idle_closing();
+	test_reclaim_room();
+	test_reclaim_room_closing();
 	test_full_root();
 
 out:

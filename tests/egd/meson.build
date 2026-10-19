@@ -107,7 +107,10 @@ if get_option('esdm-server').enabled()
 	# and touching all but two of them one after the other took close to
 	# three seconds in the TSan build, and the last ones were then closed
 	# as idle before their turn. Several UIDs, and the tests needing them,
-	# take root.
+	# take root. The server's calls into the auxiliary pool, waiting for
+	# the events of a round and shutting a connection down are renamed to
+	# wrappers in the test, which count the insertions and send one on a
+	# connection in the middle of a round or of its closing.
 	egd_server_evict_test = executable(
 			'egd_server_evict_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
@@ -117,6 +120,9 @@ if get_option('esdm-server').enabled()
 				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=24',
 				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=12',
 				'-DESDM_EGD_IDLE_TIMEOUT_MS=8000',
+				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-Depoll_wait=test_epoll_wait',
+				'-Dshutdown=test_shutdown',
 			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
