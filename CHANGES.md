@@ -384,7 +384,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * hardening: zero all used registers on return (-fzero-call-used-regs=used instead of used-gpr); pass the code generation hardening flags to the link as well, as LTO builds silently dropped -fzero-call-used-regs
 
-* ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes) and esdm-plain builds the default configuration
+* ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes), and esdm-plain builds the esdm package without fips140 and sp80090c - and so without the SP800-90C configuration they imply - and runs the test suite on it
 
 * fix: esdm.spec names the jitterentropy packages as openSUSE ships them
 
