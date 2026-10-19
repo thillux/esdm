@@ -38,12 +38,22 @@ extern "C" {
 #define member_to_struct(member, data_type, member_var)                        \
 	(data_type *)((char *)(member) - (char *)&((data_type *)0)->member_var)
 
-/* Whole seconds on CLOCK_MONOTONIC, 0 if the clock cannot be read */
+/*
+ * Whole seconds on CLOCK_MONOTONIC, 0 if the clock cannot be read.
+ *
+ * Read from the coarse clock, the time of the last tick, which lags the precise
+ * one by less than a tick and never by a second: whole seconds are all that is
+ * asked for. Every generate operation of a DRNG asks, for its reseed interval -
+ * and the coarse clock is read from memory by the vDSO whatever the
+ * clocksource is, while CLOCK_MONOTONIC takes a system call and a trap to the
+ * hypervisor on a clocksource without a vDSO, such as acpi_pm or the HPET of a
+ * guest whose TSC is not trusted.
+ */
 static inline long long esdm_monotonic_now(void)
 {
 	struct timespec now;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &now) == -1)
+	if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == -1)
 		return 0;
 
 	return (long long)now.tv_sec;
