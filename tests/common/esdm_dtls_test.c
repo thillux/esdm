@@ -26,10 +26,13 @@
  *   none of them readable on the socket;
  * - a message larger than allowed, a record that is not one of ours, and a
  *   peer that is gone end the connection;
- * - an error the application left with the TLS stack is none of the DTLS.
+ * - an error the application left with the TLS stack is none of the DTLS;
+ * - what the TLS stack frees holds no plaintext.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
+#include <malloc.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,11 +46,80 @@
 
 #ifdef ESDM_DTLS
 
-#ifdef ESDM_OPENSSL
+#if defined(ESDM_OPENSSL)
+#include <openssl/crypto.h>
 #include <openssl/err.h>
+#elif defined(ESDM_GNUTLS)
+#include <gnutls/gnutls.h>
 #endif
 
 #define TEST_MAX_MSG (64 * 1024)
+
+/*
+ * What the TLS stack frees must not hold the plaintext of a record: the test
+ * sends a message carrying a marker both ways, and looks for it in every
+ * buffer the TLS stack frees. OpenSSL and GnuTLS let their free be replaced;
+ * Botan keeps the plaintext in vectors wiping themselves.
+ */
+static const char test_marker[] = "ESDM DTLS plaintext marker";
+static unsigned int test_freed_plaintext = 0;
+
+#if defined(ESDM_OPENSSL) || defined(ESDM_GNUTLS)
+static void test_look_at_freed(void *ptr)
+{
+	if (ptr && memmem(ptr, malloc_usable_size(ptr), test_marker,
+			  sizeof(test_marker) - 1))
+		test_freed_plaintext++;
+}
+#endif
+
+#if defined(ESDM_OPENSSL)
+static void *test_ossl_malloc(size_t num, const char *file, int line)
+{
+	(void)file;
+	(void)line;
+	return malloc(num);
+}
+
+static void test_ossl_free(void *ptr, const char *file, int line)
+{
+	(void)file;
+	(void)line;
+	test_look_at_freed(ptr);
+	free(ptr);
+}
+
+static void *test_ossl_realloc(void *ptr, size_t num, const char *file,
+			       int line)
+{
+	if (!num) {
+		test_ossl_free(ptr, file, line);
+		return NULL;
+	}
+	return realloc(ptr, num);
+}
+#elif defined(ESDM_GNUTLS)
+static gnutls_free_function test_gnutls_free_orig;
+
+static void test_gnutls_free(void *ptr)
+{
+	test_look_at_freed(ptr);
+	test_gnutls_free_orig(ptr);
+}
+#endif
+
+/* Before the TLS stack allocates anything */
+static void test_watch_frees(void)
+{
+#if defined(ESDM_OPENSSL)
+	CHECK_EQ(CRYPTO_set_mem_functions(test_ossl_malloc, test_ossl_realloc,
+					  test_ossl_free),
+		 1);
+#elif defined(ESDM_GNUTLS)
+	test_gnutls_free_orig = gnutls_free;
+	gnutls_free = test_gnutls_free;
+#endif
+}
 
 /*
  * An error the application left on the error queue of the thread, which
@@ -176,6 +248,16 @@ static void test_dtls(void)
 			CHECK_MEM_EQ(got, msg, sizes[i]);
 	}
 
+	/* A message carrying the marker both ways, see test_look_at_freed() */
+	for (i = 0; i < 2 * ESDM_DTLS_PART_SIZE; i += sizeof(test_marker))
+		memcpy(msg + i, test_marker, sizeof(test_marker));
+	CHECK_EQ(esdm_dtls_send(client, msg, i), 0);
+	CHECK_EQ(test_recv(server, sv[1], got, sizeof(got)), (ssize_t)i);
+	CHECK_EQ(esdm_dtls_send(server, msg, i), 0);
+	CHECK_EQ(test_recv(client, sv[0], got, sizeof(got)), (ssize_t)i);
+	CHECK_MEM_EQ(got, msg, i);
+	memset(got, 0, sizeof(got));
+
 	/* An empty message is one too */
 	CHECK_EQ(esdm_dtls_send(client, msg, 0), 0);
 	CHECK_EQ(test_recv(server, sv[1], got, sizeof(got)), 0);
@@ -241,6 +323,8 @@ out:
 	close(sv[1]);
 	esdm_dtls_ctx_free(cctx);
 	esdm_dtls_ctx_free(sctx);
+
+	CHECK_EQ(test_freed_plaintext, 0);
 }
 
 #endif /* ESDM_DTLS */
@@ -248,6 +332,7 @@ out:
 int main(void)
 {
 #ifdef ESDM_DTLS
+	test_watch_frees();
 	test_dtls();
 	return common_test_result("esdm_dtls");
 #else

@@ -268,6 +268,12 @@ int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 	 * requests: no record buffers for those
 	 */
 	SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
+	/*
+	 * A record is decrypted in place, in the read buffer: wipe what was
+	 * handed out, and the buffer as it is released - after every record,
+	 * see above - or freed.
+	 */
+	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
 
 	if (server) {
 		if (esdm_dtls_openssl_server_key(c))

@@ -33,11 +33,13 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 
 #include "esdm_dtls.h"
 #include "esdm_dtls_backend.h"
+#include "memset_secure.h"
 
 /* DTLS 1.2 exactly, ECDHE with ECDSA, AEAD ciphers only, no tickets */
 #define ESDM_DTLS_GNUTLS_PRIORITY                                              \
@@ -277,10 +279,29 @@ int esdm_dtls_backend_send(void *conn, const uint8_t *buf, size_t len)
 	return esdm_dtls_gnutls_error((int)ret);
 }
 
+/*
+ * GnuTLS decrypts a record into a buffer of its own, which gnutls_record_recv()
+ * frees without wiping it: the packet is taken from GnuTLS instead, and wiped
+ * here before it is freed.
+ */
 ssize_t esdm_dtls_backend_recv(void *conn, uint8_t *buf, size_t len)
 {
 	struct esdm_dtls_gnutls_conn *d = conn;
-	ssize_t ret = gnutls_record_recv(d->session, buf, len);
+	gnutls_packet_t packet = NULL;
+	gnutls_datum_t data;
+	ssize_t ret = gnutls_record_recv_packet(d->session, &packet);
+
+	if (packet) {
+		gnutls_packet_get(packet, &data, NULL);
+		/* A record larger than @len: its size tells the caller */
+		if (ret > 0) {
+			ret = data.size < len ? (ssize_t)data.size :
+						(ssize_t)len;
+			memcpy(buf, data.data, (size_t)ret);
+		}
+		memset_secure(data.data, 0, data.size);
+		gnutls_packet_deinit(packet);
+	}
 
 	if (ret > 0)
 		return ret;
