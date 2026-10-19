@@ -38,6 +38,9 @@
  * @status_unterminated: status_json fills its buffer without a NUL
  * @get_delay_ms: get_entropy takes this long, a request in progress meanwhile
  * @status_delay_ms: status_json takes this long
+ *
+ * The delays and the counters are atomic: a test changes and reads them while
+ * the plugin runs in the thread of a provider it started.
  */
 struct esdm_es_ext_test_control {
 	uint32_t claim_bits;
@@ -47,14 +50,14 @@ struct esdm_es_ext_test_control {
 	int status_ret;
 	const char *status_text;
 	int status_unterminated;
-	unsigned int get_delay_ms;
-	unsigned int status_delay_ms;
+	_Atomic unsigned int get_delay_ms;
+	_Atomic unsigned int status_delay_ms;
 
-	unsigned int init_calls;
-	unsigned int fini_calls;
-	unsigned int get_calls;
-	unsigned int selftest_calls;
-	unsigned int status_calls;
+	_Atomic unsigned int init_calls;
+	_Atomic unsigned int fini_calls;
+	_Atomic unsigned int get_calls;
+	_Atomic unsigned int selftest_calls;
+	_Atomic unsigned int status_calls;
 	size_t last_buflen;
 	size_t last_status_buflen;
 };
