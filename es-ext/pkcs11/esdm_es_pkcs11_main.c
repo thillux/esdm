@@ -250,6 +250,33 @@ static int pkcs11_pin(const char *pin_file, const char *credential,
 	return *pin ? 0 : 1;
 }
 
+/*
+ * Tell what is wrong with the command line, getopt_long() having returned @c
+ * for it - without repeating what was given: a PIN given there by mistake
+ * would go to the journal with it, with every start of the daemon.
+ * getopt_long() itself is told not to print anything (opterr), as it repeats
+ * an option it does not know, or one too short to tell apart, with the
+ * argument attached to it - "--pin=1234".
+ */
+static void pkcs11_option_error(int c, const struct option *opts)
+{
+	const struct option *opt;
+
+	/* An option the daemon knows, but without its argument */
+	if (c == ':') {
+		for (opt = opts; opt->name; opt++) {
+			if (opt->val == optopt) {
+				fprintf(stderr, "--%s needs an argument\n",
+					opt->name);
+				return;
+			}
+		}
+	}
+
+	fprintf(stderr,
+		"Unknown option, one too short to tell apart, or one with an argument it does not take - not repeated here, as it may hold the PIN, which is read from a file or a credential, see --pin_file\n");
+}
+
 static void usage(void)
 {
 	fprintf(stderr, "\nESDM PKCS#11 entropy source\n\n");
@@ -345,7 +372,9 @@ int main(int argc, char *argv[])
 
 	es_ext_net_cli_init(&net);
 
-	while ((c = getopt_long(argc, argv, "M:t:p:s:m:u:vh", opts, NULL)) !=
+	/* What getopt_long() would print repeats what was given, see above */
+	opterr = 0;
+	while ((c = getopt_long(argc, argv, ":M:t:p:s:m:u:vh", opts, NULL)) !=
 	       -1) {
 		switch (c) {
 		case 'M':
@@ -440,6 +469,12 @@ int main(int argc, char *argv[])
 		case 'h':
 			usage();
 			return 0;
+		case '?':
+		case ':':
+			pkcs11_option_error(c, opts);
+			usage();
+			es_ext_net_cli_free(&net);
+			return 1;
 		default:
 			ret = es_ext_net_cli_option(&net, c, optarg);
 			if (ret > 0)
@@ -466,11 +501,12 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	/* Not repeated either: it may well be the PIN */
 	if (optind != argc) {
 		fprintf(stderr,
-			"Unexpected argument \"%s\" - the PIN is read from a file or a credential, see --pin_file\n",
-			argv[optind]);
+			"Unexpected argument - not repeated here, as it may be the PIN, which is read from a file or a credential, see --pin_file\n");
 		usage();
+		es_ext_net_cli_free(&net);
 		return 1;
 	}
 

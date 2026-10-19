@@ -315,11 +315,43 @@ static void test_options(void)
 		test_refused("name with a control character", args, NULL);
 	}
 	{
-		/* The PIN never goes on the command line */
-		const char *const args[] = { "--module", pk.shim, TOKEN_PIN,
+		/*
+		 * The PIN never goes on the command line - nor is one given
+		 * there by mistake repeated by the daemon, whose output goes
+		 * to the journal: as an argument, as that of an option too
+		 * short to tell apart, of one that is not known, or of one
+		 * that takes none
+		 */
+		const char *const stray[] = { "--module", pk.shim, TOKEN_PIN,
+					      NULL };
+		const char *const ambiguous[] = { "--module", pk.shim,
+						  "--pin=" TOKEN_PIN, NULL };
+		const char *const unknown[] = { "--module", pk.shim,
+						"--" TOKEN_PIN, NULL };
+		const char *const no_arg[] = { "--module", pk.shim,
+					       "--no_dtls=" TOKEN_PIN, NULL };
+		const char *const *const mistakes[] = { stray, ambiguous,
+							unknown, no_arg };
+		unsigned int i;
+
+		for (i = 0; i < sizeof(mistakes) / sizeof(mistakes[0]); i++) {
+			test_refused("PIN on the command line", mistakes[i],
+				     NULL);
+			CHECK_EQ(pk_count_lines(pk.daemon_log, TOKEN_PIN), 0);
+			CHECK_EQ(pk_count_lines(pk.daemon_log,
+						"not repeated here"),
+				 1);
+		}
+	}
+	{
+		/* An option without its argument is named */
+		const char *const args[] = { "--module", pk.shim, "--pin_file",
 					     NULL };
 
-		test_refused("PIN on the command line", args, NULL);
+		test_refused("option without its argument", args, NULL);
+		CHECK_EQ(pk_count_lines(pk.daemon_log,
+					"--pin_file needs an argument"),
+			 1);
 	}
 	{
 		const char *const args[] = { "--module", pk.shim, "--pin_file",
