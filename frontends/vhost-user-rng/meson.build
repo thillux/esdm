@@ -13,6 +13,8 @@ vhost_user_rng_core_src = files([
 
 vhost_user_rng_inc = include_directories([
 	'.',
+	'../../service-egd/server',
+	'../../service-rpc/server',
 ])
 
 vhost_user_rng_core_lib = static_library('vhost_user_rng_core',
@@ -20,4 +22,16 @@ vhost_user_rng_core_lib = static_library('vhost_user_rng_core',
 		include_directories: [ include_dirs_client, vhost_user_rng_inc ],
 		dependencies: [ dependencies_client ],
 		link_with: [ esdm_common_static_lib ],
+		)
+
+esdm_vhost_user_rng = executable(
+		'esdm-vhost-user-rng',
+		[ 'vhost_user_rng.c',
+		  '../../service-egd/server/esdm_server_socket.c',
+		  '../../service-rpc/server/privileges.c' ],
+		include_directories: [ include_dirs_client, vhost_user_rng_inc ],
+		dependencies: [ dependencies_client ],
+		link_with: [ vhost_user_rng_core_lib, esdm_common_static_lib,
+			     esdm_rpc_client_lib ],
+		install: true
 		)

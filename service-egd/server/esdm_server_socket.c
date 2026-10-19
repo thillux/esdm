@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string.h>
+#include <sys/fsuid.h>
 #include <sys/stat.h>
 
 #include "esdm_logger.h"
@@ -32,6 +33,8 @@
 struct esdm_server_bind {
 	int fd;
 	const struct sockaddr_un *addr;
+	/* Group of the socket file, (gid_t)-1 for the one of the process */
+	gid_t gid;
 	/* The bind(2) result, 0 or a negative errno */
 	int ret;
 	/* The thread could not get a umask of its own */
@@ -56,6 +59,21 @@ static void *esdm_server_bind_thread(void *arg)
 	else
 		b->unshare_errno = errno;
 
+	/*
+	 * The group of a new file is the file system gid of the thread creating
+	 * it, which is a credential of the thread alone - unlike the gids
+	 * setgid(2) changes, which glibc applies to every thread of the
+	 * process. setfsgid(2) does not report a failure, so the gid in effect
+	 * afterwards is asked for with an invalid one, which changes nothing.
+	 */
+	if (b->gid != (gid_t)-1) {
+		setfsgid(b->gid);
+		if ((gid_t)setfsgid((gid_t)-1) != b->gid) {
+			b->ret = -EPERM;
+			return NULL;
+		}
+	}
+
 	b->ret = 0;
 	if (bind(b->fd, (const struct sockaddr *)b->addr, sizeof(*b->addr)) < 0)
 		b->ret = -errno;
@@ -63,9 +81,13 @@ static void *esdm_server_bind_thread(void *arg)
 	return NULL;
 }
 
-int esdm_server_bind_unix(int fd, const struct sockaddr_un *addr, mode_t mode)
+int esdm_server_bind_unix_group(int fd, const struct sockaddr_un *addr,
+				mode_t mode, gid_t gid)
 {
-	struct esdm_server_bind b = { .fd = fd, .addr = addr, .ret = -EFAULT };
+	struct esdm_server_bind b = { .fd = fd,
+				      .addr = addr,
+				      .gid = gid,
+				      .ret = -EFAULT };
 	pthread_t thread;
 	int ret;
 
@@ -94,4 +116,9 @@ int esdm_server_bind_unix(int fd, const struct sockaddr_un *addr, mode_t mode)
 	}
 
 	return b.ret;
+}
+
+int esdm_server_bind_unix(int fd, const struct sockaddr_un *addr, mode_t mode)
+{
+	return esdm_server_bind_unix_group(fd, addr, mode, (gid_t)-1);
 }
