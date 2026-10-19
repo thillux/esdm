@@ -533,6 +533,16 @@ static void test_malformed(pid_t pid)
 	test_malformed_one("GET_INFLIGHT_FD, not offered",
 			   VHOST_USER_GET_INFLIGHT_FD, 0, table, 24, NULL, 0,
 			   true);
+	/* Its reply is the state of the ring, which vring 1 has none of */
+	state.index = 1;
+	test_malformed_one("GET_VRING_BASE of vring 1",
+			   VHOST_USER_GET_VRING_BASE, 0, &state, sizeof(state),
+			   NULL, 0, true);
+	test_malformed_one("GET_VRING_BASE of vring 1, a reply asked for",
+			   VHOST_USER_GET_VRING_BASE,
+			   VHOST_USER_NEED_REPLY_MASK, &state, sizeof(state),
+			   NULL, 0, true);
+	state.index = 0;
 	test_malformed_one("unknown request 99", 99, 0, NULL, 0, NULL, 0,
 			   false);
 	test_malformed_one("unknown request 0 with a descriptor", 0, 0, NULL,
@@ -658,6 +668,25 @@ static void test_refused(pid_t pid)
 	fe_close(&fe);
 	fe_mem_destroy(&mem);
 	fe_mem_destroy(&mem2);
+
+	/*
+	 * With REPLY_ACK, a failure of GET_VRING_BASE would be acknowledged
+	 * where the front-end reads the state of the ring: the connection is
+	 * closed instead
+	 */
+	{
+		struct vhost_user_vring_state state = { .index = 1 };
+
+		CHECK(!fe_connect(&fe, test_sock), "connect");
+		CHECK(!fe_negotiate(&fe, 0, TEST_PFEATURES), "negotiation");
+		CHECK(!fe_send(&fe, VHOST_USER_GET_VRING_BASE,
+			       VHOST_USER_NEED_REPLY_MASK, &state,
+			       sizeof(state), NULL, 0),
+		      "GET_VRING_BASE of vring 1 sent");
+		CHECK(fe_closed(&fe, TEST_WAIT_MS),
+		      "GET_VRING_BASE of vring 1 closes the connection, REPLY_ACK negotiated");
+		fe_close(&fe);
+	}
 
 	CHECK(fe_alive(pid), "daemon alive after the refused requests");
 }

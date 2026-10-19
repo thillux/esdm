@@ -599,10 +599,16 @@ static int vu_get_vring_base(struct vu_dev *dev, struct vu_msg *msg,
 	struct vhost_user_vring_state state;
 	struct vu_vring *vr;
 
+	/*
+	 * The reply is the state of the ring, which a ring the device does not
+	 * have has none of: without REPLY_ACK, the front-end would wait for it
+	 * for good, and with it, take the acknowledgement of the failure for
+	 * the state. Only closing the connection tells it.
+	 */
 	memcpy(&state, msg->payload, sizeof(state));
 	vr = vu_ring(dev, state.index);
 	if (!vr)
-		return -EINVAL;
+		return VU_DISCONNECT;
 
 	vu_lock(dev);
 	vu_vring_stop(vr);
