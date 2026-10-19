@@ -21,6 +21,7 @@
 #define ESDM_RPC_SERVICE_H
 
 #include <stdint.h>
+#include <string.h>
 #include <sys/ipc.h>
 
 #include <stdatomic.h>
@@ -82,20 +83,26 @@ extern "C" {
 #define ESDM_CUSE_URANDOM_DEVNAME "uesdm"
 #define ESDM_CUSE_URANDOM_DEVICE "/dev/" ESDM_CUSE_URANDOM_DEVNAME
 
-#define ESDM_SHM_STATUS_VERSION 4
+#define ESDM_SHM_STATUS_VERSION 5
 
 /*
- * Size of the rendered status report kept in the shared memory segment.
+ * Size of the rendered status report kept in the shared memory segment, and
+ * of the status file of esdm-proc.
  *
- * esdm_status() appends one section per entropy source, truncates on overflow
- * and emits the auxiliary pool section last. A build with every source enabled
- * renders roughly 1900 bytes, so the previous 1536 silently cut that section
- * off and every reader (CUSE ioctl 42, the aux client) saw a report stopping
- * mid-way. Keep enough headroom that adding a source does not bring that back.
+ * esdm_status() prints the entropy sources first and the DRNG, reseed worker
+ * and self test sections last, so a report cut short loses those. A build
+ * with every source the ESDM has renders about 2700 bytes without the
+ * entropy sources of the kernel, each of which adds about 160, PKCS#11 about
+ * 200, and each external entropy source up to its ESDM_ES_EXT_STATUS_MAX
+ * bytes of status: two of these took the report past the 4096 bytes this
+ * was before. Four times that leaves room for sources yet to come. A report
+ * longer still ends in a line saying so - see
+ * esdm_shm_status_mark_truncated().
+ *
  * Growing this changes the layout of struct esdm_shm_status, hence the version
  * bump above - an old client rejects the segment rather than misreading it.
  */
-#define ESDM_SHM_STATUS_INFO_SIZE 4096
+#define ESDM_SHM_STATUS_INFO_SIZE 16384
 
 struct esdm_shm_status {
 	/* Monotonic increasing version */
@@ -130,6 +137,32 @@ struct esdm_shm_status {
 static inline key_t esdm_ftok(const char *pathname, int proj_id)
 {
 	return ftok(pathname, proj_id);
+}
+
+/*
+ * End the text status report in @buf of @buflen bytes, which esdm_status() or
+ * esdm_rpcc_status() cut short with -EMSGSIZE, after its last whole line that
+ * leaves room for a line saying it is incomplete. The status segment and the
+ * status file of esdm-proc have no return code to say so: their readers - the
+ * CUSE ioctl 42, the aux client, a cat - would take the report as complete.
+ */
+static inline void esdm_shm_status_mark_truncated(char *buf, size_t buflen)
+{
+	static const char marker[] = "(status report truncated)\n";
+	size_t len;
+	char *nl;
+
+	if (!buf || buflen < sizeof(marker))
+		return;
+
+	len = strnlen(buf, buflen - 1);
+	if (len > buflen - sizeof(marker))
+		len = buflen - sizeof(marker);
+	buf[len] = '\0';
+
+	nl = strrchr(buf, '\n');
+	len = nl ? (size_t)(nl - buf) + 1 : 0;
+	memcpy(buf + len, marker, sizeof(marker));
 }
 
 /******************************************************************************

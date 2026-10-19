@@ -1688,7 +1688,7 @@ static void test_shm_status(void)
 	 * trusted.
 	 */
 	esdm_cuse_shm_status->infolen = ESDM_SHM_STATUS_INFO_SIZE * 2;
-	ioctl_call(42, NULL, 0, sizeof(reply.buf), -1);
+	ioctl_call(42, NULL, 0, ESDM_SHM_STATUS_INFO_SIZE * 2, -1);
 	CHECK(reply.kind == REPLY_IOCTL &&
 		      reply.size == ESDM_SHM_STATUS_INFO_SIZE,
 	      "an oversized info length was not clamped to the segment");

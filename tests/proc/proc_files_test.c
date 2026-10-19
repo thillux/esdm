@@ -647,6 +647,36 @@ static void test_fill_data_without_server(void)
 }
 
 /*
+ * A status report that did not fit into the file - or into the status segment,
+ * which ends it the same way - says so in its last line rather than stopping
+ * mid-way: a read has no return code that could tell.
+ */
+static void test_status_truncated(void)
+{
+	static const char marker[] = "(status report truncated)\n";
+	char buf[64];
+
+	/* Cut short in the middle of the last line that leaves room */
+	memset(buf, 0, sizeof(buf));
+	snprintf(buf, sizeof(buf), "%s",
+		 "Line one\nLine two\nLine three\nLine four is cut sho");
+	esdm_shm_status_mark_truncated(buf, 50);
+	CHECK_STR_EQ(buf, "Line one\nLine two\n(status report truncated)\n");
+	CHECK(strlen(buf) < 50, "the marked report overruns its buffer");
+
+	/* A report that does not have a single whole line is the marker */
+	memset(buf, 'x', sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
+	esdm_shm_status_mark_truncated(buf, sizeof(buf));
+	CHECK_STR_EQ(buf, marker);
+
+	/* A buffer too small for the marker is left as it is */
+	snprintf(buf, sizeof(buf), "Short");
+	esdm_shm_status_mark_truncated(buf, sizeof(marker) - 1);
+	CHECK_STR_EQ(buf, "Short");
+}
+
+/*
  * The boot_id is read once at startup and served from there. It is the one file
  * whose content does not come from the ESDM, so it is also the one that still
  * has an answer when no server does.
@@ -870,6 +900,7 @@ int main(int argc, char *argv[])
 	test_write_values_rejected();
 	test_write_values_parsed();
 	test_fill_data_without_server();
+	test_status_truncated();
 	test_pre_init();
 	test_caller_cap_sys_admin();
 	test_privileged_transitions();

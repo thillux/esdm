@@ -343,8 +343,13 @@ static int esdm_proc_get_status(struct esdm_proc_file *file)
 
 	/*
 	 * A report that did not fit is served as far as it got: it stays
-	 * readable, and what is here is all the file has room for.
+	 * readable, and what is here is all the file has room for. It says
+	 * so, as a read of the file has no other way to tell.
 	 */
+	if (ret == -EMSGSIZE)
+		esdm_shm_status_mark_truncated(file->valdata,
+					       ESDM_PROC_BUF_LEN);
+
 	if (ret && ret != -EMSGSIZE)
 		esdm_proc_empty_file(file);
 	else

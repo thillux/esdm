@@ -574,10 +574,13 @@ int esdm_shm_status_init(void)
 	/*
 	 * The report is published as far as it fits into the field, which is
 	 * all a reader of the shared memory segment can be given - it is noted
-	 * here rather than passed off as the whole report.
+	 * here and in the report itself rather than passed off as the whole
+	 * report: a reader has nothing else to tell it by.
 	 */
 	if (esdm_status(esdm_shm_status->info, sizeof(esdm_shm_status->info)) ==
 	    -EMSGSIZE) {
+		esdm_shm_status_mark_truncated(esdm_shm_status->info,
+					       sizeof(esdm_shm_status->info));
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ANY,
 			"Status report truncated to the %zu bytes of the shared memory segment\n",
