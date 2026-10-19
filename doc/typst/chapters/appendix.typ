@@ -234,7 +234,8 @@ neighboring rights to it to the public domain worldwide.
       Update to the ESDM 1.2.4 code: \
       Interrupt and scheduler ES as kernel module with DRBG conditioning \
       Auxiliary pool as XDRBG-256 over SHAKE256 \
-      Addition of eBPF, TPM2, PKCS\#11, kernel Jitter RNG and external ES \
+      Addition of eBPF, TPM2, kernel Jitter RNG and external ES, \
+      the PKCS\#11 ES as the provider esdm-es-pkcs11 \
       Addition of crypto backends, EGD interface, DTLS, JSON status \
       Split of the AIS 20/31 options into NTG.1, DRG.3 and DRG.4
     ],

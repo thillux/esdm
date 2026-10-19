@@ -62,11 +62,12 @@ provided with the data is correct:]
   that may obtain data from various hardware sources.
 
 - The random number generator of a TPM 2.0 accessed via its resource manager
-  device, and the random number generator of a PKCS\#11 token.
+  device.
 
 - External entropy sources developed outside of the ESDM which are loaded as a
   plugin library or which are served by a process of their own over a Unix
-  domain socket.
+  domain socket - among them `esdm-es-pkcs11`, which serves the random number
+  generator of a PKCS\#11 token.
 
 #par(first-line-indent: 0pt)[The ESDM treats all external and internal entropy
 sources equally. It can handle the situations where one or more entropy
@@ -149,8 +150,8 @@ interface can be selectively enabled and disabled at compile time:
 
   The server must be started as root. It creates its sockets and its status
   shared memory segment while privileged, initializes the entropy sources
-  requiring privileges - e.g. it loads the eBPF programs, the PKCS\#11 module
-  or an external entropy source plugin - and then permanently drops its
+  requiring privileges - e.g. it loads the eBPF programs or an external
+  entropy source plugin - and then permanently drops its
   privileges to an unprivileged user (option `--username`, `nobody` by
   default).
 
@@ -318,7 +319,6 @@ The ESDM consists of the following components shown in figure
   + the kernel RNG output,
   + the Linux kernel HWRAND framework (/dev/hwrng),
   + the TPM 2.0,
-  + the PKCS\#11 token,
   + the Jitter RNG of the Linux kernel crypto API,
   + the external entropy sources served by a plugin library and by a provider
     socket, and
@@ -526,12 +526,12 @@ two bytes.
 
   $ T_n = & E_n || S_n || E^"eBPF"_n || S^"eBPF"_n || J_n || C_n || K_n
     || H_n \
-    & || M_n || P_n || J^"K"_n || X^"L"_n || X^"S"_n || A_n || t $ <eq:t>
+    & || M_n || J^"K"_n || X^"L"_n || X^"S"_n || A_n || t $ <eq:t>
 
   with the Jitter RNG output $J$, the kernel RNG output $K$, the HWRAND output
-  $H$, the TPM 2.0 output $M$, the PKCS\#11 output $P$, the output of the
-  kernel Jitter RNG $J^"K"$ and of the external entropy sources $X^"L"$ and
-  $X^"S"$.
+  $H$, the TPM 2.0 output $M$, the output of the kernel Jitter RNG $J^"K"$
+  and of the external entropy sources $X^"L"$ and $X^"S"$ - the PKCS\#11
+  token among the latter.
 
 + Separation: The data of an entropy source that is configured with an entropy
   rate of zero is placed in the slot of a second buffer of the same layout,
@@ -558,8 +558,8 @@ data is always returned irrespective of the entropy rate of this pool. This
 ensures that also data that is not credited with entropy but injected into the
 ESDM is used to stir the seed for the DRNG.
 
-The Jitter RNG, the HWRAND, the TPM 2.0, the PKCS\#11 token, the kernel Jitter
-RNG and the entropy sources of the kernel module may collect their data
+The Jitter RNG, the HWRAND, the TPM 2.0, the kernel Jitter RNG and the
+entropy sources of the kernel module may collect their data
 asynchronously ahead of the request into a cache of blocks filled by the
 entropy source monitor (meson options `es_*_entropy_blocks`). The cache is
 compiled out with the options `sp80090c`, `fips140` or `ais2031_drg3` unless
@@ -1308,17 +1308,6 @@ command sent to the TPM resource manager device of the meson option
 device absent at initialization leaves the entropy source disabled. The entropy
 rate is defined with the meson option `es_tpm2_entropy_rate` (256 per default).
 
-== PKCS\#11 Entropy Source - ESDM-external Entropy Source <sec:pkcs11>
-
-The ESDM obtains random numbers from a PKCS\#11 token with
-`C_GenerateRandom` via the `libp11` library (meson option `es_pkcs11`,
-disabled per default). The PKCS\#11 module, the token label and the PIN are
-defined with the meson options `es_pkcs11_module_path`,
-`es_pkcs11_token_label` and `es_pkcs11_pin`; the module can also be given with
-the option `--pkcs11_module` of the ESDM server, the token configuration with
-the privileged `esdm_rpcc_set_pkcs11_config` RPC API call. The entropy rate is
-defined with the meson option `es_pkcs11_entropy_rate` (128 per default).
-
 == External Entropy Sources - ESDM-external Entropy Sources <sec:ext-es>
 
 Noise sources that are not part of the ESDM are written against
@@ -1384,6 +1373,36 @@ requests served, the verdict of the last self test of its plugin and its
 uptime, next to the status of its plugin, null where there is none. The ESDM
 asks each source for its status at most every 5 seconds, never waiting for a
 source busy with a request.
+
+== PKCS\#11 Entropy Source - ESDM-external Entropy Source <sec:pkcs11>
+
+The random number generator of a PKCS\#11 token is read with
+`C_GenerateRandom` via the `libp11` library by `esdm-es-pkcs11` (meson option
+`es_pkcs11`, disabled per default), a provider of its own served by
+`libesdm_es_ext` as discussed in section @sec:ext-es: the ESDM reads it
+through one of its ExternalSocket sources and contains no PKCS\#11 code. The
+PKCS\#11 module of the token vendor runs in that process with the privileges
+the token needs, and the PIN is a secret of that process alone.
+
+The daemon takes the token of a configured label (`--token_label`, meson
+option `es_pkcs11_token_label`) or the first token with a random number
+generator among the slots of its module (`--module`, meson option
+`es_pkcs11_module_path`). It logs in as user only if a PIN is configured and
+the token asks for a login; the PIN is read from a file or a systemd
+credential, never from the command line or the build. As every failed login
+uses up one of the PIN retries of the token, a PIN the token refused is wiped
+and never tried again. A token that is not there, or lost to a failed
+`C_GenerateRandom`, is looked for again at most every 5 seconds, loading the
+module anew where its slots hold no usable token. A token is tested whenever
+it is bound - two reads that have to differ - and one repeating its output is
+credited with nothing until a later test passes.
+
+The daemon declares "PKCS\#11" and the token label as the name of the source
+and the entropy rate of the meson option `es_pkcs11_entropy_rate` (128 per
+default, `--entropy_rate`), which the ESDM credits unless a rate is configured
+for the source. Its status reports the module, the token label, the token and
+its slot, whether it is present and logged in to, what became of the PIN and
+the last error.
 
 == DRNG Seeding Operation <sec:seeding>
 
@@ -1699,8 +1718,10 @@ the method index, the message length and a request identifier
 
 - Privileged operations: inserting entropy (`RndAddEntropy`,
   `RndAddToEntCnt`), clearing the entropy estimates (`RndClearPool`), forcing a
-  reseed (`RndReseedCRNG`), changing the Linux interface settings, configuring
-  the PKCS\#11 token and running the self tests (`Selftest`).
+  reseed (`RndReseedCRNG`), changing the Linux interface settings and running
+  the self tests (`Selftest`). The slot of a call that configured the
+  PKCS\#11 entropy source of earlier development versions is kept, answered
+  with `-EOPNOTSUPP`, so that the calls after it keep their index on the wire.
 
 #par(first-line-indent: 0pt)[With the meson option `dtls` (disabled per
 default), the connections between the processes of the ESDM are protected

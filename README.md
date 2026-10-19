@@ -108,6 +108,11 @@ is enabled during compile time:
   distribution or from the
   [libfuse Github website](https://github.com/libfuse/libfuse/).
 
+* libp11: If the PKCS#11 entropy source `esdm-es-pkcs11` is enabled as a
+  compile time option, libp11 is required, either from your distribution or
+  from the [libp11 Github website](https://github.com/OpenSC/libp11). Its
+  tests use SoftHSM (`softhsm2-util`) when it is installed.
+
 * Botan >= 3.0: If the Botan backend for cryptographic operations shall be used
   and is enabled as a compile time option get Botan either from your distribution
   or from the
@@ -302,8 +307,34 @@ esdm-server --es_ext_socket /run/esdm-es-a.socket \
 	--es_ext_socket /run/esdm-es-b.socket
 ```
 
-The PKCS#11 entropy source takes its provider module from the command line
-as well: `esdm-server --pkcs11_module /path/to/pkcs11-module.so`.
+### PKCS#11 Entropy Source
+
+The random number generator of a PKCS#11 token - a smartcard, a USB token, an
+HSM or SoftHSM - is served to the ESDM by `esdm-es-pkcs11` (meson option
+`es_pkcs11`), a provider of its own reading the token with `C_GenerateRandom`
+through libp11. The ESDM reads it through one of its provider socket sources
+and knows nothing of PKCS#11: neither `libesdm` nor `esdm-server` load a
+PKCS#11 module or link libp11.
+
+```
+esdm-es-pkcs11 --module /usr/lib/softhsm/libsofthsm2.so \
+	--token_label my-token --pin_file /etc/esdm/pkcs11-pin
+esdm-server --es_ext_socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket \
+	--es_ext_socket_uid esdm-es-pkcs11
+```
+
+The daemon takes the token of the given label, or the first one with a random
+number generator, logs in only if a PIN is configured and the token asks for
+it, never tries a PIN the token refused again, and looks for a token that is
+not there, or was lost, at most every 5 seconds. The PIN comes from a file or
+the systemd credential `pkcs11-pin` - never from the command line. It declares
+`PKCS#11` and the token label as the name of the source and the rate of
+`es_pkcs11_entropy_rate` (or `--entropy_rate`), and reports the token, the
+login and the last error as the `provider` status of the source. Its systemd
+unit `esdm-es-pkcs11.service` runs it as the system user `esdm-es-pkcs11` in
+a sandbox, ordered before `esdm-server.service`, which a drop-in setting
+`ESDM_SERVER_OPTIONS` points at it - see `esdm-es-pkcs11(8)`. A build with
+another provider needs one provider socket source more (`es_ext_socket_num`).
 
 ## Testing
 
@@ -359,6 +390,10 @@ The ESDM consists of the following components:
   respective mount namespace. If you have multiple mount namespaces, you need
   to start the daemon in each mount namespace or make the files otherwise
   available if its services shall be available there.
+
+* `esdm-es-pkcs11`: The PKCS#11 entropy source, serving the random number
+  generator of a PKCS#11 token to the `esdm-server`, which reads it as an
+  external entropy source - see [PKCS#11 Entropy Source].
 
 * `esdm-cuse-random`: The ESDM CUSE daemon creates a device file that behaves
   identically to /dev/random. It must be started as root. Reading, writing and

@@ -308,7 +308,7 @@
   items: (
   [Use without additional conditioning – fast source], (
     [Jitter RNG (optionally in its own NTG.1 mode), kernel Jitter RNG],
-    [Kernel RNG, Linux HWRand, TPM 2.0, PKCS\#11 token],
+    [Kernel RNG, Linux HWRand, TPM 2.0],
     [CPU (e.g. Intel RDSEED, POWER DARN, RISC-V seed CSR, \ IBM Z PRNO, ARM RNDRRS)], (
       [Proper oversampling as defined by specification],
     ),
@@ -329,7 +329,7 @@
 // ---------------------------------------------------------------- slide 17
 #slide(17, title: [External Entropy Sources II], scale: 0.48, items: (
   [TPM 2.0: TPM2_GetRandom on the resource manager /dev/tpmrm0],
-  [PKCS\#11 token via libp11 – module path at start time],
+  [PKCS\#11 token via libp11 – esdm-es-pkcs11 provider, PIN as credential],
   [Kernel Jitter RNG: kernel crypto API RNG, name configurable],
   [External entropy sources developed against libesdm_es_ext], (
     [ExternalLib: plugin library loaded into the esdm-server],
