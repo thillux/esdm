@@ -26,6 +26,22 @@ the ioctls of the kernel's random devices - the counterpart of the CUSE
 frontend in the kernel, leaving the kernel's own devices untouched; it falls
 back to the kernel's RNG while the ESDM is not reachable
 
+* Add esdm-vhost-user-rng (meson option vhost-user-rng, Linux only): the
+vhost-user back-end of a virtio entropy device, giving QEMU (vhost-user-rng-pci,
+and vhost-user-rng on virtio-mmio, e.g. on microvm) and Cloud Hypervisor
+(--generic-vhost-user ...,device_type=rng) guests a virtio-rng device served
+from the fully seeded DRNG of the ESDM - nothing before the ESDM is fully
+seeded -, or with --pr from the prediction resistant one, optionally rate
+limited (--max_bytes/--period_ms). One process per VM without privileges, as it
+parses memory the guest writes, reaching the ESDM over the unprivileged RPC
+interface; every field of the queue is read once, chains, indirect tables and
+buffers are checked against the queue size and the memory of the guest, and a
+malformed request is completed with nothing written. Socket activated through
+the template units esdm-vhost-user-rng@.socket/@.service
+(/run/esdm-vhost-user-rng/<vm>.sock, group of the meson option
+vhost-user-rng-socket-group, kvm by default), see esdm-vhost-user-rng(8); no
+live migration (QEMU declares vhost-user-rng unmigratable), no packed ring
+
 * Split the build option ais2031 into ais2031_ntg1 (NTG.1 seeding strategy),
 ais2031_drg3 (DRG.3 class) and ais2031_drg4 (DRG.4.10 reseeding limits), which
 can now be selected independently - ais2031_drg3 and ais2031_drg4 are mutually
