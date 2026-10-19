@@ -5,7 +5,7 @@
 An entropy assessment of the scheduler-based entropy sources is not provided
 yet. Both are therefore credited with no entropy by default:
 
-- The scheduler entropy source of the kernel module addon/linux\_esdm\_es
+- The scheduler entropy source of the kernel module kernel/esdm\_es
   (section @sec:sched-events) is not built by default (`BUILD_ES_SCHED=0` in
   the Makefile of the module), and the ESDM credits it with no entropy
   (`es_sched_entropy_rate` is 0). The module processes its time stamps like

@@ -75,7 +75,7 @@ static int es_sched_getstate(void)
 
 	/*
 	 * The members come from the kernel module (esdm_sched_es_state_json()
-	 * of addon/linux_esdm_es/esdm_es_sched.c), which post-processes with a
+	 * of kernel/esdm_es/esdm_es_sched.c), which post-processes with a
 	 * DRBG rather than a hash since commit 1dd63ca.
 	 */
 	if (!es_state_has(obj, "drbg_for_operating_entropy_pool",

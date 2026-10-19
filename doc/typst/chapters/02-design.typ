@@ -24,7 +24,7 @@ entropy rate of one of them at runtime sets the others to zero
 (`esdm_config_timing_es_rate_set`):
 
 - The indigo marked parts refer to the scheduler entropy source of the kernel
-  module `addon/linux_esdm_es` that records the time stamps of context switches
+  module `kernel/esdm_es` that records the time stamps of context switches
   in per-CPU rings. The recorded time stamps are post-processed with an
   SP800-90A DRBG of the kernel module when seeding of the DRNG is to be
   performed.
@@ -244,7 +244,7 @@ interface can be selectively enabled and disabled at compile time:
   obtain and process the raw noise data of the internal entropy sources for
   their entropy assessment, see section @sec:test-interfaces.
 
-- `esdm_cdev` (`addon/linux_esdm_cdev`): A kernel module serving the random
+- `esdm_cdev` (`kernel/esdm_cdev`): A kernel module serving the random
   numbers of the ESDM through the character devices `/dev/esdm_random` and
   `/dev/esdm_urandom` and the directory `/proc/esdm` - the counterpart of the
   CUSE daemons in the kernel, which leaves the kernel's own devices untouched.
@@ -388,7 +388,7 @@ module.
 
 + Concatenation: The time stamps received by the IRQ and the scheduler entropy
   sources are concatenated in a per-CPU ring - the implementation is provided
-  with the function `esdm_es_ring_add` in `addon/linux_esdm_es/esdm_es_ring.h`.
+  with the function `esdm_es_ring_add` in `kernel/esdm_es/esdm_es_ring.h`.
   The ring holds 4096 time stamps for the default oversampling rate of 3
   (`ESDM_ES_OSR` of the Makefile of the module). When the ring is full, newly
   received time stamps are dropped:
@@ -402,7 +402,7 @@ module.
   $s$ = 256 bits of the DRBG are collected from all per-CPU rings and handed to
   the DRBG of the kernel module as seed - the implementation is provided with
   the function `esdm_es_drbg_pool_extract_block` in
-  `addon/linux_esdm_es/esdm_es_drbg.c`. These are $(s + o) dot r \/ 256$ time
+  `kernel/esdm_es/esdm_es_drbg.c`. These are $(s + o) dot r \/ 256$ time
   stamps, $r$ being the number of time stamps per 256 bits of entropy and $o$
   the oversampling of 65 bits (129 bits for the instantiation of the DRBG) in
   the FIPS mode of a kernel built with `CONFIG_CRYPTO_FIPS`, 0 otherwise. The
@@ -761,11 +761,11 @@ The ESDM uses the following main data structures:
 == Interrupt Processing - ESDM-internal Entropy Source <sec:irq-processing>
 
 The interrupt entropy source is provided by the kernel module
-`addon/linux_esdm_es` (`esdm_es.ko`, built with `BUILD_ES_IRQ=1`, which is the
+`kernel/esdm_es` (`esdm_es.ko`, built with `BUILD_ES_IRQ=1`, which is the
 default). The kernel patch `0002-ESDM-interrupt-entropy-source-hooks` hooks a
 callback of the module into the interrupt handling of the Linux kernel. The
 ESDM reads the entropy source via the IOCTLs of the device `/dev/esdm_es`
-(`addon/linux_esdm_es/esdm_es_ioctl.h`).
+(`kernel/esdm_es/esdm_es_ioctl.h`).
 
 The ESDM interrupt processing callback is the hot code path in the ESDM and
 special care is taken that it is as short as possible and that it operates
@@ -933,7 +933,7 @@ The ESDM implements the following health tests:
 - Adaptive Proportion Test (APT)
 
 #par(first-line-indent: 0pt)[Those tests are detailed in the following
-sections. They are implemented in `addon/linux_esdm_es/esdm_health.c` for the
+sections. They are implemented in `kernel/esdm_es/esdm_health.c` for the
 entropy sources of the kernel module and in
 `esdm/es/ebpf/esdm_es_ebpf_health.bpf.h` for the eBPF entropy sources.]
 

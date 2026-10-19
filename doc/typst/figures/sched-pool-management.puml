@@ -1,7 +1,7 @@
 @startuml
 ' Figure: Scheduler Event Recording
 ' esdm_time_process() / esdm_time_process_common() of
-' addon/linux_esdm_es/esdm_es_timer_common.c - the same for interrupts
+' kernel/esdm_es/esdm_es_timer_common.c - the same for interrupts
 skinparam defaultFontName "Liberation Sans"
 skinparam defaultFontSize 12
 skinparam shadowing false

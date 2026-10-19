@@ -17,8 +17,8 @@ for an SP800\-90B entropy assessment. It serves the same purpose for those
 sources as the
 .I esdm_raw_*
 debugfs interfaces of the
-.I linux_esdm_es
-kernel add\-on do for the kernel based ones.
+.I esdm_es
+kernel module do for the kernel based ones.
 .PP
 The tool loads and attaches its own copy of the eBPF programs, so every
 invocation starts from a freshly initialized source: zeroed per\-CPU state, no

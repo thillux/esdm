@@ -72,7 +72,7 @@ contemporary and future-proof entropy source and DRNG management framework:
   - Two additional but optional entropy sources are provided for
     resource-constrained systems: the scheduler-based entropy source and the
     interrupt-based entropy source. Both exist in two variants: one is
-    provided by a kernel module (`addon/linux_esdm_es`) which hooks into the
+    provided by a kernel module (`kernel/esdm_es`) which hooks into the
     scheduler / the interrupt handling code path by means of small kernel
     patches, the other one by eBPF programs attached to tracepoints of a
     stock Linux kernel which needs no kernel patches.

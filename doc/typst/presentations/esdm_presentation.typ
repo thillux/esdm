@@ -349,7 +349,7 @@
   [Conditioning: SP800-90A DRBG of the kernel when entropy is requested],
   [esdm-kernel-seeder reseeds the kernel RNG periodically],
   [Requires small kernel patch + kernel module], (
-    [Code present in ESDM source tree: addon/linux_esdm_es],
+    [Code present in ESDM source tree: kernel/esdm_es],
   ),
   [Alternative without kernel patch: eBPF-based interrupt ES],
 ))
@@ -380,7 +380,7 @@
   [Data compression executed in process context during reseeding of DRNG],
   [Data compression is the SP800-90A DRBG of the kernel],
   [Requires small kernel patch + kernel module], (
-    [Code present in ESDM source tree: addon/linux_esdm_es],
+    [Code present in ESDM source tree: kernel/esdm_es],
   ),
   [Alternative without kernel patch: eBPF-based scheduler ES],
 ))

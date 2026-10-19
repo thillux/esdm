@@ -63,7 +63,7 @@ to the ESDM applies:
     auxiliary pool.
 
   - The interrupt entropy source and the scheduler entropy source of the ESDM
-    Linux kernel module in addon/linux\_esdm\_es are subject to a full entropy
+    Linux kernel module in kernel/esdm\_es are subject to a full entropy
     analysis following section @sec:sp80090b and chapter
     @sec:sched-assessment, respectively. The eBPF variants of both sources
     (section @sec:ebpf) are uncredited per default. At most one of the four
@@ -317,7 +317,7 @@ The following compile-time settings must be observed:
   chapter @sec:irq-assessment and by applying the testing of the entropy
   source as outlined in section @sec:90b-reuse on the target system. This also
   requires the compilation of the ESDM Linux kernel module documented in
-  addon/linux\_esdm\_es/README.md.
+  kernel/esdm\_es/README.md.
 
 - Enable `es_sched` configure the scheduler entropy source compliant to
   SP800-90B as outlined in section @sec:sched-assessment if the scheduler
@@ -325,7 +325,7 @@ The following compile-time settings must be observed:
   assessment in chapter @sec:sched-assessment and by applying the testing of
   the entropy source as outlined in this chapter on the target system. This
   also requires the compilation of the ESDM Linux kernel module documented in
-  addon/linux\_esdm\_es/README.md.
+  kernel/esdm\_es/README.md.
 
 - Credit the eBPF scheduler or interrupt entropy source with
   `es_sched_ebpf_entropy_rate` or `es_irq_ebpf_entropy_rate` only with an

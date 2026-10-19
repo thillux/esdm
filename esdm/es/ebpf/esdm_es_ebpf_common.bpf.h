@@ -100,7 +100,7 @@ const volatile struct esdm_ebpf_config esdm_ebpf_cfg = { 0 };
 
 /* Window of raw time stamps analyzed to derive the timer granularity (GCD) */
 #define ESDM_EBPF_GCD_WINDOW 100
-/* Upper bound of the accepted GCD, mirrors the ESDM kernel add-on */
+/* Upper bound of the accepted GCD, mirrors the ESDM kernel module */
 #define ESDM_EBPF_GCD_MAX 1000
 
 /*
@@ -132,7 +132,7 @@ esdm_ebpf_gcd_reset(struct esdm_ebpf_percpu_state *state)
 
 /*
  * Divide out the common granularity of the time source, mirroring the GCD
- * handling of the kernel add-on (esdm_es_timer_common.c). Coarse clock sources
+ * handling of the kernel module (esdm_es_timer_common.c). Coarse clock sources
  * increment in fixed steps, leaving the low-order time stamp bits constant and
  * thus entropy-free. The GCD of the first ESDM_EBPF_GCD_WINDOW raw time stamps
  * of a CPU estimates that step; later time stamps are divided by it so the
@@ -151,7 +151,7 @@ esdm_ebpf_gcd_process(struct esdm_ebpf_percpu_state *state, __u64 ts)
 
 	if (++state->gcd_count >= ESDM_EBPF_GCD_WINDOW) {
 		g = state->gcd_running;
-		/* Clamp as the kernel add-on does: never 0, never too coarse */
+		/* Clamp as the kernel module does: never 0, never too coarse */
 		if (!g)
 			g = 1;
 		else if (g >= ESDM_EBPF_GCD_MAX)
@@ -396,7 +396,7 @@ static __always_inline void esdm_ebpf_collect(void)
 	 * Two time stamps form no delta and only set the predecessor up: the
 	 * first one a CPU sees, and the first one after the timer granularity
 	 * became known, whose predecessor is on the undivided scale. The kernel
-	 * add-on does the same (esdm_time_process_common()).
+	 * kernel module does the same (esdm_time_process_common()).
 	 *
 	 * Only deltas the health tests vouch for are collected, so the record
 	 * carries no health state of this CPU - only the health epoch, which

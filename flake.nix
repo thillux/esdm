@@ -129,15 +129,15 @@
             # list rather than appending to it.
             kernelPatches =
               lpsuper.kernel.kernelPatches
-              ++ lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
+              ++ lpself.callPackage ./kernel/esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
               ++ lib.optionals kernelFips (
-                lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
+                lpself.callPackage ./kernel/esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
-              ++ lib.optionals kernelDebug (lpself.callPackage ./addon/linux_esdm_es/debug.nix { })
-              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { inherit (lpsuper) kernel; };
+              ++ lib.optionals kernelDebug (lpself.callPackage ./kernel/esdm_es/debug.nix { })
+              ++ lpself.callPackage ./kernel/esdm_es/drbg.nix { inherit (lpsuper) kernel; };
           };
-          esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
-          esdm_cdev = lpself.callPackage ./addon/linux_esdm_cdev { };
+          esdm_es = lpself.callPackage ./kernel/esdm_es { };
+          esdm_cdev = lpself.callPackage ./kernel/esdm_cdev { };
         };
 
         # 6.1 is the first kernel version supported by ESDM.
@@ -931,7 +931,7 @@
           kernel:
           let
             esdm = self.packages.${system}.esdm;
-            check = "python3 ${./addon/linux_esdm_cdev/tests/esdm_cdev_check.py}";
+            check = "python3 ${./kernel/esdm_cdev/tests/esdm_cdev_check.py}";
           in
           pkgs.testers.nixosTest {
             name = "esdm_cdev character devices";
@@ -941,7 +941,7 @@
               {
                 boot.kernelPackages = kernel;
                 boot.extraModulePackages = [
-                  (config.boot.kernelPackages.callPackage ./addon/linux_esdm_cdev { })
+                  (config.boot.kernelPackages.callPackage ./kernel/esdm_cdev { })
                 ];
 
                 services.esdm = {
@@ -2120,7 +2120,7 @@
         // lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "esdm_es_${name}" (
-            pkgs.callPackage ./addon/linux_esdm_es {
+            pkgs.callPackage ./kernel/esdm_es {
               inherit (pkgs) lib;
               inherit (kernel) kernel;
               enableTesting = true;
@@ -2133,7 +2133,7 @@
         // lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "esdm_cdev_${name}" (
-            pkgs.callPackage ./addon/linux_esdm_cdev {
+            pkgs.callPackage ./kernel/esdm_cdev {
               inherit (pkgs) lib;
               inherit (kernel) kernel;
               werror = true;

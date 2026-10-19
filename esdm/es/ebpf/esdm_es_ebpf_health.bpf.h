@@ -2,8 +2,8 @@
 /*
  * ESDM eBPF-based entropy sources: SP800-90B health tests in eBPF
  *
- * Port of the health tests of the ESDM Linux kernel add-on
- * (addon/linux_esdm_es/esdm_health.c) into eBPF program code:
+ * Port of the health tests of the ESDM kernel module esdm_es
+ * (kernel/esdm_es/esdm_health.c) into eBPF program code:
  *
  * - Stuck test: the first, second and third derivative of the event time
  *   stamp must be non-zero.
@@ -15,10 +15,10 @@
  * - SP800-90B section 4.3 startup test: 1024 samples (two APT windows) must
  *   pass before the entropy source may deliver entropy.
  *
- * In deviation from the add-on which maintains the RCT/APT state globally
- * with atomic operations, all health state is maintained per CPU: the eBPF
- * programs run with migration disabled, so the state is lock-free without
- * atomics. Each CPU therefore executes its own independent instance of the
+ * In deviation from the kernel module, which maintains the RCT/APT state
+ * globally with atomic operations, all health state is maintained per CPU:
+ * the eBPF programs run with migration disabled, so the state is lock-free
+ * without atomics. Each CPU therefore executes its own independent instance of the
  * health tests on its own event sequence - including the startup test -
  * which is statistically at least as strict as the global variant.
  *

@@ -1,7 +1,7 @@
 @startuml
 ' Figure: Kernel Entropy Source Data Extraction
 ' esdm_es_drbg_pool_extract() / esdm_es_drbg_pool_extract_block() of
-' addon/linux_esdm_es/esdm_es_drbg.c, serving the ESDM_IRQ_ENT_BUF and
+' kernel/esdm_es/esdm_es_drbg.c, serving the ESDM_IRQ_ENT_BUF and
 ' ESDM_SCHED_ENT_BUF IOCTLs of /dev/esdm_es
 skinparam defaultFontName "Liberation Sans"
 skinparam defaultFontSize 12

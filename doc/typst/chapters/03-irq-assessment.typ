@@ -14,7 +14,7 @@ treated as black boxes by the ESDM and must therefore deliver their own
 entropy assessment.
 
 The interrupt entropy source assessed here is the one implemented by the Linux
-kernel module `esdm_es.ko` of addon/linux\_esdm\_es: hook patches for the
+kernel module `esdm_es.ko` of kernel/esdm\_es: hook patches for the
 supported kernel versions call the module for every interrupt, the module
 collects and health tests the time stamps and conditions them with an
 SP800-90A DRBG, and the ESDM reads the result through the ioctls of the device
@@ -759,7 +759,7 @@ does not change depending on the environmental conditions.
 This document explains the architectural security boundary.
 
 The boundary of the implementation is the source code files provided as part
-of the software delivery: the kernel module of addon/linux\_esdm\_es with its
+of the software delivery: the kernel module of kernel/esdm\_es with its
 kernel patches, and the ESDM reading it through the ioctls of /dev/esdm\_es.
 These ioctls are only available to a caller that opened the device file with
 the capability `CAP_SYS_ADMIN` (`esdm_cdev_open`).
@@ -894,7 +894,7 @@ for a discussion of the narrowest internal width and the output block size.
 
 Test tools for measuring raw entropy are provided with the ESDM source code:
 `esdm-getrawentropy` and `esdm-extractlsb` in addon/test, and the kernel
-module testing support in addon/linux\_esdm\_es. These tools can be used by
+module testing support in kernel/esdm\_es. These tools can be used by
 everybody without further knowledge of the ESDM.
 
 === SP800-90B Section 3.2.4 Requirement 2 <sec:90b-324-2>
@@ -1107,7 +1107,7 @@ following configurations and settings must be made.
 The following compile-time settings must be observed:
 
 - The kernel module must be compiled and loaded as documented in
-  addon/linux\_esdm\_es/README.md, with the hook patches for the kernel
+  kernel/esdm\_es/README.md, with the hook patches for the kernel
   version applied. Its Makefile must have the interrupt entropy source enabled
   (`BUILD_ES_IRQ=1`, the default) and `ESDM_ES_OSR` set to the oversampling
   rate resulting from the entropy assessment outlined in section

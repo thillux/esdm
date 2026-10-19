@@ -167,8 +167,8 @@ void esdm_ebpf_setup_logging(void)
 /****************************** Health tests **********************************/
 
 /*
- * APT cutoff tables of the ESDM Linux kernel add-on
- * (addon/linux_esdm_es/esdm_health.h), indexed by OSR - 1: binomial
+ * APT cutoff tables of the ESDM kernel module esdm_es
+ * (kernel/esdm_es/esdm_health.h), indexed by OSR - 1: binomial
  * distribution quantiles for the APT window size of 512 with alpha = 2^-30
  * (intermittent) and alpha = 2^-60 (permanent) for H = 1/OSR bits per
  * sample. OSR values of 15 and above use the window size as cutoff per FIPS
@@ -258,7 +258,7 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
  * Estimate whether the monotonic clock read by the eBPF program via
  * bpf_ktime_get_ns() has a high resolution. A coarse clock leaves the low-order
  * time stamp bits constant, so no timing entropy can be collected at all - the
- * kernel add-on refuses to register its hooks for the same reason (see
+ * kernel module refuses to register its hooks for the same reason (see
  * esdm_es_sched_module_init()). clock_getres() reports the nominal 1 ns
  * regardless of the true granularity, so estimate from the smallest non-zero
  * advance between successive reads.

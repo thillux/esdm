@@ -16,7 +16,7 @@
 /*
  * The APT is performed on the time stamp reduced modulo ESDM_EBPF_APT_LSB,
  * i.e. on its four low-order bits (ESDM_EBPF_APT_WORD_MASK == 0xf). This
- * matches the ESDM kernel add-on (esdm_health.c) verbatim.
+ * matches the ESDM kernel module (esdm_health.c) verbatim.
  */
 #define ESDM_EBPF_APT_LSB 16
 #define ESDM_EBPF_APT_WORD_MASK (ESDM_EBPF_APT_LSB - 1)
