@@ -31,6 +31,10 @@
  * taken from what the source publishes whenever it releases that lock, not
  * waited for.
  *
+ * The source is shown under the name its plugin declares, if it is a valid
+ * one, in place of its name in the ES table - see esdm_es_ext.h. The name is
+ * published like the state below: the ESDM status takes it from there.
+ *
  * A block is credited with what the plugin claims for it, at most with what
  * the configured rate allows (esdm_config_es_ext_lib_entropy_rate()). A
  * plugin that fails to deliver - or claims more than the data can hold, which
@@ -104,6 +108,9 @@ struct esdm_es_extlib {
 	/* The path it was loaded from */
 	char loaded_path[PATH_MAX];
 
+	/* The name the plugin declares, if it is valid - empty for none */
+	char name[ESDM_ES_EXT_NAME_MAX + 1];
+
 	/* The plugin as claimed for this source, under extlib_claim_mutex */
 	const struct esdm_es_ext_plugin *claimed;
 
@@ -145,7 +152,7 @@ struct esdm_es_extlib {
 	atomic_bool published_credited;
 	mutex_t state_mutex;
 	char state_path[PATH_MAX];
-	char state_name[64];
+	char state_name[ESDM_ES_EXT_NAME_MAX + 1];
 	const char *state_status;
 	struct esdm_es_ext_status_cache status;
 };
@@ -164,7 +171,6 @@ struct esdm_es_extlib {
 		.mutex = MUTEX_UNLOCKED,                                       \
 		.default_path = ESDM_EXT_LIB_PATH_##i,                         \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
-		.state_name = "(none)",                                        \
 		.state_status = "not loaded",                                  \
 	},
 
@@ -247,9 +253,7 @@ static void esdm_es_extlib_publish_locked(struct esdm_es_extlib *lib)
 	mutex_lock(&lib->state_mutex);
 	snprintf(lib->state_path, sizeof(lib->state_path), "%s",
 		 esdm_es_extlib_path_locked(lib));
-	snprintf(lib->state_name, sizeof(lib->state_name), "%s",
-		 lib->plugin && lib->plugin->name ? lib->plugin->name :
-						    "(none)");
+	snprintf(lib->state_name, sizeof(lib->state_name), "%s", lib->name);
 	lib->state_status = status;
 	mutex_unlock(&lib->state_mutex);
 }
@@ -272,6 +276,52 @@ static void esdm_es_extlib_status_forget_locked(struct esdm_es_extlib *lib)
 	mutex_unlock(&lib->state_mutex);
 }
 
+/*
+ * How the log names the source: its tag, with the name its plugin declares.
+ * Caller must hold the mutex of @lib.
+ */
+static const char *esdm_es_extlib_label_locked(const struct esdm_es_extlib *lib,
+					       char *buf, size_t buflen)
+{
+	if (!lib->name[0])
+		return lib->tag;
+	snprintf(buf, buflen, "%s (%s)", lib->tag, lib->name);
+	return buf;
+}
+
+/*
+ * Take the name the plugin @p declares, if it is one a source may declare and
+ * not the name of another entropy source. Caller must hold the mutex of @lib
+ * (write lock).
+ */
+static void esdm_es_extlib_name_locked(struct esdm_es_extlib *lib,
+				       const struct esdm_es_ext_plugin *p)
+{
+	const char *name = esdm_es_ext_name_or_null(p->name);
+	const char *self = esdm_es_extlib_name(lib);
+
+	lib->name[0] = '\0';
+	if (!p->name)
+		return;
+
+	if (!name) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES plugin%s: the name it declares is no name of 1 to %u bytes of UTF-8 without control characters, it is shown as %s\n",
+			lib->tag, ESDM_ES_EXT_NAME_MAX, self);
+		return;
+	}
+	if (esdm_es_name_taken(name, &esdm_es_extlib[lib->idx])) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES plugin%s: it declares the name %s of another entropy source, it is shown as %s\n",
+			lib->tag, name, self);
+		return;
+	}
+
+	snprintf(lib->name, sizeof(lib->name), "%s", name);
+}
+
 /* Caller must hold the mutex of @lib (write lock). */
 static void esdm_es_extlib_unload_locked(struct esdm_es_extlib *lib)
 {
@@ -286,6 +336,7 @@ static void esdm_es_extlib_unload_locked(struct esdm_es_extlib *lib)
 	(void)esdm_es_extlib_claim_locked(lib, NULL);
 
 	lib->loaded_path[0] = '\0';
+	lib->name[0] = '\0';
 	lib->read_failed = false;
 	lib->selftest_failed = false;
 	lib->selftest_due = false;
@@ -300,6 +351,7 @@ static void esdm_es_extlib_unload_locked(struct esdm_es_extlib *lib)
 static int esdm_es_extlib_init_plugin_locked(struct esdm_es_extlib *lib,
 					     const struct esdm_es_ext_plugin *p)
 {
+	const char *name = esdm_es_ext_name_or_null(p->name);
 	void *ctx = NULL;
 	int ret = 0;
 
@@ -311,12 +363,14 @@ static int esdm_es_extlib_init_plugin_locked(struct esdm_es_extlib *lib,
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
 				"External ES plugin%s: initialization of %s failed: %s\n",
-				lib->tag, p->name ? p->name : "the plugin",
+				lib->tag, name ? name : "the plugin",
 				strerror(-ret));
 			return ret;
 		}
 	}
 
+	/* After its init, which may find out what it is */
+	esdm_es_extlib_name_locked(lib, p);
 	lib->plugin = p;
 	lib->ctx = ctx;
 	lib->read_failed = false;
@@ -416,7 +470,7 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	esdm_logger(
 		LOGGER_STATUS, LOGGER_C_ES,
 		"External ES plugin%s: %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
-		lib->tag, p->name ? p->name : "(unnamed)", path,
+		lib->tag, lib->name[0] ? lib->name : "(unnamed)", path,
 		esdm_config_es_ext_lib_entropy_rate(lib->idx));
 
 	return 0;
@@ -482,6 +536,7 @@ static void esdm_es_extlib_get(struct esdm_es_extlib *lib,
 			       uint32_t requested_bits)
 {
 	uint32_t claimed, len = requested_bits >> 3;
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	int ret;
 
 	eb_es->e_bits = 0;
@@ -501,7 +556,9 @@ static void esdm_es_extlib_get(struct esdm_es_extlib *lib,
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
 				"External ES plugin%s: no entropy delivered: %s\n",
-				lib->tag, strerror(-ret));
+				esdm_es_extlib_label_locked(lib, label,
+							    sizeof(label)),
+				strerror(-ret));
 		lib->read_failed = true;
 		goto out;
 	}
@@ -528,6 +585,7 @@ out:
 static int esdm_es_extlib_monitor(struct esdm_es_extlib *lib)
 {
 	uint8_t probe[ESDM_DRNG_SECURITY_STRENGTH_BYTES];
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	struct timespec now;
 	uint32_t claimed;
 
@@ -543,7 +601,8 @@ static int esdm_es_extlib_monitor(struct esdm_es_extlib *lib)
 		lib->read_failed = false;
 		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
 			    "External ES plugin%s: delivering again\n",
-			    lib->tag);
+			    esdm_es_extlib_label_locked(lib, label,
+							sizeof(label)));
 	}
 
 out:
@@ -583,7 +642,7 @@ esdm_es_extlib_status_locked(struct esdm_es_extlib *lib)
 static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 				    struct json_object *obj)
 {
-	char path[PATH_MAX], name[64];
+	char path[PATH_MAX], name[ESDM_ES_EXT_NAME_MAX + 1];
 	struct json_object *provider;
 	uint32_t poolsize, entropy_rate;
 	time_t now = (time_t)esdm_monotonic_now();
@@ -620,6 +679,8 @@ static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 	poolsize = esdm_es_extlib_entropylevel(lib, esdm_security_strength());
 	entropy_rate = esdm_es_extlib_entropylevel(lib, 256);
 
+	/* Its name, see esdm_es_mgr_cb.h, and its instance */
+	esdm_es_ext_state_name(obj, name, esdm_es_extlib_name(lib));
 	json_object_object_add(obj, "available_entropy",
 			       json_object_new_int64(poolsize));
 	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
@@ -627,7 +688,9 @@ static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 	json_object_object_add(obj, "plugin_library",
 			       json_object_new_string(path[0] ? path :
 								"(unset)"));
-	json_object_object_add(obj, "plugin", json_object_new_string(name));
+	json_object_object_add(obj, "plugin",
+			       json_object_new_string(name[0] ? name :
+								"(none)"));
 	json_object_object_add(obj, "status", json_object_new_string(status));
 	if (provider)
 		json_object_object_add(obj, "provider", provider);
@@ -644,6 +707,7 @@ static bool esdm_es_extlib_active(struct esdm_es_extlib *lib)
  */
 static int esdm_es_extlib_selftest_locked(struct esdm_es_extlib *lib)
 {
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	int ret;
 
 	if (!lib->plugin) {
@@ -662,7 +726,9 @@ static int esdm_es_extlib_selftest_locked(struct esdm_es_extlib *lib)
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ES,
 				"External ES plugin%s: self test failed: %d\n",
-				lib->tag, ret);
+				esdm_es_extlib_label_locked(lib, label,
+							    sizeof(label)),
+				ret);
 			lib->selftest_failed = true;
 			return -EFAULT;
 		}

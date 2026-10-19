@@ -29,7 +29,12 @@
  *   provider that goes away - does not change what another is credited with.
  * - A plugin library serves one source: a second source refuses the plugin
  *   another one uses.
- * - The JSON status of the ESDM lists every source once, under its name.
+ * - The JSON status of the ESDM lists every source once, under its instance
+ *   name - and under the name its plugin or provider declares, which two
+ *   sources may share; a source declaring none, or one that is not valid, is
+ *   shown under its instance name. Another plugin loaded into one source, or
+ *   a provider restarted with another name, changes the name of that source
+ *   only, and a status taken meanwhile shows the old name or the new one.
  *
  * Both sources are compiled into the test, with a short retry interval and
  * timeout of the provider sockets. The plugin libraries are copies of the test
@@ -51,6 +56,7 @@
 #include "esdm_es_extsock.c"
 
 #include <dlfcn.h>
+#include <pthread.h>
 
 #include "common_test.h"
 #include "../es_state_check.h"
@@ -69,6 +75,7 @@ static const char *test_serve_bin;
 static const char *test_plugin[TEST_PLUGINS];
 static struct esdm_es_ext_test_control *test_ctl[TEST_PLUGINS];
 static void *test_ref[TEST_PLUGINS];
+static struct esdm_es_ext_plugin *test_plugin_struct[TEST_PLUGINS];
 
 static char test_dir[] = "/tmp/esdm-es-ext-multi-test-XXXXXX";
 static char test_socket[ESDM_EXT_SOCKET_NUM][sizeof(test_dir) + 32];
@@ -312,6 +319,218 @@ static void test_providers(void)
 	}
 }
 
+/* The string member @key of the state of @es, into @buf */
+static const char *test_state_str(const struct esdm_es_cb *es, const char *key,
+				  char *buf, size_t buflen)
+{
+	struct json_object *state = es_state_get(es);
+	const char *val = es_state_str(state, key);
+
+	snprintf(buf, buflen, "%s", val ? val : "(none)");
+	json_object_put(state);
+	return buf;
+}
+
+/*
+ * A status reader running while the name of a source changes: every name it
+ * sees is one of @names, the instance name included - never anything else.
+ */
+struct test_reader {
+	const struct esdm_es_cb *es;
+	const char *names[3];
+	atomic_bool stop;
+	atomic_uint reads;
+	unsigned int bad;
+};
+
+
+static void *test_reader_run(void *arg)
+{
+	struct test_reader *reader = arg;
+	char name[64];
+	unsigned int i;
+
+	while (!atomic_load(&reader->stop)) {
+		test_state_str(reader->es, "name", name, sizeof(name));
+		for (i = 0; i < 3; i++) {
+			if (reader->names[i] &&
+			    !strcmp(name, reader->names[i]))
+				break;
+		}
+		if (i == 3) {
+			printf("the reader saw the name \"%s\"\n", name);
+			reader->bad++;
+		}
+		atomic_fetch_add(&reader->reads, 1);
+	}
+
+	return NULL;
+}
+
+/* Start @reader, returning once it read */
+static bool test_reader_start(struct test_reader *reader, pthread_t *thread)
+{
+	unsigned int i;
+
+	if (pthread_create(thread, NULL, test_reader_run, reader))
+		return false;
+	for (i = 0; i < 5000 && !atomic_load(&reader->reads); i++)
+		es_ext_test_sleep_ms(1);
+	return atomic_load(&reader->reads) > 0;
+}
+
+/*
+ * The names the plugins declare, one per source: two sources of the same
+ * name, one without, one with a name that is none. Another plugin loaded into
+ * one source changes only its name, and a status reader sees the old name or
+ * the new one meanwhile.
+ */
+static void test_plugin_names(void)
+{
+	unsigned int i, n = ESDM_EXT_LIB_NUM < 4 ? ESDM_EXT_LIB_NUM : 4;
+	struct test_reader reader = { .es = LIB(0) };
+	char name[64], instance[64];
+	pthread_t thread;
+
+	snprintf(test_ctl[0]->name, sizeof(test_ctl[0]->name), "alpha");
+	snprintf(test_ctl[1]->name, sizeof(test_ctl[1]->name), "alpha");
+	if (n > 2)
+		test_plugin_struct[2]->name = NULL;
+	if (n > 3)
+		snprintf(test_ctl[3]->name, sizeof(test_ctl[3]->name),
+			 "esc\x1b[31m");
+	for (i = 0; i < n; i++) {
+		CHECK_EQ(esdm_es_ext_lib_set_path(i, test_plugin[i]), 0);
+		CHECK_EQ(LIB(i)->init(), 0);
+	}
+
+	for (i = 0; i < n; i++) {
+		test_state_str(LIB(i), "name", name, sizeof(name));
+		test_state_str(LIB(i), "instance", instance, sizeof(instance));
+		CHECK(!strcmp(instance, LIB(i)->name),
+		      "%s is the instance %s", LIB(i)->name, instance);
+		CHECK(!strcmp(name, i < 2 ? "alpha" : LIB(i)->name),
+		      "%s is shown as %s", LIB(i)->name, name);
+	}
+
+	/* Another plugin into the first source, read meanwhile */
+	reader.names[0] = "alpha";
+	reader.names[1] = "beta";
+	reader.names[2] = LIB(0)->name;
+	CHECK(test_reader_start(&reader, &thread), "the reader does not read");
+	snprintf(test_ctl[6]->name, sizeof(test_ctl[6]->name), "beta");
+	for (i = 0; i < 20; i++) {
+		CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[i & 1 ? 0 : 6]),
+			 0);
+	}
+	atomic_store(&reader.stop, true);
+	pthread_join(thread, NULL);
+	CHECK_EQ(reader.bad, 0);
+	CHECK(!strcmp(test_state_str(LIB(0), "name", name, sizeof(name)),
+		      "alpha"),
+	      "the first source is shown as %s", name);
+	CHECK(!strcmp(test_state_str(LIB(1), "name", name, sizeof(name)),
+		      "alpha"),
+	      "the second source changed with the first: %s", name);
+
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
+		LIB(i)->fini();
+		esdm_es_ext_lib_set_path(i, "");
+	}
+	for (i = 0; i < TEST_PLUGINS; i++) {
+		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
+			 ES_EXT_TEST_NAME);
+		test_plugin_struct[i]->name = test_ctl[i]->name;
+	}
+}
+
+/*
+ * The names the providers declare: the one of --name, the one of the plugin -
+ * the same for two of them. A provider restarted with another name shows it
+ * once connected to again, the others keep theirs, and a status reader sees
+ * the old name or the new one meanwhile.
+ */
+static void test_provider_names(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	const char *const name_a[] = { "--name", "Quelle A", NULL };
+	const char *const name_c[] = { "--name", "Quelle C", NULL };
+	struct test_reader reader = { .es = SOCK(0) };
+	char name[64];
+	pid_t provider[2];
+	pthread_t thread;
+	unsigned int i;
+
+	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
+					test_socket[0], name_a, NULL);
+	provider[1] = es_ext_test_serve(test_serve_bin, test_plugin[5],
+					test_socket[1], NULL, "name=Quelle A");
+	CHECK(provider[0] > 0 && provider[1] > 0,
+	      "the providers did not come up");
+	for (i = 0; i < 2; i++) {
+		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+	}
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK_EQ(SOCK(i)->init(), 0);
+
+	/* The same name for both, apart by their instances */
+	for (i = 0; i < 2; i++) {
+		CHECK(!strcmp(test_state_str(SOCK(i), "name", name,
+					     sizeof(name)),
+			      "Quelle A"),
+		      "%s is shown as %s", SOCK(i)->name, name);
+		CHECK(!strcmp(test_state_str(SOCK(i), "instance", name,
+					     sizeof(name)),
+			      SOCK(i)->name),
+		      "%s is the instance %s", SOCK(i)->name, name);
+	}
+	for (i = 2; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK(!strcmp(test_state_str(SOCK(i), "name", name,
+					     sizeof(name)),
+			      SOCK(i)->name),
+		      "%s without a provider is shown as %s", SOCK(i)->name,
+		      name);
+
+	/* The first restarted with another name, read meanwhile */
+	reader.names[0] = "Quelle A";
+	reader.names[1] = "Quelle C";
+	reader.names[2] = SOCK(0)->name;
+	CHECK(test_reader_start(&reader, &thread), "the reader does not read");
+	es_ext_test_terminate(provider[0]);
+	CHECK(!strcmp(test_state_str(SOCK(0), "name", name, sizeof(name)),
+		      "Quelle A"),
+	      "the name changed before the provider came back: %s", name);
+	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
+					test_socket[0], name_c, NULL);
+	CHECK(provider[0] > 0, "the provider did not come back");
+	CHECK_EQ(test_get(SOCK(0), bits), 0);
+	es_ext_test_sleep_ms(1200);
+	for (i = 0; i < 10 && strcmp(test_state_str(SOCK(0), "name", name,
+						     sizeof(name)),
+				     "Quelle C");
+	     i++) {
+		test_get(SOCK(0), bits);
+		es_ext_test_sleep_ms(200);
+	}
+	atomic_store(&reader.stop, true);
+	pthread_join(thread, NULL);
+	CHECK(!strcmp(name, "Quelle C"),
+	      "the provider back is not shown under its new name: %s", name);
+	CHECK_EQ(reader.bad, 0);
+	CHECK(!strcmp(test_state_str(SOCK(1), "name", name, sizeof(name)),
+		      "Quelle A"),
+	      "the second source changed with the first: %s", name);
+
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		SOCK(i)->fini();
+	for (i = 0; i < 2; i++) {
+		es_ext_test_terminate(provider[i]);
+		esdm_es_ext_socket_set_path(i, "");
+		esdm_es_ext_socket_set_peer_uid(i, -1);
+	}
+}
+
 /*
  * The JSON status of the ESDM lists each source once, under its name, with
  * its own configuration.
@@ -407,9 +626,11 @@ int main(int argc, char *argv[])
 		if (!test_ref[i])
 			return common_test_result("es_ext_multi");
 		test_ctl[i] = dlsym(test_ref[i], ES_EXT_TEST_CONTROL_SYMBOL);
-		CHECK(test_ctl[i] != NULL, "%s has no control",
-		      test_plugin[i]);
-		if (!test_ctl[i])
+		test_plugin_struct[i] =
+			dlsym(test_ref[i], ESDM_ES_EXT_PLUGIN_SYMBOL);
+		CHECK(test_ctl[i] != NULL && test_plugin_struct[i] != NULL,
+		      "%s has no control", test_plugin[i]);
+		if (!test_ctl[i] || !test_plugin_struct[i])
 			return common_test_result("es_ext_multi");
 	}
 
@@ -425,6 +646,8 @@ int main(int argc, char *argv[])
 	test_table();
 	test_plugins();
 	test_providers();
+	test_plugin_names();
+	test_provider_names();
 	test_status();
 
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)

@@ -50,7 +50,20 @@ static void es_ext_test_sleep(unsigned int ms)
 ESDM_ES_EXT_PLUGIN_EXPORT
 struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 	.claim_bits = UINT32_MAX,
+	.name = "es-ext-test",
 };
+
+/*
+ * The plugin, not const: a test sets the name it declares, @name of the
+ * control by default - or NULL for none.
+ */
+#ifdef ES_EXT_TEST_PLUGIN_STATIC
+#define ES_EXT_TEST_PLUGIN es_ext_test_plugin
+#else
+#define ES_EXT_TEST_PLUGIN esdm_es_ext_plugin
+ESDM_ES_EXT_PLUGIN_EXPORT
+#endif
+extern struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN;
 
 /* Take the settings of ES_EXT_TEST_PLUGIN_ENV, if there are any */
 static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
@@ -72,7 +85,11 @@ static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
 		*val++ = '\0';
 		n = strtol(val, NULL, 0);
 
-		if (!strcmp(setting, "selftest_ret"))
+		if (!strcmp(setting, "name")) {
+			/* An empty one declares none */
+			snprintf(ctl->name, sizeof(ctl->name), "%s", val);
+			ES_EXT_TEST_PLUGIN.name = val[0] ? ctl->name : NULL;
+		} else if (!strcmp(setting, "selftest_ret"))
 			ctl->selftest_ret = (int)n;
 		else if (!strcmp(setting, "get_ret"))
 			ctl->get_ret = (int)n;
@@ -159,18 +176,16 @@ static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 	return len >= 0 && (size_t)len < buflen ? 0 : -EMSGSIZE;
 }
 
-#ifdef ES_EXT_TEST_PLUGIN_STATIC
-const struct esdm_es_ext_plugin es_ext_test_plugin = {
-#else
+#ifndef ES_EXT_TEST_PLUGIN_STATIC
 ESDM_ES_EXT_PLUGIN_EXPORT
-const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 #endif
+struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
 #ifdef ES_EXT_TEST_PLUGIN_V1
 	.version = 1,
 #else
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
 #endif
-	.name = "es-ext-test",
+	.name = esdm_es_ext_test_control.name,
 	.init = es_ext_test_init,
 	.fini = es_ext_test_fini,
 	.get_entropy = es_ext_test_get_entropy,

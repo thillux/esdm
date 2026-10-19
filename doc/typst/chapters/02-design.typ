@@ -1360,6 +1360,15 @@ source. A plugin library serves one source, as the callbacks of a plugin are
 never called concurrently; several providers are served by several
 `esdm-es-ext-serve` processes on sockets of their own.
 
+A plugin declares the name of its source with the `name` member of its
+struct, a provider in its answer to the INFO request of the socket protocol,
+which the ESDM asks once per connection - `esdm-es-ext-serve` answers with the
+name of its plugin or the one given with `--name`. The ESDM shows the source
+under that name in its status and log, if it is 1 to 32 bytes of UTF-8
+without control characters and not the name of another entropy source; the
+name of its entry in the ES table, ExternalLib1 say, remains its `instance`
+in the status. Two sources may declare the same name.
+
 == DRNG Seeding Operation <sec:seeding>
 
 The seeding operation obtains random data from all available entropy sources.

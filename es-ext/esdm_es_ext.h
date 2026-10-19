@@ -69,6 +69,12 @@ extern "C" {
  */
 #define ESDM_ES_EXT_STATUS_MAX 512
 
+/*
+ * The longest name a source may declare: bytes of UTF-8, the terminating NUL
+ * not counted - see @name of struct esdm_es_ext_plugin
+ */
+#define ESDM_ES_EXT_NAME_MAX 32
+
 /* The name a plugin library exports its struct esdm_es_ext_plugin under */
 #define ESDM_ES_EXT_PLUGIN_SYMBOL "esdm_es_ext_plugin"
 
@@ -101,7 +107,15 @@ extern "C" {
  * process of the provider, as it was started.
  *
  * @version: ESDM_ES_EXT_PLUGIN_VERSION
- * @name: Name of the source, shown in the ESDM status. May be NULL.
+ * @name: Name of the source: the ESDM shows the source under it in its
+ *	  status, and in its log, in place of the name of the entropy source it
+ *	  is loaded as - "ExternalLib", "ExternalLib1" and so on - which the
+ *	  status keeps as the "instance" of the source. 1 to
+ *	  ESDM_ES_EXT_NAME_MAX bytes of UTF-8 without control characters,
+ *	  terminated by a NUL; a name that is none of that, or the name of
+ *	  another entropy source of the ESDM, is refused, and the source shown
+ *	  under its instance name. Two sources may declare the same name. May
+ *	  be NULL.
  * @init: Set the source up and return its context in *ctx, which is handed to
  *	  the other callbacks. Returns 0 or a negative errno, in which case the
  *	  source is not used. May be NULL.
@@ -154,8 +168,9 @@ struct esdm_es_ext_plugin {
  *	u16 version		ESDM_ES_EXT_PROTO_VERSION
  *	u16 type		ESDM_ES_EXT_PROTO_GET_ENTROPY,
  *				ESDM_ES_EXT_PROTO_SELFTEST,
- *				ESDM_ES_EXT_PROTO_STARTDTLS or
- *				ESDM_ES_EXT_PROTO_STATUS
+ *				ESDM_ES_EXT_PROTO_STARTDTLS,
+ *				ESDM_ES_EXT_PROTO_STATUS or
+ *				ESDM_ES_EXT_PROTO_INFO
  *	u32 length		bytes asked for, 1 to ESDM_ES_EXT_PROTO_MAX_DATA
  *				for GET_ENTROPY; the largest status taken, 1 to
  *				ESDM_ES_EXT_STATUS_MAX, for STATUS; 0 otherwise
@@ -170,7 +185,10 @@ struct esdm_es_ext_plugin {
  *	u8  data[]		exactly length bytes for a GET_ENTROPY answered
  *				with status 0; the status, 1 to length bytes of
  *				JSON text without a NUL, for a STATUS answered
- *				with status 0; nothing otherwise
+ *				with status 0; what the provider declares of
+ *				itself, 4 to 4 + ESDM_ES_EXT_NAME_MAX bytes, for
+ *				an INFO answered with status 0, see below;
+ *				nothing otherwise
  *
  * A response that breaks any of this is discarded and the connection closed.
  * A provider closes a connection on a request that breaks it - including one
@@ -186,6 +204,23 @@ struct esdm_es_ext_plugin {
  * of the provider until the connection is lost the next time. A provider that
  * does not answer STATUS in time is disconnected as for any request, and not
  * asked for its status for a minute.
+ *
+ * INFO: what the provider declares of itself, which the ESDM asks for once
+ * per connection - right after STARTDTLS and the DTLS handshake, inside the
+ * DTLS session where there is one, before any other request. The request has
+ * length 0. A provider answers it with status 0 and the data
+ *	u32 entropy_rate	ESDM_ES_EXT_PROTO_RATE_NONE (0xffffffff)
+ *	u8  name[]		0 to ESDM_ES_EXT_NAME_MAX bytes: the name of the
+ *				source, UTF-8 without control characters and
+ *				without a NUL - none for a provider without a
+ *				name
+ * or with a negative errno and no data, which declares nothing. The ESDM shows
+ * the source under the name as a plugin library under the @name of its plugin:
+ * a name that is not valid is not taken, and the source shown under its
+ * instance name. esdm-es-ext-serve answers with the name of its plugin, or the
+ * one of its --name option. A provider older than INFO closes the connection
+ * on it: the ESDM connects again at once and does not ask on that connection,
+ * so the provider keeps working without a name.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
  * first request. A provider answering it with status 0 expects a DTLS 1.2
@@ -211,6 +246,8 @@ struct esdm_es_ext_plugin {
 #define ESDM_ES_EXT_PROTO_SELFTEST 2
 #define ESDM_ES_EXT_PROTO_STARTDTLS 3
 #define ESDM_ES_EXT_PROTO_STATUS 4
+#define ESDM_ES_EXT_PROTO_INFO 5
+#define ESDM_ES_EXT_PROTO_RATE_NONE 0xffffffffU
 #define ESDM_ES_EXT_PROTO_MAX_DATA 512
 #define ESDM_ES_EXT_PROTO_REQ_LEN 12
 #define ESDM_ES_EXT_PROTO_RSP_LEN 16
@@ -275,6 +312,22 @@ int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid);
  *	   it, -ENOMEM if the DTLS context cannot be set up
  */
 int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable);
+
+/**
+ * @brief Answer INFO with another name than the one of the plugin
+ *
+ * The server declares the @name of its plugin as the name of the source by
+ * default - see the INFO request above. A name set here is declared instead.
+ *
+ * @param [in] server The server, not running yet
+ * @param [in] name 1 to ESDM_ES_EXT_NAME_MAX bytes of UTF-8 without control
+ *		    characters, NUL-terminated; NULL to go back to the name of
+ *		    the plugin
+ *
+ * @return 0 on success, -EINVAL for a name that is not valid
+ */
+int esdm_es_ext_server_set_name(struct esdm_es_ext_server *server,
+				const char *name);
 
 /**
  * @brief Serve requests until esdm_es_ext_server_stop() is called

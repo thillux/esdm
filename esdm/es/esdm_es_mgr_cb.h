@@ -146,7 +146,9 @@ struct entropy_buf {
  *	   in the section of the ES, next to its "id" and "name" members. The
  *	   member names are lower case words separated by underscores, which
  *	   the text status turns into its labels. Must not block for long: the
- *	   status is asked for while the ES serves requests.
+ *	   status is asked for while the ES serves requests. An external
+ *	   source replaces "name" with the name the noise source declares for
+ *	   itself, keeping @name as its "instance".
  * @reset: Reset entropy source (drop all entropy and reinitialize).
  *	   This callback may be NULL.
  * @active: Is ES active.

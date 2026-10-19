@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -84,6 +85,12 @@ struct esdm_es_ext_server {
 	const struct esdm_es_ext_plugin *plugin;
 	void *ctx;
 	bool initialized;
+
+	/*
+	 * The name INFO declares, empty for none: the one set with
+	 * esdm_es_ext_server_set_name(), or that of the plugin
+	 */
+	char name[ESDM_ES_EXT_NAME_MAX + 1];
 
 	int listen_fd;
 	/* Written to by esdm_es_ext_server_stop() */
@@ -379,6 +386,24 @@ static int esdm_es_ext_server_status(struct esdm_es_ext_server *server,
 }
 
 /*
+ * Take the name of the plugin as the name INFO declares, if it is a valid one
+ * - see @name of struct esdm_es_ext_plugin.
+ */
+static void esdm_es_ext_server_plugin_name(struct esdm_es_ext_server *server)
+{
+	const char *name = esdm_es_ext_name_or_null(server->plugin->name);
+
+	server->name[0] = '\0';
+	if (name)
+		snprintf(server->name, sizeof(server->name), "%s", name);
+	else if (server->plugin->name)
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ANY,
+			"External ES provider: the name of the plugin is no name of 1 to %u bytes of UTF-8 without control characters, INFO declares none\n",
+			ESDM_ES_EXT_NAME_MAX);
+}
+
+/*
  * Serve what client @i has sent: one request, or the next step of its DTLS
  * handshake.
  *
@@ -430,6 +455,12 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	case ESDM_ES_EXT_PROTO_STATUS:
 		status = esdm_es_ext_server_status(server, data, length,
 						   &datalen);
+		break;
+	case ESDM_ES_EXT_PROTO_INFO:
+		status = 0;
+		datalen = esdm_es_ext_proto_info_pack(
+			data, ESDM_ES_EXT_PROTO_RATE_NONE,
+			server->name[0] ? server->name : NULL);
 		break;
 	default:
 		status = server->plugin->selftest ?
@@ -551,6 +582,8 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 		}
 	}
 	s->initialized = true;
+	/* After its init, which may find out what it is */
+	esdm_es_ext_server_plugin_name(s);
 
 #ifdef ESDM_DTLS
 	/* Offered by default; a server without it still serves in the clear */
@@ -584,6 +617,24 @@ int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid)
 		return -ENOSPC;
 
 	server->allowed_uids[server->allowed_uids_num++] = uid;
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_es_ext_server_set_name(struct esdm_es_ext_server *server,
+				const char *name)
+{
+	if (!server)
+		return -EINVAL;
+
+	if (!name) {
+		esdm_es_ext_server_plugin_name(server);
+		return 0;
+	}
+
+	if (!esdm_es_ext_name_or_null(name))
+		return -EINVAL;
+	snprintf(server->name, sizeof(server->name), "%s", name);
 	return 0;
 }
 

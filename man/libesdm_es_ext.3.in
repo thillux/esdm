@@ -83,6 +83,27 @@ is
 2. A plugin of version 1, whose struct ends before
 .IR status_json ,
 is loaded all the same.
+.PP
+.I name
+is the name of the source: the ESDM shows the source under it in its status
+\- the
+.B name
+member of the source \- and in its log, in place of the name of the entropy
+source the plugin is loaded as
+.RB ( ExternalLib ,
+.B ExternalLib1
+and so on), which the status keeps as the
+.B instance
+of the source. It is 1 to
+.B ESDM_ES_EXT_NAME_MAX
+(32) bytes of UTF-8 without control characters \- no C0, DEL or C1 code point
+\- terminated by a NUL. A name that is none of that, or the name of another
+entropy source of the ESDM, is refused, not cut to size, and the source shown
+under its instance name, as is a plugin whose
+.I name
+is NULL. Two sources may declare the same name; their instances tell them
+apart. The ESDM takes the name when it initializes the plugin, after
+.IR init .
 .I get_entropy
 fills all
 .I buflen
@@ -183,6 +204,18 @@ client that can connect is served. Allow the user the ESDM runs as: it
 connects as root at start up, but with its privileges dropped once it
 reconnects.
 .TP
+.BI "int esdm_es_ext_server_set_name(struct esdm_es_ext_server *" server ", const char *" name );
+Declare
+.I name
+as the name of the source in the answer to INFO, in place of the
+.I name
+of the plugin, which the server declares by default \- if it is a valid one.
+Returns
+.B \-EINVAL
+for a name that is not valid; NULL goes back to the name of the plugin. Call
+it before
+.BR esdm_es_ext_server_run ().
+.TP
 .BI "int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *" server ", int " enable );
 Offer DTLS to the clients, or not. A library built with DTLS offers it by
 default; enabling it in one built without returns
@@ -248,13 +281,15 @@ A request is 12 bytes: the magic
 .B ESDM_ES_EXT_PROTO_GET_ENTROPY
 = 1,
 .B ESDM_ES_EXT_PROTO_SELFTEST
-= 2 or
+= 2,
 .B ESDM_ES_EXT_PROTO_STATUS
-= 4) and the length (u32: the bytes asked for, 1 to
+= 4 or
+.B ESDM_ES_EXT_PROTO_INFO
+= 5) and the length (u32: the bytes asked for, 1 to
 .B ESDM_ES_EXT_PROTO_MAX_DATA
 = 512, for GET_ENTROPY; the largest status taken, 1 to
 .B ESDM_ES_EXT_STATUS_MAX
-= 512, for STATUS; 0 for SELFTEST).
+= 512, for STATUS; 0 for SELFTEST and INFO).
 .PP
 A response is 16 bytes: magic, version and type as in the request, the status
 (s32: 0 or a negative errno) and the entropy of the data (u32, at most 8 times
@@ -262,7 +297,9 @@ the length for GET_ENTROPY, 0 otherwise); a GET_ENTROPY answered with status 0
 is followed by exactly the length bytes of data, a STATUS answered with status
 0 by the status of the source \- the JSON text of
 .IR status_json ,
-1 to length bytes without the NUL \- and any other response by nothing.
+1 to length bytes without the NUL \- an INFO answered with status 0 by what
+the provider declares of itself, see below, and any other response by
+nothing.
 .PP
 A message that breaks any of this ends the connection, and so does a request
 of a type the provider does not know.
@@ -285,6 +322,37 @@ no such refusal: the ESDM connects again and asks on the new connection. A
 provider not answering STATUS within the timeout of a request is disconnected
 as for any request, connected to again after the retry interval, and not asked
 for its status for a minute.
+.SS INFO
+The ESDM asks the provider what it declares of itself once per connection,
+before any other request but STARTDTLS: inside the DTLS session where there is
+one. The request has length 0. A provider answers it with status 0, entropy 0
+and the data
+.PP
+.nf
+	u32 entropy_rate	0xffffffff (ESDM_ES_EXT_PROTO_RATE_NONE)
+	u8  name[]		0 to 32 bytes
+.fi
+.PP
+\- 4 to 36 bytes \- where
+.I name
+is the name of the source without a NUL, no bytes for a provider without a
+name; or with a negative errno, such as
+.BR \-EOPNOTSUPP ,
+and no data, which declares nothing. The ESDM shows the source under the name
+as a plugin library under the
+.I name
+of its plugin, and takes it only if it is valid in the same way; a name that is
+not valid is not taken, and the source shown under its instance name. An
+answer of more than 36 bytes, or another answer that breaks the protocol, ends
+the connection as for any request. The provider server of this library
+answers with the
+.I name
+of its plugin, or the one set with
+.BR esdm_es_ext_server_set_name ().
+A provider older than INFO closes the connection on it, as on any request it
+does not know: the ESDM connects again at once without asking on the new
+connection, and uses the provider without a name. The name is asked for anew
+on every connection \- a provider restarted may declare another one.
 .SS DTLS
 An ESDM built with DTLS (meson option
 .BR dtls ,

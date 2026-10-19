@@ -26,6 +26,13 @@ extern struct esdm_es_cb *esdm_es[];
 #define for_each_esdm_es(ctr) for ((ctr) = 0; (ctr) < esdm_ext_es_last; (ctr)++)
 
 /*
+ * Is @name the name of an entropy source in the ES table other than @self? A
+ * name an external entropy source declares for itself must not be: whoever
+ * reads the status could not tell the sources apart.
+ */
+bool esdm_es_name_taken(const char *name, const struct esdm_es_cb *self);
+
+/*
  * _Atomic: written via the RPC set_write_wakeup_thresh handler and aux-pool
  * (re)init while read concurrently on the CUSE poll and avail-entropy paths;
  * plain accesses of the _Atomic object are seq_cst, so no call site changes.

@@ -26,6 +26,9 @@
 /* The name the test plugin exports its control under */
 #define ES_EXT_TEST_CONTROL_SYMBOL "esdm_es_ext_test_control"
 
+/* The name it declares unless the test sets another one */
+#define ES_EXT_TEST_NAME "es-ext-test"
+
 /*
  * What the test plugin does, set by the test, and what was asked of it.
  *
@@ -38,6 +41,8 @@
  * @status_unterminated: status_json fills its buffer without a NUL
  * @get_delay_ms: get_entropy takes this long, a request in progress meanwhile
  * @status_delay_ms: status_json takes this long
+ * @name: The name the plugin declares, "es-ext-test" unless the test sets
+ *	  another one - see the plugin, which may declare none
  *
  * The delays and the counters are atomic: a test changes and reads them while
  * the plugin runs in the thread of a provider it started.
@@ -52,6 +57,7 @@ struct esdm_es_ext_test_control {
 	int status_unterminated;
 	_Atomic unsigned int get_delay_ms;
 	_Atomic unsigned int status_delay_ms;
+	char name[64];
 
 	_Atomic unsigned int init_calls;
 	_Atomic unsigned int fini_calls;
@@ -66,8 +72,8 @@ struct esdm_es_ext_test_control {
  * A plugin served by esdm-es-ext-serve runs in a process of its own, out of
  * reach of the control of the test: the test hands its settings over in this
  * environment variable instead, which the plugin reads in its init - a comma
- * separated list of selftest_ret=N, get_ret=N, claim_bits=N, get_delay_ms=N
- * and status_delay_ms=N.
+ * separated list of selftest_ret=N, get_ret=N, claim_bits=N, get_delay_ms=N,
+ * status_delay_ms=N and name=NAME - an empty NAME declares no name.
  */
 #define ES_EXT_TEST_PLUGIN_ENV "ESDM_ES_EXT_TEST_PLUGIN"
 

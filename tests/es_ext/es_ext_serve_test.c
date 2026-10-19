@@ -24,6 +24,10 @@
  * serve - no plugin, a plugin that does not fit, a mode that is none - it
  * refuses to start with.
  *
+ * It answers INFO with the name of its plugin, or the one of --name, and
+ * refuses to start with a --name that is no valid name. A request that breaks
+ * the protocol closes the connection.
+ *
  * Usage: es_ext_serve_test <esdm-es-ext-serve> <test plugin> <bad version>
  */
 
@@ -254,6 +258,111 @@ static void test_no_dtls(const char *serve, const char *plugin)
 	CHECK_EQ(test_wait(pid), 0);
 }
 
+/* Send a request of @type for @length bytes, the size of the answer in @rsp */
+static ssize_t test_request(int fd, uint16_t type, uint32_t length,
+			    uint8_t *rsp, size_t rsplen)
+{
+	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
+
+	esdm_es_ext_proto_req_pack(req, type, length);
+	if (send(fd, req, sizeof(req), MSG_NOSIGNAL) != (ssize_t)sizeof(req))
+		return -1;
+	return recv(fd, rsp, rsplen, 0);
+}
+
+/*
+ * INFO in the clear, byte for byte: the name of the plugin without its NUL,
+ * no rate, no entropy - or the one of --name
+ */
+static void test_info(const char *serve, const char *plugin)
+{
+	static const char *const bad_names[] = {
+		"", "0123456789abcdef0123456789abcdef0", "tab\there",
+		"\xff", "esc\x1b[0m",
+	};
+	char uid[16];
+	char *argv[] = { (char *)serve, "--plugin",   (char *)plugin,
+			 "--socket",    test_socket,  "--client_uid",
+			 uid,		"--no_dtls",  NULL,
+			 NULL,		NULL };
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	const char *name;
+	size_t namelen;
+	uint32_t rate;
+	int32_t status = -1;
+	unsigned int i;
+	pid_t pid;
+	ssize_t n;
+	int fd;
+
+	snprintf(uid, sizeof(uid), "%u", (unsigned int)getuid());
+
+	for (i = 0; i < 2; i++) {
+		const char *want = i ? "Quelle \xc3\xa4" : "es-ext-test";
+
+		if (i) {
+			argv[8] = "--name";
+			argv[9] = "Quelle \xc3\xa4";
+		}
+		pid = test_spawn(argv);
+		CHECK(pid > 0, "cannot start %s", serve);
+		if (pid <= 0)
+			return;
+		CHECK(test_wait_socket(), "the provider did not create its socket");
+
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect to the provider");
+		if (fd >= 0) {
+			n = test_request(fd, ESDM_ES_EXT_PROTO_INFO, 0, rsp,
+					 sizeof(rsp));
+			CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 4 +
+					    (ssize_t)strlen(want));
+			/* The header: magic, version, type, status, no bits */
+			CHECK(n >= ESDM_ES_EXT_PROTO_RSP_LEN &&
+				      !memcmp(rsp, "ESEX\x01\x00\x05\x00", 8) &&
+				      !memcmp(rsp + 8, "\0\0\0\0\0\0\0\0", 8),
+			      "the header of the answer is not INFO's");
+			CHECK_EQ(esdm_es_ext_proto_info_unpack(
+					 rsp, n > 0 ? (size_t)n : 0, &status,
+					 &rate, &name, &namelen),
+				 0);
+			CHECK_EQ(status, 0);
+			CHECK_EQ(namelen, strlen(want));
+			CHECK(name && !memcmp(name, want, strlen(want)),
+			      "the provider declares another name");
+
+			/* An INFO with a length breaks the protocol: closed */
+			n = test_request(fd, ESDM_ES_EXT_PROTO_INFO, 1, rsp,
+					 sizeof(rsp));
+			CHECK(n <= 0, "an INFO of length 1 is answered");
+			close(fd);
+		}
+
+		/* A type unknown to it closes the connection as well */
+		fd = test_connect();
+		CHECK(fd >= 0, "cannot connect to the provider");
+		if (fd >= 0) {
+			n = test_request(fd, ESDM_ES_EXT_PROTO_INFO + 1, 0, rsp,
+					 sizeof(rsp));
+			CHECK(n <= 0, "an unknown type is answered");
+			close(fd);
+		}
+
+		CHECK_EQ(kill(pid, SIGTERM), 0);
+		CHECK_EQ(test_wait(pid), 0);
+	}
+
+	/* A --name that is no name: refused at start up */
+	for (i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+		struct stat sb;
+
+		argv[9] = (char *)bad_names[i];
+		CHECK_EQ(test_run(argv), 1);
+		CHECK(lstat(test_socket, &sb) < 0,
+		      "a refused --name %u left a socket behind", i);
+	}
+}
+
 static void test_refusals(const char *serve, const char *plugin,
 			  const char *bad_version)
 {
@@ -306,6 +415,7 @@ int main(int argc, char *argv[])
 	test_serve(argv[1], argv[2]);
 	test_default_clients(argv[1], argv[2]);
 	test_no_dtls(argv[1], argv[2]);
+	test_info(argv[1], argv[2]);
 
 	unlink(test_socket);
 	rmdir(test_dir);

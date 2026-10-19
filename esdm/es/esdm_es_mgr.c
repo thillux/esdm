@@ -169,6 +169,18 @@ struct esdm_es_cb *esdm_es[] = {
 	&esdm_es_aux
 };
 
+bool esdm_es_name_taken(const char *name, const struct esdm_es_cb *self)
+{
+	unsigned int i;
+
+	for_each_esdm_es (i) {
+		if (esdm_es[i] != self && !strcmp(esdm_es[i]->name, name))
+			return true;
+	}
+
+	return false;
+}
+
 /******************************** ES monitor **********************************/
 
 bool esdm_es_mgr_running(void)

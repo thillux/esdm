@@ -111,7 +111,7 @@ static void test_request(void)
 	esdm_es_ext_proto_req_pack(req, 0, 16);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
-	esdm_es_ext_proto_req_pack(req, 5, 0);
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO + 1, 0);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 }
@@ -434,6 +434,172 @@ static void test_plugin_status(void)
 	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, 0), -EINVAL);
 }
 
+/*
+ * INFO, byte for byte: a request of length 0, answered with the rate and the
+ * name the provider declares, or with an errno and nothing
+ */
+static void test_info(void)
+{
+	static const uint8_t expected_req[ESDM_ES_EXT_PROTO_REQ_LEN] = {
+		'E', 'S', 'E', 'X', 1, 0, 5, 0, 0, 0, 0, 0
+	};
+	static const uint8_t expected_rsp[] = {
+		'E', 'S', 'E', 'X', 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0xff, 0xff, 0xff, 0xff, 'n', 'o', 'i', 's', 'e'
+	};
+	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_INFO_MAX + 1];
+	uint8_t data[ESDM_ES_EXT_PROTO_INFO_MAX];
+	char name[ESDM_ES_EXT_NAME_MAX + 2];
+	const char *got;
+	uint32_t length, datalen, rate;
+	int32_t status;
+	uint16_t type;
+	size_t len, namelen;
+
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO, 0);
+	CHECK_MEM_EQ(req, expected_req, sizeof(req));
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 0);
+	CHECK_EQ(type, ESDM_ES_EXT_PROTO_INFO);
+
+	/* A length is no INFO, nor is a type beyond it */
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO, 1);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO + 1, 0);
+	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
+		 -EPROTO);
+
+	/* The answer: no rate, a name of 5 bytes without its NUL */
+	datalen = esdm_es_ext_proto_info_pack(data, ESDM_ES_EXT_PROTO_RATE_NONE,
+					      "noise");
+	CHECK_EQ(datalen, 4 + 5);
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 0, 0,
+					 data, datalen);
+	CHECK_EQ(len, sizeof(expected_rsp));
+	CHECK_MEM_EQ(rsp, expected_rsp, sizeof(expected_rsp));
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 0);
+	CHECK_EQ(status, 0);
+	CHECK_EQ(rate, ESDM_ES_EXT_PROTO_RATE_NONE);
+	CHECK_EQ(namelen, 5);
+	CHECK(got && !memcmp(got, "noise", 5), "the name is not decoded");
+
+	/* No name */
+	datalen = esdm_es_ext_proto_info_pack(data, 128, NULL);
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 0, 0,
+					 data, datalen);
+	CHECK_EQ(len, ESDM_ES_EXT_PROTO_RSP_LEN + 4);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 0);
+	CHECK_EQ(rate, 128);
+	CHECK(got == NULL && namelen == 0, "a name is decoded from none");
+
+	/* An errno and nothing: nothing declared */
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO,
+					 -EOPNOTSUPP, 0, data, datalen);
+	CHECK_EQ(len, ESDM_ES_EXT_PROTO_RSP_LEN);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 0);
+	CHECK_EQ(status, -EOPNOTSUPP);
+	CHECK_EQ(rate, ESDM_ES_EXT_PROTO_RATE_NONE);
+
+	/* Too short for a rate, longer than any name, data with an errno */
+	memset(name, 'x', sizeof(name));
+	name[ESDM_ES_EXT_NAME_MAX] = '\0';
+	datalen = esdm_es_ext_proto_info_pack(data, 0, name);
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 0, 0,
+					 data, datalen);
+	CHECK_EQ(len, ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_INFO_MAX);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 0);
+	CHECK_EQ(namelen, ESDM_ES_EXT_NAME_MAX);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len + 1, &status, &rate,
+					       &got, &namelen),
+		 -EPROTO);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp,
+					       ESDM_ES_EXT_PROTO_RSP_LEN + 3,
+					       &status, &rate, &got, &namelen),
+		 -EPROTO);
+	esdm_es_ext_put_le32(rsp + 8, (uint32_t)-EIO);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 -EPROTO);
+
+	/* Entropy, another type, a status that is no errno */
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 0, 0,
+					 data, 4);
+	esdm_es_ext_put_le32(rsp + 12, 1);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 -EPROTO);
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_STATUS, 0, 0,
+					 data, 4);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 -EPROTO);
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 1, 0,
+					 data, 4);
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, len, &status, &rate, &got,
+					       &namelen),
+		 -EPROTO);
+
+	/* Not to be taken for the answer to another request */
+	len = esdm_es_ext_proto_rsp_pack(rsp, ESDM_ES_EXT_PROTO_INFO, 0, 0,
+					 data, 4);
+	{
+		const uint8_t *d;
+		uint32_t bits;
+
+		CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+				 rsp, len, ESDM_ES_EXT_PROTO_INFO, 0, &status,
+				 &bits, &d),
+			 -EPROTO);
+	}
+}
+
+/* The names a source may declare */
+static void test_names(void)
+{
+	static const char *const valid[] = {
+		"a", "es-ext-test", "Rauschquelle \xc3\xa4\xc3\xb6\xc3\xbc",
+		"\xe2\x82\xac \xf0\x9f\x8e\xb2",
+		"0123456789abcdef0123456789abcdef",
+	};
+	static const char *const invalid[] = {
+		"",
+		"0123456789abcdef0123456789abcdef0",
+		"tab\there", "new\nline", "esc\x1b[0m", "del\x7f",
+		/* C1, overlong, a surrogate, a lone continuation, cut short */
+		"c1\xc2\x85", "\xc0\xaf", "\xed\xa0\x80", "\x80", "\xe2\x82",
+		"\xff",
+	};
+	unsigned int i;
+
+	for (i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+		CHECK(esdm_es_ext_name_valid(valid[i], strlen(valid[i])),
+		      "the name %u is refused", i);
+		CHECK(esdm_es_ext_name_or_null(valid[i]) == valid[i],
+		      "the name %u is not taken", i);
+	}
+	for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		CHECK(!esdm_es_ext_name_valid(invalid[i], strlen(invalid[i])),
+		      "the name %u is taken", i);
+		CHECK(esdm_es_ext_name_or_null(invalid[i]) == NULL,
+		      "the name %u is taken as string", i);
+	}
+
+	/* No NUL within, no NULL */
+	CHECK(!esdm_es_ext_name_valid("a\0b", 3), "a NUL is taken");
+	CHECK(!esdm_es_ext_name_valid(NULL, 3), "NULL is taken");
+	CHECK(esdm_es_ext_name_or_null(NULL) == NULL, "NULL is a name");
+}
+
 int main(void)
 {
 	test_request();
@@ -441,6 +607,8 @@ int main(void)
 	test_status_response();
 	test_plugin_helpers();
 	test_plugin_status();
+	test_info();
+	test_names();
 
 	return common_test_result("es_ext_proto");
 }

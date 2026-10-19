@@ -34,6 +34,11 @@
  * ESDM status - is taken from what the source publishes whenever it releases
  * its mutex, not waited for.
  *
+ * The provider is asked what it declares of itself once per connection, with
+ * the INFO request: the source is shown under the name it declares, if it is a
+ * valid one, in place of its name in the ES table. A provider older than INFO
+ * is connected to again without asking, and is used without a name.
+ *
  * Whoever can create the socket file at the configured path could feed the
  * ESDM with data credited as entropy, so the credentials of the provider are
  * checked on every connection: root, or the one uid configured in addition.
@@ -119,6 +124,12 @@ struct esdm_es_extsock {
 	uid_t connected_uid;
 
 	/*
+	 * The name the provider declared on its last connection, if it is
+	 * valid - empty for none
+	 */
+	char name[ESDM_ES_EXT_NAME_MAX + 1];
+
+	/*
 	 * The DTLS of the connection, NULL while it is unencrypted - see
 	 * esdm_dtls.h and esdm_es_ext.h on the opportunistic DTLS. The context
 	 * is set up on first use.
@@ -187,6 +198,7 @@ struct esdm_es_extsock {
 	mutex_t state_mutex;
 	char state_path[ESDM_ES_EXTSOCK_PATH_SIZE];
 	char state_status[64];
+	char state_name[ESDM_ES_EXT_NAME_MAX + 1];
 	int64_t state_peer_uid;
 	struct esdm_es_ext_status_cache status;
 };
@@ -269,8 +281,29 @@ static void esdm_es_extsock_publish_locked(struct esdm_es_extsock *sock)
 			 sock->selftest_failed ? ", failing its self test" :
 			 sock->read_failed     ? ", failing" :
 						 "");
+	snprintf(sock->state_name, sizeof(sock->state_name), "%s", sock->name);
 	sock->state_peer_uid = sock->peer_uid;
 	mutex_unlock(&sock->state_mutex);
+}
+
+/* The name of @sock in the ES table */
+static const char *esdm_es_extsock_name(const struct esdm_es_extsock *sock)
+{
+	return esdm_es_extsock[sock->idx].name;
+}
+
+/*
+ * How the log names the source: its tag, with the name the provider declares.
+ * Caller must hold the mutex of @sock.
+ */
+static const char *
+esdm_es_extsock_label_locked(const struct esdm_es_extsock *sock, char *buf,
+			     size_t buflen)
+{
+	if (!sock->name[0])
+		return sock->tag;
+	snprintf(buf, buflen, "%s (%s)", sock->tag, sock->name);
+	return buf;
 }
 
 /* Release the mutex of @sock (write lock), publishing what changed under it */
@@ -514,12 +547,12 @@ err:
 #endif /* ESDM_DTLS */
 
 /*
- * Connect to the provider, encrypted if it can be, and unencrypted if not.
- * Caller must hold the mutex of @sock (write lock).
+ * Open a connection to the provider, encrypted if it can be, and unencrypted if
+ * not. Caller must hold the mutex of @sock (write lock).
  *
  * @return 0 when connected, a negative errno otherwise
  */
-static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
+static int esdm_es_extsock_open_dtls_locked(struct esdm_es_extsock *sock)
 {
 	const char *path = esdm_es_extsock_path_locked(sock);
 	int ret = esdm_es_extsock_open_locked(sock);
@@ -540,11 +573,122 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 			sock, 3, LOGGER_WARN,
 			"no DTLS with it, using the connection unencrypted",
 			path);
-		ret = esdm_es_extsock_open_locked(sock);
-		if (ret)
-			return ret;
+		return esdm_es_extsock_open_locked(sock);
 	}
 #endif
+
+	/* A provider refusing DTLS is used unencrypted, on this connection */
+	return 0;
+}
+
+/*
+ * Take the name the provider declares, @len bytes at @name, if it is one a
+ * source may declare and not the name of another entropy source. Caller must
+ * hold the mutex of @sock (write lock).
+ */
+static void esdm_es_extsock_name_locked(struct esdm_es_extsock *sock,
+					const char *name, size_t len)
+{
+	const char *self = esdm_es_extsock_name(sock);
+
+	sock->name[0] = '\0';
+	if (!len)
+		return;
+
+	if (!esdm_es_ext_name_valid(name, len)) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider%s: the name it declares is no name of 1 to %u bytes of UTF-8 without control characters, it is shown as %s\n",
+			sock->tag, ESDM_ES_EXT_NAME_MAX, self);
+		return;
+	}
+
+	memcpy(sock->name, name, len);
+	sock->name[len] = '\0';
+	if (esdm_es_name_taken(sock->name, &esdm_es_extsock[sock->idx])) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider%s: it declares the name %s of another entropy source, it is shown as %s\n",
+			sock->tag, sock->name, self);
+		sock->name[0] = '\0';
+	}
+}
+
+/*
+ * Ask the provider connected to what it declares of itself - see INFO in
+ * esdm_es_ext.h. Caller must hold the mutex of @sock (write lock) with the
+ * provider connected.
+ *
+ * @return 0 when it answered - whatever it declared; -ECONNRESET when it
+ *	   closed the connection on the request, as a provider older than INFO
+ *	   does, -EPROTO when it answered what the protocol does not allow, which
+ *	   closes the connection as well; another negative errno when the request
+ *	   failed otherwise, the connection given up on as for any request
+ */
+static int esdm_es_extsock_info_locked(struct esdm_es_extsock *sock)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	const char *name;
+	size_t namelen;
+	uint32_t rate;
+	int32_t status;
+	ssize_t n;
+
+	sock->name[0] = '\0';
+
+	n = esdm_es_extsock_transact_locked(sock, ESDM_ES_EXT_PROTO_INFO, 0,
+					    rsp);
+	if (n < 0)
+		return (int)n;
+
+	if (esdm_es_ext_proto_info_unpack(rsp, (size_t)n, &status, &rate, &name,
+					  &namelen)) {
+		esdm_es_extsock_disconnect_locked(sock);
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider%s: invalid answer to INFO, connecting again without asking\n",
+			sock->tag);
+		return -EPROTO;
+	}
+
+	/* A provider declaring nothing */
+	if (status)
+		return 0;
+
+	esdm_es_extsock_name_locked(sock, name, namelen);
+	return 0;
+}
+
+/*
+ * Connect to the provider, encrypted if it can be, and ask it what it
+ * declares. Caller must hold the mutex of @sock (write lock).
+ *
+ * @return 0 when connected, a negative errno otherwise
+ */
+static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
+{
+	const char *path = esdm_es_extsock_path_locked(sock);
+	char label[ESDM_ES_EXT_LABEL_SIZE];
+	int ret = esdm_es_extsock_open_dtls_locked(sock);
+
+	if (ret)
+		return ret;
+
+	ret = esdm_es_extsock_info_locked(sock);
+	if (ret == -ECONNRESET || ret == -EPROTO) {
+		/*
+		 * A provider older than INFO closes the connection on it, and
+		 * one that answered what the protocol does not allow is
+		 * disconnected: either is used without what it would declare,
+		 * on a new connection that does not ask.
+		 */
+		esdm_es_extsock_log_once(
+			sock, 4, LOGGER_VERBOSE,
+			"does not answer INFO, using it without a name", path);
+		ret = esdm_es_extsock_open_dtls_locked(sock);
+	}
+	if (ret)
+		return ret;
 
 	sock->last_logged = 0;
 	/* Its claims are not assessed by the ESDM, which is worth a line */
@@ -552,7 +696,8 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 		sock->was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
 		LOGGER_C_ES,
 		"External ES provider%s %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
-		sock->tag, path, (unsigned int)sock->connected_uid,
+		esdm_es_extsock_label_locked(sock, label, sizeof(label)), path,
+		(unsigned int)sock->connected_uid,
 		esdm_es_extsock_encrypted_locked(sock) ? "DTLS" : "unencrypted",
 		esdm_config_es_ext_socket_entropy_rate(sock->idx));
 	sock->was_connected = true;
@@ -770,6 +915,7 @@ static void esdm_es_extsock_reset_locked(struct esdm_es_extsock *sock)
 	sock->selftest_due = true;
 	sock->status_warned = false;
 	sock->status_backoff_until = 0;
+	sock->name[0] = '\0';
 	esdm_es_extsock_status_forget_locked(sock);
 }
 
@@ -840,6 +986,7 @@ static void esdm_es_extsock_get(struct esdm_es_extsock *sock,
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	uint32_t claimed, len = requested_bits >> 3;
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	const uint8_t *data;
 	const char *why = NULL;
 	int32_t status;
@@ -891,7 +1038,9 @@ fail:
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
 			"External ES provider%s: no entropy delivered: %s\n",
-			sock->tag, why);
+			esdm_es_extsock_label_locked(sock, label,
+						     sizeof(label)),
+			why);
 	sock->read_failed = true;
 
 out:
@@ -910,6 +1059,7 @@ out:
 static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	const uint8_t *data;
 	uint32_t claimed;
 	int32_t status;
@@ -942,7 +1092,8 @@ static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 		sock->read_failed = false;
 		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
 			    "External ES provider%s: delivering again\n",
-			    sock->tag);
+			    esdm_es_extsock_label_locked(sock, label,
+							 sizeof(label)));
 	}
 
 out:
@@ -1067,6 +1218,7 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 {
 	uint32_t poolsize, entropy_rate;
 	char path[ESDM_ES_EXTSOCK_PATH_SIZE], status[64], accepted[48];
+	char name[ESDM_ES_EXT_NAME_MAX + 1];
 	struct json_object *provider;
 	time_t now = esdm_es_extsock_now();
 	int64_t peer_uid;
@@ -1097,6 +1249,7 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 	provider = due ? NULL : esdm_es_ext_status_cache_get(&sock->status);
 	snprintf(path, sizeof(path), "%s", sock->state_path);
 	snprintf(status, sizeof(status), "%s", sock->state_status);
+	snprintf(name, sizeof(name), "%s", sock->state_name);
 	peer_uid = sock->state_peer_uid;
 	mutex_unlock(&sock->state_mutex);
 
@@ -1109,6 +1262,8 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 	else
 		snprintf(accepted, sizeof(accepted), "root");
 
+	/* Its name, see esdm_es_mgr_cb.h, and its instance */
+	esdm_es_ext_state_name(obj, name, esdm_es_extsock_name(sock));
 	json_object_object_add(obj, "available_entropy",
 			       json_object_new_int64(poolsize));
 	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
@@ -1142,6 +1297,7 @@ static bool esdm_es_extsock_active(struct esdm_es_extsock *sock)
 static int esdm_es_extsock_selftest_locked(struct esdm_es_extsock *sock)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	char label[ESDM_ES_EXT_LABEL_SIZE];
 	uint32_t bits;
 	const uint8_t *data;
 	int32_t status;
@@ -1166,7 +1322,9 @@ static int esdm_es_extsock_selftest_locked(struct esdm_es_extsock *sock)
 	if (status) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "External ES provider%s: self test failed: %s\n",
-			    sock->tag, strerror(-status));
+			    esdm_es_extsock_label_locked(sock, label,
+							 sizeof(label)),
+			    strerror(-status));
 		sock->selftest_failed = true;
 		return -EFAULT;
 	}

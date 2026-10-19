@@ -154,13 +154,14 @@ static inline pid_t es_ext_test_serve(const char *serve, const char *plugin,
 }
 
 /*
- * The object of the entropy source called @name in the "entropy_sources" of
- * the JSON status @root, NULL if there is none
+ * The object of the entropy source whose member @key is @val in the
+ * "entropy_sources" of the JSON status @root, NULL if there is none
  */
-static inline struct json_object *es_ext_test_status_es(struct json_object *root,
-							const char *name)
+static inline struct json_object *
+es_ext_test_status_find(struct json_object *root, const char *key,
+			const char *val)
 {
-	struct json_object *sources, *es, *val;
+	struct json_object *sources, *es, *member;
 	size_t i;
 
 	if (!json_object_object_get_ex(root, "entropy_sources", &sources))
@@ -168,12 +169,20 @@ static inline struct json_object *es_ext_test_status_es(struct json_object *root
 
 	for (i = 0; i < json_object_array_length(sources); i++) {
 		es = json_object_array_get_idx(sources, i);
-		if (json_object_object_get_ex(es, "name", &val) &&
-		    !strcmp(json_object_get_string(val), name))
+		if (json_object_object_get_ex(es, key, &member) &&
+		    json_object_is_type(member, json_type_string) &&
+		    !strcmp(json_object_get_string(member), val))
 			return es;
 	}
 
 	return NULL;
+}
+
+/* The external entropy source of the instance name @instance */
+static inline struct json_object *es_ext_test_status_es(struct json_object *root,
+							const char *instance)
+{
+	return es_ext_test_status_find(root, "instance", instance);
 }
 
 #endif /* _ES_EXT_TEST_UTIL_H */

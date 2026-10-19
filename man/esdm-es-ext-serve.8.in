@@ -11,6 +11,8 @@ esdm\-es\-ext\-serve \- serve an external entropy source plugin to the ESDM
 .IR MODE ]
 .RB [ \-\-client_uid
 .IR USER ]...
+.RB [ \-\-name
+.IR NAME ]
 .RB [ \-v ]
 .SH DESCRIPTION
 .B esdm\-es\-ext\-serve
@@ -46,6 +48,12 @@ socket has to let the user the ESDM runs as connect \- by default
 hence the default mode 0666. A more restrictive mode needs the ESDM to run with
 a group that is granted access
 .RB ( "esdm\-server \-\-groupname" ).
+.PP
+The name of the plugin \- or the one given with
+.B \-\-name
+\- is the name the ESDM shows the source under, which it asks the provider for
+on every connection (INFO request, see
+.BR libesdm_es_ext (3)).
 .PP
 The status the plugin reports of itself, if it has a
 .I status_json
@@ -88,6 +96,13 @@ default is
 Give the user of
 .B esdm\-server \-\-username
 if the ESDM runs as another one.
+.TP
+.BI \-\-name " NAME"
+Declare
+.I NAME
+as the name of the source in place of the name of the plugin: 1 to 32 bytes of
+UTF-8 without control characters. A name that is none of that is refused at
+start up, with exit status 1.
 .TP
 .B \-\-no_dtls
 Do not offer DTLS to the clients. A build with DTLS (meson option

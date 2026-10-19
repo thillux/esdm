@@ -251,7 +251,13 @@ or
 in the status; with several, they are called
 .BR ExternalLib0 ,
 .B ExternalLib1
-and so on. A plugin library serves one source: a second source given the plugin
+and so on. A source whose plugin or provider declares a name of its own is
+shown under that name in the status and in the log, its name in the ES table
+kept as its
+.B instance
+in the status \- see
+.BR libesdm_es_ext (3).
+A plugin library serves one source: a second source given the plugin
 another one uses refuses it. Several providers are served by several
 .BR esdm\-es\-ext\-serve (8)
 processes, each on a socket of its own:

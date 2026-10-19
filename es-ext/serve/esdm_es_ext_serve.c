@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 
 #include "esdm_es_ext.h"
+#include "esdm_es_ext_proto.h"
 #include "esdm_logger.h"
 
 /* Set by the build, see es-ext/meson.build */
@@ -87,6 +88,12 @@ static void usage(void)
 		"\t\t\tnext to root; may be repeated (default: nobody)\n");
 	fprintf(stderr, "\t   --no_dtls\tDo not offer DTLS to the clients\n");
 	fprintf(stderr,
+		"\t   --name <NAME>\tDeclare NAME as the name of the source in place\n");
+	fprintf(stderr,
+		"\t\t\tof the one of the plugin: 1 to %u bytes of UTF-8 without\n",
+		ESDM_ES_EXT_NAME_MAX);
+	fprintf(stderr, "\t\t\tcontrol characters\n");
+	fprintf(stderr,
 		"\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t-h --help\tThis help information\n");
 	fprintf(stderr, "\t   --version\tPrint version\n");
@@ -100,6 +107,7 @@ int main(int argc, char *argv[])
 		{ "mode", required_argument, NULL, 'm' },
 		{ "client_uid", required_argument, NULL, 'u' },
 		{ "no_dtls", no_argument, NULL, 'D' },
+		{ "name", required_argument, NULL, 'N' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
@@ -107,7 +115,7 @@ int main(int argc, char *argv[])
 	};
 	struct esdm_es_ext_plugin_handle *handle = NULL;
 	const struct esdm_es_ext_plugin *plugin;
-	const char *plugin_path = NULL, *socket_path = NULL;
+	const char *plugin_path = NULL, *socket_path = NULL, *name = NULL;
 	struct sigaction sa;
 	uid_t client_uids[SERVE_MAX_CLIENT_UIDS];
 	unsigned int client_uids_num = 0, i;
@@ -160,6 +168,15 @@ int main(int argc, char *argv[])
 		case 'D':
 			dtls = false;
 			break;
+		case 'N':
+			if (!esdm_es_ext_name_valid(optarg, strlen(optarg))) {
+				fprintf(stderr,
+					"--name takes 1 to %u bytes of UTF-8 without control characters\n",
+					ESDM_ES_EXT_NAME_MAX);
+				return 1;
+			}
+			name = optarg;
+			break;
 		case 'v':
 			esdm_logger_inc_verbosity();
 			break;
@@ -192,9 +209,8 @@ int main(int argc, char *argv[])
 	ret = esdm_es_ext_server_alloc(plugin, socket_path, mode,
 				       &serve_server);
 	if (ret) {
-		fprintf(stderr, "Cannot serve %s on %s: %s\n",
-			plugin->name ? plugin->name : plugin_path, socket_path,
-			strerror(-ret));
+		fprintf(stderr, "Cannot serve %s on %s: %s\n", plugin_path,
+			socket_path, strerror(-ret));
 		esdm_es_ext_plugin_unload(handle);
 		return 1;
 	}
@@ -227,6 +243,10 @@ int main(int argc, char *argv[])
 	if (!dtls)
 		esdm_es_ext_server_set_dtls(serve_server, 0);
 
+	/* Checked above already */
+	if (name)
+		(void)esdm_es_ext_server_set_name(serve_server, name);
+
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = serve_stop;
 	sigemptyset(&sa.sa_mask);
@@ -236,9 +256,11 @@ int main(int argc, char *argv[])
 	/* A client gone mid-answer is no reason to terminate */
 	signal(SIGPIPE, SIG_IGN);
 
+	if (!name)
+		name = esdm_es_ext_name_or_null(plugin->name);
 	esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
 		    "Serving external entropy source %s on %s\n",
-		    plugin->name ? plugin->name : plugin_path, socket_path);
+		    name ? name : plugin_path, socket_path);
 
 	ret = esdm_es_ext_server_run(serve_server);
 	if (ret)

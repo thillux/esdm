@@ -36,58 +36,9 @@
 #include <string.h>
 
 #include "esdm_es_ext.h"
+#include "esdm_es_ext_proto.h"
 #include "esdm_es_ext_status.h"
 #include "esdm_logger.h"
-
-/*
- * Is @text of @len bytes UTF-8 as RFC 3629 has it - no overlong form, no
- * surrogate, nothing beyond U+10FFFF? All of a JSON text is, not only its
- * strings.
- */
-static bool esdm_es_ext_status_utf8(const unsigned char *text, size_t len)
-{
-	size_t i = 0;
-
-	while (i < len) {
-		uint32_t cp;
-		size_t n, j;
-
-		if (text[i] < 0x80) {
-			i++;
-			continue;
-		}
-
-		/* The lead byte tells how many continuation bytes follow */
-		if (text[i] >= 0xc2 && text[i] <= 0xdf) {
-			n = 1;
-			cp = text[i] & 0x1f;
-		} else if (text[i] >= 0xe0 && text[i] <= 0xef) {
-			n = 2;
-			cp = text[i] & 0x0f;
-		} else if (text[i] >= 0xf0 && text[i] <= 0xf4) {
-			n = 3;
-			cp = text[i] & 0x07;
-		} else {
-			return false;
-		}
-
-		if (len - i <= n)
-			return false;
-		for (j = 1; j <= n; j++) {
-			if ((text[i + j] & 0xc0) != 0x80)
-				return false;
-			cp = (cp << 6) | (text[i + j] & 0x3f);
-		}
-
-		if ((n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) ||
-		    (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff)
-			return false;
-
-		i += n + 1;
-	}
-
-	return true;
-}
 
 /*
  * Are all numbers in @obj finite? JSON has none for NaN and the infinities,
@@ -133,8 +84,9 @@ static struct json_object *esdm_es_ext_status_obj(const char *text, size_t len)
 	struct json_object *obj = NULL;
 	size_t end;
 
+	/* All of a JSON text is UTF-8, not only its strings */
 	if (!len || len > ESDM_ES_EXT_STATUS_MAX || memchr(text, '\0', len) ||
-	    !esdm_es_ext_status_utf8((const unsigned char *)text, len))
+	    !esdm_es_ext_utf8_valid(text, len))
 		return NULL;
 
 	/* json-c takes one level less than the depth it is given */
@@ -182,6 +134,17 @@ struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
 
 	*warned = false;
 	return obj;
+}
+
+void esdm_es_ext_state_name(struct json_object *obj, const char *declared,
+			    const char *instance)
+{
+	/* Replacing the name the status put there, in its place */
+	json_object_object_add(
+		obj, "name",
+		json_object_new_string(declared[0] ? declared : instance));
+	json_object_object_add(obj, "instance",
+			       json_object_new_string(instance));
 }
 
 bool esdm_es_ext_status_cache_due(const struct esdm_es_ext_status_cache *cache,

@@ -51,6 +51,20 @@ struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
 					     const char *who, bool *warned);
 
 /*
+ * Room for how a log message names an external source: its name in the ES
+ * table and the name it declares, see esdm_es_extlib.c
+ */
+#define ESDM_ES_EXT_LABEL_SIZE 64
+
+/*
+ * Add the name of an external source to its state @obj: the name it declares,
+ * @declared - empty for none - in place of the name of its entry in the ES
+ * table, @instance, which it keeps as "instance". See struct esdm_es_cb.
+ */
+void esdm_es_ext_state_name(struct json_object *obj, const char *declared,
+			    const char *instance);
+
+/*
  * The status of a plugin or a provider is asked for at most once per this many
  * seconds, and the last one obtained shown in between: it is asked for with
  * the source held, a request of a seeding waiting meanwhile - and whoever may

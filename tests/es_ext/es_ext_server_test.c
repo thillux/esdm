@@ -29,7 +29,9 @@
  * - In a build with several sources of each kind, the options given several
  *   times configure one source each, the n-th occurrence the n-th source: each
  *   source has its own plugin or provider and rate, and is listed under its
- *   own name in the JSON and the text status.
+ *   own instance name in the JSON and the text status.
+ * - A source is shown under the name its plugin or provider declares, which
+ *   esdm-es-ext-serve --name overrides; two sources may declare the same name.
  *
  * Skipped (77) unless run as root, as the esdm-server refuses to start
  * otherwise. The daemon claims the fixed socket, semaphore and IPC names, so
@@ -118,13 +120,24 @@ static bool test_status(char *buf, size_t buflen)
 	return false;
 }
 
-/* The section of the status about the entropy source @name */
-static const char *test_es_section(const char *status, const char *name)
+/*
+ * The section of the status about the external entropy source of the
+ * instance name @instance, from its name on
+ */
+static const char *test_es_section(const char *status, const char *instance)
 {
+	const char *section, *name;
 	char needle[64];
 
-	snprintf(needle, sizeof(needle), " Name: %s\n", name);
-	return strstr(status, needle);
+	snprintf(needle, sizeof(needle), "\n Instance: %s\n", instance);
+	section = strstr(status, needle);
+	if (!section)
+		return NULL;
+
+	/* The line before, its name */
+	for (name = section; name > status && name[-1] != '\n'; name--)
+		;
+	return name;
 }
 
 static bool test_wait_socket(void)
@@ -162,6 +175,8 @@ static void test_plugin(const char *server, const char *plugin)
 	es = test_es_section(status, TEST_EXTLIB);
 	CHECK(es != NULL, "the status lists no " TEST_EXTLIB " source");
 	if (es) {
+		CHECK(!strncmp(es, " Name: es-ext-test\n", 19),
+		      "the source is not shown under its name (%.400s)", es);
 		CHECK(strstr(es, "Plugin: es-ext-test") != NULL,
 		      "the plugin was not loaded (%.400s)", es);
 		CHECK(strstr(es, "Status: delivering") != NULL,
@@ -215,6 +230,9 @@ static void test_socket_provider(const char *server, const char *serve,
 	es = test_es_section(status, TEST_EXTSOCK);
 	CHECK(es && strstr(es, "Status: connected (uid 0)") != NULL,
 	      "the provider was not connected to (%.400s)", es ? es : "");
+	CHECK(es && !strncmp(es, " Name: es-ext-test\n", 19),
+	      "the source is not shown under the name of the provider (%.400s)",
+	      es ? es : "");
 	/* Its status, which esdm-es-ext-serve fetches from the plugin */
 	CHECK(es && strstr(es, "\n Provider properties:\n"
 			       "  Plugin: es-ext-test\n") != NULL,
@@ -303,16 +321,19 @@ static void test_several(const char *server, const char *serve,
 	};
 	static char status[65536];
 	struct json_object *root = NULL, *es;
+	const char *section;
 	pid_t provider[2], pid;
 	unsigned int i;
 
 	for (i = 0; i < 2; i++)
 		snprintf(socket[i], sizeof(socket[i]), "%s/provider%u.socket",
 			 test_dir, i);
+	const char *const name_b[] = { "--name", "Quelle B", NULL };
+
 	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], NULL,
-					"selftest_ret=-19");
-	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], NULL,
-					NULL);
+					"selftest_ret=-19,name=Quelle A");
+	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], name_b,
+					"name=overridden");
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 
@@ -333,17 +354,28 @@ static void test_several(const char *server, const char *serve,
 	root = json_tokener_parse(status);
 	CHECK(root != NULL, "the JSON status is no JSON");
 
+	/* Two plugins of the same name, apart by their instances */
 	es = es_ext_test_status_es(root, "ExternalLib0");
+	CHECK(test_json_str_is(es, "name", "es-ext-test"),
+	      "ExternalLib0 is not shown under the name of its plugin: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
 	CHECK(test_json_str_is(es, "plugin_library", copies[0]) &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 64,
 	      "ExternalLib0 is not configured as its options say: %s",
 	      es ? json_object_to_json_string(es) : "(none)");
 	es = es_ext_test_status_es(root, "ExternalLib1");
+	CHECK(test_json_str_is(es, "name", "es-ext-test"),
+	      "ExternalLib1 is not shown under the name of its plugin: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
 	CHECK(test_json_str_is(es, "plugin_library", copies[1]) &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 128,
 	      "ExternalLib1 is not configured as its options say: %s",
 	      es ? json_object_to_json_string(es) : "(none)");
+	/* The name of the plugin, and the one of --name */
 	es = es_ext_test_status_es(root, "ExternalSocket0");
+	CHECK(test_json_str_is(es, "name", "Quelle A"),
+	      "ExternalSocket0 is not shown under the name of its plugin: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
 	CHECK(test_json_str_is(es, "provider_socket", socket[0]) &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 0 &&
 		      strstr(json_object_to_json_string(es),
@@ -351,6 +383,9 @@ static void test_several(const char *server, const char *serve,
 	      "ExternalSocket0 is not configured as its options say: %s",
 	      es ? json_object_to_json_string(es) : "(none)");
 	es = es_ext_test_status_es(root, "ExternalSocket1");
+	CHECK(test_json_str_is(es, "name", "Quelle B"),
+	      "ExternalSocket1 is not shown under the name of --name: %s",
+	      es ? json_object_to_json_string(es) : "(none)");
 	CHECK(test_json_str_is(es, "provider_socket", socket[1]) &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 192,
 	      "ExternalSocket1 is not configured as its options say: %s",
@@ -365,6 +400,10 @@ static void test_several(const char *server, const char *serve,
 		      test_es_section(status, "ExternalSocket0") &&
 		      test_es_section(status, "ExternalSocket1"),
 	      "the text status does not name each source");
+	section = test_es_section(status, "ExternalSocket1");
+	CHECK(section && !strncmp(section, " Name: Quelle B\n", 16),
+	      "the text status does not show the declared name (%.300s)",
+	      section ? section : "");
 
 	test_terminate(pid);
 

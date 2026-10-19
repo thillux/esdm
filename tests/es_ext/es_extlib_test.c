@@ -38,6 +38,10 @@
  * - The status of the plugin is asked for at most once per interval, and
  *   not while a request is in progress - which neither the ESDM status nor
  *   the entropy available waits for.
+ * - The source is shown under the name its plugin declares, with its instance
+ *   name next to it; a name that is not valid, or that of another entropy
+ *   source, is refused, as is none, and the source shown under its instance
+ *   name.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
@@ -67,6 +71,7 @@
 #define ES (&esdm_es_extlib[0])
 
 static struct esdm_es_ext_test_control *ctl;
+static struct esdm_es_ext_plugin *plugin;
 
 static uint32_t test_get(uint32_t bits, uint8_t *first_byte)
 {
@@ -454,6 +459,76 @@ static void test_status(const char *good, const char *v1)
 	CHECK(ES->active(), "the test plugin is not back");
 }
 
+/*
+ * The name the plugin declares: shown in place of the instance name - which
+ * the state keeps as "instance" - once the plugin is loaded anew.
+ */
+static void test_names(const char *path)
+{
+	static const char *const bad[] = {
+		"0123456789abcdef0123456789abcdef0", "",     "tab\there",
+		"\xff\xfe",				 "\xc0\xaf", "esc\x1b[31m",
+		"c1\xc2\x9b",
+	};
+	struct json_object *state;
+	char txt[4096];
+	unsigned int i;
+
+	/* The name of the test plugin, and the instance */
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	state = es_state_get(ES);
+	CHECK(es_state_str_is(state, "name", ES_EXT_TEST_NAME) &&
+		      es_state_str_is(state, "instance", ES->name) &&
+		      es_state_str_is(state, "plugin", ES_EXT_TEST_NAME),
+	      "the source is not shown under the name of the plugin: %s",
+	      es_state_print(state));
+	CHECK_EQ(esdm_status_txt(state, NULL, txt, sizeof(txt)), 0);
+	json_object_put(state);
+	CHECK(strstr(txt, "Name: " ES_EXT_TEST_NAME "\nInstance: "),
+	      "the text has no name and instance: %s", txt);
+
+	/* Any valid name, the longest included */
+	snprintf(ctl->name, sizeof(ctl->name), "Rauschquelle \xc3\xa4");
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(test_state_has("name", "Rauschquelle \xc3\xa4"),
+	      "the name of the plugin is not shown");
+	snprintf(ctl->name, sizeof(ctl->name),
+		 "0123456789abcdef0123456789abcdef");
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(test_state_has("name", "0123456789abcdef0123456789abcdef"),
+	      "the longest name is not shown");
+
+	/* Names that are none: the plugin is used, under its instance */
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		snprintf(ctl->name, sizeof(ctl->name), "%s", bad[i]);
+		CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+		CHECK(ES->active(), "a plugin with name %u is not used", i);
+		CHECK(test_state_has("name", ES->name) &&
+			      test_state_has("plugin", "(none)"),
+		      "the name %u that is none is taken", i);
+	}
+
+	/* The name of another entropy source */
+	snprintf(ctl->name, sizeof(ctl->name), "%s",
+		 esdm_es[esdm_ext_es_aux]->name);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(test_state_has("name", ES->name),
+	      "the name of another entropy source is taken");
+
+	/* None at all */
+	plugin->name = NULL;
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(test_state_has("name", ES->name) &&
+		      test_state_has("instance", ES->name),
+	      "a plugin without a name is not shown under its instance");
+
+	plugin->name = ctl->name;
+	snprintf(ctl->name, sizeof(ctl->name), ES_EXT_TEST_NAME);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(test_state_has("name", ES_EXT_TEST_NAME),
+	      "the name of the plugin is not back");
+}
+
 static void test_reinit(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
@@ -554,12 +629,15 @@ int main(int argc, char *argv[])
 		return common_test_result("es_extlib");
 	ctl = dlsym(ref, ES_EXT_TEST_CONTROL_SYMBOL);
 	CHECK(ctl != NULL, "the test plugin has no control");
-	if (!ctl)
+	plugin = dlsym(ref, ESDM_ES_EXT_PLUGIN_SYMBOL);
+	CHECK(plugin != NULL, "the test plugin has no plugin");
+	if (!ctl || !plugin)
 		return common_test_result("es_extlib");
 
 	test_unconfigured();
 	test_credit(argv[1]);
 	test_status(argv[1], argv[6]);
+	test_names(argv[1]);
 	test_reinit();
 	test_bad_plugins(argv[1], argv[2], argv[3], argv[4]);
 

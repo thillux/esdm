@@ -40,6 +40,12 @@
  *   answering at all is disconnected and credited with nothing, and none of
  *   its data is handed on. It is not connected to again before the retry
  *   interval is over.
+ * - The source is shown under the name the provider declares in its answer to
+ *   INFO, which it is asked for once per connection - inside the DTLS session
+ *   where there is one - with its instance name next to it. A name that is not
+ *   valid, or that of another entropy source, is not taken; a provider that
+ *   does not know INFO, or answers what the protocol does not allow, is
+ *   connected to again at once without asking and works without a name.
  * - The status of the provider is the "provider" member of the state, if it
  *   is a JSON object. It is asked for at most once per interval, and not
  *   while a request is in progress - which neither the ESDM status nor the
@@ -72,7 +78,7 @@
 #include "esdm_status_txt.h"
 #include "es_ext_test_plugin.h"
 
-extern const struct esdm_es_ext_plugin es_ext_test_plugin;
+extern struct esdm_es_ext_plugin es_ext_test_plugin;
 extern struct esdm_es_ext_test_control esdm_es_ext_test_control;
 static struct esdm_es_ext_test_control *ctl = &esdm_es_ext_test_control;
 
@@ -147,6 +153,23 @@ enum test_evil_status {
 #define TEST_EVIL_STATUS_TEXT "{\"evil\":1}"
 
 static atomic_int test_evil_status = TEST_EVIL_STATUS_DATA;
+
+/* How the provider answers INFO, independent of the modes above */
+enum test_evil_info {
+	/* -EOPNOTSUPP: it declares nothing */
+	TEST_EVIL_INFO_NONE,
+	/* With the name of test_evil_name */
+	TEST_EVIL_INFO_NAME,
+	/* With one byte of name more than a name may have */
+	TEST_EVIL_INFO_TOO_LONG,
+	/* Not at all: the connection is closed, as an old provider does */
+	TEST_EVIL_INFO_OLD,
+};
+
+static atomic_int test_evil_info = TEST_EVIL_INFO_NONE;
+static atomic_uint test_evil_info_requests = 0;
+/* The name of TEST_EVIL_INFO_NAME, set while no request is in progress */
+static char test_evil_name[ESDM_ES_EXT_NAME_MAX + 2] = "evil";
 /* A provider not knowing STARTDTLS: it closes the connection on it */
 static atomic_bool test_evil_old = false;
 static atomic_bool test_evil_stop = false;
@@ -209,6 +232,34 @@ static void *test_evil_run(void *arg)
 					break;
 				len = esdm_es_ext_proto_rsp_pack(
 					rsp, type, -EOPNOTSUPP, 0, NULL, 0);
+				if (send(fd, rsp, len, MSG_NOSIGNAL) !=
+				    (ssize_t)len)
+					break;
+				continue;
+			}
+			if (type == ESDM_ES_EXT_PROTO_INFO) {
+				int mode = atomic_load(&test_evil_info);
+				uint32_t datalen;
+
+				atomic_fetch_add(&test_evil_info_requests, 1);
+				if (mode == TEST_EVIL_INFO_OLD)
+					break;
+				esdm_es_ext_put_le32(
+					data, ESDM_ES_EXT_PROTO_RATE_NONE);
+				datalen = 4 + (uint32_t)strlen(test_evil_name);
+				memcpy(data + 4, test_evil_name,
+				       strlen(test_evil_name));
+				if (mode == TEST_EVIL_INFO_TOO_LONG) {
+					memset(data + 4, 'x',
+					       ESDM_ES_EXT_NAME_MAX + 1);
+					datalen = 4 + ESDM_ES_EXT_NAME_MAX + 1;
+				}
+				len = esdm_es_ext_proto_rsp_pack(
+					rsp, type,
+					mode == TEST_EVIL_INFO_NONE ?
+						-EOPNOTSUPP :
+						0,
+					0, data, datalen);
 				if (send(fd, rsp, len, MSG_NOSIGNAL) !=
 				    (ssize_t)len)
 					break;
@@ -1058,6 +1109,9 @@ static atomic_bool test_relay_stop = false;
 /* A message of the provider held the plaintext data of the test plugin */
 static atomic_bool test_relay_saw_plaintext = false;
 static atomic_uint test_relay_messages = 0;
+/* An INFO request, and the name of the test plugin, in the clear */
+static atomic_uint test_relay_plain_info = 0;
+static atomic_bool test_relay_saw_name = false;
 
 /* The test plugin fills a block with one byte value - a run of 16 tells */
 static bool test_has_run(const uint8_t *buf, size_t len)
@@ -1113,7 +1167,16 @@ static void *test_relay_run(void *arg)
 				continue;
 			}
 			if (pfd[0].revents) {
+				uint32_t length;
+				uint16_t type;
+
 				n = recv(esdm, buf, sizeof(buf), 0);
+				if (n > 0 &&
+				    !esdm_es_ext_proto_req_unpack(
+					    buf, (size_t)n, &type, &length) &&
+				    type == ESDM_ES_EXT_PROTO_INFO)
+					atomic_fetch_add(&test_relay_plain_info,
+							 1);
 				if (n <= 0 || send(provider, buf, (size_t)n,
 						   MSG_NOSIGNAL) != n)
 					break;
@@ -1125,6 +1188,10 @@ static void *test_relay_run(void *arg)
 				atomic_fetch_add(&test_relay_messages, 1);
 				if (test_has_run(buf, (size_t)n))
 					atomic_store(&test_relay_saw_plaintext,
+						     true);
+				if (memmem(buf, (size_t)n, ES_EXT_TEST_NAME,
+					   strlen(ES_EXT_TEST_NAME)))
+					atomic_store(&test_relay_saw_name,
 						     true);
 				if (send(esdm, buf, (size_t)n, MSG_NOSIGNAL) !=
 				    n)
@@ -1165,6 +1232,8 @@ static void test_eavesdrop(bool dtls)
 	atomic_store(&test_relay_stop, false);
 	atomic_store(&test_relay_saw_plaintext, false);
 	atomic_store(&test_relay_messages, 0);
+	atomic_store(&test_relay_plain_info, 0);
+	atomic_store(&test_relay_saw_name, false);
 	CHECK_EQ(pthread_create(&relay, NULL, test_relay_run, NULL), 0);
 
 	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_relay), 0);
@@ -1179,9 +1248,20 @@ static void test_eavesdrop(bool dtls)
 		      "the connection is not encrypted");
 		CHECK(!atomic_load(&test_relay_saw_plaintext),
 		      "the data delivered can be read off the channel");
+		/* INFO only inside the DTLS session, its name too */
+		CHECK_EQ(atomic_load(&test_relay_plain_info), 0);
+		CHECK(!atomic_load(&test_relay_saw_name),
+		      "the name can be read off the channel");
+		CHECK(test_state_has("name", ES_EXT_TEST_NAME),
+		      "the name did not arrive through the DTLS session");
 	} else
 #endif
 	{
+		CHECK_EQ(atomic_load(&test_relay_plain_info), 1);
+		CHECK(atomic_load(&test_relay_saw_name),
+		      "the relay does not see the name of an unencrypted channel");
+		CHECK(test_state_has("name", ES_EXT_TEST_NAME),
+		      "the name did not arrive in the clear");
 		CHECK(test_state_has("status", "unencrypted"),
 		      "the state does not say the connection is unencrypted");
 		CHECK(atomic_load(&test_relay_saw_plaintext),
@@ -1231,6 +1311,141 @@ static void test_old_provider(void)
 #endif
 }
 
+/*
+ * The name the provider declares: the one of the plugin, or another one the
+ * server is given, shown in place of the instance name - which the state keeps
+ * as "instance". A name that is not valid, or that of another entropy source,
+ * is not taken; a provider that answers INFO with what the protocol does not
+ * allow, or does not know it, is used without a name, on a new connection
+ * that does not ask.
+ */
+static void test_names(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	static const char *const bad[] = {
+		"tab\there", "\xff\xfe", "esc\x1b[31m", "c1\xc2\x9b",
+	};
+	struct json_object *state;
+	unsigned int conns, i;
+	pthread_t evil;
+	char txt[4096];
+
+	/* The name of the test plugin, and the instance */
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	state = es_state_get(ES);
+	CHECK(es_state_str_is(state, "name", ES_EXT_TEST_NAME) &&
+		      es_state_str_is(state, "instance", ES->name),
+	      "the source is not shown under the name of the plugin: %s",
+	      es_state_print(state));
+	CHECK_EQ(esdm_status_txt(state, NULL, txt, sizeof(txt)), 0);
+	json_object_put(state);
+	CHECK(strstr(txt, "Name: " ES_EXT_TEST_NAME "\nInstance: "),
+	      "the text has no name and instance: %s", txt);
+
+	/* Another one given to the server */
+	test_server_stop();
+	CHECK_EQ(esdm_es_ext_server_alloc(&es_ext_test_plugin, test_good, 0600,
+					  &test_server),
+		 0);
+	CHECK_EQ(esdm_es_ext_server_set_name(test_server, "x\ny"), -EINVAL);
+	CHECK_EQ(esdm_es_ext_server_set_name(test_server, "Quelle \xc3\xa4"),
+		 0);
+	CHECK_EQ(-pthread_create(&test_server_thread, NULL, test_server_run,
+				 test_server),
+		 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK(test_state_has("name", "Quelle \xc3\xa4"),
+	      "the name given to the server is not shown");
+
+	/* Back to the one of the plugin, and the plugin without one */
+	test_server_stop();
+	es_ext_test_plugin.name = NULL;
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK(test_state_has("name", ES->name),
+	      "a provider without a name is not shown under its instance");
+	test_server_stop();
+	es_ext_test_plugin.name = ctl->name;
+	CHECK_EQ(test_server_start(), 0);
+
+	/* A provider of its own, declaring what the test has it declare */
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_NAME);
+	CHECK_EQ(test_evil_start(&evil), 0);
+	conns = atomic_load(&test_evil_connections);
+	atomic_store(&test_evil_info_requests, 0);
+
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_state_has("name", "evil"), "the name is not taken");
+	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
+	/* Once per connection */
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
+
+	/* Names that are none: refused, the source works on */
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		snprintf(test_evil_name, sizeof(test_evil_name), "%s", bad[i]);
+		CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+		CHECK_EQ(test_get(bits, NULL), 8);
+		CHECK(test_state_has("name", ES->name),
+		      "the name %u that is none is taken", i);
+	}
+
+	/* The name of another entropy source */
+	snprintf(test_evil_name, sizeof(test_evil_name), "%s",
+		 esdm_es[esdm_ext_es_aux]->name);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_state_has("name", ES->name),
+	      "the name of another entropy source is taken");
+	snprintf(test_evil_name, sizeof(test_evil_name), "evil");
+
+	/* A name too long breaks the protocol: once more, without asking */
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_TOO_LONG);
+	conns = atomic_load(&test_evil_connections);
+	atomic_store(&test_evil_info_requests, 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_state_has("name", ES->name), "a name too long is taken");
+	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 2);
+
+	/* An old provider: the same, and it works without a name */
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_OLD);
+	conns = atomic_load(&test_evil_connections);
+	atomic_store(&test_evil_info_requests, 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_state_has("name", ES->name), "an old provider has a name");
+	CHECK(test_state_has("status", "connected (uid"),
+	      "an old provider is not connected to");
+	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns + 2);
+
+	/* Declaring nothing */
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_NONE);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_state_has("name", ES->name),
+	      "a provider declaring nothing has a name");
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	CHECK_EQ(ES->init(), 0);
+}
+
 int main(void)
 {
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
@@ -1265,6 +1480,7 @@ int main(void)
 	test_old_provider();
 	test_status_old_provider();
 	test_status_busy();
+	test_names();
 	test_protocol_breaches();
 
 	if (test_server)
