@@ -25,6 +25,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,7 @@ struct egd_peer {
 	unsigned int connections;
 	unsigned int requests;
 	unsigned int pr_requests;
+	unsigned int pr_generations;
 	unsigned int nconn;
 	int conn_fds[EGD_PEER_MAX_CONN];
 	pthread_t conn_threads[EGD_PEER_MAX_CONN];
@@ -149,7 +151,26 @@ static int peer_cmd_entropy_count(struct egd_peer_conn *conn)
 	return peer_write_all(conn->fd, response, sizeof(response));
 }
 
-static int peer_cmd_read_nonblock(struct egd_peer_conn *conn)
+/*
+ * Account a prediction resistant read of @requested bytes with the seeds the
+ * ESDM would take for it, see ESDM_EGD_PR_GENERATION.
+ */
+static void peer_count_pr(struct egd_peer_conn *conn, bool pr,
+			  uint8_t requested)
+{
+	struct egd_peer *peer = conn->peer;
+
+	if (!pr)
+		return;
+
+	pthread_mutex_lock(&peer->lock);
+	peer->pr_generations +=
+		((unsigned int)requested + ESDM_EGD_PR_GENERATION - 1) /
+		ESDM_EGD_PR_GENERATION;
+	pthread_mutex_unlock(&peer->lock);
+}
+
+static int peer_cmd_read_nonblock(struct egd_peer_conn *conn, bool pr)
 {
 	uint8_t requested, delivered;
 	int ret;
@@ -157,6 +178,7 @@ static int peer_cmd_read_nonblock(struct egd_peer_conn *conn)
 	ret = peer_read_all(conn->fd, &requested, sizeof(requested));
 	if (ret)
 		return ret;
+	peer_count_pr(conn, pr, requested);
 
 	switch (conn->peer->mode) {
 	case EGD_PEER_SHORT:
@@ -187,7 +209,7 @@ static int peer_cmd_read_nonblock(struct egd_peer_conn *conn)
 	return peer_send_data(conn, delivered);
 }
 
-static int peer_cmd_read_block(struct egd_peer_conn *conn)
+static int peer_cmd_read_block(struct egd_peer_conn *conn, bool pr)
 {
 	uint8_t requested;
 	int ret;
@@ -195,6 +217,7 @@ static int peer_cmd_read_block(struct egd_peer_conn *conn)
 	ret = peer_read_all(conn->fd, &requested, sizeof(requested));
 	if (ret)
 		return ret;
+	peer_count_pr(conn, pr, requested);
 
 	/* The blocking command is answered in full, whatever it takes. */
 	return peer_send_data(conn, requested);
@@ -318,11 +341,14 @@ static void *peer_conn_thread(void *arg)
 			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
 		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
-			ret = peer_cmd_read_nonblock(conn);
+			ret = peer_cmd_read_nonblock(
+				conn,
+				cmd == ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK);
 			break;
 		case ESDM_EGD_CMD_READ_BLOCK:
 		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
-			ret = peer_cmd_read_block(conn);
+			ret = peer_cmd_read_block(
+				conn, cmd == ESDM_EGD_CMD_ESDM_PR_READ_BLOCK);
 			break;
 		case ESDM_EGD_CMD_WRITE_ENTROPY:
 			ret = peer_cmd_write_entropy(conn);
@@ -545,6 +571,17 @@ unsigned int egd_peer_pr_requests(struct egd_peer *peer)
 
 	pthread_mutex_lock(&peer->lock);
 	ret = peer->pr_requests;
+	pthread_mutex_unlock(&peer->lock);
+
+	return ret;
+}
+
+unsigned int egd_peer_pr_generations(struct egd_peer *peer)
+{
+	unsigned int ret;
+
+	pthread_mutex_lock(&peer->lock);
+	ret = peer->pr_generations;
 	pthread_mutex_unlock(&peer->lock);
 
 	return ret;

@@ -271,13 +271,29 @@ static int test_pr_reads(void)
 	      "%u prediction resistant transfers, expected 2",
 	      egd_peer_pr_requests(peer));
 
+	/*
+	 * Split at a multiple of what the ESDM generates per seed, so that the
+	 * read costs no more seeds than its size: 300 bytes take 10 of them,
+	 * 256 bytes another 8 - as 255 + 1 bytes, they would take 9.
+	 */
+	CHECK(egd_peer_pr_generations(peer) == 10,
+	      "the prediction resistant read of %zu bytes cost %u seeds, expected 10",
+	      sizeof(buf), egd_peer_pr_generations(peer));
+	CHECK(esdm_egd_client_get_random_pr(client, buf, 256) == 0,
+	      "the prediction resistant blocking read of 256 bytes failed");
+	CHECK(egd_peer_pr_requests(peer) == 4 &&
+		      egd_peer_pr_generations(peer) == 18,
+	      "the prediction resistant read of 256 bytes went out as %u transfers costing %u seeds, expected 2 costing 8",
+	      egd_peer_pr_requests(peer) - 2,
+	      egd_peer_pr_generations(peer) - 10);
+
 	/* One transfer, which the peer answers with half of what was asked */
 	CHECK(esdm_egd_client_get_random_pr_nonblock(client, buf, 32,
 						     &generated) == 0,
 	      "the prediction resistant non-blocking read failed");
 	CHECK(generated == 16, "%zu bytes delivered, expected 16", generated);
-	CHECK(egd_peer_pr_requests(peer) == 3,
-	      "%u prediction resistant transfers, expected 3",
+	CHECK(egd_peer_pr_requests(peer) == 5,
+	      "%u prediction resistant transfers, expected 5",
 	      egd_peer_pr_requests(peer));
 
 	/* More than one transfer is refused before anything is sent */
@@ -285,13 +301,13 @@ static int test_pr_reads(void)
 		      client, buf, ESDM_EGD_MAX_TRANSFER + 1, &generated) ==
 		      -EINVAL,
 	      "a non-blocking request beyond one transfer was not refused");
-	CHECK(egd_peer_requests(peer) == 3, "%u requests, expected 3",
+	CHECK(egd_peer_requests(peer) == 5, "%u requests, expected 5",
 	      egd_peer_requests(peer));
 
 	/* The standard reads stay what they are */
 	CHECK(esdm_egd_client_get_random(client, buf, 8) == 0,
 	      "the blocking read failed");
-	CHECK(egd_peer_pr_requests(peer) == 3,
+	CHECK(egd_peer_pr_requests(peer) == 5,
 	      "an ordinary read went out as a prediction resistant one");
 
 	esdm_egd_client_free(client);

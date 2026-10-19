@@ -1513,6 +1513,10 @@ struct esdm_egd_random_op {
  *
  * The commands fit into any socket buffer, so the write never waits for the
  * server to take answers that nobody reads yet.
+ *
+ * A prediction resistant read goes out in transfers of a multiple of what the
+ * ESDM generates per seed, see ESDM_EGD_MAX_PR_TRANSFER: n bytes cost the seeds
+ * of n bytes then, not one more for each transfer.
  */
 static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 					 void *arg)
@@ -1520,6 +1524,9 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 	struct esdm_egd_random_op *op = arg;
 	uint8_t request[2 * ESDM_EGD_CLIENT_PIPELINE];
 	size_t done = 0;
+	uint8_t max_chunk = (op->cmd == ESDM_EGD_CMD_ESDM_PR_READ_BLOCK) ?
+				    ESDM_EGD_MAX_PR_TRANSFER :
+				    ESDM_EGD_MAX_TRANSFER;
 
 	while (done < op->buflen) {
 		size_t num, batch = 0;
@@ -1529,8 +1536,8 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 			      done + batch < op->buflen;
 		     num++) {
 			size_t remaining = op->buflen - done - batch;
-			uint8_t chunk = (remaining > ESDM_EGD_MAX_TRANSFER) ?
-						ESDM_EGD_MAX_TRANSFER :
+			uint8_t chunk = (remaining > max_chunk) ?
+						max_chunk :
 						(uint8_t)remaining;
 
 			request[2 * num] = op->cmd;

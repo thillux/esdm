@@ -50,6 +50,7 @@
 
 #include "common_test.h"
 #include "egd_peer.h"
+#include "esdm_egd_protocol.h"
 
 /* The provider module, and the property that selects its algorithms */
 #define TEST_EGD_PROVIDER "libesdm-egd-provider"
@@ -282,7 +283,8 @@ static void test_prediction_resistance_large(struct egd_peer *peer)
 {
 	EVP_RAND_CTX *rctx = rand_ctx_new("CTR-DRBG");
 	unsigned char buf[1024];
-	unsigned int requests_before, pr_before, requests, pr;
+	unsigned int requests_before, pr_before, seeds_before, requests, pr,
+		seeds;
 
 	if (!rctx)
 		return;
@@ -293,18 +295,26 @@ static void test_prediction_resistance_large(struct egd_peer *peer)
 
 	requests_before = egd_peer_requests(peer);
 	pr_before = egd_peer_pr_requests(peer);
+	seeds_before = egd_peer_pr_generations(peer);
 	CHECK(EVP_RAND_generate(rctx, buf, sizeof(buf), 256, 1, NULL, 0) == 1,
 	      "a prediction resistant request of %zu bytes was not answered: %s",
 	      sizeof(buf), last_error());
 	requests = egd_peer_requests(peer) - requests_before;
 	pr = egd_peer_pr_requests(peer) - pr_before;
+	seeds = egd_peer_pr_generations(peer) - seeds_before;
 
 	CHECK(pr == requests,
 	      "%u of the %u reads of a prediction resistant request of %zu bytes went out as ordinary ones",
 	      requests - pr, requests, sizeof(buf));
-	CHECK(pr == (sizeof(buf) + 254) / 255,
+	CHECK(pr == (sizeof(buf) + ESDM_EGD_MAX_PR_TRANSFER - 1) /
+			    ESDM_EGD_MAX_PR_TRANSFER,
 	      "a prediction resistant request of %zu bytes took %u prediction resistant reads",
 	      sizeof(buf), pr);
+
+	/* Split so that it costs the ESDM no more seeds than its size */
+	CHECK(seeds == sizeof(buf) / ESDM_EGD_PR_GENERATION,
+	      "a prediction resistant request of %zu bytes cost %u seeds, expected %zu",
+	      sizeof(buf), seeds, sizeof(buf) / ESDM_EGD_PR_GENERATION);
 
 	EVP_RAND_CTX_free(rctx);
 }

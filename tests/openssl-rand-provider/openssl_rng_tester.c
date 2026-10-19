@@ -34,7 +34,18 @@
 /* The GNU test protocol's hard error: the test could not be run at all */
 #define TEST_SETUP_ERROR 99
 
-static bool test_random(void)
+/*
+ * The RSA key generation draws on the provider for its prime candidates and the
+ * bases of its primality tests: a 4096 bit key took some 540 requests, 290 of
+ * them of 256 bytes. Served with prediction resistance, each costs the ESDM a
+ * seed per 32 bytes, some 2500 seeds for the key - 25 to 100 seconds and more
+ * on 16 CPUs. The provider doing so makes a 2048 bit key instead, some 410
+ * requests costing about 1000 seeds.
+ */
+#define TEST_RSA_BITS 4096
+#define TEST_RSA_BITS_PR 2048
+
+static bool test_random(unsigned int rsa_bits)
 {
 	unsigned char bytes[300];
 	int ret;
@@ -44,7 +55,7 @@ static bool test_random(void)
 	if (ret != 1)
 		return false;
 
-	EVP_PKEY *pkey = EVP_RSA_gen(4096);
+	EVP_PKEY *pkey = EVP_RSA_gen(rsa_bits);
 	if (pkey == NULL)
 		return false;
 	EVP_PKEY_free(pkey);
@@ -154,7 +165,10 @@ static int performTest(char *test, char *type)
 	}
 
 	if (strncmp(test, "random", strlen("random")) == 0) {
-		ret = test_random() ? EXIT_SUCCESS : EXIT_FAILURE;
+		ret = test_random(strcmp(type, "egd-pr") ? TEST_RSA_BITS :
+							   TEST_RSA_BITS_PR) ?
+			      EXIT_SUCCESS :
+			      EXIT_FAILURE;
 	} else if (strncmp(test, "instantiate_pr", strlen("instantiate_pr")) ==
 		   0) {
 		ret = test_instantiate(true) ? EXIT_SUCCESS : EXIT_FAILURE;

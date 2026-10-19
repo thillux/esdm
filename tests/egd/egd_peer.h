@@ -106,6 +106,15 @@ unsigned int egd_peer_requests(struct egd_peer *peer);
 unsigned int egd_peer_pr_requests(struct egd_peer *peer);
 
 /**
+ * @brief Seeds the ESDM would have taken for those prediction resistant reads
+ *
+ * Its prediction resistance DRNG takes one per ESDM_EGD_PR_GENERATION bytes
+ * of a transfer begun - which is what the client's split of a large read is
+ * judged by.
+ */
+unsigned int egd_peer_pr_generations(struct egd_peer *peer);
+
+/**
  * @brief The data of the last write entropy command received
  *
  * @param [out] buf Buffer for the data, at most @buflen bytes are copied

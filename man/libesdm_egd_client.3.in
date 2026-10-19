@@ -270,7 +270,12 @@ Like
 .BR esdm_egd_client_get_random (),
 but served by the prediction resistance DRNG of the ESDM, which hands out no
 more than its entropy sources just delivered: the answer takes as long as
-collecting that entropy does. The ESDM\-specific command this uses is unknown to
+collecting that entropy does. That DRNG takes a seed for each 32 bytes
+.RB ( ESDM_EGD_PR_GENERATION )
+a transfer begins, so a larger request is split into transfers of
+.B ESDM_EGD_MAX_PR_TRANSFER
+(224) bytes rather than 255: it costs as many seeds as it has 32 bytes, begun
+ones included. The ESDM\-specific command this uses is unknown to
 other EGD daemons, which close the connection on it \- the call fails then.
 .TP
 .BI "int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"

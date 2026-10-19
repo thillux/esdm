@@ -171,6 +171,18 @@
 /* The protocol's length byte caps every transfer at 255 bytes. */
 #define ESDM_EGD_MAX_TRANSFER 255
 
+/*
+ * The prediction resistance DRNG of the ESDM takes a seed of its own for each
+ * ESDM_EGD_PR_GENERATION bytes it generates - its security strength - and so
+ * for each block of a transfer begun. A prediction resistant read larger than
+ * one transfer is therefore split into transfers of ESDM_EGD_MAX_PR_TRANSFER
+ * bytes, the largest multiple of it that fits: as 255 + 1 bytes, 256 of them
+ * would cost a seed more than as 224 + 32.
+ */
+#define ESDM_EGD_PR_GENERATION 32
+#define ESDM_EGD_MAX_PR_TRANSFER                                               \
+	(ESDM_EGD_MAX_TRANSFER - ESDM_EGD_MAX_TRANSFER % ESDM_EGD_PR_GENERATION)
+
 /* Longest command: write entropy (command, 2 entropy bytes, length byte). */
 #define ESDM_EGD_MAX_CMD_SIZE (4 + ESDM_EGD_MAX_TRANSFER)
 
