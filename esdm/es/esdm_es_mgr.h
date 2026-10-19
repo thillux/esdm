@@ -15,10 +15,6 @@
 
 #define ESDM_DRNG_BLOCKSIZE 64 /* Maximum of DRNG block sizes */
 
-/* Helper to concatenate a macro with an integer type */
-#define ESDM_PASTER(x, y) x##y
-#define ESDM_UINT32_C(x) ESDM_PASTER(x, U)
-
 /************************* Entropy sources management *************************/
 
 extern struct esdm_es_cb *esdm_es[];

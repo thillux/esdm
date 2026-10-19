@@ -100,9 +100,7 @@ struct entropy_es_small {
 	uint32_t e_bits;
 };
 
-/* Large buffer for entropy data */
-#define ESDM_DRNG_OVERSAMPLE_SEED_SIZE_BYTES                                   \
-	(ESDM_DRNG_SECURITY_STRENGTH_BYTES + 16)
+/* Large buffer for entropy data - the one of a FIPS kernel's esdm_es */
 struct entropy_es_large {
 	uint8_t e[ESDM_DRNG_OVERSAMPLE_SEED_SIZE_BYTES];
 	uint32_t e_bits;

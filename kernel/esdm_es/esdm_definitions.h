@@ -11,25 +11,22 @@
 #include <linux/minmax.h>
 #include <linux/slab.h>
 
+/* Security strength and seed sizes, as the ESDM has them */
+#include "esdm_seed_sizes.h"
+
 /*************************** General ESDM parameter ***************************/
 
 /*
- * Specific settings for different use cases
+ * Specific settings for different use cases: the SP800-90C oversampling of a
+ * FIPS kernel
  */
 #ifdef CONFIG_CRYPTO_FIPS
-#define ESDM_OVERSAMPLE_ES_BITS 64
-#define ESDM_SEED_BUFFER_INIT_ADD_BITS 128
+#define ESDM_OVERSAMPLE_ES_BITS ESDM_SP80090C_OVERSAMPLE_ES_BITS
+#define ESDM_SEED_BUFFER_INIT_ADD_BITS ESDM_SP80090C_SEED_BUFFER_INIT_ADD_BITS
 #else /* CONFIG_CRYPTO_FIPS */
 #define ESDM_OVERSAMPLE_ES_BITS 0
 #define ESDM_SEED_BUFFER_INIT_ADD_BITS 0
 #endif /* CONFIG_CRYPTO_FIPS */
-
-/* Security strength of ESDM -- this must match DRNG security strength */
-#define ESDM_DRNG_SECURITY_STRENGTH_BYTES 32
-#define ESDM_DRNG_SECURITY_STRENGTH_BITS (ESDM_DRNG_SECURITY_STRENGTH_BYTES * 8)
-#define ESDM_DRNG_INIT_SEED_SIZE_BITS                                          \
-	(ESDM_DRNG_SECURITY_STRENGTH_BITS + ESDM_SEED_BUFFER_INIT_ADD_BITS)
-#define ESDM_DRNG_INIT_SEED_SIZE_BYTES (ESDM_DRNG_INIT_SEED_SIZE_BITS >> 3)
 
 /* Alignmask that is intended to be identical to CRYPTO_MINALIGN */
 #define ESDM_KCAPI_ALIGN ARCH_KMALLOC_MINALIGN

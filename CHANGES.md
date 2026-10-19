@@ -95,7 +95,7 @@ tests/es_ebpf_testing
 * The source tree of the library is sorted into esdm/es, esdm/crypto,
 esdm/drng and esdm/status
 
-* The kernel modules moved from addon/linux_esdm_es and addon/linux_esdm_cdev to kernel/esdm_es and kernel/esdm_cdev and are built from the source tree, sharing code with the ESDM instead of carrying copies: the IOCTL interface of /dev/esdm_es (kernel/shared/esdm_es_ioctl.h) with the interrupt and scheduler entropy sources, the cutoffs of the SP800-90B health tests (kernel/shared/esdm_health_cutoffs.h) with the eBPF entropy sources, the XDRBG-256 with the auxiliary pools, and the EGD protocol (service-egd/esdm_egd_protocol.h) of esdm_cdev with the EGD interface
+* The kernel modules moved from addon/linux_esdm_es and addon/linux_esdm_cdev to kernel/esdm_es and kernel/esdm_cdev and are built from the source tree, sharing code with the ESDM instead of carrying copies: the IOCTL interface of /dev/esdm_es (kernel/shared/esdm_es_ioctl.h) with the interrupt and scheduler entropy sources, the security strength, the SP800-90C oversampling and the seed sizes making up the entropy buffers that interface hands over (kernel/shared/esdm_seed_sizes.h), the cutoffs of the SP800-90B health tests (kernel/shared/esdm_health_cutoffs.h) with the eBPF entropy sources, the XDRBG-256 with the auxiliary pools, and the EGD protocol (service-egd/esdm_egd_protocol.h) of esdm_cdev with the EGD interface
 
 * The test tooling moved from addon to tests, named after the meson options
 building it: the validation helpers esdm-getrawentropy and esdm-extractlsb

@@ -28,14 +28,13 @@
 #include "esdm_hash_common.h"
 #include "math_helper.h"
 
-/*************************** General ESDM parameter ***************************/
+/*
+ * Security strength and seed sizes, as the kernel module esdm_es has them -
+ * the oversampling configured by ESDM_SEED_BUFFER_INIT_ADD_BITS of config.h
+ */
+#include "esdm_seed_sizes.h"
 
-/* Security strength of ESDM -- this must match DRNG security strength */
-#define ESDM_DRNG_SECURITY_STRENGTH_BYTES 32
-#define ESDM_DRNG_SECURITY_STRENGTH_BITS (ESDM_DRNG_SECURITY_STRENGTH_BYTES * 8)
-#define ESDM_DRNG_INIT_SEED_SIZE_BITS                                          \
-	(ESDM_DRNG_SECURITY_STRENGTH_BITS + ESDM_SEED_BUFFER_INIT_ADD_BITS)
-#define ESDM_DRNG_INIT_SEED_SIZE_BYTES (ESDM_DRNG_INIT_SEED_SIZE_BITS >> 3)
+/*************************** General ESDM parameter ***************************/
 
 /*
  * SP800-90A defines a maximum request size of 1<<16 bytes. The given value is
@@ -132,20 +131,6 @@ static inline uint32_t esdm_fast_noise_entropylevel(uint32_t ent_bits,
 	/* Cap entropy to buffer size in bits */
 	ent_bits = min_uint32(ent_bits, requested_bits);
 	return ent_bits;
-}
-
-/* Convert entropy in bits into nr. of events with the same entropy content. */
-static inline uint32_t esdm_entropy_to_data(uint32_t entropy_bits,
-					    uint32_t entropy_rate)
-{
-	return ((entropy_bits * entropy_rate) /
-		ESDM_DRNG_SECURITY_STRENGTH_BITS);
-}
-
-/* Convert number of events into entropy value. */
-static inline uint32_t esdm_data_to_entropy(uint32_t num, uint32_t entropy_rate)
-{
-	return ((num * ESDM_DRNG_SECURITY_STRENGTH_BITS) / entropy_rate);
 }
 
 static inline uint32_t atomic_read_u32(const atomic_int *v)

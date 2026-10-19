@@ -104,12 +104,6 @@ config ESDM_COLLECTION_SIZE
 
 /******************************************************************************/
 
-/*************************** General ESDM parameter ***************************/
-
-/* Helper to concatenate a macro with an integer type */
-#define ESDM_PASTER(x, y) x##y
-#define ESDM_UINT32_C(x) ESDM_PASTER(x, U)
-
 bool esdm_gcd_tested(void);
 void esdm_gcd_set(u64 running_gcd);
 u64 esdm_gcd_get(void);
