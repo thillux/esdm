@@ -536,10 +536,31 @@
               out = machine.succeed("esdm-tool --get-random 32").strip()
               assert len(out) >= 64, f"short random output: {out!r}"
 
-              # Linux-compat frontends: /dev/random is served by the CUSE
-              # daemon once the compat target is up.
+              # Linux-compat frontends: /dev/random and /dev/urandom are served
+              # by the CUSE daemons, /proc/sys/kernel/random by esdm-proc, once
+              # the compat target is up. Their units are of Type=simple, so
+              # the target is up as soon as the daemons are started - and the
+              # kernel's own /dev/random (1:8) serves a read just as well - so
+              # wait for the takeover itself: the device of the CUSE daemon
+              # bind mounted over the kernel's, and the FUSE file system of
+              # esdm-proc mounted over the kernel's directory.
               machine.wait_for_unit("esdm-linux-compat.target")
+              for unit in ["esdm-cuse-random", "esdm-cuse-urandom", "esdm-proc"]:
+                  machine.wait_for_unit(f"{unit}.service")
+                  machine.succeed(f"systemctl is-active --quiet {unit}.service")
+              for dev, kernel_dev in [("random", "1:8"), ("urandom", "1:9")]:
+                  machine.wait_until_succeeds(f"findmnt -n -M /dev/{dev}", timeout=60)
+                  devno = machine.succeed(f"stat -c %t:%T /dev/{dev}").strip()
+                  assert devno != kernel_dev, (
+                      f"/dev/{dev} is still the kernel's device ({devno})"
+                  )
+              machine.wait_until_succeeds(
+                  "findmnt -n -M /proc/sys/kernel/random -o FSTYPE | grep -q '^fuse'",
+                  timeout=60,
+              )
               machine.succeed("test \"$(head -c 32 /dev/random | wc -c)\" = 32")
+              machine.succeed("test \"$(head -c 32 /dev/urandom | wc -c)\" = 32")
+              machine.succeed("grep -qx '[0-9][0-9]*' /proc/sys/kernel/random/entropy_avail")
 
               # A clean shutdown must not deadlock or leak (kmemleak is on).
               machine.succeed("systemctl stop esdm-server.service")
