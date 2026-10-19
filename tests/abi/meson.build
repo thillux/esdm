@@ -8,6 +8,38 @@
 nm = find_program('nm', required: false)
 python = import('python').find_installation()
 
+# Every installed header on its own, as the first include of a program: what it
+# uses it has to include itself. Strict ISO C, as a program including it may be
+# built that way, and warnings are errors: a struct a prototype names before it
+# is declared is one of that prototype's own, which no caller can pass - and C
+# only warns about it. The compiler runs as the test rather than in a build
+# target, so that a broken header fails a test instead of the build.
+header_cc_cmd = meson.get_compiler('c').cmd_array()
+header_cc = find_program(header_cc_cmd[0])
+header_cc_args = [ ]
+foreach i : range(1, header_cc_cmd.length())
+	header_cc_args += header_cc_cmd[i]
+endforeach
+# esdm_rpc_client.h includes protobuf-c, from wherever it is installed
+header_protobuf_inc = dependency('libprotobuf-c').get_variable(
+	pkgconfig: 'includedir', default_value: '')
+if header_protobuf_inc != ''
+	header_cc_args += [ '-I' + header_protobuf_inc ]
+endif
+# The linker arguments a compiler wrapper adds are of no use here, which clang
+# tells with -Werror
+header_cc_args += meson.get_compiler('c').get_supported_arguments(
+	'-Wno-unused-command-line-argument')
+header_cc_args += [ '-std=c11', '-Wall', '-Wextra', '-pedantic', '-Werror',
+		    '-fsyntax-only', files('header_test.c'), '-include' ]
+
+foreach header : include_user_files
+	test('Public header ' + import('fs').name(header) + ' on its own',
+		header_cc,
+		args: header_cc_args + [ header ],
+		suite: 'abi')
+endforeach
+
 if nm.found() and get_option('default_library') != 'static'
 	check_exports = files('check_exports.py')
 
