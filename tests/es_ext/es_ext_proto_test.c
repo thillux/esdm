@@ -94,16 +94,16 @@ static void test_request(void)
 
 	/* STATUS asks for the largest status it takes */
 	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS,
-				   ESDM_ES_EXT_STATUS_MAX);
+				   ESDM_ES_EXT_PROTO_STATUS_MAX);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 0);
 	CHECK_EQ(type, ESDM_ES_EXT_PROTO_STATUS);
-	CHECK_EQ(length, ESDM_ES_EXT_STATUS_MAX);
+	CHECK_EQ(length, ESDM_ES_EXT_PROTO_STATUS_MAX);
 	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS, 0);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_STATUS,
-				   ESDM_ES_EXT_STATUS_MAX + 1);
+				   ESDM_ES_EXT_PROTO_STATUS_MAX + 1);
 	CHECK_EQ(esdm_es_ext_proto_req_unpack(req, sizeof(req), &type, &length),
 		 -EPROTO);
 

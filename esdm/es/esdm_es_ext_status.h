@@ -24,22 +24,16 @@
 #include <stddef.h>
 #include <time.h>
 
+#include "esdm_es_ext_json.h"
+
 struct json_object;
 
 /*
- * The deepest nesting a status of an external entropy source may have, in
- * objects and arrays one in the other, the status object itself counted. The
- * status becomes a part of the ESDM status, which is no place for a document
- * nested without bounds.
- */
-#define ESDM_ES_EXT_STATUS_MAX_DEPTH 8
-
-/*
  * Parse the status a plugin or a provider reported: @len bytes of text at
- * @text, which have to be one JSON object - well formed, UTF-8, with nothing
- * but white space after it, no NUL in it, no number that is NaN or infinite,
- * no longer than ESDM_ES_EXT_STATUS_MAX bytes and nested no deeper than
- * ESDM_ES_EXT_STATUS_MAX_DEPTH.
+ * @text, which have to be one JSON object - see esdm_es_ext_json_object() -
+ * of no more than @max bytes, nested no deeper than @depth: ESDM_ES_EXT_STATUS_MAX
+ * and ESDM_ES_EXT_STATUS_MAX_DEPTH for a plugin, ESDM_ES_EXT_PROTO_STATUS_MAX
+ * and one level more for a provider, which may wrap the status of its plugin.
  *
  * A status that is none is logged once, *@warned remembering that it was
  * until a valid status comes along; @who names the source in the log.
@@ -48,6 +42,7 @@ struct json_object;
  *	   that is no such object
  */
 struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
+					     size_t max, unsigned int depth,
 					     const char *who, bool *warned);
 
 /*

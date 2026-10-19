@@ -116,7 +116,7 @@ static inline pid_t es_ext_test_serve(const char *serve, const char *plugin,
 				      const char *const *extra,
 				      const char *settings)
 {
-	char *argv[32], uid[16], env[300];
+	char *argv[32], uid[16], env[1100];
 	char *envp[2] = { NULL, NULL };
 	unsigned int n = 0;
 	pid_t pid;

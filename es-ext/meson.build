@@ -1,7 +1,8 @@
 # libesdm_es_ext: what an external entropy source is developed against - the
 # plugin API of esdm_es_ext.h, the provider server serving a plugin on a Unix
 # domain socket, and the loader for plugin libraries. Its only dependencies
-# beyond libc are the ESDM logger and the socket creation of the server.
+# beyond libc are the ESDM logger, the socket creation of the server, and
+# json-c for the status the server answers with.
 es_ext_lib_src = files([
 	'esdm_es_ext_plugin.c',
 	'esdm_es_ext_server.c',
@@ -22,7 +23,7 @@ endif
 esdm_es_ext_lib = both_libraries('esdm_es_ext',
 	[ es_ext_lib_src ],
 	include_directories: include_dirs_es_ext,
-	dependencies: [ dependency('threads'), dl_dep ] + dtls_deps,
+	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps,
 	link_with: esdm_common_static_lib,
 	version: meson.project_version(),
 	soversion: version_array[0],
@@ -44,6 +45,6 @@ esdm_es_ext_serve = executable('esdm-es-ext-serve',
 	c_args: [ '-DESDM_ES_EXT_SERVE_VERSION="' + meson.project_version() + '"' ],
 	include_directories: include_dirs_es_ext,
 	link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
-	dependencies: [ dependency('threads'), dl_dep ] + dtls_deps,
+	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps,
 	install: true
 	)

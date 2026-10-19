@@ -233,10 +233,15 @@ static void test_socket_provider(const char *server, const char *serve,
 	CHECK(es && !strncmp(es, " Name: es-ext-test\n", 19),
 	      "the source is not shown under the name of the provider (%.400s)",
 	      es ? es : "");
-	/* Its status, which esdm-es-ext-serve fetches from the plugin */
+	/*
+	 * Its status: the fields of esdm-es-ext-serve and the status it
+	 * fetches from the plugin
+	 */
 	CHECK(es && strstr(es, "\n Provider properties:\n"
-			       "  Plugin: es-ext-test\n") != NULL,
-	      "the status of the provider is not shown (%.400s)", es ? es : "");
+			       "  Server properties:\n") != NULL &&
+		      strstr(es, "\n  Plugin properties:\n"
+				 "   Plugin: es-ext-test\n") != NULL,
+	      "the status of the provider is not shown (%.600s)", es ? es : "");
 
 	/* The provider goes, and comes back */
 	test_terminate(provider);
@@ -339,9 +344,9 @@ static void test_several(const char *server, const char *serve,
 			 test_dir, i);
 
 	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], serve0,
-					"selftest_ret=-19,name=Quelle A");
+					"selftest_ret=-19;name=Quelle A");
 	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], serve1,
-					"rate=96,name=overridden");
+					"rate=96;name=overridden");
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 

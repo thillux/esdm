@@ -73,6 +73,13 @@ extern "C" {
 #define ESDM_ES_EXT_STATUS_MAX 512
 
 /*
+ * The largest status a provider answers STATUS with: bytes of JSON text. The
+ * provider server of libesdm_es_ext wraps the status of its plugin, of up to
+ * ESDM_ES_EXT_STATUS_MAX bytes, into one of its own - see STATUS below.
+ */
+#define ESDM_ES_EXT_PROTO_STATUS_MAX 1024
+
+/*
  * The longest name a source may declare: bytes of UTF-8, the terminating NUL
  * not counted - see @name of struct esdm_es_ext_plugin
  */
@@ -188,7 +195,8 @@ struct esdm_es_ext_plugin {
  *				ESDM_ES_EXT_PROTO_INFO
  *	u32 length		bytes asked for, 1 to ESDM_ES_EXT_PROTO_MAX_DATA
  *				for GET_ENTROPY; the largest status taken, 1 to
- *				ESDM_ES_EXT_STATUS_MAX, for STATUS; 0 otherwise
+ *				ESDM_ES_EXT_PROTO_STATUS_MAX, for STATUS; 0
+ *				otherwise
  *
  * Response, ESDM_ES_EXT_PROTO_RSP_LEN bytes followed by the data:
  *	u32 magic		ESDM_ES_EXT_PROTO_MAGIC
@@ -209,10 +217,24 @@ struct esdm_es_ext_plugin {
  * A provider closes a connection on a request that breaks it - including one
  * of a type it does not know.
  *
- * STATUS: the status of the source, as @status_json of a plugin reports it -
- * one JSON object, which the ESDM shows in its own status. A provider without
- * one answers -EOPNOTSUPP, one whose status does not fit into the length
- * -EMSGSIZE. The ESDM asks for it when its own status is asked for, at most
+ * STATUS: the status of the source - one JSON object of up to the length
+ * asked for, at most ESDM_ES_EXT_PROTO_STATUS_MAX bytes, nested no deeper than
+ * 9 levels, which the ESDM shows as the "provider" member of the source in its
+ * own status. A provider without one answers -EOPNOTSUPP, one whose status does
+ * not fit into the length -EMSGSIZE. The provider server of libesdm_es_ext
+ * answers with an object of its own:
+ *	{ "server": { ... }, "plugin": ... }
+ * "plugin" being the status @status_json of its plugin reports - null for a
+ * plugin without one, one that fails, or one that is no JSON object of up to
+ * ESDM_ES_EXT_STATUS_MAX bytes, nested no deeper than 8 levels, and for one
+ * that does not fit into the length next to the fields of the server - and
+ * "server" what the server knows itself: its "version", the "plugin_api"
+ * version of its plugin, the "name" and "entropy_rate" it declares in its
+ * answer to INFO (null for none), whether the "dtls" of the connection asking
+ * is on, the "clients" connected and the "client_slots" there are, the
+ * "requests" served, the "selftest" verdict of the plugin ("passed", "failed"
+ * or "none" before the first one) and its "uptime_seconds". A provider written
+ * without the library answers with an object of its own making. The ESDM asks for it when its own status is asked for, at most
  * every 5 seconds - showing the last one in between - and not while a request
  * is in progress, going without it then. A provider older than STATUS closes
  * the connection on it: the ESDM connects again at once, and reports no status

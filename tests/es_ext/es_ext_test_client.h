@@ -45,7 +45,7 @@
 
 /* The largest answer there is */
 #define ES_EXT_TEST_CLIENT_RSP_MAX                                            \
-	(ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA)
+	(ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA)
 
 struct es_ext_test_client {
 	int fd;

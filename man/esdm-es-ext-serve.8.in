@@ -70,9 +70,60 @@ of a user the ESDM accepts can declare any rate this way: the ESDM operator
 who does not want to trust that configures the rate of the source. The rate
 the plugin declares is logged at start up.
 .PP
-The status the plugin reports of itself, if it has a
+It answers the STATUS request of the ESDM, which shows the answer as the
+.B provider
+member of the source in its own status, with one JSON object of up to 1024
+bytes:
+.PP
+.nf
+	{ "server": { ... }, "plugin": ... }
+.fi
+.PP
+.B plugin
+is the status the plugin reports of itself with its
 .I status_json
-callback, is handed to the ESDM, which shows it in its own status.
+callback \- or null for a plugin without one, one failing, one whose status is
+no JSON object of up to 512 bytes, nested no deeper than 8 levels, without NaN
+or infinities, and one that does not fit next to the fields of the server;
+never a status cut short.
+.B server
+holds the fields of
+.B esdm\-es\-ext\-serve
+itself:
+.TP
+.B version
+the version of
+.BR libesdm_es_ext ;
+.TP
+.B plugin_api
+the plugin API version of the plugin;
+.TP
+.BR name ", " entropy_rate
+the name and the entropy rate it declares in its answer to INFO, those of
+.B \-\-name
+and
+.B \-\-entropy_rate
+or of the plugin, null for none;
+.TP
+.B dtls
+whether the connection asking runs DTLS;
+.TP
+.BR clients ", " client_slots
+the clients connected, and how many it serves at a time;
+.TP
+.B requests
+the requests it served, of all clients;
+.TP
+.B selftest
+the verdict of the last self test of the plugin a client asked for:
+.BR passed ,
+.BR failed ,
+or
+.B none
+before the first;
+.TP
+.B uptime_seconds
+the time since it was started.
 .PP
 In turn, only clients running as root or as a user given with
 .B \-\-client_uid

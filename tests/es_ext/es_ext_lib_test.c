@@ -42,6 +42,7 @@
 #include "config.h"
 #include "es_ext_test_plugin.h"
 #include "esdm_es_ext.h"
+#include "esdm_es_ext_json.h"
 #include "esdm_es_ext_proto.h"
 
 static char test_dir[] = "/tmp/esdm-es-ext-lib-test-XXXXXX";
@@ -323,40 +324,113 @@ out:
 	esdm_es_ext_plugin_unload(handle);
 }
 
-/* Ask for the status, at most @length bytes of it */
-static ssize_t test_status(int fd, uint32_t length, uint8_t *rsp,
-			   size_t rsp_size, int32_t *status, const char **text,
-			   size_t *textlen)
+/*
+ * The answer to STATUS of @n bytes in @rsp as JSON object, NULL if it is none -
+ * checked as the ESDM checks the status of a provider
+ */
+static struct json_object *test_status_obj(const uint8_t *rsp, ssize_t n,
+					   uint32_t length)
 {
-	ssize_t n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS, length, rsp,
-				 rsp_size);
+	const char *text = NULL;
+	size_t textlen = 0;
+	int32_t status = 1;
 
-	*status = 1;
-	if (n > 0 && esdm_es_ext_proto_status_unpack(rsp, (size_t)n, length,
-						     status, text, textlen))
-		return -EPROTO;
-	return n;
+	if (n <= 0 || esdm_es_ext_proto_status_unpack(rsp, (size_t)n, length,
+						      &status, &text,
+						      &textlen) ||
+	    status)
+		return NULL;
+	return esdm_es_ext_json_object(text, textlen,
+				       ESDM_ES_EXT_PROTO_STATUS_MAX,
+				       ESDM_ES_EXT_STATUS_MAX_DEPTH + 1);
+}
+
+/* The member @key of @obj, NULL if there is none or it is null */
+static struct json_object *test_member(struct json_object *obj,
+				       const char *key)
+{
+	struct json_object *val = NULL;
+
+	if (!obj || !json_object_object_get_ex(obj, key, &val))
+		return NULL;
+	return val;
+}
+
+/* Does @obj have a member @key that is null? */
+static bool test_member_null(struct json_object *obj, const char *key)
+{
+	struct json_object *val = (struct json_object *)1;
+
+	return obj && json_object_object_get_ex(obj, key, &val) && !val;
+}
+
+static int64_t test_member_int(struct json_object *obj, const char *key)
+{
+	struct json_object *val = test_member(obj, key);
+
+	return val && json_object_is_type(val, json_type_int) ?
+		       json_object_get_int64(val) :
+		       -1;
+}
+
+static const char *test_member_str(struct json_object *obj, const char *key)
+{
+	struct json_object *val = test_member(obj, key);
+
+	return val && json_object_is_type(val, json_type_string) ?
+		       json_object_get_string(val) :
+		       "(none)";
+}
+
+/* Ask for the status, the server fields of it in *@server */
+static struct json_object *test_status_ask(int fd, uint32_t length,
+					   struct json_object **server)
+{
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA +
+		    1];
+	ssize_t n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS, length, rsp,
+				 sizeof(rsp));
+	struct json_object *obj = test_status_obj(rsp, n, length);
+
+	*server = test_member(obj, "server");
+	return obj;
 }
 
 /*
- * STATUS: the status of the plugin as it reports it, or the error it reports
- * instead - and none of a plugin of version 1, whose struct has no callback.
+ * STATUS: the fields of the server - its version, the plugin API version, the
+ * name and the rate it declares, the DTLS of the connection, the clients and
+ * the slots, the requests served, the verdict of the last self test, the
+ * uptime - and the status of the plugin as it reports it, null for none, for a
+ * failing one and for one that is no JSON object of up to
+ * ESDM_ES_EXT_STATUS_MAX bytes; none of a plugin of version 1, whose struct
+ * has no callback. A status that does not fit what is asked for drops the part
+ * of the plugin, never cuts the text short.
  */
 static void test_server_status(const char *good, const char *v1)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
+	static const char *const bad_status[] = {
+		"{\"a\":NaN}", "{\"a\":1e999}", "{\"\xff\":1}", "[1]",
+		"{\"a\":1} x",
+	};
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA +
+		    1];
+	char big[ESDM_ES_EXT_STATUS_MAX + 2];
 	const char *paths[] = { good, v1 };
-	unsigned int i;
+	unsigned int i, j;
+
+	memset(big, 'a', sizeof(big));
+	memcpy(big, "{\"x\":\"", 6);
+	memcpy(big + ESDM_ES_EXT_STATUS_MAX - 2, "\"}", 3);
 
 	for (i = 0; i < 2; i++) {
 		struct esdm_es_ext_plugin_handle *handle;
 		const struct esdm_es_ext_plugin *plugin;
 		struct esdm_es_ext_test_control *ctl;
 		struct esdm_es_ext_server *server;
-		const char *text = NULL;
-		size_t textlen = 0;
+		struct json_object *obj, *fields, *part;
+		int64_t requests, uptime;
+		size_t len_null;
 		pthread_t thread;
-		int32_t status;
 		ssize_t n;
 		int fd;
 
@@ -380,54 +454,151 @@ static void test_server_status(const char *good, const char *v1)
 		if (fd < 0)
 			goto stop;
 
-		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
-				&status, &text, &textlen);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(obj && fields, "the status has no fields of the server");
+		CHECK(!strcmp(test_member_str(fields, "version"), VERSION),
+		      "the server reports another version");
+		CHECK_EQ(test_member_int(fields, "plugin_api"), i ? 1 : 3);
+		CHECK(!strcmp(test_member_str(fields, "name"),
+			      ES_EXT_TEST_NAME),
+		      "the server reports another name");
+		CHECK(test_member_null(fields, "entropy_rate"),
+		      "the server reports a rate without one");
+		CHECK(json_object_is_type(test_member(fields, "dtls"),
+					  json_type_boolean) &&
+			      !json_object_get_boolean(
+				      test_member(fields, "dtls")),
+		      "the server reports DTLS in the clear");
+		CHECK_EQ(test_member_int(fields, "clients"), 1);
+		CHECK_EQ(test_member_int(fields, "client_slots"), 8);
+		CHECK_EQ(test_member_int(fields, "requests"), 0);
+		CHECK(!strcmp(test_member_str(fields, "selftest"), "none"),
+		      "the server reports a self test before one");
+		CHECK(test_member_int(fields, "uptime_seconds") >= 0,
+		      "the server reports no uptime");
+
 		if (i) {
 			/* Version 1: the callback beyond its struct is not */
-			CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
-			CHECK_EQ(status, -EOPNOTSUPP);
+			CHECK(test_member_null(obj, "plugin"),
+			      "a plugin of version 1 reports a status");
 			CHECK_EQ(ctl->status_calls, 0);
+			json_object_put(obj);
 			close(fd);
 			goto stop;
 		}
 
-		/* The status as the plugin writes it, without the NUL */
-		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN +
-				    strlen(ES_EXT_TEST_STATUS));
-		CHECK_EQ(status, 0);
-		CHECK(text && textlen == strlen(ES_EXT_TEST_STATUS) &&
-			      !memcmp(text, ES_EXT_TEST_STATUS, textlen),
-		      "the status is not the plugin's");
+		/* The status as the plugin writes it */
+		part = test_member(obj, "plugin");
+		CHECK(part && !strcmp(test_member_str(part, "plugin"),
+				      "es-ext-test"),
+		      "the status of the plugin is not in it");
 		CHECK_EQ(ctl->last_status_buflen, ESDM_ES_EXT_STATUS_MAX + 1);
+		json_object_put(obj);
 
-		/* One that does not fit what is asked for is not cut short */
-		n = test_status(fd, 8, rsp, sizeof(rsp), &status, &text,
-				&textlen);
-		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
-		CHECK_EQ(status, -EMSGSIZE);
+		/* Requests counted, a self test passed and failed */
+		n = test_request(fd, ESDM_ES_EXT_PROTO_GET_ENTROPY, 16, rsp,
+				 sizeof(rsp));
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 16);
+		n = test_request(fd, ESDM_ES_EXT_PROTO_SELFTEST, 0, rsp,
+				 sizeof(rsp));
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		requests = test_member_int(fields, "requests");
+		CHECK_EQ(requests, 3);
+		CHECK(!strcmp(test_member_str(fields, "selftest"), "passed"),
+		      "the passed self test is not reported");
+		uptime = test_member_int(fields, "uptime_seconds");
+		json_object_put(obj);
+		ctl->selftest_ret = -ENODEV;
+		n = test_request(fd, ESDM_ES_EXT_PROTO_SELFTEST, 0, rsp,
+				 sizeof(rsp));
+		ctl->selftest_ret = 0;
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(!strcmp(test_member_str(fields, "selftest"), "failed"),
+		      "the failed self test is not reported");
+		CHECK_EQ(test_member_int(fields, "requests"), requests + 2);
+		json_object_put(obj);
 
-		/* The error of the plugin */
+		/* The uptime grows */
+		usleep(1100000);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(test_member_int(fields, "uptime_seconds") > uptime,
+		      "the uptime does not grow");
+		json_object_put(obj);
+
+		/* No status of the plugin: the fields of the server alone */
 		ctl->status_ret = -ENODEV;
-		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
-				&status, &text, &textlen);
-		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
-		CHECK_EQ(status, -ENODEV);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(fields && test_member_null(obj, "plugin"),
+		      "a failing plugin reports a status");
+		len_null = strlen(json_object_to_json_string_ext(
+			obj, JSON_C_TO_STRING_PLAIN |
+				     JSON_C_TO_STRING_NOSLASHESCAPE));
+		json_object_put(obj);
 		ctl->status_ret = 0;
 
-		/* A status without its NUL is no status */
+		/* What is no status: null, the fields there all the same */
 		ctl->status_unterminated = 1;
-		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
-				&status, &text, &textlen);
-		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
-		CHECK_EQ(status, -EMSGSIZE);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(fields && test_member_null(obj, "plugin"),
+		      "an unterminated status is taken");
+		json_object_put(obj);
 		ctl->status_unterminated = 0;
+		for (j = 0; j < sizeof(bad_status) / sizeof(bad_status[0]);
+		     j++) {
+			ctl->status_text = bad_status[j];
+			obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+					      &fields);
+			CHECK(fields && test_member_null(obj, "plugin"),
+			      "the status %u that is none is taken", j);
+			json_object_put(obj);
+		}
 
-		/* Nor is an empty one */
-		ctl->status_text = "";
-		n = test_status(fd, ESDM_ES_EXT_STATUS_MAX, rsp, sizeof(rsp),
-				&status, &text, &textlen);
-		CHECK_EQ(status, -ENODATA);
+		/* The largest status of a plugin fits, one byte more does not */
+		ctl->status_text = big;
+		big[ESDM_ES_EXT_STATUS_MAX + 1] = '\0';
+		memcpy(big + ESDM_ES_EXT_STATUS_MAX - 2, "\"}", 3);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(json_object_is_type(test_member(obj, "plugin"),
+					  json_type_object),
+		      "the largest status of a plugin does not fit");
+		json_object_put(obj);
+		memcpy(big + ESDM_ES_EXT_STATUS_MAX - 2, "a\"}", 4);
+		obj = test_status_ask(fd, ESDM_ES_EXT_PROTO_STATUS_MAX,
+				      &fields);
+		CHECK(fields && test_member_null(obj, "plugin"),
+		      "an oversized status of a plugin is taken");
+		json_object_put(obj);
 		ctl->status_text = NULL;
+
+		/*
+		 * Room for the fields of the server only: the plugin left out
+		 * rather than cut short - and not even them: none at all
+		 */
+		obj = test_status_ask(fd, (uint32_t)len_null + 2, &fields);
+		CHECK(fields && test_member_null(obj, "plugin"),
+		      "the status of the plugin is not left out");
+		json_object_put(obj);
+		n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS, 8, rsp,
+				 sizeof(rsp));
+		CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+		{
+			const char *text;
+			size_t textlen;
+			int32_t status = 0;
+
+			if (n > 0)
+				esdm_es_ext_proto_status_unpack(
+					rsp, (size_t)n, 8, &status, &text,
+					&textlen);
+			CHECK_EQ(status, -EMSGSIZE);
+		}
 
 		/* The connection serves entropy as before */
 		n = test_request(fd, ESDM_ES_EXT_PROTO_GET_ENTROPY, 16, rsp,
@@ -436,7 +607,8 @@ static void test_server_status(const char *good, const char *v1)
 
 		/* A STATUS for more than there can be closes the connection */
 		n = test_request(fd, ESDM_ES_EXT_PROTO_STATUS,
-				 ESDM_ES_EXT_STATUS_MAX + 1, rsp, sizeof(rsp));
+				 ESDM_ES_EXT_PROTO_STATUS_MAX + 1, rsp,
+				 sizeof(rsp));
 		CHECK(n <= 0, "a STATUS for too much was answered");
 		close(fd);
 

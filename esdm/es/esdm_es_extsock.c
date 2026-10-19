@@ -514,7 +514,7 @@ static int esdm_es_extsock_ms_left(const struct timespec *deadline)
  */
 static int esdm_es_extsock_startdtls_locked(struct esdm_es_extsock *sock)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	struct timespec deadline;
 	const uint8_t *data;
 	struct esdm_dtls *dtls;
@@ -544,9 +544,10 @@ static int esdm_es_extsock_startdtls_locked(struct esdm_es_extsock *sock)
 		}
 	}
 
-	ret = esdm_dtls_alloc(
-		sock->dtls_ctx, sock->fd,
-		ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA, &dtls);
+	ret = esdm_dtls_alloc(sock->dtls_ctx, sock->fd,
+			      ESDM_ES_EXT_PROTO_RSP_LEN +
+				      ESDM_ES_EXT_PROTO_MAX_RSP_DATA,
+			      &dtls);
 	if (ret) {
 		esdm_es_extsock_disconnect_locked(sock);
 		return ret;
@@ -674,7 +675,7 @@ static void esdm_es_extsock_name_locked(struct esdm_es_extsock *sock,
  */
 static int esdm_es_extsock_info_locked(struct esdm_es_extsock *sock)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	const char *name;
 	size_t namelen;
 	uint32_t rate;
@@ -823,7 +824,7 @@ static bool esdm_es_extsock_ensure_locked(struct esdm_es_extsock *sock)
 
 /*
  * Send a request of @type for @length bytes and receive the answer into @rsp,
- * which has room for ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA
+ * which has room for ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA
  * bytes. *@sent tells whether the request went out - one that did not found
  * the connection gone before it. Caller must hold the mutex of @sock (write
  * lock) with the provider connected.
@@ -893,9 +894,10 @@ static ssize_t esdm_es_extsock_request_locked(struct esdm_es_extsock *sock,
 
 		if (sock->dtls) {
 			/* A message larger than any answer is -EMSGSIZE */
-			n = esdm_dtls_recv(sock->dtls, rsp,
-					   ESDM_ES_EXT_PROTO_RSP_LEN +
-						   ESDM_ES_EXT_PROTO_MAX_DATA);
+			n = esdm_dtls_recv(
+				sock->dtls, rsp,
+				ESDM_ES_EXT_PROTO_RSP_LEN +
+					ESDM_ES_EXT_PROTO_MAX_RSP_DATA);
 			if (n == -EAGAIN)
 				continue;
 			if (n < 0)
@@ -908,7 +910,8 @@ static ssize_t esdm_es_extsock_request_locked(struct esdm_es_extsock *sock,
 		 * not fit, which is how one larger than any answer is told.
 		 */
 		n = recv(sock->fd, rsp,
-			 ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA,
+			 ESDM_ES_EXT_PROTO_RSP_LEN +
+				 ESDM_ES_EXT_PROTO_MAX_RSP_DATA,
 			 MSG_DONTWAIT | MSG_TRUNC);
 		if (n < 0 && (errno == EAGAIN || errno == EINTR))
 			continue;
@@ -920,8 +923,8 @@ static ssize_t esdm_es_extsock_request_locked(struct esdm_es_extsock *sock,
 			n = -ECONNRESET;
 			goto err;
 		}
-		if ((size_t)n >
-		    ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA) {
+		if ((size_t)n > ESDM_ES_EXT_PROTO_RSP_LEN +
+					ESDM_ES_EXT_PROTO_MAX_RSP_DATA) {
 			n = -EPROTO;
 			goto err;
 		}
@@ -1054,7 +1057,7 @@ static void esdm_es_extsock_get(struct esdm_es_extsock *sock,
 				struct entropy_es *eb_es,
 				uint32_t requested_bits)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	uint32_t claimed, len = requested_bits >> 3;
 	char label[ESDM_ES_EXT_LABEL_SIZE];
 	const uint8_t *data;
@@ -1128,7 +1131,7 @@ out:
  */
 static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	char label[ESDM_ES_EXT_LABEL_SIZE];
 	const uint8_t *data;
 	uint32_t claimed;
@@ -1194,7 +1197,7 @@ out:
 static struct json_object *
 esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	struct json_object *obj = NULL;
 	time_t now = esdm_es_extsock_now();
 	bool retried = false, sent;
@@ -1209,7 +1212,8 @@ esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 
 again:
 	n = esdm_es_extsock_request_locked(sock, ESDM_ES_EXT_PROTO_STATUS,
-					   ESDM_ES_EXT_STATUS_MAX, rsp, &sent);
+					   ESDM_ES_EXT_PROTO_STATUS_MAX, rsp,
+					   &sent);
 	if (n < 0 && !sent) {
 		if (retried)
 			goto out;
@@ -1256,8 +1260,8 @@ again:
 	}
 
 	if (esdm_es_ext_proto_status_unpack(rsp, (size_t)n,
-					    ESDM_ES_EXT_STATUS_MAX, &status,
-					    &text, &textlen)) {
+					    ESDM_ES_EXT_PROTO_STATUS_MAX,
+					    &status, &text, &textlen)) {
 		/* A connection that brings such things is not used again */
 		esdm_es_extsock_drop_locked(sock);
 		esdm_logger(
@@ -1275,8 +1279,11 @@ again:
 		goto out;
 	}
 
-	obj = esdm_es_ext_status_parse(text, textlen, sock->who,
-				       &sock->status_warned);
+	/* One level deeper than a plugin: the server may wrap that of its plugin */
+	obj = esdm_es_ext_status_parse(text, textlen,
+				       ESDM_ES_EXT_PROTO_STATUS_MAX,
+				       ESDM_ES_EXT_STATUS_MAX_DEPTH + 1,
+				       sock->who, &sock->status_warned);
 
 out:
 	memset_secure(rsp, 0, sizeof(rsp));
@@ -1373,7 +1380,7 @@ static bool esdm_es_extsock_active(struct esdm_es_extsock *sock)
  */
 static int esdm_es_extsock_selftest_locked(struct esdm_es_extsock *sock)
 {
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	char label[ESDM_ES_EXT_LABEL_SIZE];
 	uint32_t bits;
 	const uint8_t *data;

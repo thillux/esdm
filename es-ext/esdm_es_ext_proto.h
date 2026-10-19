@@ -44,9 +44,18 @@
  */
 #define ESDM_ES_EXT_PROTO_MAX_ERRNO 4095
 
-/* A status fits where the data does: the buffers of both are the same */
-#if ESDM_ES_EXT_STATUS_MAX > ESDM_ES_EXT_PROTO_MAX_DATA
-#error "A status has to fit into the response buffer"
+/*
+ * The largest data an answer carries: the data of a GET_ENTROPY, or a status -
+ * what the buffers of an answer have room for
+ */
+#define ESDM_ES_EXT_PROTO_MAX_RSP_DATA                                         \
+	(ESDM_ES_EXT_PROTO_STATUS_MAX > ESDM_ES_EXT_PROTO_MAX_DATA ?           \
+		 ESDM_ES_EXT_PROTO_STATUS_MAX :                                \
+		 ESDM_ES_EXT_PROTO_MAX_DATA)
+
+/* The status of a plugin fits into the one of its provider */
+#if ESDM_ES_EXT_STATUS_MAX > ESDM_ES_EXT_PROTO_STATUS_MAX
+#error "The status of a plugin has to fit into the status of a provider"
 #endif
 
 static inline void esdm_es_ext_put_le16(uint8_t *p, uint16_t v)
@@ -165,9 +174,8 @@ static inline bool esdm_es_ext_name_valid(const char *name, size_t len)
  */
 static inline const char *esdm_es_ext_name_or_null(const char *name)
 {
-	if (!name ||
-	    !esdm_es_ext_name_valid(name,
-				    strnlen(name, ESDM_ES_EXT_NAME_MAX + 1)))
+	if (!name || !esdm_es_ext_name_valid(
+			     name, strnlen(name, ESDM_ES_EXT_NAME_MAX + 1)))
 		return NULL;
 	return name;
 }
@@ -187,7 +195,7 @@ static inline bool esdm_es_ext_proto_length_valid(uint16_t type,
 						  uint32_t length)
 {
 	if (type == ESDM_ES_EXT_PROTO_STATUS)
-		return length >= 1 && length <= ESDM_ES_EXT_STATUS_MAX;
+		return length >= 1 && length <= ESDM_ES_EXT_PROTO_STATUS_MAX;
 
 	if (type != ESDM_ES_EXT_PROTO_GET_ENTROPY)
 		return length == 0;
@@ -258,7 +266,7 @@ static inline uint32_t esdm_es_ext_proto_info_pack(uint8_t *out, uint32_t rate,
 
 /*
  * Encode a response into @out, which has room for ESDM_ES_EXT_PROTO_RSP_LEN +
- * ESDM_ES_EXT_PROTO_MAX_DATA bytes. @data of @datalen bytes is appended for a
+ * ESDM_ES_EXT_PROTO_MAX_RSP_DATA bytes. @data of @datalen bytes is appended for a
  * GET_ENTROPY or a STATUS answered with @status 0 only - for a STATUS, the JSON
  * text without its NUL. @entropy_bits is sent for a GET_ENTROPY only.
  *
@@ -309,8 +317,8 @@ static inline int esdm_es_ext_proto_rsp_unpack(const uint8_t *in, size_t len,
 	*data = NULL;
 	*entropy_bits = 0;
 
-	if (type == ESDM_ES_EXT_PROTO_STATUS || type == ESDM_ES_EXT_PROTO_INFO ||
-	    len < ESDM_ES_EXT_PROTO_RSP_LEN ||
+	if (type == ESDM_ES_EXT_PROTO_STATUS ||
+	    type == ESDM_ES_EXT_PROTO_INFO || len < ESDM_ES_EXT_PROTO_RSP_LEN ||
 	    esdm_es_ext_get_le32(in) != ESDM_ES_EXT_PROTO_MAGIC ||
 	    esdm_es_ext_get_le16(in + 4) != ESDM_ES_EXT_PROTO_VERSION ||
 	    esdm_es_ext_get_le16(in + 6) != type)

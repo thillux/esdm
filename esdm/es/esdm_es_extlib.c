@@ -694,7 +694,9 @@ esdm_es_extlib_status_locked(struct esdm_es_extlib *lib)
 		return NULL;
 	}
 
-	return esdm_es_ext_status_parse(text, (size_t)len, lib->who,
+	return esdm_es_ext_status_parse(text, (size_t)len,
+					ESDM_ES_EXT_STATUS_MAX,
+					ESDM_ES_EXT_STATUS_MAX_DEPTH, lib->who,
 					&lib->status_warned);
 }
 

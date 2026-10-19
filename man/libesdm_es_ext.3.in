@@ -338,8 +338,8 @@ A request is 12 bytes: the magic
 = 5) and the length (u32: the bytes asked for, 1 to
 .B ESDM_ES_EXT_PROTO_MAX_DATA
 = 512, for GET_ENTROPY; the largest status taken, 1 to
-.B ESDM_ES_EXT_STATUS_MAX
-= 512, for STATUS; 0 for SELFTEST and INFO).
+.B ESDM_ES_EXT_PROTO_STATUS_MAX
+= 1024, for STATUS; 0 for SELFTEST and INFO).
 .PP
 A response is 16 bytes: magic, version and type as in the request, the status
 (s32: 0 or a negative errno) and the entropy of the data (u32, at most 8 times
@@ -355,16 +355,60 @@ A message that breaks any of this ends the connection, and so does a request
 of a type the provider does not know.
 .SS STATUS
 The ESDM asks the provider for its status when its own status is asked for,
-at most every 5 seconds, and not while another request is in progress. A
-provider whose plugin has
-no
-.I status_json
-answers
+at most every 5 seconds, and not while another request is in progress. The
+status is one JSON object of up to the length asked for, at most
+.B ESDM_ES_EXT_PROTO_STATUS_MAX
+(1024) bytes, nested no deeper than 9 levels; the ESDM checks that it is a
+well-formed JSON object, without NaN or infinities, before it shows it as the
+.B provider
+member of the source. A provider with no status answers
 .BR \-EOPNOTSUPP ,
 one whose status does not fit into the length
 .BR \-EMSGSIZE .
-The ESDM checks that the status is a well-formed JSON object before it shows
-it. A provider older than STATUS closes the connection on it, as on any
+.PP
+The provider server of this library \- and so
+.BR esdm\-es\-ext\-serve (8)
+\- answers with an object of its own,
+.PP
+.nf
+	{ "server": { ... }, "plugin": ... }
+.fi
+.PP
+.B plugin
+being the status
+.I status_json
+of its plugin reports \- asked for into a buffer of
+.B ESDM_ES_EXT_STATUS_MAX
+(512) bytes and the NUL, and checked as the ESDM checks the status of a plugin
+it loads \- or null for none, a failing one, one that is no such object, and
+one that does not fit into the length next to the fields of the server, which
+are never cut short:
+.BR version ,
+.BR plugin_api ,
+the
+.B name
+and the
+.B entropy_rate
+it declares in its answer to INFO,
+.B dtls
+of the connection asking, the
+.B clients
+connected and the
+.B client_slots
+there are, the
+.B requests
+served, the
+.B selftest
+verdict of the plugin and the
+.B uptime_seconds
+\- see
+.BR esdm\-es\-ext\-serve (8).
+So a STATUS of a provider of this library is answered whether its plugin has a
+status or not. A provider written without the library answers with an object
+of its own making, within the same bounds.
+.PP
+The answer travels as one message \- with DTLS, as one record, as it is far
+smaller than the part a record carries. A provider older than STATUS closes the connection on it, as on any
 request it does not know: the ESDM connects again at once, still crediting the
 provider, and does not ask again until it connects the next time. A connection
 found closed when STATUS is sent, as one to a provider restarted meanwhile, is

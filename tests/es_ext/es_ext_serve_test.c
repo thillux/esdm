@@ -28,6 +28,13 @@
  * refuses to start with a --name that is no valid name. A request that breaks
  * the protocol closes the connection.
  *
+ * It answers STATUS with fields of its own next to the status of its plugin,
+ * in the clear and inside a DTLS session: its version, the plugin API, the
+ * name and the rate it declares, the DTLS of the connection, its clients and
+ * slots, the requests served, the self test verdict and its uptime - and the
+ * status of the plugin as it reports it, or null for none, an error, a status
+ * that is no valid JSON object and one that is too large, never cut short.
+ *
  * Usage: es_ext_serve_test <esdm-es-ext-serve> <test plugin> <bad version>
  *			    <rated plugin>
  */
@@ -46,9 +53,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <json-c/json.h>
+
 #include "common_test.h"
 #include "es_ext_test_client.h"
+#include "es_ext_test_util.h"
 #include "es_ext_test_plugin.h"
+#include "esdm_es_ext.h"
+#include "esdm_es_ext_json.h"
 #include "esdm_es_ext_proto.h"
 
 static char test_dir[] = "/tmp/esdm-es-ext-serve-test-XXXXXX";
@@ -418,6 +430,286 @@ static void test_info(const char *serve, const char *plugin,
 	}
 }
 
+/* The answer to STATUS on @c as JSON object, NULL if it is none */
+static struct json_object *test_status_of(struct es_ext_test_client *c)
+{
+	uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+	const char *text = NULL;
+	size_t textlen = 0;
+	int32_t status = 1;
+	ssize_t n;
+
+	n = es_ext_test_client_request(c, ESDM_ES_EXT_PROTO_STATUS,
+				       ESDM_ES_EXT_PROTO_STATUS_MAX, rsp,
+				       sizeof(rsp));
+	if (n <= 0 ||
+	    esdm_es_ext_proto_status_unpack(rsp, (size_t)n,
+					    ESDM_ES_EXT_PROTO_STATUS_MAX,
+					    &status, &text, &textlen) ||
+	    status) {
+		printf("no status: answer of %zd bytes, status %d\n", n,
+		       (int)status);
+		return NULL;
+	}
+	return esdm_es_ext_json_object(text, textlen,
+				       ESDM_ES_EXT_PROTO_STATUS_MAX,
+				       ESDM_ES_EXT_STATUS_MAX_DEPTH + 1);
+}
+
+static struct json_object *test_field(struct json_object *obj, const char *key)
+{
+	struct json_object *server = NULL, *val = NULL;
+
+	if (!json_object_object_get_ex(obj, "server", &server) ||
+	    !json_object_object_get_ex(server, key, &val))
+		return NULL;
+	return val;
+}
+
+static int64_t test_field_int(struct json_object *obj, const char *key)
+{
+	struct json_object *val = test_field(obj, key);
+
+	return val && json_object_is_type(val, json_type_int) ?
+		       json_object_get_int64(val) :
+		       -1;
+}
+
+static bool test_field_is(struct json_object *obj, const char *key,
+			  const char *want)
+{
+	struct json_object *val = test_field(obj, key);
+
+	return val && json_object_is_type(val, json_type_string) &&
+	       !strcmp(json_object_get_string(val), want);
+}
+
+static bool test_field_bool(struct json_object *obj, const char *key,
+			    bool want)
+{
+	struct json_object *val = test_field(obj, key);
+
+	return val && json_object_is_type(val, json_type_boolean) &&
+	       json_object_get_boolean(val) == want;
+}
+
+/* The "plugin" part: its member @key is @want - or it is null for NULL */
+static bool test_plugin_part(struct json_object *obj, const char *key,
+			     const char *want)
+{
+	struct json_object *plugin = (struct json_object *)1, *val = NULL;
+
+	if (!obj || !json_object_object_get_ex(obj, "plugin", &plugin))
+		return false;
+	if (!want)
+		return plugin == NULL;
+	return plugin && json_object_object_get_ex(plugin, key, &val) && val &&
+	       !strcmp(json_object_get_string(val), want);
+}
+
+static void test_print(const char *what, struct json_object *obj)
+{
+	printf("%s: %s\n", what,
+	       obj ? json_object_to_json_string_ext(obj,
+						    JSON_C_TO_STRING_PLAIN) :
+		     "(none)");
+}
+
+/*
+ * The fields of the server, as --name, --entropy_rate and the plugin have
+ * them, in the clear and inside the DTLS session the server offers, and in the
+ * clear with --no_dtls: the DTLS of the connection asking, the clients coming
+ * and going, the requests, the self test verdict, the uptime growing.
+ */
+static void test_status_fields(const char *serve, const char *plugin,
+			       const char *rated)
+{
+	const char *const named[] = { "--name", "Feld", "--entropy_rate", "77",
+				      NULL };
+	const char *const no_dtls[] = { "--no_dtls", NULL };
+	struct es_ext_test_client c, c2;
+	struct json_object *obj;
+	int64_t requests, uptime;
+	unsigned int round;
+	pid_t pid;
+
+	/* Offering DTLS - asked for or not - and with --no_dtls */
+	for (round = 0; round < 3; round++) {
+		bool ask = round == 1, dtls = false;
+		uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+
+#ifdef ESDM_DTLS
+		dtls = ask;
+#endif
+		pid = es_ext_test_serve(serve, plugin, test_socket,
+					round == 2 ? no_dtls : named, NULL);
+		CHECK(pid > 0, "the provider did not come up");
+		if (pid <= 0)
+			continue;
+
+		/* --no_dtls: asked for, refused - in the clear */
+		if (round == 2)
+			CHECK(es_ext_test_client_open(&c, test_socket, true) ==
+				      -EOPNOTSUPP,
+			      "DTLS is offered with --no_dtls");
+		CHECK_EQ(es_ext_test_client_open(&c, test_socket, dtls), 0);
+
+		obj = test_status_of(&c);
+		CHECK(obj != NULL, "round %u: no status", round);
+		test_print("status", obj);
+		CHECK(test_field_is(obj, "version", VERSION),
+		      "the server reports another version");
+		CHECK_EQ(test_field_int(obj, "plugin_api"),
+			 ESDM_ES_EXT_PLUGIN_VERSION);
+		CHECK(test_field_is(obj, "name",
+				    round == 2 ? ES_EXT_TEST_NAME : "Feld"),
+		      "round %u: the server reports another name", round);
+		if (round == 2)
+			CHECK(test_field(obj, "entropy_rate") == NULL,
+			      "the server reports a rate without one");
+		else
+			CHECK_EQ(test_field_int(obj, "entropy_rate"), 77);
+		CHECK(test_field_bool(obj, "dtls", dtls),
+		      "round %u: the DTLS of the connection is not reported",
+		      round);
+		CHECK_EQ(test_field_int(obj, "clients"), 1);
+		CHECK_EQ(test_field_int(obj, "client_slots"), 8);
+		CHECK(test_field_is(obj, "selftest", "none"),
+		      "a self test is reported before one");
+		CHECK(test_plugin_part(obj, "plugin", ES_EXT_TEST_NAME),
+		      "the status of the plugin is not in it");
+		requests = test_field_int(obj, "requests");
+		uptime = test_field_int(obj, "uptime_seconds");
+		CHECK(requests >= 0 && uptime >= 0,
+		      "no requests or uptime reported");
+		json_object_put(obj);
+
+		/* Requests, a self test, another client, time */
+		es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_GET_ENTROPY,
+					   32, rsp, sizeof(rsp));
+		es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_GET_ENTROPY,
+					   32, rsp, sizeof(rsp));
+		es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					   rsp, sizeof(rsp));
+		CHECK_EQ(es_ext_test_client_open(&c2, test_socket, false), 0);
+		es_ext_test_client_request(&c2, ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					   rsp, sizeof(rsp));
+		es_ext_test_sleep_ms(1100);
+		obj = test_status_of(&c);
+		CHECK_EQ(test_field_int(obj, "requests"), requests + 5);
+		CHECK_EQ(test_field_int(obj, "clients"), 2);
+		CHECK(test_field_is(obj, "selftest", "passed"),
+		      "the self test is not reported");
+		CHECK(test_field_int(obj, "uptime_seconds") > uptime,
+		      "the uptime does not grow");
+		CHECK(test_field_bool(obj, "dtls", dtls),
+		      "the DTLS of the connection changed");
+		json_object_put(obj);
+
+		/* The other client gone: noticed by the next round */
+		es_ext_test_client_close(&c2);
+		es_ext_test_sleep_ms(100);
+		obj = test_status_of(&c);
+		CHECK_EQ(test_field_int(obj, "clients"), 1);
+		json_object_put(obj);
+
+		es_ext_test_client_close(&c);
+		es_ext_test_terminate(pid);
+	}
+
+	/* The name and the rate of the plugin, a self test failing */
+	pid = es_ext_test_serve(serve, rated, test_socket, NULL,
+				"selftest_ret=-19");
+	CHECK(pid > 0, "the provider of the rated plugin did not come up");
+	if (pid > 0) {
+		uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+
+		CHECK_EQ(es_ext_test_client_open(&c, test_socket, false), 0);
+		es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					   rsp, sizeof(rsp));
+		obj = test_status_of(&c);
+		CHECK(test_field_is(obj, "name", ES_EXT_TEST_RATED_NAME) &&
+			      test_field_int(obj, "entropy_rate") ==
+				      ES_EXT_TEST_RATED_RATE,
+		      "the name and the rate of the plugin are not reported");
+		CHECK(test_field_is(obj, "selftest", "failed"),
+		      "the failed self test is not reported");
+		json_object_put(obj);
+		es_ext_test_client_close(&c);
+		es_ext_test_terminate(pid);
+	}
+}
+
+/*
+ * The status of the plugin within the one of the server, in the clear and
+ * inside a DTLS session: a JSON object as it reports it - the largest one of
+ * ESDM_ES_EXT_STATUS_MAX bytes included - and null for none, an error, a
+ * status with NaN or that is no UTF-8, and one too large.
+ */
+static void test_status_plugin(const char *serve, const char *plugin)
+{
+	static const struct {
+		const char *settings;
+		const char *want;
+	} cases[] = {
+		{ NULL, ES_EXT_TEST_NAME },
+		{ "status={\"plugin\":\"anders\",\"n\":[1,2]}", "anders" },
+		{ "status_size=512", "" },
+		{ "status_ret=-95", NULL },
+		{ "status_ret=-5", NULL },
+		{ "status={\"plugin\":NaN}", NULL },
+		{ "status={\"plugin\":\"\xff\"}", NULL },
+		{ "status={\"plugin\":1} x", NULL },
+		{ "status_size=513", NULL },
+	};
+	struct es_ext_test_client c;
+	struct json_object *obj, *val;
+	unsigned int i, dtls;
+	pid_t pid;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		pid = es_ext_test_serve(serve, plugin, test_socket, NULL,
+					cases[i].settings);
+		CHECK(pid > 0, "the provider of case %u did not come up", i);
+		if (pid <= 0)
+			continue;
+
+		for (dtls = 0; dtls < 2; dtls++) {
+#ifndef ESDM_DTLS
+			if (dtls)
+				continue;
+#endif
+			CHECK_EQ(es_ext_test_client_open(&c, test_socket,
+							 dtls),
+				 0);
+			obj = test_status_of(&c);
+			CHECK(obj && test_field_bool(obj, "dtls", dtls),
+			      "case %u: the fields of the server are missing",
+			      i);
+			if (!cases[i].want)
+				CHECK(test_plugin_part(obj, NULL, NULL),
+				      "case %u: a status that is none is taken",
+				      i);
+			else if (!cases[i].want[0])
+				CHECK(json_object_object_get_ex(obj, "plugin",
+								&val) &&
+					      json_object_is_type(
+						      val, json_type_object),
+				      "case %u: the largest status is not taken",
+				      i);
+			else
+				CHECK(test_plugin_part(obj, "plugin",
+						       cases[i].want),
+				      "case %u: the status of the plugin is not taken",
+				      i);
+			json_object_put(obj);
+			es_ext_test_client_close(&c);
+		}
+
+		es_ext_test_terminate(pid);
+	}
+}
+
 static void test_refusals(const char *serve, const char *plugin,
 			  const char *bad_version)
 {
@@ -471,6 +763,8 @@ int main(int argc, char *argv[])
 	test_default_clients(argv[1], argv[2]);
 	test_no_dtls(argv[1], argv[2]);
 	test_info(argv[1], argv[2], argv[4]);
+	test_status_fields(argv[1], argv[2], argv[4]);
+	test_status_plugin(argv[1], argv[2]);
 
 	unlink(test_socket);
 	rmdir(test_dir);

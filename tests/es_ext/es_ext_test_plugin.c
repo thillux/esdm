@@ -82,14 +82,14 @@ extern struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN;
 static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
 {
 	const char *env = getenv(ES_EXT_TEST_PLUGIN_ENV);
-	char settings[256], *setting, *save = NULL;
+	char settings[1024], *setting, *save = NULL;
 
 	if (!env || strlen(env) >= sizeof(settings))
 		return;
 	memcpy(settings, env, strlen(env) + 1);
 
-	for (setting = strtok_r(settings, ",", &save); setting;
-	     setting = strtok_r(NULL, ",", &save)) {
+	for (setting = strtok_r(settings, ";", &save); setting;
+	     setting = strtok_r(NULL, ";", &save)) {
 		char *val = strchr(setting, '=');
 		long n;
 
@@ -114,6 +114,23 @@ static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
 			ctl->status_delay_ms = (unsigned int)n;
 		else if (!strcmp(setting, "rate"))
 			ctl->entropy_rate = (uint32_t)n;
+		else if (!strcmp(setting, "status_ret"))
+			ctl->status_ret = (int)n;
+		else if (!strcmp(setting, "status")) {
+			snprintf(ctl->status_buf, sizeof(ctl->status_buf), "%s",
+				 val);
+			ctl->status_text = ctl->status_buf;
+		} else if (!strcmp(setting, "status_size")) {
+			/* A status of this many bytes: {"x":"aaa..."} */
+			size_t size = (size_t)n;
+
+			if (size < 8 || size >= sizeof(ctl->status_buf))
+				continue;
+			memset(ctl->status_buf, 'a', size);
+			memcpy(ctl->status_buf, "{\"x\":\"", 6);
+			memcpy(ctl->status_buf + size - 2, "\"}", 3);
+			ctl->status_text = ctl->status_buf;
+		}
 	}
 }
 

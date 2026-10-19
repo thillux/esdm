@@ -204,7 +204,7 @@ static void *test_evil_run(void *arg)
 		for (;;) {
 			uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 			uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN +
-				    ESDM_ES_EXT_PROTO_MAX_DATA + 8];
+				    ESDM_ES_EXT_PROTO_MAX_RSP_DATA + 8];
 			uint8_t data[ESDM_ES_EXT_PROTO_MAX_DATA + 8];
 			uint32_t length;
 			uint16_t type;
@@ -390,17 +390,23 @@ static void test_status_expire(void)
 }
 
 /*
- * The "provider" member of the state, NULL if there is none - the status
- * kept, if it is recent
+ * The status of the plugin a provider of the library serves - the "plugin"
+ * member of the "provider" member of the state, next to the fields of the
+ * server - or the "provider" member itself for a provider of the test; NULL
+ * if there is none. The status kept, if it is recent.
  */
 static struct json_object *test_provider_kept(struct json_object **state)
 {
-	struct json_object *provider = NULL;
+	struct json_object *provider = NULL, *plugin = NULL;
 
 	*state = es_state_get(ES);
 	if (!json_object_object_get_ex(*state, "provider", &provider))
 		return NULL;
-	return provider;
+	if (!json_object_object_get_ex(provider, "server", NULL))
+		return provider;
+	if (!json_object_object_get_ex(provider, "plugin", &plugin))
+		return NULL;
+	return plugin;
 }
 
 /* The same, the provider asked for its status anew */
@@ -618,7 +624,8 @@ static void test_reconnect(void)
 static void test_status(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
-	struct json_object *state, *provider;
+	struct json_object *state, *provider, *server, *val = NULL;
+	char big[ESDM_ES_EXT_STATUS_MAX + 2];
 	unsigned int calls = ctl->status_calls;
 	char txt[2048];
 
@@ -629,7 +636,8 @@ static void test_status(void)
 	      "the status is not the provider's: %s", es_state_print(state));
 	CHECK_EQ(ctl->status_calls, calls + 1);
 	CHECK_EQ(esdm_status_txt(state, NULL, txt, sizeof(txt)), 0);
-	CHECK(strstr(txt, "\nProvider properties:\n Plugin: es-ext-test\n"),
+	CHECK(strstr(txt, "\nProvider properties:\n Server properties:\n") &&
+		      strstr(txt, "\n Plugin properties:\n  Plugin: es-ext-test\n"),
 	      "the text has no status of the provider: %s", txt);
 	json_object_put(state);
 
@@ -647,6 +655,31 @@ static void test_status(void)
 	CHECK(!provider, "a status that is no object is taken");
 	CHECK(es_state_str_has(state, "status", "connected (uid"),
 	      "an invalid status took the connection");
+	json_object_put(state);
+	ctl->status_text = NULL;
+
+	/*
+	 * The fields of the server arrive whatever the plugin reports: the
+	 * DTLS of the connection, and the status of the plugin left out -
+	 * not cut short - when it is larger than a status of a plugin may be
+	 */
+	memset(big, 'a', sizeof(big));
+	memcpy(big, "{\"x\":\"", 6);
+	memcpy(big + ESDM_ES_EXT_STATUS_MAX - 1, "\"}", 3);
+	ctl->status_text = big;
+	provider = test_provider(&state);
+	CHECK(!provider, "a status too large is taken");
+	CHECK(json_object_object_get_ex(state, "provider", &server) &&
+		      json_object_object_get_ex(server, "server", &server) &&
+		      json_object_object_get_ex(server, "dtls", &val) &&
+		      json_object_is_type(val, json_type_boolean),
+	      "the fields of the server are gone with the status: %s",
+	      es_state_print(state));
+#ifdef ESDM_DTLS
+	CHECK(json_object_get_boolean(val),
+	      "the server does not report the DTLS of the connection: %s",
+	      es_state_print(state));
+#endif
 	json_object_put(state);
 	ctl->status_text = NULL;
 

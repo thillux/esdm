@@ -109,7 +109,7 @@ if get_option('esdm-es-ext').enabled()
 		'es_ext_lib_test.c',
 		include_directories: include_dirs_es_ext_test,
 		link_with: esdm_es_ext_lib.get_static_lib(),
-		dependencies: [ dependency('threads'), dl_dep ],
+		dependencies: [ dependency('threads'), dl_dep, json_c_dep ],
 	)
 	test('External ES library', es_ext_lib_test,
 		args: es_ext_plugin_args, depends: es_ext_plugins,
@@ -119,7 +119,8 @@ if get_option('esdm-es-ext').enabled()
 	es_ext_serve_test = executable('es_ext_serve_test',
 		'es_ext_serve_test.c',
 		include_directories: include_dirs_es_ext_test,
-		dependencies: [ dependencies_client, dependency('threads') ],
+		dependencies: [ dependencies_client, dependency('threads'),
+				json_c_dep ],
 		link_with: esdm_common_static_lib,
 	)
 	# The external entropy sources as the esdm-server takes them on its

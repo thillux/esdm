@@ -52,6 +52,7 @@
  *	  another one - see the plugin, which may declare none
  * @entropy_rate: The rate the plugin declares, taken by its init:
  *		  ES_EXT_TEST_RATE_NONE for none
+ * @status_buf: Room for a status of the environment, see below
  *
  * The delays and the counters are atomic: a test changes and reads them while
  * the plugin runs in the thread of a provider it started.
@@ -68,6 +69,7 @@ struct esdm_es_ext_test_control {
 	_Atomic unsigned int status_delay_ms;
 	char name[64];
 	uint32_t entropy_rate;
+	char status_buf[1024];
 
 	_Atomic unsigned int init_calls;
 	_Atomic unsigned int fini_calls;
@@ -83,9 +85,10 @@ struct esdm_es_ext_test_control {
  * A plugin served by esdm-es-ext-serve runs in a process of its own, out of
  * reach of the control of the test: the test hands its settings over in this
  * environment variable instead, which the plugin reads in its init - a comma
- * separated list of selftest_ret=N, get_ret=N, claim_bits=N, get_delay_ms=N,
- * status_delay_ms=N, name=NAME - an empty NAME declares no name - and rate=N,
- * the entropy rate it declares.
+ * separated list - separated by semicolons - of selftest_ret=N, get_ret=N,
+ * claim_bits=N, get_delay_ms=N, status_delay_ms=N, name=NAME - an empty NAME
+ * declares no name - rate=N, the entropy rate it declares, status_ret=N,
+ * status=TEXT, the status it reports, and status_size=N, a status of N bytes.
  */
 #define ES_EXT_TEST_PLUGIN_ENV "ESDM_ES_EXT_TEST_PLUGIN"
 

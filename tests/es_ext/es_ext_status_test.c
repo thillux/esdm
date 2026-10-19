@@ -35,7 +35,7 @@ static bool test_taken(const char *text, size_t len)
 	struct json_object *obj;
 	bool warned = false;
 
-	obj = esdm_es_ext_status_parse(text, len, "test", &warned);
+	obj = esdm_es_ext_status_parse(text, len, ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned);
 	CHECK(warned == !obj, "warned %d for %.40s", warned, text);
 	json_object_put(obj);
 
@@ -77,7 +77,7 @@ static void test_objects(void)
 	bool warned = false;
 
 	/* Members of every type, as they are */
-	obj = esdm_es_ext_status_parse(all, strlen(all), "test", &warned);
+	obj = esdm_es_ext_status_parse(all, strlen(all), ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned);
 	CHECK(obj != NULL, "a status with every type is not taken");
 	if (obj) {
 		CHECK(json_object_object_get_ex(obj, "i", &val) &&
@@ -95,7 +95,7 @@ static void test_objects(void)
 	 * UTF-8 of every length, as it is - in a member name: json-c 0.18
 	 * refuses any byte beyond ASCII in a string in its strict mode
 	 */
-	obj = esdm_es_ext_status_parse(utf8, strlen(utf8), "test", &warned);
+	obj = esdm_es_ext_status_parse(utf8, strlen(utf8), ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned);
 	CHECK(obj != NULL, "a status in UTF-8 is not taken");
 	if (obj) {
 		CHECK(json_object_object_get_ex(obj, utf8_name, &val),
@@ -187,11 +187,11 @@ static void test_refused(void)
 	      "a status beyond the largest is taken");
 
 	/* Logged once, until a valid one comes along */
-	CHECK(!esdm_es_ext_status_parse("[", 1, "test", &warned), "[ taken");
+	CHECK(!esdm_es_ext_status_parse("[", 1, ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned), "[ taken");
 	CHECK(warned, "an invalid status is not remembered as logged");
-	CHECK(!esdm_es_ext_status_parse("[", 1, "test", &warned), "[ taken");
+	CHECK(!esdm_es_ext_status_parse("[", 1, ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned), "[ taken");
 	CHECK(warned, "an invalid status is not remembered as logged");
-	json_object_put(esdm_es_ext_status_parse("{}", 2, "test", &warned));
+	json_object_put(esdm_es_ext_status_parse("{}", 2, ESDM_ES_EXT_STATUS_MAX, ESDM_ES_EXT_STATUS_MAX_DEPTH, "test", &warned));
 	CHECK(!warned, "a valid status does not clear the warning");
 }
 

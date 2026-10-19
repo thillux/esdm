@@ -39,6 +39,12 @@
  *   the one its plugin or provider declares, else the default of its kind.
  *   Configuring one source, loading another plugin into one, or restarting
  *   one provider with another rate changes the rate of that source only.
+ * - Each source has the status of its own plugin or provider - for a provider
+ *   the fields of its esdm-es-ext-serve, the DTLS of its own connection
+ *   included, next to the status of its plugin - none for one without, one
+ *   failing, one that is no valid status; cached for each source on its own;
+ *   a slow plugin or provider keeps only its own status out, a provider gone
+ *   only its own source.
  *
  * Both sources are compiled into the test, with a short retry interval and
  * timeout of the provider sockets. The plugin libraries are copies of the test
@@ -55,6 +61,7 @@
 #define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 0
 #define ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC 1
 #define ESDM_EXT_SOCKET_TIMEOUT_MS 500
+#define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 3
 
 /* The units under test */
 #include "esdm_es_extlib.c"
@@ -323,6 +330,13 @@ static void test_providers(void)
 		esdm_es_ext_socket_set_peer_uid(i, -1);
 		esdm_config_es_ext_socket_entropy_rate_set(i, 0);
 	}
+}
+
+/* A request of a seeding the plugin of @arg takes its time for */
+static void *test_slow_get(void *arg)
+{
+	test_get(arg, ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	return NULL;
 }
 
 /* The string member @key of the state of @es, into @buf */
@@ -714,13 +728,345 @@ static void test_provider_rates(void)
 }
 
 /*
+ * The "provider" member of the state of @es, NULL if there is none - asked
+ * for anew if @fresh, the status kept otherwise
+ */
+static struct json_object *test_provider_of(const struct esdm_es_cb *es,
+					    bool fresh, struct json_object **state)
+{
+	struct json_object *provider = NULL;
+	unsigned int i;
+
+	if (fresh) {
+		for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
+			if (es == LIB(i)) {
+				mutex_lock(&extlib[i].state_mutex);
+				extlib[i].status.at = 0;
+				mutex_unlock(&extlib[i].state_mutex);
+			}
+		}
+		for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
+			if (es == SOCK(i)) {
+				mutex_lock(&extsock[i].state_mutex);
+				extsock[i].status.at = 0;
+				mutex_unlock(&extsock[i].state_mutex);
+			}
+		}
+	}
+
+	*state = es_state_get(es);
+	if (!json_object_object_get_ex(*state, "provider", &provider))
+		return NULL;
+	return provider;
+}
+
+/* The member @key of the member @part of the provider status @provider */
+static struct json_object *test_part(struct json_object *provider,
+				     const char *part, const char *key)
+{
+	struct json_object *obj = NULL, *val = NULL;
+
+	if (!json_object_object_get_ex(provider, part, &obj) || !obj ||
+	    !json_object_object_get_ex(obj, key, &val))
+		return NULL;
+	return val;
+}
+
+static bool test_part_is(struct json_object *provider, const char *part,
+			 const char *key, const char *want)
+{
+	struct json_object *val = test_part(provider, part, key);
+
+	return val && json_object_is_type(val, json_type_string) &&
+	       !strcmp(json_object_get_string(val), want);
+}
+
+/* Does the provider status @provider have a "plugin" that is null? */
+static bool test_plugin_null(struct json_object *provider)
+{
+	struct json_object *val = (struct json_object *)1;
+
+	return json_object_object_get_ex(provider, "plugin", &val) && !val;
+}
+
+/*
+ * The status of each plugin library source its own: the status of its plugin,
+ * none for a plugin without one, one failing and one reporting NaN; cached for
+ * each source on its own; a slow plugin keeps only its own status out; another
+ * plugin loaded into one source forgets the status of that source only.
+ */
+static void test_plugin_status(void)
+{
+	static const char *const settings[] = { NULL, NULL, NULL,
+						"{\"plugin\":NaN}" };
+	static const int rets[] = { 0, -EOPNOTSUPP, -EIO, 0 };
+	unsigned int i, calls0, calls1, n = ESDM_EXT_LIB_NUM < 4 ?
+						    ESDM_EXT_LIB_NUM :
+						    4;
+	struct json_object *state, *provider;
+	pthread_t getter;
+
+	for (i = 0; i < n; i++) {
+		test_ctl[i]->status_ret = rets[i];
+		test_ctl[i]->status_text = settings[i];
+		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
+			 "plugin-%u", i);
+		CHECK_EQ(esdm_es_ext_lib_set_path(i, test_plugin[i]), 0);
+	}
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
+		CHECK_EQ(LIB(i)->init(), 0);
+
+	/* Its own status each, none where there is none */
+	for (i = 0; i < n; i++) {
+		provider = test_provider_of(LIB(i), true, &state);
+		if (!i)
+			CHECK(provider && es_state_str_is(provider, "plugin",
+							  ES_EXT_TEST_NAME),
+			      "%s does not have the status of its plugin: %s",
+			      LIB(i)->name, es_state_print(state));
+		else
+			CHECK(!provider, "%s has a status: %s", LIB(i)->name,
+			      es_state_print(state));
+		CHECK(es_state_str_has(state, "status", "awaiting") ||
+			      es_state_str_has(state, "status", "delivering"),
+		      "%s lost its state with its status", LIB(i)->name);
+		json_object_put(state);
+	}
+
+	/* Cached for each source on its own */
+	test_ctl[1]->status_ret = 0;
+	provider = test_provider_of(LIB(1), true, &state);
+	json_object_put(state);
+	calls0 = test_ctl[0]->status_calls;
+	calls1 = test_ctl[1]->status_calls;
+	provider = test_provider_of(LIB(0), true, &state);
+	CHECK(provider != NULL, "the first source lost its status");
+	json_object_put(state);
+	provider = test_provider_of(LIB(1), false, &state);
+	CHECK(provider != NULL, "the second source lost its status");
+	json_object_put(state);
+	CHECK_EQ(test_ctl[0]->status_calls, calls0 + 1);
+	CHECK_EQ(test_ctl[1]->status_calls, calls1);
+
+	/* A slow plugin keeps its own status out, not the others' */
+	test_ctl[1]->get_delay_ms = 600;
+	CHECK_EQ(pthread_create(&getter, NULL, test_slow_get, LIB(1)), 0);
+	es_ext_test_sleep_ms(100);
+	provider = test_provider_of(LIB(1), true, &state);
+	CHECK(!provider, "a busy plugin was asked for its status");
+	json_object_put(state);
+	provider = test_provider_of(LIB(0), true, &state);
+	CHECK(provider != NULL, "the status of the first source waited");
+	json_object_put(state);
+	pthread_join(getter, NULL);
+	test_ctl[1]->get_delay_ms = 0;
+	CHECK_EQ(test_ctl[1]->status_calls, calls1);
+
+	/* Another plugin into the first: its status only is forgotten */
+	provider = test_provider_of(LIB(1), true, &state);
+	json_object_put(state);
+	calls1 = test_ctl[1]->status_calls;
+	calls0 = test_ctl[6]->status_calls;
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[6]), 0);
+	provider = test_provider_of(LIB(0), false, &state);
+	CHECK(provider && es_state_str_is(provider, "plugin",
+					  ES_EXT_TEST_NAME) &&
+		      test_ctl[6]->status_calls == calls0 + 1,
+	      "the status of the other plugin is not asked for: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	provider = test_provider_of(LIB(1), false, &state);
+	CHECK(provider != NULL, "the second source forgot its status");
+	json_object_put(state);
+	CHECK_EQ(test_ctl[1]->status_calls, calls1);
+
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
+		LIB(i)->fini();
+		esdm_es_ext_lib_set_path(i, "");
+	}
+	for (i = 0; i < TEST_PLUGINS; i++) {
+		test_ctl[i]->status_ret = 0;
+		test_ctl[i]->status_text = NULL;
+		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
+			 ES_EXT_TEST_NAME);
+	}
+}
+
+/*
+ * The status of each provider socket source its own: the fields of its
+ * esdm-es-ext-serve - the name, the rate, the DTLS of its connection - and the
+ * status of its plugin, null for none; cached for each source on its own; a
+ * slow provider keeps only its own status out, and is not asked for it for a
+ * while; a provider gone affects only its own source.
+ */
+static void test_provider_status(void)
+{
+	const char *const opts0[] = { "--name", "S0", "--entropy_rate", "10",
+				      NULL };
+	const char *const opts1[] = { "--no_dtls", NULL };
+	static const char *const settings[] = {
+		NULL, "status_ret=-95;name=S1",
+		"selftest_ret=-19;name=S2;status={\"plugin\":\"zwei\"}",
+		"name=S3"
+	};
+	unsigned int i, n = ESDM_EXT_SOCKET_NUM < 4 ? ESDM_EXT_SOCKET_NUM : 4;
+	pid_t provider_pid[4] = { -1, -1, -1, -1 };
+	struct json_object *state, *provider, *val;
+	int64_t requests0, requests1;
+	struct timespec start, end;
+	long ms;
+
+	for (i = 0; i < n; i++) {
+		provider_pid[i] = es_ext_test_serve(
+			test_serve_bin, test_plugin[4 + i], test_socket[i],
+			i == 0 ? opts0 : i == 1 ? opts1 : NULL, settings[i]);
+		CHECK(provider_pid[i] > 0, "provider %u did not come up", i);
+		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+	}
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK_EQ(SOCK(i)->init(), 0);
+
+	/* Each with the fields of its own server and its own plugin part */
+	for (i = 0; i < n; i++) {
+		char name[8];
+
+		snprintf(name, sizeof(name), "S%u", i);
+		provider = test_provider_of(SOCK(i), true, &state);
+		CHECK(provider && test_part_is(provider, "server", "name",
+					       name),
+		      "%s does not have the status of its own server: %s",
+		      SOCK(i)->name, es_state_print(state));
+		val = test_part(provider, "server", "dtls");
+#ifdef ESDM_DTLS
+		CHECK(val && json_object_get_boolean(val) == (i != 1),
+		      "%s reports the DTLS of another connection: %s",
+		      SOCK(i)->name, es_state_print(state));
+#else
+		CHECK(val && !json_object_get_boolean(val),
+		      "%s reports DTLS: %s", SOCK(i)->name,
+		      es_state_print(state));
+#endif
+		if (i == 0)
+			CHECK(json_object_get_int64(test_part(provider,
+							      "server",
+							      "entropy_rate")) ==
+					      10 &&
+				      test_part_is(provider, "plugin",
+						   "plugin",
+						   ES_EXT_TEST_NAME),
+			      "the first source is not its own: %s",
+			      es_state_print(state));
+		if (i == 1)
+			CHECK(test_plugin_null(provider),
+			      "the second source has a plugin status: %s",
+			      es_state_print(state));
+		if (i == 2)
+			CHECK(test_part_is(provider, "plugin", "plugin",
+					   "zwei") &&
+				      test_part_is(provider, "server",
+						   "selftest", "failed") &&
+				      es_state_str_has(state, "status",
+						       "failing its self test"),
+			      "the third source is not its own: %s",
+			      es_state_print(state));
+		json_object_put(state);
+	}
+
+	/* Cached for each source on its own */
+	provider = test_provider_of(SOCK(1), true, &state);
+	requests1 = json_object_get_int64(
+		test_part(provider, "server", "requests"));
+	json_object_put(state);
+	provider = test_provider_of(SOCK(0), true, &state);
+	requests0 = json_object_get_int64(
+		test_part(provider, "server", "requests"));
+	json_object_put(state);
+	provider = test_provider_of(SOCK(0), true, &state);
+	CHECK(json_object_get_int64(test_part(provider, "server",
+					      "requests")) == requests0 + 1,
+	      "the first source was not asked anew: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	provider = test_provider_of(SOCK(1), false, &state);
+	CHECK(json_object_get_int64(test_part(provider, "server",
+					      "requests")) == requests1,
+	      "the second source was asked with the first: %s",
+	      es_state_print(state));
+	json_object_put(state);
+
+	/*
+	 * The second provider slow to answer STATUS: the status of the first
+	 * does not wait for it, and it is not asked for a while
+	 */
+	es_ext_test_terminate(provider_pid[1]);
+	provider_pid[1] = es_ext_test_serve(test_serve_bin, test_plugin[5],
+					    test_socket[1], opts1,
+					    "status_delay_ms=900;name=S1");
+	CHECK(provider_pid[1] > 0, "the slow provider did not come up");
+	test_get(SOCK(1), ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	provider = test_provider_of(SOCK(0), true, &state);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	ms = (end.tv_sec - start.tv_sec) * 1000 +
+	     (end.tv_nsec - start.tv_nsec) / 1000000;
+	CHECK(provider != NULL && ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
+	      "the status of the first source took %ld ms", ms);
+	json_object_put(state);
+	provider = test_provider_of(SOCK(1), true, &state);
+	CHECK(!provider, "the slow provider has a status");
+	json_object_put(state);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	provider = test_provider_of(SOCK(1), true, &state);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	ms = (end.tv_sec - start.tv_sec) * 1000 +
+	     (end.tv_nsec - start.tv_nsec) / 1000000;
+	CHECK(!provider && ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
+	      "the slow provider was asked again within its backoff (%ld ms)",
+	      ms);
+	json_object_put(state);
+	provider = test_provider_of(SOCK(0), true, &state);
+	CHECK(provider != NULL, "the first source lost its status");
+	json_object_put(state);
+
+	/* The third provider gone: the others keep theirs */
+	if (n > 2) {
+		es_ext_test_terminate(provider_pid[2]);
+		provider_pid[2] = -1;
+		CHECK_EQ(test_get(SOCK(2), ESDM_DRNG_SECURITY_STRENGTH_BITS),
+			 0);
+		CHECK(test_state_has(SOCK(2), "status", "not connected"),
+		      "a provider gone is still connected");
+		provider = test_provider_of(SOCK(0), true, &state);
+		CHECK(provider && es_state_str_has(state, "status",
+						   "connected (uid"),
+		      "the first source changed with the third: %s",
+		      es_state_print(state));
+		json_object_put(state);
+	}
+
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		SOCK(i)->fini();
+	for (i = 0; i < n; i++) {
+		es_ext_test_terminate(provider_pid[i]);
+		esdm_es_ext_socket_set_path(i, "");
+		esdm_es_ext_socket_set_peer_uid(i, -1);
+	}
+}
+
+/*
  * The JSON status of the ESDM lists each source once, under its name, with
- * its own configuration.
+ * its own configuration - and for a provider the fields of its own server, the
+ * DTLS of its connection included, and the status of its plugin; the text
+ * status shows them in sections of their own.
  */
 static void test_status(void)
 {
+	const char *const opts[2][4] = { { "--name", "Quelle 0", NULL },
+					 { "--no_dtls", "--name", "Quelle 1",
+					   NULL } };
 	static char buf[65536];
-	struct json_object *root = NULL, *es;
+	struct json_object *root = NULL, *es, *provider_obj;
 	pid_t provider[2] = { -1, -1 };
 	char name[32];
 	unsigned int i;
@@ -729,7 +1075,7 @@ static void test_status(void)
 	for (i = 0; i < 2; i++) {
 		provider[i] = es_ext_test_serve(test_serve_bin,
 						test_plugin[4 + i],
-						test_socket[i], NULL, NULL);
+						test_socket[i], opts[i], NULL);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
 		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
@@ -768,9 +1114,40 @@ static void test_status(void)
 						       "connected (uid"),
 			      "%s is not connected to its provider: %s", name,
 			      es_state_print(es));
+		if (!es || i >= 2 ||
+		    !json_object_object_get_ex(es, "provider", &provider_obj))
+			continue;
+
+		/* The fields of its own server, the DTLS of its connection */
+		snprintf(name, sizeof(name), "Quelle %u", i);
+		CHECK(es_state_str_is(es, "name", name) &&
+			      test_part_is(provider_obj, "server", "name",
+					   name) &&
+			      test_part_is(provider_obj, "plugin", "plugin",
+					   ES_EXT_TEST_NAME),
+		      "the status of the provider is not its own: %s",
+		      es_state_print(es));
+#ifdef ESDM_DTLS
+		CHECK(json_object_get_boolean(test_part(
+			      provider_obj, "server", "dtls")) == !i,
+		      "the provider reports the DTLS of another connection: %s",
+		      es_state_print(es));
+		CHECK(es_state_str_has(es, "status", i ? "unencrypted" : "DTLS"),
+		      "the source does not say whether it uses DTLS: %s",
+		      es_state_print(es));
+#endif
 	}
 
 	json_object_put(root);
+
+	/* The text status, with sections of the provider and its parts */
+	CHECK_EQ(esdm_status(buf, sizeof(buf)), 0);
+	CHECK(strstr(buf, " Instance: ExternalSocket1\n") &&
+		      strstr(buf, "\n Provider properties:\n"
+				  "  Server properties:\n"
+				  "   Version: " VERSION "\n"),
+	      "the text status does not show the status of the providers: %s",
+	      buf);
 
 fini:
 	esdm_fini();
@@ -833,6 +1210,8 @@ int main(int argc, char *argv[])
 	test_provider_names();
 	test_plugin_rates();
 	test_provider_rates();
+	test_plugin_status();
+	test_provider_status();
 	test_status();
 
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)

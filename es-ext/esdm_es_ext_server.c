@@ -44,6 +44,7 @@
 #include "config.h"
 #include "esdm_es_ext.h"
 #include "esdm_dtls.h"
+#include "esdm_es_ext_json.h"
 #include "esdm_es_ext_proto.h"
 #include "esdm_logger.h"
 #include "esdm_server_socket.h"
@@ -99,6 +100,16 @@ struct esdm_es_ext_server {
 	 */
 	uint32_t rate;
 	uint32_t plugin_rate;
+
+	/*
+	 * What the server answers STATUS with next to the status of the plugin:
+	 * the requests served, the verdict of the last self test of the plugin
+	 * - 0 passed, < 0 failed, 1 none yet - and when it was set up,
+	 * monotonic nanoseconds
+	 */
+	uint64_t requests;
+	int selftest;
+	uint64_t started;
 
 	int listen_fd;
 	/* Written to by esdm_es_ext_server_stop() */
@@ -365,32 +376,130 @@ static int esdm_es_ext_server_startdtls(struct esdm_es_ext_server *server,
 }
 
 /*
- * Answer a STATUS request for at most @length bytes with the status of the
- * plugin, which goes into @data.
+ * The status of the plugin as JSON object, NULL for none: for a plugin without
+ * one, one whose status fails, and one whose status is no JSON object of up to
+ * ESDM_ES_EXT_STATUS_MAX bytes, nested no deeper than
+ * ESDM_ES_EXT_STATUS_MAX_DEPTH - checked as the ESDM checks the status of a
+ * plugin it loads.
+ */
+static struct json_object *
+esdm_es_ext_server_plugin_status(struct esdm_es_ext_server *server)
+{
+	char text[ESDM_ES_EXT_STATUS_MAX + 1];
+	ssize_t len;
+
+	len = esdm_es_ext_plugin_status(server->plugin, server->ctx, text,
+					sizeof(text));
+	if (len < 0)
+		return NULL;
+
+	return esdm_es_ext_json_object(text, (size_t)len,
+				       ESDM_ES_EXT_STATUS_MAX,
+				       ESDM_ES_EXT_STATUS_MAX_DEPTH);
+}
+
+/* What the server knows itself, for client @i - see STATUS in esdm_es_ext.h */
+static struct json_object *
+esdm_es_ext_server_fields(struct esdm_es_ext_server *server, unsigned int i)
+{
+	struct json_object *obj = json_object_new_object();
+	uint32_t rate = server->rate != ESDM_ES_EXT_PROTO_RATE_NONE ?
+				server->rate :
+				server->plugin_rate;
+	unsigned int c, clients = 0;
+
+	if (!obj)
+		return NULL;
+
+	for (c = 0; c < ESDM_ES_EXT_SERVER_MAX_CLIENTS; c++) {
+		if (server->clients[c] >= 0)
+			clients++;
+	}
+
+	json_object_object_add(obj, "version", json_object_new_string(VERSION));
+	json_object_object_add(obj, "plugin_api",
+			       json_object_new_int64(server->plugin->version));
+	json_object_object_add(
+		obj, "name",
+		server->name[0] ? json_object_new_string(server->name) : NULL);
+	json_object_object_add(obj, "entropy_rate",
+			       rate != ESDM_ES_EXT_PROTO_RATE_NONE ?
+				       json_object_new_int64(rate) :
+				       NULL);
+	json_object_object_add(
+		obj, "dtls",
+		json_object_new_boolean(server->client_state[i] ==
+					ESDM_ES_EXT_CLIENT_DTLS));
+	json_object_object_add(obj, "clients", json_object_new_int64(clients));
+	json_object_object_add(
+		obj, "client_slots",
+		json_object_new_int64(ESDM_ES_EXT_SERVER_MAX_CLIENTS));
+	json_object_object_add(
+		obj, "requests",
+		json_object_new_int64((int64_t)server->requests));
+	json_object_object_add(
+		obj, "selftest",
+		json_object_new_string(server->selftest > 0 ? "none" :
+				       !server->selftest    ? "passed" :
+							      "failed"));
+	json_object_object_add(
+		obj, "uptime_seconds",
+		json_object_new_int64(
+			(int64_t)((esdm_es_ext_server_now() - server->started) /
+				  1000000000ULL)));
+
+	return obj;
+}
+
+/*
+ * Answer a STATUS request of client @i for at most @length bytes, the status
+ * going into @data: the fields of the server, and the status of its plugin -
+ * left out, as null, if both do not fit into @length together. The text is
+ * never cut short: half a JSON object is none.
  *
  * @return the status of the answer, *@datalen holding the length of the text
  */
 static int esdm_es_ext_server_status(struct esdm_es_ext_server *server,
-				     uint8_t *data, uint32_t length,
-				     uint32_t *datalen)
+				     unsigned int i, uint8_t *data,
+				     uint32_t length, uint32_t *datalen)
 {
-	char text[ESDM_ES_EXT_STATUS_MAX + 1];
-	ssize_t ret;
+	struct json_object *root = json_object_new_object();
+	struct json_object *fields = esdm_es_ext_server_fields(server, i);
+	const char *text;
+	size_t len;
+	int ret = -EMSGSIZE;
 
 	*datalen = 0;
+	if (!root || !fields) {
+		json_object_put(root);
+		json_object_put(fields);
+		return -ENOMEM;
+	}
 
-	ret = esdm_es_ext_plugin_status(server->plugin, server->ctx, text,
-					sizeof(text));
-	if (ret < 0)
-		return (int)ret;
+	json_object_object_add(root, "server", fields);
+	json_object_object_add(root, "plugin",
+			       esdm_es_ext_server_plugin_status(server));
 
-	/* Not cut short: half a JSON object is none */
-	if ((size_t)ret > length)
-		return -EMSGSIZE;
+	text = json_object_to_json_string_ext(
+		root, JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE);
+	len = text ? strlen(text) : SIZE_MAX;
+	if (len > length) {
+		/* The fields of the server alone */
+		json_object_object_add(root, "plugin", NULL);
+		text = json_object_to_json_string_ext(
+			root, JSON_C_TO_STRING_PLAIN |
+				      JSON_C_TO_STRING_NOSLASHESCAPE);
+		len = text ? strlen(text) : SIZE_MAX;
+	}
 
-	memcpy(data, text, (size_t)ret);
-	*datalen = (uint32_t)ret;
-	return 0;
+	if (len <= length) {
+		memcpy(data, text, len);
+		*datalen = (uint32_t)len;
+		ret = 0;
+	}
+
+	json_object_put(root);
+	return ret;
 }
 
 /*
@@ -421,8 +530,8 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 				     unsigned int i)
 {
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN + 1];
-	uint8_t data[ESDM_ES_EXT_PROTO_MAX_DATA];
-	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
+	uint8_t data[ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
+	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	uint32_t length, datalen, entropy_bits = 0;
 	uint16_t type;
 	size_t rsp_len;
@@ -461,7 +570,7 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 		status = esdm_es_ext_server_startdtls(server, i);
 		break;
 	case ESDM_ES_EXT_PROTO_STATUS:
-		status = esdm_es_ext_server_status(server, data, length,
+		status = esdm_es_ext_server_status(server, i, data, length,
 						   &datalen);
 		break;
 	case ESDM_ES_EXT_PROTO_INFO:
@@ -480,12 +589,15 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 		/* An errno, or what it stands for */
 		if (status > 0 || status < -ESDM_ES_EXT_PROTO_MAX_ERRNO)
 			status = -EIO;
+		server->selftest = status;
 		break;
 	}
 
 	rsp_len = esdm_es_ext_proto_rsp_pack(rsp, type, status, entropy_bits,
 					     data, datalen);
 	ret = esdm_es_ext_server_send(server, i, rsp, rsp_len);
+	if (ret)
+		server->requests++;
 
 	/* The answer to STARTDTLS went out in the clear, the handshake follows */
 	if (ret && type == ESDM_ES_EXT_PROTO_STARTDTLS && !status)
@@ -528,6 +640,8 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 	s->plugin = plugin;
 	s->rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	s->plugin_rate = ESDM_ES_EXT_PROTO_RATE_NONE;
+	s->selftest = 1;
+	s->started = esdm_es_ext_server_now();
 	s->listen_fd = -1;
 	s->stop_pipe[0] = s->stop_pipe[1] = -1;
 	for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++)
