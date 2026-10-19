@@ -21,6 +21,7 @@
 
 #include <esdm_rpc_client.h>
 
+#include <json-c/json.h>
 #include <poll.h>
 
 #include <errno.h>
@@ -101,7 +102,96 @@ static int64_t parse_interval_arg(const char *str)
  * twice the amount for full entropy inside the pool after leftover hashing
  * on pool updates.
  */
-#define ESDM_SERVER_LINUX_ENTROPY_BYTES (2 * 32)
+#define ESDM_SERVER_LINUX_ENTROPY_BITS 256
+#define ESDM_SERVER_LINUX_ENTROPY_BYTES (2 * ESDM_SERVER_LINUX_ENTROPY_BITS / 8)
+
+/*
+ * Whether the ESDM runs its interrupt entropy source, as its JSON status
+ * @status_json says: the source is listed, and not as disabled for missing
+ * kernel support. The kernel add-on it reads takes the interrupts away from
+ * the kernel RNG as soon as it is there, whatever rate the ESDM credits the
+ * source with - the ESDM caps its kernel RNG entropy source then as well.
+ */
+static bool seeder_irq_es_present(const char *status_json)
+{
+	struct json_object *root, *sources, *es, *name;
+	bool present = false;
+	size_t i, n;
+
+	if (!status_json)
+		return false;
+
+	root = json_tokener_parse(status_json);
+	if (!root)
+		return false;
+
+	if (!json_object_object_get_ex(root, "entropy_sources", &sources) ||
+	    !json_object_is_type(sources, json_type_array))
+		goto out;
+
+	n = json_object_array_length(sources);
+	for (i = 0; i < n; i++) {
+		es = json_object_array_get_idx(sources, i);
+		if (!json_object_object_get_ex(es, "name", &name) ||
+		    !json_object_is_type(name, json_type_string) ||
+		    strcmp(json_object_get_string(name), "Interrupt"))
+			continue;
+
+		present = !json_object_object_get_ex(es, "disabled", NULL);
+		break;
+	}
+
+out:
+	json_object_put(root);
+	return present;
+}
+
+/*
+ * The entropy one insertion credits the kernel with, in bits, given the
+ * linux-reseed-entropy-count build option @configured and the JSON status of
+ * the ESDM @status_json, NULL if there is none.
+ *
+ * A configured count is credited as it is. Left at 0, the count follows the
+ * interrupt entropy source of the ESDM. While it runs, it deprives the kernel
+ * RNG of its main entropy source, and the data of the ESDM is entropy the
+ * kernel does not get otherwise: it is credited with as much as its pool
+ * holds, which the data fills with full entropy. Without it, the kernel RNG
+ * has its interrupts and the ESDM credits its kernel RNG entropy source with
+ * what the kernel gathers from them - crediting the data again would count
+ * that entropy twice, so it is credited with nothing.
+ */
+static uint32_t seeder_entropy_bits(uint32_t configured,
+				    const char *status_json)
+{
+	if (configured)
+		return configured;
+
+	return seeder_irq_es_present(status_json) ?
+		       ESDM_SERVER_LINUX_ENTROPY_BITS :
+		       0;
+}
+
+/*
+ * The entropy count of the next insertion, see seeder_entropy_bits(). The
+ * status is asked for every time: the ESDM may take up its interrupt entropy
+ * source later on, and may have been restarted with another configuration. A
+ * status that cannot be obtained credits nothing.
+ */
+static uint32_t seeder_entropy_count(char *status, size_t statuslen)
+{
+	int ret = -ENOMEM;
+
+	if (!ESDM_LINUX_RESEED_ENTROPY_COUNT && status) {
+		esdm_invoke(esdm_rpcc_status_json(status, statuslen));
+		if (ret)
+			esdm_logger(LOGGER_WARN, LOGGER_C_SEEDER,
+				    "Cannot obtain the ESDM status, crediting no entropy: %d\n",
+				    ret);
+	}
+
+	return seeder_entropy_bits(ESDM_LINUX_RESEED_ENTROPY_COUNT,
+				   ret ? NULL : status);
+}
 
 static bool pr_mode(void)
 {
@@ -236,8 +326,16 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 	ssize_t ret;
 	int pret;
 	int fn_ret = EXIT_SUCCESS;
+	/* The JSON status, only asked for when the count depends on it */
+	char *status = ESDM_LINUX_RESEED_ENTROPY_COUNT ?
+			       NULL :
+			       malloc(ESDM_RPC_MAX_DATA);
 
 	rpi->buf_size = ESDM_SERVER_LINUX_ENTROPY_BYTES;
+
+	if (!ESDM_LINUX_RESEED_ENTROPY_COUNT && !status)
+		esdm_logger(LOGGER_WARN, LOGGER_C_SEEDER,
+			    "Cannot allocate the status buffer, crediting no entropy\n");
 
 	while (atomic_load(&should_run)) {
 		if (pr_mode()) {
@@ -255,7 +353,8 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 					    "Failure in generating random bits: %zd\n",
 					    ret);
 		} else {
-			rpi->entropy_count = ESDM_LINUX_RESEED_ENTROPY_COUNT;
+			rpi->entropy_count = (int)seeder_entropy_count(
+				status, ESDM_RPC_MAX_DATA);
 			if (pr_mode()) {
 				/*
 				 * Immediately force CRNG reseed in NTG.1/PR mode
@@ -323,6 +422,7 @@ static int handle_reseeding(int64_t seeding_interval_secs)
 	}
 
 out:
+	free(status);
 	return fn_ret;
 }
 
@@ -379,7 +479,8 @@ static void install_term(void)
 
 /*
  * Helper tool to insert entropy into the kernel RNG occasionally. When the IRQ ES
- * is present, this is required as the kernel RNG is deprived of its main ES.
+ * is present, this is required as the kernel RNG is deprived of its main ES,
+ * and the data is credited with entropy - see seeder_entropy_bits().
  * But also in any other case it is good to insert data into the kernel RNG
  * to provide data that is gathered from other entropy sources. Basically
  * the ESDM acts as an RNGd to top up the entropy in the kernel.

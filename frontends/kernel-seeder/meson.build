@@ -3,7 +3,7 @@ esdm_kernel_seeder = executable(
 		'esdm-kernel-seeder',
         [ 'seeder_main.c' ],
 		include_directories: include_dirs_client,
-		dependencies: [ dependencies_client ],
+		dependencies: [ dependencies_client, json_c_dep ],
 		link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ],
 		install: true
 		)

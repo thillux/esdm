@@ -1048,7 +1048,14 @@ like hash algorithms.
 option('linux-reseed-interval', type: 'integer', value: 120,
        description: 'interval between forced Linux kernel RNG reseeds (in seconds)')
 option('linux-reseed-entropy-count', type: 'integer', value: 0, min: 0, max: 512,
-       description: 'amount of entropy to account on kernel reseed (without es_irq)')
+       description: '''Entropy in bits esdm-kernel-seeder credits each insertion into the Linux kernel RNG with
+
+With 0, an insertion is credited with 256 bits, the kernel's pool, while the
+ESDM runs the interrupt entropy source, which deprives the kernel RNG of its
+interrupts, and with nothing otherwise, as the ESDM then credits its kernel
+RNG entropy source with what the kernel gathers. Any other value is credited
+in either case.
+''')
 
 option('esdm-server', type: 'feature', value: 'enabled',
        description: 'Enable the ESDM server')
