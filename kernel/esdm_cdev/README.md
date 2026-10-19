@@ -59,7 +59,8 @@ Both devices are world readable and writable, as the kernel's are.
 * Opened with `O_SYNC`, either device reads from the ESDM's prediction
   resistance DRNG, which hands out no more than its entropy sources just
   delivered, as the CUSE frontend does. Without `O_NONBLOCK` a read waits for
-  the rest; with it, the read returns what was there, or `EAGAIN`.
+  the rest; with it, the read returns what was there, or `EAGAIN`. `O_DSYNC`
+  alone does not select it.
 * Data written to either device is mixed into the ESDM's auxiliary pool
   without being credited with entropy, as a write to the kernel's devices is.
 

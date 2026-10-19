@@ -2377,12 +2377,48 @@ static void read_eagain(const char *dev, int flags, const char *what)
 }
 
 /*
+ * A read of @dev with @flags that does not wait for the ESDM: with the ESDM
+ * not operational, the kernel's RNG serves it at once. A SIGALRM ends one
+ * that waits after all.
+ */
+static void read_served(const char *dev, int flags, const char *what)
+{
+	struct sigaction intr = { .sa_handler = on_sig_intr };
+	uint8_t buf[64];
+	ssize_t rc;
+	int fd, err;
+
+	sigemptyset(&intr.sa_mask);
+	if (sigaction(SIGALRM, &intr, NULL))
+		fail("sigaction: %s", strerror(errno));
+
+	fd = open_or_fail(dev, O_RDONLY | flags);
+	alarm(10);
+	rc = read(fd, buf, sizeof(buf));
+	err = errno;
+	alarm(0);
+	close(fd);
+
+	if (rc < 0 && err == EINTR)
+		fail("%s: waited for an ESDM that is not operational", what);
+	if (rc < 0)
+		fail("%s: read: %s", what, strerror(err));
+	if (rc != (ssize_t)sizeof(buf))
+		fail("%s: read gave %zd bytes", what, rc);
+	check_random(buf, sizeof(buf), what);
+
+	printf("%s: served by the kernel's RNG\n", what);
+}
+
+/*
  * block-notop: against a notop fake-egd - the reads that wait for the ESDM
  * to be operational, of /dev/esdm_random and with O_SYNC of either device,
  * wait for it rather than take the kernel's RNG while the ESDM can be
  * reached. A signal with SA_RESTART has such a read restarted, waiting on,
  * one without ends it with EINTR and no data. With O_NONBLOCK, they give
- * EAGAIN.
+ * EAGAIN. O_DSYNC alone is no O_SYNC: /dev/esdm_urandom opened with it reads
+ * as without, which the kernel's RNG serves while the ESDM is not
+ * operational.
  */
 static void cmd_block_notop(int argc, char *argv[])
 {
@@ -2407,6 +2443,11 @@ static void cmd_block_notop(int argc, char *argv[])
 			    0.5, 1.5);
 		read_eagain(waiting[i].dev, waiting[i].flags, waiting[i].what);
 	}
+
+	read_served(CDEV_URANDOM, 0, CDEV_URANDOM);
+	read_served(CDEV_URANDOM, O_DSYNC, CDEV_URANDOM " O_DSYNC");
+	read_served(CDEV_URANDOM, O_DSYNC | O_NONBLOCK,
+		    CDEV_URANDOM " O_DSYNC|O_NONBLOCK");
 
 	printf("block-notop ok\n");
 }

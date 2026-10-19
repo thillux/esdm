@@ -13,7 +13,7 @@
  *    fully seeded.
  *  - Opened with O_SYNC, either reads from the prediction resistance DRNG,
  *    which hands out no more than its entropy sources just delivered. Without
- *    O_NONBLOCK, the read waits for the rest.
+ *    O_NONBLOCK, the read waits for the rest. O_DSYNC alone does not.
  *  - Data written to either is mixed into the ESDM's auxiliary pool without
  *    being credited with entropy.
  *  - The ioctls of the kernel's devices: RNDGETENTCNT for everybody, the ones
@@ -217,7 +217,11 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 {
 	bool urandom = esdm_cdev_type(file) == ESDM_CDEV_URANDOM;
 	bool nonblock = file->f_flags & O_NONBLOCK;
-	bool pr = file->f_flags & O_SYNC;
+	/*
+	 * O_SYNC is __O_SYNC | O_DSYNC, so a test of O_SYNC would take O_DSYNC
+	 * alone for it. The kernel tells them apart by __O_SYNC, too.
+	 */
+	bool pr = file->f_flags & __O_SYNC;
 	/* Waits for the seeding: everything but the plain urandom read */
 	bool seeded = !urandom || pr;
 	u8 cmd = pr ? ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK :
