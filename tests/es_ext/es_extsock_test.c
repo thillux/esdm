@@ -402,7 +402,10 @@ static void test_arguments(void)
 	CHECK_EQ(esdm_es_ext_socket_set_path(NULL), -EINVAL);
 	CHECK_EQ(esdm_es_ext_socket_set_path(too_long), -EINVAL);
 	CHECK_EQ(esdm_es_ext_socket_set_peer_uid(-2), -EINVAL);
-	CHECK_EQ(esdm_es_ext_socket_set_peer_uid((long)UINT32_MAX), -EINVAL);
+	/* Where a long holds it: with 32 bits, (long)UINT32_MAX is -1, no uid */
+	if (sizeof(long) > sizeof(uint32_t))
+		CHECK_EQ(esdm_es_ext_socket_set_peer_uid((long)UINT32_MAX),
+			 -EINVAL);
 	CHECK_EQ(esdm_es_ext_socket_set_peer_uid(-1), 0);
 }
 
