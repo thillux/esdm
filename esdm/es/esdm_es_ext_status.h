@@ -35,9 +35,10 @@ struct json_object;
 
 /*
  * Parse the status a plugin or a provider reported: @len bytes of text at
- * @text, which have to be one JSON object - well formed, with nothing but
- * white space after it, no NUL in it, no longer than ESDM_ES_EXT_STATUS_MAX
- * bytes and nested no deeper than ESDM_ES_EXT_STATUS_MAX_DEPTH.
+ * @text, which have to be one JSON object - well formed, UTF-8, with nothing
+ * but white space after it, no NUL in it, no number that is NaN or infinite,
+ * no longer than ESDM_ES_EXT_STATUS_MAX bytes and nested no deeper than
+ * ESDM_ES_EXT_STATUS_MAX_DEPTH.
  *
  * A status that is none is logged once, *@warned remembering that it was
  * until a valid status comes along; @who names the source in the log.

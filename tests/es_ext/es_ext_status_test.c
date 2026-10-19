@@ -68,6 +68,11 @@ static void test_objects(void)
 	char buf[ESDM_ES_EXT_STATUS_MAX + 2];
 	static const char all[] = "{\"s\":\"x\",\"i\":-3,\"b\":false,"
 				  "\"n\":null,\"a\":[1,2],\"o\":{\"d\":1.5}}";
+	static const char utf8_name[] =
+		"\x7f\xc3\xa4\xe2\x82\xac\xf0\x9f\x98\x80"
+		"\xf4\x8f\xbf\xbf";
+	static const char utf8[] = "{\"\x7f\xc3\xa4\xe2\x82\xac\xf0\x9f\x98\x80"
+				   "\xf4\x8f\xbf\xbf\":null}";
 	struct json_object *obj, *val;
 	bool warned = false;
 
@@ -85,6 +90,22 @@ static void test_objects(void)
 	}
 
 	CHECK(test_taken_str("{}"), "the empty object is not taken");
+
+	/*
+	 * UTF-8 of every length, as it is - in a member name: json-c 0.18
+	 * refuses any byte beyond ASCII in a string in its strict mode
+	 */
+	obj = esdm_es_ext_status_parse(utf8, strlen(utf8), "test", &warned);
+	CHECK(obj != NULL, "a status in UTF-8 is not taken");
+	if (obj) {
+		CHECK(json_object_object_get_ex(obj, utf8_name, &val),
+		      "the UTF-8 of the status changed");
+		json_object_put(obj);
+	}
+
+	/* Numbers as large as they get */
+	CHECK(test_taken_str("{\"a\":1.7976931348623157e308,\"b\":-0.0}"),
+	      "the largest finite number is not taken");
 	CHECK(test_taken_str("{\"a\":1}\n"),
 	      "white space after the object is not taken");
 
@@ -116,6 +137,33 @@ static void test_refused(void)
 		"{a:1}",
 		"{\"a\":01}",
 		"{\"a\":tru}",
+		/* Numbers JSON has none for, which json-c takes all the same */
+		"{\"a\":NaN}",
+		"{\"a\":Infinity}",
+		"{\"a\":-Infinity}",
+		"{\"a\":[1,NaN]}",
+		"{\"o\":{\"p\":{\"q\":-Infinity}}}",
+		"{\"a\":1e999}",
+		"{\"a\":-1e999}",
+		/*
+		 * No UTF-8 - in a member name, which json-c takes as it is, or
+		 * in a string: a byte that never is, a lone continuation
+		 */
+		"{\"\xff\":1}",
+		"{\"\x80\":1}",
+		"{\"a\":\"\xfe\"}",
+		/* Cut short by the end of the name */
+		"{\"\xc3\":1}",
+		"{\"\xe2\x82\":1}",
+		"{\"\xf0\x9f\x98\":1}",
+		/* Overlong forms of '/' and of U+20AC */
+		"{\"\xc0\xaf\":1}",
+		"{\"\xe0\x82\xac\":1}",
+		"{\"\xf0\x82\x82\xac\":1}",
+		/* A surrogate, and beyond U+10FFFF */
+		"{\"\xed\xa0\x80\":1}",
+		"{\"\xf4\x90\x80\x80\":1}",
+		"{\"\xf5\x80\x80\x80\":1}",
 	};
 	char buf[ESDM_ES_EXT_STATUS_MAX + 2];
 	bool warned = false;
