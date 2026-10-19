@@ -326,6 +326,12 @@ endif
 # nothing; the TLS mode is provided by the TLS stack of the crypto backend.
 # The TLS layer is built into the static common library only, from where the
 # EGD client library and the daemons take it.
+#
+# egd-net-tls is no error in either direction: --auto-features=enabled, which
+# the meson macros of rpm, nixpkgs and arch-meson pass, turns its auto into
+# enabled and cannot be told apart from asking for it. It is ignored while
+# egd-net is disabled, and leaves a backend without a TLS stack with plain TCP
+# and a warning.
 egd_net = get_option('egd-net').enabled()
 egd_net_tls = false
 egd_net_tls_deps = []
@@ -337,15 +343,13 @@ if egd_net
 	elif get_option('crypto_backend') == 'botan'
 		egd_net_tls_deps = [ botan_dep ]
 	elif get_option('egd-net-tls').enabled()
-		error('egd-net-tls needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none. Leave egd-net-tls at auto or disabled for plain TCP only.')
+		warning('egd-net-tls needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none, so egd-net is built with plain TCP only')
 	endif
 	egd_net_tls = not get_option('egd-net-tls').disabled() and \
 		      egd_net_tls_deps.length() > 0
 	if not egd_net_tls
 		egd_net_tls_deps = []
 	endif
-elif get_option('egd-net-tls').enabled()
-	error('egd-net-tls is the TLS mode of egd-net, which is disabled')
 endif
 dependencies_client += egd_net_tls_deps
 dependencies_server += egd_net_tls_deps

@@ -1194,10 +1194,12 @@ option('egd-net-tls', type: 'feature', value: 'auto',
 
 Mutually authenticated TLS 1.3 with certificates, CRLs and their rotation,
 provided by the TLS stack of the crypto backend: crypto_backend openssl,
-gnutls or botan. The builtin and the leancrypto backend have none, which is
-an error when this is enabled; auto takes the TLS stack where there is one.
+gnutls or botan. The builtin and the leancrypto backend have none; with them,
+egd-net is built with plain TCP only, with a warning when this is enabled.
+auto and enabled take the TLS stack where there is one - the two cannot be
+told apart under --auto-features=enabled, which distribution builds pass.
 Without it, the daemons and the library offer plain TCP only, and refuse the
-TLS options with an error.
+TLS options with an error. Ignored while egd-net is disabled.
 ''')
 
 option('egd-net-port', type: 'integer', min: 1, max: 65535, value: 7378,
