@@ -109,16 +109,23 @@ add_global_arguments(['-DMAJVERSION=' + version_array[0],
 		      '-DVERSION="' + meson.project_version() + '"'],
 		      language : 'c')
 
+# The link arguments below are given for C++ as well: a target with a C++
+# source - libesdm with the botan backend, and everything linking it - is
+# linked by the C++ driver with the C++ link arguments alone, and lost them
+# otherwise. Like the C++ arguments above, they are accepted before the botan
+# backend adds the language, and unused without it.
+
 # Dead-code-stripping support
-add_global_arguments(['-ffunction-sections', '-fdata-sections'], language : 'c')
-add_project_link_arguments('-Wl,--gc-sections', language : 'c')
+add_global_arguments(['-ffunction-sections', '-fdata-sections'],
+		     language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,--gc-sections', language : ['c', 'cpp'])
 
 # Link for full RELRO
-add_project_link_arguments('-Wl,-z,relro', language : 'c')
-add_project_link_arguments('-Wl,-z,now', language : 'c')
+add_project_link_arguments('-Wl,-z,relro', language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,-z,now', language : ['c', 'cpp'])
 
 # No executable stack
-add_project_link_arguments('-Wl,-z,noexecstack', language : 'c')
+add_project_link_arguments('-Wl,-z,noexecstack', language : ['c', 'cpp'])
 
 # The client libraries export the logger so that the copy of the frontend
 # linking them interposes theirs. Clang drops that interposition under LTO and
