@@ -403,22 +403,32 @@ static int vu_rng_listen_path(const char *path, mode_t mode, gid_t gid)
 	memcpy(addr.sun_path, path, strlen(path) + 1);
 
 	/*
-	 * A socket left behind by an earlier instance is replaced - unless an
-	 * instance still serves on it, which would lose its guest.
+	 * A socket left behind by an earlier instance is replaced: nobody
+	 * listens on it, which a connection refused tells. Any other answer
+	 * leaves it alone, as an instance may still serve on it, which would
+	 * lose its guest - the connection accepted, or the backlog of the
+	 * instance full, or a socket the daemon may not connect to. The
+	 * connection does not block, so a full backlog does not hold the daemon
+	 * up either.
 	 */
 	if (lstat(path, &sb) == 0) {
 		if (!S_ISSOCK(sb.st_mode))
 			return -EEXIST;
 
-		fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+			    0);
 		if (fd < 0)
 			return -errno;
-		ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+		ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr)) ?
+			      errno :
+			      0;
 		close(fd);
-		if (!ret)
+		if (!ret || ret == EAGAIN || ret == EINPROGRESS)
 			return -EADDRINUSE;
-
-		unlink(path);
+		if (ret == ECONNREFUSED)
+			unlink(path);
+		else if (ret != ENOENT)
+			return -ret;
 	}
 
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);

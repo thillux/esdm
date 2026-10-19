@@ -149,8 +149,10 @@ Listen on a UNIX domain socket at
 .IR PATH ,
 created with
 .BR \-\-mode .
-A socket left at the path by an earlier instance is replaced, unless an
-instance still listens on it; any other file is not. The daemon removes the
+A socket left at the path by an earlier instance, refusing connections, is
+replaced. One that accepts them, has its backlog full or that the daemon may
+not connect to is not \- an instance may still serve on it \-, and neither is
+any other file: the daemon does not start then. The daemon removes the
 socket when it ends \- started as root, only where
 .B \-\-user
 may, in a directory that user can write to. Elsewhere the socket stays behind

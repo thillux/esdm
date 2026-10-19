@@ -55,6 +55,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "../rpc_client/env.h"
@@ -1787,6 +1788,158 @@ out_log:
 }
 
 /*
+ * The exit status of a daemon that is to end by itself; -1 if it did not
+ * within @timeout_ms, and it is stopped then
+ */
+static int test_wait_exit(pid_t pid, int timeout_ms)
+{
+	uint64_t end = fe_now_ms() + (uint64_t)timeout_ms;
+	int status;
+
+	do {
+		if (waitpid(pid, &status, WNOHANG) == pid)
+			return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+		fe_sleep_ms(20);
+	} while (fe_now_ms() < end);
+
+	printf("  daemon %d still runs\n", (int)pid);
+	fe_stop(pid, 1000);
+	return -1;
+}
+
+/* A socket of the test at test_sock, listening with @backlog unless -1 */
+static int test_sock_bind(int backlog)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+	if (fd < 0)
+		return -1;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", test_sock);
+	unlink(test_sock);
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
+	    (backlog >= 0 && listen(fd, backlog))) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+/* The inode at test_sock, 0 if there is none */
+static ino_t test_sock_ino(void)
+{
+	struct stat sb;
+
+	return lstat(test_sock, &sb) ? 0 : sb.st_ino;
+}
+
+/*
+ * The daemon started on what is at test_sock, which is not its to take: it has
+ * to end with status 1 right away, and leave it where it is
+ */
+static void test_takeover_refused(const char *what)
+{
+	ino_t ino = test_sock_ino();
+	int status;
+	pid_t pid;
+
+	pid = fe_spawn(test_daemon, test_sock, NULL);
+	CHECK(pid > 0, "daemon started: %d", (int)pid);
+	if (pid <= 0)
+		return;
+	status = test_wait_exit(pid, TEST_WAIT_MS);
+	CHECK(status == 1, "on %s, the daemon ends with status %d", what,
+	      status);
+	CHECK(ino && test_sock_ino() == ino, "%s left where it is", what);
+}
+
+/*
+ * What --socket finds at its path: a socket left behind is replaced, one an
+ * instance may still serve on is not, nor is any other file
+ */
+static void test_lifecycle_takeover(void)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	int fd, conns[16], nconns = 0, i;
+	bool full = false;
+	pid_t pid;
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", test_sock);
+
+	TEST_STEP("--socket: a socket nobody listens on is replaced");
+	fd = test_sock_bind(-1);
+	CHECK(fd >= 0, "socket bound");
+	if (fd >= 0)
+		close(fd);
+	pid = fe_spawn(test_daemon, test_sock, NULL);
+	CHECK(pid > 0, "daemon started: %d", (int)pid);
+	if (pid > 0) {
+		CHECK(test_responsive(), "the daemon serves on it");
+		test_end(pid);
+	}
+
+	TEST_STEP("--socket: a socket listened on is not taken over");
+	fd = test_sock_bind(4);
+	CHECK(fd >= 0, "socket listening");
+	if (fd >= 0) {
+		test_takeover_refused("a socket listened on");
+		close(fd);
+	}
+
+	TEST_STEP("--socket: nor is one whose backlog is full");
+	fd = test_sock_bind(0);
+	CHECK(fd >= 0, "socket listening");
+	if (fd >= 0) {
+		for (i = 0; i < 16 && !full; i++) {
+			int c = socket(AF_UNIX,
+				       SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+				       0);
+
+			if (c < 0)
+				break;
+			if (!connect(c, (struct sockaddr *)&addr,
+				     sizeof(addr))) {
+				conns[nconns++] = c;
+				continue;
+			}
+			full = errno == EAGAIN;
+			close(c);
+			if (!full)
+				break;
+		}
+		CHECK(full, "the backlog full after %d connections", nconns);
+		test_takeover_refused("a socket with its backlog full");
+		for (i = 0; i < nconns; i++)
+			close(conns[i]);
+		close(fd);
+	}
+
+	TEST_STEP("--socket: nor is one the daemon may not connect to");
+	if (geteuid()) {
+		fd = test_sock_bind(4);
+		CHECK(fd >= 0, "socket listening");
+		if (fd >= 0) {
+			CHECK(!chmod(test_sock, 0), "mode 0");
+			test_takeover_refused("a socket of mode 0");
+			close(fd);
+		}
+	} else {
+		printf("Root may connect to any socket - skipping\n");
+	}
+
+	TEST_STEP("--socket: a file that is no socket is not replaced");
+	unlink(test_sock);
+	fd = open(test_sock, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	CHECK(fd >= 0, "file created");
+	if (fd >= 0) {
+		close(fd);
+		test_takeover_refused("a regular file");
+	}
+	unlink(test_sock);
+}
+
+/*
  * A request waits for the ESDM to be seeded, and what the front-end does
  * meanwhile is never held up by it
  */
@@ -2007,6 +2160,7 @@ static int test_group_lifecycle(void)
 	/* Daemons of their own, after the one of the group ended */
 	test_lifecycle_esdm_refusing();
 	test_lifecycle_esdm_backoff();
+	test_lifecycle_takeover();
 
 	return 0;
 }
