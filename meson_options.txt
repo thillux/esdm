@@ -163,10 +163,13 @@ limit that this value must be in the range between 0 and 256.
 When configuring this value to 0, the kernel RNG entropy source will provide
 256 bits of data without being credited to contain entropy.
 
-Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, this value
-is set to 0 automatically when booting the kernel in FIPS mode (with fips=1
-kernel command line option). This is due to the fact that random.c is not
-SP800-90B compliant.
+Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, the kernel
+RNG is credited with no entropy at all, on every kernel and whether it runs in
+FIPS mode or not: these builds always apply the SP800-90C oversampling, and
+random.c is not SP800-90B compliant. Other builds credit it with no entropy
+while a scheduler-based entropy source is credited, and with at most 4 bits
+per 256 bits of data while the interrupt-based entropy source of the kernel
+module is present or an eBPF one is credited.
 ''')
 
 ################################################################################
