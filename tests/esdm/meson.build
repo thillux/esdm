@@ -130,6 +130,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_fork_test = executable(
+		'esdm_fork_test',
+		[ esdm_ipc_ns, 'esdm_fork_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_drng_mgr_run_dry_test = executable(
 		'esdm_drng_mgr_run_dry_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_run_dry_test.c' ],
@@ -451,6 +459,11 @@ if get_option('esdm-server').enabled()
 		timeout: 300,
 		is_parallel: false,
 		priority: -10)
+
+	test('ESDM fork - initial DRNG', esdm_fork_test, args : [ 'initial' ])
+	if get_option('node').enabled()
+		test('ESDM fork - node DRNG', esdm_fork_test, args : [ 'node' ])
+	endif
 
 	# Serial as well: it keeps several CPUs busy generating, and the node
 	# DRNGs coming back in time is a matter of the reseed worker getting a

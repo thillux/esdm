@@ -96,6 +96,12 @@ struct esdm_drng {
 	 */
 	atomic_bool reseed_pending;
 
+	/*
+	 * The fork generation of the process the state was last made unique
+	 * to, see esdm_drng_fork_stir_nolock(). Written under the lock below.
+	 */
+	atomic_uint fork_gen;
+
 	/* Lock write operations on DRNG state, DRNG replacement of drng_cb */
 	mutex_w_t lock; /* Non-atomic DRNG operation */
 };
@@ -105,7 +111,8 @@ struct esdm_drng {
 	.requests = ESDM_DRNG_RESEED_THRESH, .requests_since_fully_seeded = 0, \
 	.request_bits_since_fully_seeded = 0, .seed_generation = 0,            \
 	.last_seeded_time = 0, .last_seeded_wtime = 0, .fully_seeded = false,  \
-	.force_reseed = true, .initiated = false, .reseed_pending = false
+	.force_reseed = true, .initiated = false, .reseed_pending = false,     \
+	.fork_gen = 0
 
 /*
  * Statistics of one DRNG instance, as handed to the callback of

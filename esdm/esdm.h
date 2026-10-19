@@ -32,6 +32,13 @@
  * way - the DRNGs are freed and the managers are terminated for good, and a
  * further esdm_init() fails with -ESHUTDOWN instead of bringing them back.
  *
+ * A child of fork() inherits the ESDM, but none of its threads. Each of its
+ * DRNGs is reseeded with data unique to the child before it produces output
+ * there, so the child repeats neither its parent's random numbers nor another
+ * child's. A lock held by another thread of the parent at the moment of the
+ * fork - the ESDM's own threads included - stays taken in the child, and the
+ * child must not call esdm_fini(). See the FORK section of libesdm(3).
+ *
  * @return: 0 on success, -ESHUTDOWN after esdm_fini(), < 0 on other errors
  */
 int esdm_init(void);

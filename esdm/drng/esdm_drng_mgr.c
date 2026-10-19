@@ -23,8 +23,10 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>
 
 #include "build_bug_on.h"
 #include "config.h"
@@ -46,6 +48,8 @@
 #include "esdm_openssl.h"
 #include "esdm_selftest.h"
 #include "helper.h"
+#include "memset_secure.h"
+#include "os_random.h"
 #include "queue.h"
 #include "ret_checkers.h"
 #include "threading_support.h"
@@ -158,6 +162,10 @@ static DEFINE_MUTEX_W_UNLOCKED(esdm_pr_lock);
 static struct xoshiro_state esdm_drng_stagger_prng;
 static bool esdm_drng_stagger_avail = false;
 
+/* The fork handler, defined with the asynchronous reseeding below */
+static pthread_once_t esdm_drng_atfork_once = PTHREAD_ONCE_INIT;
+static void esdm_drng_atfork_register(void);
+
 /********************************** Helper ************************************/
 
 bool esdm_get_available(void)
@@ -252,6 +260,90 @@ static void esdm_drng_set_seeded_wtime(struct esdm_drng *drng)
 
 	if (clock_gettime(CLOCK_REALTIME, &now) != -1)
 		atomic_store(&drng->last_seeded_wtime, (long long)now.tv_sec);
+}
+
+/*
+ * The fork generation of this process: zero in the process that set the ESDM
+ * up, bumped in the child of every fork() - see esdm_drng_atfork_child(). A
+ * DRNG last made unique to another generation holds a state its parent, or a
+ * sibling, holds as well.
+ */
+static atomic_uint esdm_drng_fork_gen = 0;
+
+/*
+ * Make the state of @drng unique to this process if it was inherited across
+ * fork(), before anything is generated from it or seeded into it. The child
+ * starts out with the DRNG states of its parent, and the two would hand out
+ * the same bytes until each reseeds - which neither does on account of the
+ * fork, nor at a moment of its own.
+ *
+ * The state is reseeded with 32 bytes of the kernel RNG, which no two
+ * processes share, together with the process ID and the time - the latter set
+ * the child apart from its parent even should the kernel RNG fail. A reseed
+ * from the entropy sources is forced to follow by the usual rules: at its next
+ * request for a DRNG that cannot defer it, as soon as the pool lock is free
+ * for a node DRNG - the child has no reseed worker, see
+ * esdm_drng_atfork_child().
+ *
+ * A DRNG that never held a seed has nothing inherited to set apart: its first
+ * seeding comes from the entropy sources of this process, stamped with the
+ * time of their collection.
+ *
+ * Caller holds drng->lock.
+ *
+ * @return 0 on success, < 0 if the state could not be made unique - nothing
+ *	   may be generated from it then
+ */
+static int esdm_drng_fork_stir_nolock(struct esdm_drng *drng)
+{
+	unsigned int gen = atomic_load(&esdm_drng_fork_gen);
+	struct {
+		uint8_t random[32];
+		struct timespec mono, real;
+		pid_t pid;
+		unsigned int gen;
+	} stir;
+	int ret;
+
+	if (atomic_load(&drng->fork_gen) == gen)
+		return 0;
+
+	if (!drng->drng || !atomic_load(&drng->seed_generation)) {
+		atomic_store(&drng->fork_gen, gen);
+		return 0;
+	}
+
+	memset(&stir, 0, sizeof(stir));
+	ret = esdm_os_random(stir.random, sizeof(stir.random));
+	if (ret) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_DRNG,
+			"no data from the kernel RNG for a DRNG inherited across fork() (%d) - process ID and time set it apart until its reseed\n",
+			ret);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &stir.mono);
+	clock_gettime(CLOCK_REALTIME, &stir.real);
+	stir.pid = getpid();
+	stir.gen = gen;
+
+	ret = drng->drng_cb->drng_seed(drng->drng, (uint8_t *)&stir,
+				       sizeof(stir), NULL, 0);
+	memset_secure(&stir, 0, sizeof(stir));
+	if (ret < 0) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_DRNG,
+			"reseed of a DRNG inherited across fork() failed (%d)\n",
+			ret);
+		return ret;
+	}
+
+	atomic_store(&drng->fork_gen, gen);
+	atomic_store(&drng->force_reseed, true);
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_DRNG,
+		    "DRNG inherited across fork() reseeded\n");
+
+	return 0;
 }
 
 /*
@@ -355,6 +447,9 @@ int esdm_drng_mgr_initialize(void)
 
 	if (!atomic_compare_exchange_strong(&esdm_avail, &expected, 1))
 		return 0;
+
+	/* Before the first DRNG is seeded - and a fork() could copy it */
+	pthread_once(&esdm_drng_atfork_once, esdm_drng_atfork_register);
 
 	ret = xoshiro_init(&esdm_drng_stagger_prng);
 	if (ret) {
@@ -722,6 +817,16 @@ static bool esdm_drng_inject(struct esdm_drng *drng, const uint8_t *inbuf,
 
 	if (!drng->drng)
 		return false;
+
+	/*
+	 * A seed collected in this process is no less likely to repeat one of
+	 * the parent's - the auxiliary pool, a block an entropy source cached,
+	 * are inherited as well - and a DRNG state made unique to it cannot.
+	 */
+	if (esdm_drng_fork_stir_nolock(drng)) {
+		atomic_store(&drng->force_reseed, true);
+		return false;
+	}
 
 	if (drng->drng_cb->drng_seed(drng->drng, inbuf, inbuflen, addtl,
 				     addtllen) < 0) {
@@ -1909,6 +2014,30 @@ static int esdm_drng_reseed_worker(void *unused)
 }
 
 /*
+ * In the child of fork(), only the thread that called it lives on, and none of
+ * the ESDM's own - the reseed worker among them. The child starts a new
+ * generation, so every DRNG is made unique to it before it is used again, see
+ * esdm_drng_fork_stir_nolock(), and it is told that it has no worker: one it
+ * believed on duty would be handed the reseeds of the node DRNGs, which nobody
+ * would ever perform. Atomic stores only, as nothing else is safe here.
+ */
+static void esdm_drng_atfork_child(void)
+{
+	atomic_fetch_add(&esdm_drng_fork_gen, 1);
+	atomic_store(&esdm_drng_reseed_worker_active, false);
+	atomic_store(&esdm_drng_reseed_worker_wakeup, 0);
+}
+
+static void esdm_drng_atfork_register(void)
+{
+	if (pthread_atfork(NULL, NULL, esdm_drng_atfork_child)) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_DRNG,
+			"cannot install the fork handler - the child of a fork() hands out the random numbers of its parent until its DRNGs reseed\n");
+	}
+}
+
+/*
  * Put the worker on duty. Called once while the ESDM is brought up - see
  * esdm_init_monitor() - rather than from the paths that have something for the
  * worker to do: those only tell it, which costs an atomic store and a signal
@@ -1917,6 +2046,14 @@ static int esdm_drng_reseed_worker(void *unused)
 bool esdm_drng_mgr_reseed_worker_start(void)
 {
 	if (esdm_drng_reseed_stop())
+		return false;
+
+	/*
+	 * Not in the child of a fork(): the slots of the thread pool still tell
+	 * of the parent's threads there, and a worker scheduled into one would
+	 * never run. The requests reseed the DRNGs themselves in the child.
+	 */
+	if (atomic_load(&esdm_drng_fork_gen))
 		return false;
 
 	/* Nothing to do ahead of requests that reseed themselves */
@@ -2331,6 +2468,12 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		if (!drng->drng) {
 			mutex_w_unlock(&drng->lock);
 			return processed ? processed : -EOPNOTSUPP;
+		}
+
+		/* Nothing from a state the parent of a fork() holds as well */
+		if (esdm_drng_fork_stir_nolock(drng)) {
+			mutex_w_unlock(&drng->lock);
+			return processed ? processed : -EFAULT;
 		}
 
 		/* Now, generate random bits from the properly seeded DRNG. */
