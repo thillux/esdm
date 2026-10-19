@@ -220,11 +220,66 @@ static struct esdm_egd_client *lib_client(const char *address,
 	return client;
 }
 
+/*
+ * Send the head of an insertion of 255 bytes, and then its data a byte every
+ * 250 ms, for at most @ms - the command never completes. Is the connection
+ * closed meanwhile? *@took tells when, from the head on.
+ */
+static bool trickle_closed(int fd, unsigned int ms, uint64_t *took)
+{
+	static const uint8_t head[4] = { ESDM_EGD_CMD_WRITE_ENTROPY, 0, 0,
+					 255 };
+	uint64_t start = test_now_ms();
+	uint8_t byte = 0;
+
+	*took = 0;
+	if (fd < 0 || test_send(fd, head, sizeof(head)))
+		return false;
+	while (test_now_ms() - start < ms) {
+		if (test_fd_closed(fd, 250) ||
+		    (send(fd, &byte, 1, MSG_NOSIGNAL | MSG_DONTWAIT) < 0 &&
+		     errno != EAGAIN)) {
+			*took = test_now_ms() - start;
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * A command sent a byte at a time: bounded as a whole, by the probation for
+ * the first command - 2 s here - and by the I/O timeout from its first byte
+ * for any later one - 2 s as well -, not by either per byte.
+ */
+static void test_plain_trickle(const struct server *s)
+{
+	uint64_t took;
+	int fd;
+
+	fd = test_connect("127.0.0.1", s->port, NULL);
+	CHECK(trickle_closed(fd, 8000, &took) && took < 4000,
+	      "a first command trickling in held its probation for %llu ms",
+	      (unsigned long long)took);
+	if (fd >= 0)
+		close(fd);
+	test_sleep_ms(300);
+
+	fd = test_connect("127.0.0.1", s->port, NULL);
+	CHECK(test_plain_pid(fd) == s->pid, "no PID before trickling");
+	CHECK(trickle_closed(fd, 8000, &took) && took < 4000,
+	      "a command trickling in held the connection for %llu ms",
+	      (unsigned long long)took);
+	if (fd >= 0)
+		close(fd);
+	test_sleep_ms(300);
+}
+
 static void test_plain(void)
 {
 	static const char *const args[] = {
 		"--plain", "--max_per_client", "2", "--handshake_timeout", "2",
-		"--allow", "127.0.0.1/32", "--allow", "::1", NULL
+		"--io_timeout", "2", "--allow", "127.0.0.1/32", "--allow", "::1",
+		NULL
 	};
 	struct esdm_egd_client *client;
 	char address[64];
@@ -279,6 +334,9 @@ static void test_plain(void)
 	      "a silent client was not closed");
 	if (fd3 >= 0)
 		close(fd3);
+
+	/* Nor is one sending its command a byte at a time kept */
+	test_plain_trickle(&s);
 
 	/* An unknown command ends the connection */
 	cmd[0] = 0x77;

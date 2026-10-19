@@ -170,8 +170,9 @@ client beyond its bound is closed \- right after the handshake in TLS mode, at
 once in plain mode.
 .TP
 .BI \-\-handshake_timeout " SEC"
-Length of the probation: a connection that did not complete its handshake \-
-in plain mode, sent no command \- by then is closed. The default is 10.
+Length of the probation, from the connection on: a connection that did not
+complete its handshake \- in plain mode, its first command, all of it \- by
+then is closed. The default is 10.
 .TP
 .BI \-\-idle_timeout " SEC"
 A connection whose client sent no command for this long is closed; 0 for
@@ -182,8 +183,8 @@ network modes cannot, see
 .BR libesdm_egd_client (3).
 .TP
 .BI \-\-io_timeout " SEC"
-Bound of the rest of a command once it started, and of a client taking its
-answer. The default is 30.
+Bound of the rest of a command once it started, in all from its first byte,
+and of a client taking its answer. The default is 30.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 User to switch to after the sockets are bound and the TLS files loaded, when
@@ -234,8 +235,8 @@ in all,
 .B \-\-max_handshakes
 on probation and
 .B \-\-max_handshakes_per_source
-of them per source address \- a peer that connects and stays silent holds a
-slot for no longer than
+of them per source address \- a peer that connects and stays silent, or
+sends its first command a byte at a time, holds a slot for no longer than
 .BR \-\-handshake_timeout ,
 in plain mode as well,
 .IP \(bu 2

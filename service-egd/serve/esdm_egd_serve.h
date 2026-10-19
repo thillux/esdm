@@ -159,14 +159,15 @@ struct esdm_egd_serve_conn {
 	 */
 	unsigned int idle_timeout_ms;
 	/*
-	 * How long the client may take for its first command - the probation
-	 * of a client that is not authenticated otherwise; 0 for the idle
-	 * timeout
+	 * How long the client may take for its first command, all of it, from
+	 * the start of esdm_egd_serve() - the probation of a client that is
+	 * not authenticated otherwise, to be served right after it connected;
+	 * 0 for the idle timeout and the I/O timeout as for any other command
 	 */
 	unsigned int first_timeout_ms;
 	/*
-	 * How long the rest of a command started may take to arrive, and an
-	 * answer to be taken by the client
+	 * How long the rest of a command started may take to arrive, in all
+	 * from its first byte, and an answer to be taken by the client
 	 */
 	unsigned int io_timeout_ms;
 	/* Set when the daemon shuts down; the loop starts nothing new then */

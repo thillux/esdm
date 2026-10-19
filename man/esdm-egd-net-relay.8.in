@@ -155,8 +155,8 @@ never, the default: a consumer confined by seccomp after connecting cannot
 connect again.
 .TP
 .BI \-\-io_timeout " SEC"
-Bound of the rest of a command once it started, and of a consumer taking its
-answer. The default is 30.
+Bound of the rest of a command once it started, in all from its first byte,
+and of a consumer taking its answer. The default is 30.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 User to switch to after the socket is bound, when started as root. The default

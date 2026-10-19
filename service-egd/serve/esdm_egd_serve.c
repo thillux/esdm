@@ -88,6 +88,28 @@ static ssize_t esdm_egd_serve_cmd_len(const uint8_t *in, size_t in_len)
 	}
 }
 
+/* Milliseconds on the monotonic clock */
+static uint64_t esdm_egd_serve_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+/*
+ * What is left of @timeout_ms after @start, for a read: 0 once it passed,
+ * which reads what is there already and waits for nothing
+ */
+static int esdm_egd_serve_left_ms(uint64_t start, unsigned int timeout_ms)
+{
+	uint64_t now = esdm_egd_serve_now_ms();
+
+	if (now - start >= timeout_ms)
+		return 0;
+	return (int)(timeout_ms - (now - start));
+}
+
 /* Does the error of a backend end the connection? See the ops. */
 static bool esdm_egd_serve_fatal(int ret)
 {
@@ -410,6 +432,8 @@ static int esdm_egd_serve_cmd(const struct esdm_egd_serve_conn *c,
 int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 {
 	uint8_t in[ESDM_EGD_SERVE_BUFSIZE];
+	/* The start of the serving, and of the command at the head of @in */
+	uint64_t start = esdm_egd_serve_now_ms(), cmd_start = start;
 	size_t in_len = 0;
 	bool first = true;
 	int ret = 0;
@@ -441,14 +465,20 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 		if (!cmd_len || in_len < (size_t)cmd_len) {
 			/*
 			 * Between two commands, the client may be silent for
-			 * the idle timeout - for the first one, for its
-			 * probation. Once a command started, its rest has to
-			 * come within the timeout of a transfer.
+			 * the idle timeout. Once a command started, all of its
+			 * rest has to come within the timeout of a transfer
+			 * from its first byte - not each part of it: a client
+			 * sending a byte at a time would hold the connection
+			 * for that long per byte. The first command of a
+			 * client on probation has to be complete within the
+			 * probation from the start, however it arrives.
 			 */
-			if (in_len)
-				timeout = (int)c->io_timeout_ms;
-			else if (first && c->first_timeout_ms)
-				timeout = (int)c->first_timeout_ms;
+			if (first && c->first_timeout_ms)
+				timeout = esdm_egd_serve_left_ms(
+					start, c->first_timeout_ms);
+			else if (in_len)
+				timeout = esdm_egd_serve_left_ms(
+					cmd_start, c->io_timeout_ms);
 			else
 				timeout = c->idle_timeout_ms ?
 						  (int)c->idle_timeout_ms :
@@ -466,10 +496,15 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 				if (ret == -ETIMEDOUT)
 					esdm_logger(
 						LOGGER_DEBUG, LOGGER_C_SERVER,
-						"EGD: %s was silent for too long\n",
-						c->peer);
+						"EGD: %s %s\n", c->peer,
+						in_len ?
+							"did not complete its command in time" :
+							"was silent for too long");
 				break;
 			}
+			/* The first byte of a command: its time starts */
+			if (!in_len)
+				cmd_start = esdm_egd_serve_now_ms();
 			in_len += (size_t)n;
 			continue;
 		}
@@ -497,6 +532,12 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 		if (in_len)
 			memmove(in, in + cmd_len, in_len);
 		memset_secure(in + in_len, 0, (size_t)cmd_len);
+
+		/*
+		 * The next command, pipelined behind this one, starts its time
+		 * now: the client is not to be held to the time the answer took
+		 */
+		cmd_start = esdm_egd_serve_now_ms();
 
 		if (ret)
 			break;
