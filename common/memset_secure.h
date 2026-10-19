@@ -78,6 +78,14 @@
 
 static inline void memset_secure(void *s, int c, size_t n)
 {
+	/*
+	 * Nothing to wipe - and @s may be NULL then, as the data() of an empty
+	 * C++ container is, which memset() must not be passed even for no
+	 * bytes at all.
+	 */
+	if (!n)
+		return;
+
 	memset(s, c, n);
 	__asm__ __volatile__("" : : "r"(s) : "memory");
 }
