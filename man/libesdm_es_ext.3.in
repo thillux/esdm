@@ -72,9 +72,7 @@ struct esdm_es_ext_plugin {
 	int (*get_entropy)(void *ctx, uint8_t *buf, size_t buflen,
 			   uint32_t *entropy_bits);
 	int (*selftest)(void *ctx);
-	/* Version 2 */
 	int (*status_json)(void *ctx, char *buf, size_t buflen);
-	/* Version 3 */
 	uint32_t (*entropy_rate)(void *ctx);
 };
 .fi
@@ -82,11 +80,8 @@ struct esdm_es_ext_plugin {
 .I version
 is
 .BR ESDM_ES_EXT_PLUGIN_VERSION ,
-3. A plugin of version 1 or 2, whose struct ends before
-.I status_json
-or
-.IR entropy_rate ,
-is loaded all the same.
+1. A later version may add members at the end of the struct; a plugin of an
+earlier one, whose struct ends before them, is then loaded all the same.
 .PP
 .I name
 is the name of the source: the ESDM shows the source under it in its status
@@ -195,8 +190,7 @@ bits of entropy per 256 bits of data from 0 to
 .B ESDM_ES_EXT_ENTROPY_RATE_MAX
 (256); a rate beyond is taken as 256. It is called once after
 .IR init ,
-so that the plugin can decide from the hardware it found, and only for a plugin
-of version 3 or later. A provider declares its rate in its answer to INFO, see
+so that the plugin can decide from the hardware it found. A provider declares its rate in its answer to INFO, see
 below; the provider server of this library declares the one of the
 .I entropy_rate
 of its plugin, or the one set with

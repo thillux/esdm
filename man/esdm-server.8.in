@@ -305,8 +305,9 @@ else the one the provider declares, else 0;
 a provider that is not there at start up has its first self test on the first
 connection to it.
 .PP
-A plugin or a provider may declare the entropy rate of its data (plugin API
-version 3, and the INFO request of the socket protocol, see
+A plugin or a provider may declare the entropy rate of its data (the
+.I entropy_rate
+callback of a plugin, and the INFO request of the socket protocol, see
 .BR libesdm_es_ext (3)):
 the daemon credits the source at that rate unless one is configured for the
 source, which takes precedence. The status of each source shows the rate it is

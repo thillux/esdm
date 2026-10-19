@@ -43,14 +43,13 @@
  *   source, is refused, as is none, and the source shown under its instance
  *   name.
  * - A source is credited at the rate configured for it, else at the one its
- *   plugin declares (plugin API version 3), capped at 256, else at 256 - the
- *   state says which it is. A plugin of version 1 or 2 declares none, whatever
- *   lies beyond its struct.
+ *   plugin declares, capped at 256, else at 256 - the state says which it
+ *   is. A plugin without an entropy rate callback declares none.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
  * Usage: es_extlib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> <example> <version 1> <version 2> <rated plugin>
+ *	  <no plugin> <example> <bare plugin> <rated plugin>
  */
 
 #include "config.h"
@@ -312,7 +311,7 @@ static bool test_busy_start(pthread_t *thread, unsigned int ms)
  * reports what is no JSON object of up to ESDM_ES_EXT_STATUS_MAX bytes, or is
  * busy. The rest of the state is there either way.
  */
-static void test_status(const char *good, const char *v1)
+static void test_status(const char *good, const char *bare)
 {
 	static const char *const bad[] = {
 		"{\"a\":",
@@ -326,7 +325,7 @@ static void test_status(const char *good, const char *v1)
 	};
 	char text[ESDM_ES_EXT_STATUS_MAX + 2], txt[2048];
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
-	struct esdm_es_ext_test_control *ctl_v1 = NULL;
+	struct esdm_es_ext_test_control *ctl_bare = NULL;
 	struct json_object *state, *provider, *val;
 	unsigned int calls, i;
 	pthread_t getter;
@@ -442,22 +441,22 @@ static void test_status(const char *good, const char *v1)
 	CHECK(provider != NULL, "the status is gone after a request");
 	json_object_put(state);
 
-	/* A plugin of version 1 has none, whatever lies beyond its struct */
-	CHECK_EQ(esdm_es_ext_lib_set_path(0, v1), 0);
-	dl = dlopen(v1, RTLD_NOW | RTLD_NOLOAD);
+	/* A plugin without a status callback has none */
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, bare), 0);
+	dl = dlopen(bare, RTLD_NOW | RTLD_NOLOAD);
 	if (dl) {
-		ctl_v1 = dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL);
+		ctl_bare = dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL);
 		dlclose(dl);
 	}
-	CHECK(ctl_v1 != NULL, "the plugin of version 1 has no control");
-	CHECK(ES->active(), "the plugin of version 1 is not used");
+	CHECK(ctl_bare != NULL, "the bare plugin has no control");
+	CHECK(ES->active(), "the bare plugin is not used");
 	provider = test_provider(&state);
-	CHECK(!provider, "a plugin of version 1 reports a status");
+	CHECK(!provider, "a plugin without a status callback reports a status");
 	CHECK(test_state_has("status", "delivering"),
-	      "the plugin of version 1 does not deliver");
+	      "the bare plugin does not deliver");
 	json_object_put(state);
-	if (ctl_v1)
-		CHECK_EQ(ctl_v1->status_calls, 0);
+	if (ctl_bare)
+		CHECK_EQ(ctl_bare->status_calls, 0);
 
 	CHECK_EQ(esdm_es_ext_lib_set_path(0, good), 0);
 	CHECK(ES->active(), "the test plugin is not back");
@@ -561,13 +560,11 @@ static void test_load(const char *path)
  * declares, else 256 - and a block credited with what the plugin claims, at
  * most at that rate.
  */
-static void test_rates(const char *path, const char *v1, const char *v2,
-		       const char *rated)
+static void test_rates(const char *path, const char *bare, const char *rated)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	struct esdm_es_ext_test_control *other;
 	void *dl;
-	unsigned int i;
 
 	/* Nothing configured, nothing declared: 256 */
 	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
@@ -608,23 +605,19 @@ static void test_rates(const char *path, const char *v1, const char *v2,
 		 0);
 	CHECK(test_rate_is(64, "plugin"), "the rate of the plugin is not back");
 
-	/* The plugins of version 1 and 2 have none, whatever lies beyond */
-	for (i = 0; i < 2; i++) {
-		const char *old = i ? v2 : v1;
+	/* A plugin without an entropy rate callback declares none */
+	test_load(bare);
+	dl = dlopen(bare, RTLD_NOW | RTLD_NOLOAD);
+	other = dl ? dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL) : NULL;
+	CHECK(other != NULL, "%s has no control", bare);
+	CHECK(test_rate_is(256, "default"),
+	      "a plugin without an entropy rate callback declares a rate");
+	if (other)
+		CHECK_EQ(other->rate_calls, 0);
+	if (dl)
+		dlclose(dl);
 
-		test_load(old);
-		dl = dlopen(old, RTLD_NOW | RTLD_NOLOAD);
-		other = dl ? dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL) : NULL;
-		CHECK(other != NULL, "%s has no control", old);
-		CHECK(test_rate_is(256, "default"),
-		      "a plugin of version %u declares a rate", i + 1);
-		if (other)
-			CHECK_EQ(other->rate_calls, 0);
-		if (dl)
-			dlclose(dl);
-	}
-
-	/* The plugin of version 3 that declares its name and its rate */
+	/* The plugin that declares its name and its rate */
 	test_load(rated);
 	CHECK(test_rate_is(ES_EXT_TEST_RATED_RATE, "plugin"),
 	      "the rate of the rated plugin is not taken");
@@ -723,8 +716,8 @@ int main(int argc, char *argv[])
 	void *ref;
 
 	/* The plugins the tests of this directory share */
-	if (argc < 9) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1> <of version 2> <rated plugin>\n",
+	if (argc < 8) {
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <bare plugin> <rated plugin>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -750,7 +743,7 @@ int main(int argc, char *argv[])
 	test_credit(argv[1]);
 	test_status(argv[1], argv[6]);
 	test_names(argv[1]);
-	test_rates(argv[1], argv[6], argv[7], argv[8]);
+	test_rates(argv[1], argv[6], argv[7]);
 	test_reinit();
 	test_bad_plugins(argv[1], argv[2], argv[3], argv[4]);
 

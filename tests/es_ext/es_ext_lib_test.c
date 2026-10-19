@@ -23,7 +23,7 @@
  * correctly and not.
  *
  * Usage: es_ext_lib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> <example plugin> <test plugin of version 1>
+ *	  <no plugin> <example plugin> <bare test plugin>
  */
 
 #define _GNU_SOURCE
@@ -64,7 +64,7 @@ static struct esdm_es_ext_test_control *test_control(const char *path)
 
 static void test_loader(const char *good, const char *bad_version,
 			const char *no_get, const char *no_plugin,
-			const char *v1)
+			const char *bare)
 {
 	struct esdm_es_ext_plugin_handle *handle;
 	const struct esdm_es_ext_plugin *plugin;
@@ -86,11 +86,11 @@ static void test_loader(const char *good, const char *bad_version,
 		 -ENOENT);
 	CHECK_EQ(esdm_es_ext_plugin_load(NULL, &handle, &plugin), -EINVAL);
 
-	/* A plugin of version 1, without a status, is loaded all the same */
-	CHECK_EQ(esdm_es_ext_plugin_load(v1, &handle, &plugin), 0);
-	CHECK(plugin && plugin->version == 1 &&
-		      !esdm_es_ext_plugin_has_status(plugin),
-	      "the plugin of version 1 is not taken as one");
+	/* A plugin without the callbacks it may leave out is loaded */
+	CHECK_EQ(esdm_es_ext_plugin_load(bare, &handle, &plugin), 0);
+	CHECK(plugin && !esdm_es_ext_plugin_has_status(plugin) &&
+		      !esdm_es_ext_plugin_has_entropy_rate(plugin),
+	      "the bare plugin is not taken as one");
 	esdm_es_ext_plugin_unload(handle);
 
 	/* Unloading nothing is fine */
@@ -402,11 +402,11 @@ static struct json_object *test_status_ask(int fd, uint32_t length,
  * the slots, the requests served, the verdict of the last self test, the
  * uptime - and the status of the plugin as it reports it, null for none, for a
  * failing one and for one that is no JSON object of up to
- * ESDM_ES_EXT_STATUS_MAX bytes; none of a plugin of version 1, whose struct
- * has no callback. A status that does not fit what is asked for drops the part
+ * ESDM_ES_EXT_STATUS_MAX bytes; none of a plugin without the callback. A
+ * status that does not fit what is asked for drops the part
  * of the plugin, never cuts the text short.
  */
-static void test_server_status(const char *good, const char *v1)
+static void test_server_status(const char *good, const char *bare)
 {
 	static const char *const bad_status[] = {
 		"{\"a\":NaN}", "{\"a\":1e999}", "{\"\xff\":1}", "[1]",
@@ -415,7 +415,7 @@ static void test_server_status(const char *good, const char *v1)
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA +
 		    1];
 	char big[ESDM_ES_EXT_STATUS_MAX + 2];
-	const char *paths[] = { good, v1 };
+	const char *paths[] = { good, bare };
 	unsigned int i, j;
 
 	memset(big, 'a', sizeof(big));
@@ -459,7 +459,8 @@ static void test_server_status(const char *good, const char *v1)
 		CHECK(obj && fields, "the status has no fields of the server");
 		CHECK(!strcmp(test_member_str(fields, "version"), VERSION),
 		      "the server reports another version");
-		CHECK_EQ(test_member_int(fields, "plugin_api"), i ? 1 : 3);
+		CHECK_EQ(test_member_int(fields, "plugin_api"),
+			 ESDM_ES_EXT_PLUGIN_VERSION);
 		CHECK(!strcmp(test_member_str(fields, "name"),
 			      ES_EXT_TEST_NAME),
 		      "the server reports another name");
@@ -479,10 +480,9 @@ static void test_server_status(const char *good, const char *v1)
 		      "the server reports no uptime");
 
 		if (i) {
-			/* Version 1: the callback beyond its struct is not */
+			/* No callback, no status */
 			CHECK(test_member_null(obj, "plugin"),
-			      "a plugin of version 1 reports a status");
-			CHECK_EQ(ctl->status_calls, 0);
+			      "a plugin without a status callback reports one");
 			json_object_put(obj);
 			close(fd);
 			goto stop;
@@ -898,7 +898,7 @@ static void test_example(const char *path)
 int main(int argc, char *argv[])
 {
 	if (argc < 7) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1>\n",
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <bare test plugin>\n",
 		       argv[0]);
 		return 1;
 	}

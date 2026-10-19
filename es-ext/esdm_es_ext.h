@@ -57,11 +57,11 @@ extern "C" {
  ******************************************************************************/
 
 /*
- * Version of struct esdm_es_ext_plugin a plugin is written against. Version 2
- * added @status_json, version 3 @entropy_rate; a plugin of an earlier version,
- * which does not have them, is loaded all the same.
+ * Version of struct esdm_es_ext_plugin a plugin is written against. A later
+ * version may add members at the end, and a plugin of an earlier one, whose
+ * struct ends before them, is loaded all the same.
  */
-#define ESDM_ES_EXT_PLUGIN_VERSION 3
+#define ESDM_ES_EXT_PLUGIN_VERSION 1
 
 /* The highest entropy rate a source may declare: bits per 256 bits of data */
 #define ESDM_ES_EXT_ENTROPY_RATE_MAX 256
@@ -150,8 +150,7 @@ extern "C" {
  *		 negative errno. The ESDM shows it as the "provider" member of
  *		 the state of the source, and leaves out a status that is no
  *		 JSON object. Asked for when the ESDM status is, at most every
- *		 5 seconds, so it must not block for long. Version 2 and later
- *		 only; may be NULL.
+ *		 5 seconds, so it must not block for long. May be NULL.
  * @entropy_rate: The entropy rate the source declares for its data, bits of
  *		  entropy per 256 bits of data, 0 to
  *		  ESDM_ES_EXT_ENTROPY_RATE_MAX - a rate beyond is taken as
@@ -161,7 +160,7 @@ extern "C" {
  *		  unless a rate is configured for the source in the ESDM, which
  *		  takes precedence. Without it the default of the ESDM applies:
  *		  256 for a plugin loaded into the ESDM, 0 for one served by a
- *		  provider. Version 3 and later only; may be NULL.
+ *		  provider. May be NULL.
  */
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -171,9 +170,7 @@ struct esdm_es_ext_plugin {
 	int (*get_entropy)(void *ctx, uint8_t *buf, size_t buflen,
 			   uint32_t *entropy_bits);
 	int (*selftest)(void *ctx);
-	/* Version 2 */
 	int (*status_json)(void *ctx, char *buf, size_t buflen);
-	/* Version 3 */
 	uint32_t (*entropy_rate)(void *ctx);
 };
 

@@ -52,7 +52,7 @@
  * processes serving further copies, steered through the environment.
  *
  * Usage: es_ext_multi_test <esdm-es-ext-serve> <plugin copy> x 8
- *			    <plugin of version 2>
+ *			    <bare plugin>
  */
 
 #define _GNU_SOURCE
@@ -84,7 +84,7 @@
 #define TEST_PLUGINS 8
 
 static const char *test_serve_bin;
-static const char *test_plugin_v2;
+static const char *test_plugin_bare;
 static const char *test_plugin[TEST_PLUGINS];
 static struct esdm_es_ext_test_control *test_ctl[TEST_PLUGINS];
 static void *test_ref[TEST_PLUGINS];
@@ -568,7 +568,7 @@ static bool test_rate_is(const struct esdm_es_cb *es, uint32_t rate,
 
 /*
  * The rates of the plugin library sources, each of its own: declared by their
- * plugins - 64, 200, 300 capped at 256, none from a plugin of version 2 - or
+ * plugins - 64, 200, 300 capped at 256, none from a plugin without the callback - or
  * configured for one source, for all, and back; another plugin loaded into
  * one source changes its rate only.
  */
@@ -588,7 +588,7 @@ static void test_plugin_rates(void)
 		if (i < 3)
 			test_ctl[i]->entropy_rate = declared[i];
 		CHECK_EQ(esdm_es_ext_lib_set_path(i, i < 3 ? test_plugin[i] :
-							      test_plugin_v2),
+							      test_plugin_bare),
 			 0);
 	}
 	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
@@ -1173,11 +1173,11 @@ int main(int argc, char *argv[])
 	unsigned int i;
 
 	if (argc < 3 + TEST_PLUGINS) {
-		printf("usage: %s <esdm-es-ext-serve> <plugin copy> x %u <plugin of version 2>\n",
+		printf("usage: %s <esdm-es-ext-serve> <plugin copy> x %u <bare plugin>\n",
 		       argv[0], TEST_PLUGINS);
 		return 1;
 	}
-	test_plugin_v2 = argv[2 + TEST_PLUGINS];
+	test_plugin_bare = argv[2 + TEST_PLUGINS];
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 

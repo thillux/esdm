@@ -280,7 +280,7 @@ A block is credited with the entropy the source claims for it, capped by
 the rate of the source: the one configured with `es_ext_lib_entropy_rate` /
 `es_ext_socket_entropy_rate` (or `--es_ext_lib_entropy_rate` /
 `--es_ext_socket_entropy_rate`), else the one the source declares - the
-`entropy_rate` callback of a plugin of API version 3, the answer of a
+`entropy_rate` callback of a plugin, the answer of a
 provider to INFO, which `esdm-es-ext-serve --entropy_rate` overrides - else
 256 for a plugin, which takes its claims as they are, and 0 for a provider,
 so a provider declaring none is credited only once a rate is configured.

@@ -396,15 +396,7 @@ static void test_plugin_status(void)
 	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
 		 -EOPNOTSUPP);
 
-	/* Nor of a plugin of version 1, whatever lies beyond its struct */
 	plugin.status_json = test_plugin_status_json;
-	plugin.version = 1;
-	CHECK(!esdm_es_ext_plugin_has_status(&plugin),
-	      "a status of a plugin of version 1");
-	CHECK_EQ(esdm_es_ext_plugin_status(&plugin, NULL, buf, sizeof(buf)),
-		 -EOPNOTSUPP);
-	CHECK_EQ(test_status_calls, 0);
-	plugin.version = ESDM_ES_EXT_PLUGIN_VERSION;
 
 	/* The length of the text */
 	test_status_text = "{\"a\":1}";

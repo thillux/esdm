@@ -284,7 +284,7 @@ static void test_info(const char *serve, const char *plugin,
 		  ESDM_ES_EXT_PROTO_RATE_NONE },
 		/* Both of the options */
 		{ "test", "Quelle \xc3\xa4", "100", "Quelle \xc3\xa4", 100 },
-		/* A plugin of version 3 declaring both */
+		/* A plugin declaring both */
 		{ "rated", NULL, NULL, ES_EXT_TEST_RATED_NAME,
 		  ES_EXT_TEST_RATED_RATE },
 		/* The options take precedence */

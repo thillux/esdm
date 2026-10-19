@@ -25,14 +25,12 @@
  *
  * Built as a plugin library (shared_module) and, with ES_EXT_TEST_PLUGIN_STATIC
  * defined, compiled into a test that serves it in process. With
- * ES_EXT_TEST_PLUGIN_V1 defined, it is a plugin of version 1, which has no
- * status - the status callback it sets all the same stands for whatever lies
- * beyond the struct of such a plugin, which must not be called; with
- * ES_EXT_TEST_PLUGIN_V2 one of version 2, likewise for its entropy rate.
+ * ES_EXT_TEST_PLUGIN_BARE defined, it has neither a status nor an entropy rate
+ * callback - the members are NULL.
  *
  * It declares no entropy rate unless the test sets one, which the plugin of
- * ES_EXT_TEST_PLUGIN_RATED does by default: a plugin of version 3 declaring
- * its name, es-ext-rated, and a rate of 128 bits per 256 bits.
+ * ES_EXT_TEST_PLUGIN_RATED does by default: a plugin declaring its name,
+ * es-ext-rated, and a rate of 128 bits per 256 bits.
  */
 
 #include <errno.h>
@@ -64,7 +62,9 @@ struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 #endif
 };
 
+#ifndef ES_EXT_TEST_PLUGIN_BARE
 static uint32_t es_ext_test_entropy_rate(void *ctx);
+#endif
 
 /*
  * The plugin, not const: a test sets the name it declares, @name of the
@@ -142,7 +142,7 @@ static int es_ext_test_init(void **ctx)
 	ctl->init_calls++;
 	*ctx = ctl;
 
-#if !defined(ES_EXT_TEST_PLUGIN_V1) && !defined(ES_EXT_TEST_PLUGIN_V2)
+#ifndef ES_EXT_TEST_PLUGIN_BARE
 	/* Asked after the init: the rate the test set, or none */
 	ES_EXT_TEST_PLUGIN.entropy_rate =
 		ctl->entropy_rate == ES_EXT_TEST_RATE_NONE ?
@@ -191,6 +191,7 @@ static int es_ext_test_selftest(void *ctx)
 	return ctl->selftest_ret;
 }
 
+#ifndef ES_EXT_TEST_PLUGIN_BARE
 static uint32_t es_ext_test_entropy_rate(void *ctx)
 {
 	struct esdm_es_ext_test_control *ctl = ctx;
@@ -223,23 +224,20 @@ static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 					  ES_EXT_TEST_STATUS);
 	return len >= 0 && (size_t)len < buflen ? 0 : -EMSGSIZE;
 }
+#endif /* ES_EXT_TEST_PLUGIN_BARE */
 
 #ifndef ES_EXT_TEST_PLUGIN_STATIC
 ESDM_ES_EXT_PLUGIN_EXPORT
 #endif
 struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
-#if defined(ES_EXT_TEST_PLUGIN_V1)
-	.version = 1,
-#elif defined(ES_EXT_TEST_PLUGIN_V2)
-	.version = 2,
-#else
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
-#endif
 	.name = esdm_es_ext_test_control.name,
 	.init = es_ext_test_init,
 	.fini = es_ext_test_fini,
 	.get_entropy = es_ext_test_get_entropy,
 	.selftest = es_ext_test_selftest,
+#ifndef ES_EXT_TEST_PLUGIN_BARE
 	.status_json = es_ext_test_status_json,
 	.entropy_rate = es_ext_test_entropy_rate,
+#endif
 };

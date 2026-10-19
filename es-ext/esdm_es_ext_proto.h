@@ -469,23 +469,21 @@ esdm_es_ext_plugin_check(const struct esdm_es_ext_plugin *plugin)
 }
 
 /*
- * Does @plugin report a status? Only a plugin of version 2 or later has the
- * member at all: the struct of one of version 1 ends before it.
+ * Does @plugin report a status? A member that a later version of the plugin
+ * API adds is to be looked at only for a plugin of that version, whose struct
+ * has it - all of these are in version 1.
  */
 static inline bool
 esdm_es_ext_plugin_has_status(const struct esdm_es_ext_plugin *plugin)
 {
-	return plugin->version >= 2 && plugin->status_json;
+	return plugin->status_json != NULL;
 }
 
-/*
- * Does @plugin declare an entropy rate? Only a plugin of version 3 or later
- * has the member at all.
- */
+/* Does @plugin declare an entropy rate? */
 static inline bool
 esdm_es_ext_plugin_has_entropy_rate(const struct esdm_es_ext_plugin *plugin)
 {
-	return plugin->version >= 3 && plugin->entropy_rate;
+	return plugin->entropy_rate != NULL;
 }
 
 /*

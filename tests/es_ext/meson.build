@@ -11,20 +11,15 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		build_by_default: true,
 	)
 
-	# The same plugin as one of version 1, which has no status, and as one
-	# of version 2, which has no entropy rate
-	es_ext_test_plugin_v1 = shared_module('esdm_es_ext_test_plugin_v1',
+	# The same plugin without the callbacks a plugin may leave out: no
+	# status, no entropy rate
+	es_ext_test_plugin_bare = shared_module('esdm_es_ext_test_plugin_bare',
 		'es_ext_test_plugin.c',
-		c_args: [ '-DES_EXT_TEST_PLUGIN_V1' ],
-		include_directories: include_dirs_es_ext_test,
-	)
-	es_ext_test_plugin_v2 = shared_module('esdm_es_ext_test_plugin_v2',
-		'es_ext_test_plugin.c',
-		c_args: [ '-DES_EXT_TEST_PLUGIN_V2' ],
+		c_args: [ '-DES_EXT_TEST_PLUGIN_BARE' ],
 		include_directories: include_dirs_es_ext_test,
 	)
 
-	# A plugin of version 3 declaring its name and its entropy rate
+	# A plugin declaring its name and its entropy rate
 	es_ext_test_plugin_rated = shared_module(
 		'esdm_es_ext_test_plugin_rated',
 		'es_ext_test_plugin.c',
@@ -73,15 +68,14 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
-			   es_ext_example_plugin, es_ext_test_plugin_v1,
-			   es_ext_test_plugin_v2, es_ext_test_plugin_rated ]
+			   es_ext_example_plugin, es_ext_test_plugin_bare,
+			   es_ext_test_plugin_rated ]
 	es_ext_plugin_args = [ es_ext_test_plugin.full_path(),
 			       es_ext_bad_version_plugin.full_path(),
 			       es_ext_bad_no_get_plugin.full_path(),
 			       es_ext_bad_no_plugin.full_path(),
 			       es_ext_example_plugin.full_path(),
-			       es_ext_test_plugin_v1.full_path(),
-			       es_ext_test_plugin_v2.full_path(),
+			       es_ext_test_plugin_bare.full_path(),
 			       es_ext_test_plugin_rated.full_path() ]
 
 	es_ext_proto_test = executable('es_ext_proto_test',
@@ -260,8 +254,8 @@ if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es
 		es_ext_multi_test,
 		args: [ esdm_es_ext_serve.full_path() ] +
 		      es_ext_test_plugin_copy_args +
-		      [ es_ext_test_plugin_v2.full_path() ],
-		depends: [ esdm_es_ext_serve, es_ext_test_plugin_v2 ] +
+		      [ es_ext_test_plugin_bare.full_path() ],
+		depends: [ esdm_es_ext_serve, es_ext_test_plugin_bare ] +
 			 es_ext_test_plugin_copies,
 		suite: 'es_ext', timeout: 120)
 endif
