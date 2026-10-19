@@ -59,12 +59,20 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "esdm_egd_protocol.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Most fields of the state, by the length byte of the answer */
 #define ESDM_EGD_SERVE_MAX_STATE_FIELDS 63
+
+/*
+ * Largest read of ESDM_EGD_SERVE_FULL a backend is asked for: the 256 blocking
+ * reads libesdm_egd_client sends at once
+ */
+#define ESDM_EGD_SERVE_RUN_LIMIT (256 * ESDM_EGD_MAX_TRANSFER)
 
 /**
  * @brief The connection, as the serving loop reads and writes it
@@ -114,9 +122,11 @@ struct esdm_egd_serve_ops {
 	/* 0x00: the entropy the ESDM holds, in bits */
 	int (*entropy_count)(void *be, uint32_t *bits);
 	/*
-	 * A read of @kind into @buf of @len bytes, at most
-	 * ESDM_EGD_MAX_TRANSFER, which delivers *@generated of them. A
-	 * blocking one delivers all of them or fails.
+	 * A read of @kind into @buf of @len bytes, which delivers *@generated
+	 * of them. At most ESDM_EGD_MAX_TRANSFER - but up to
+	 * ESDM_EGD_SERVE_RUN_LIMIT for ESDM_EGD_SERVE_FULL, which answers
+	 * blocking reads in a row together. A blocking one delivers all of them
+	 * or fails.
 	 */
 	int (*get_random)(void *be, enum esdm_egd_serve_read kind, uint8_t *buf,
 			  size_t len, size_t *generated);

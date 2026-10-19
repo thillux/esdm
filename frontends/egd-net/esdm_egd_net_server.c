@@ -63,12 +63,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "build_bug_on.h"
 #include "config.h"
 #include "egd_net_common.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_serve.h"
 #include "esdm_logger.h"
 #include "esdm_rpc_client.h"
+#include "esdm_rpc_service.h"
 #include "esdm_tls.h"
 #include "memset_secure.h"
 #include "privileges.h"
@@ -215,6 +217,12 @@ static int server_be_get_random(void *be, enum esdm_egd_serve_read kind,
 			       .tv_nsec = SERVER_NONBLOCK_MS * 1000000L };
 	size_t got = 0;
 	ssize_t n;
+
+	/*
+	 * Blocking reads in a row are read together, see esdm_egd_serve.h:
+	 * in one RPC request, which carries that much
+	 */
+	BUILD_BUG_ON(ESDM_EGD_SERVE_RUN_LIMIT > ESDM_RPC_MAX_DATA);
 
 	*generated = 0;
 

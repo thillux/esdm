@@ -166,6 +166,29 @@ static void all_commands(struct esdm_egd_client *client, pid_t pid,
 	CHECK(!ret && nonzero(buf, sizeof(buf)), "%s: blocking read: %d",
 	      what, ret);
 
+	/*
+	 * More blocking reads than the client sends at once, which the daemons
+	 * answer together - in runs of at most ESDM_EGD_SERVE_RUN_LIMIT bytes
+	 */
+	{
+		const size_t large = 70000;
+		uint8_t *big = calloc(1, large);
+		size_t i;
+
+		CHECK(big != NULL, "%s: no memory for the large read", what);
+		if (big) {
+			ret = esdm_egd_client_get_random(client, big, large);
+			for (i = 0; i + 64 <= large; i += 4096) {
+				if (!nonzero(big + i, 64))
+					break;
+			}
+			CHECK(!ret && i + 64 > large,
+			      "%s: large blocking read: %d, zeroes at %zu",
+			      what, ret, i);
+			free(big);
+		}
+	}
+
 	ret = esdm_egd_client_get_random_nonblock(client, buf,
 						  ESDM_EGD_MAX_TRANSFER,
 						  &generated);

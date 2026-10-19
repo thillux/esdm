@@ -41,6 +41,12 @@
 #define ESDM_EGD_SERVE_BUFSIZE (2 * ESDM_EGD_MAX_CMD_SIZE)
 
 /*
+ * Bytes of the blocking reads in a row answered by one read of the backend, see
+ * esdm_egd_serve_read_run().
+ */
+#define ESDM_EGD_SERVE_RUN_MAX ESDM_EGD_SERVE_RUN_LIMIT
+
+/*
  * Stack of a connection thread: the TLS stacks need some of it for a handshake,
  * the RPC client for a request, the serving loop itself little - its buffers
  * of any size are on the heap.
@@ -158,6 +164,67 @@ static int esdm_egd_serve_read_block(const struct esdm_egd_serve_conn *c,
 
 out:
 	memset_secure(resp, 0, sizeof(resp));
+	return ret;
+}
+
+/*
+ * The blocking reads in a row at the head of @in, as a client pipelining a
+ * read beyond the 255 bytes of one transfer sends them, libesdm_egd_client
+ * among them: their number, and the bytes they ask for in @len - no more than
+ * ESDM_EGD_SERVE_RUN_MAX of them.
+ */
+static size_t esdm_egd_serve_run(const uint8_t *in, size_t in_len, size_t *len)
+{
+	size_t num = 0;
+
+	*len = 0;
+	while (2 * (num + 1) <= in_len &&
+	       in[2 * num] == ESDM_EGD_CMD_READ_BLOCK &&
+	       *len + in[2 * num + 1] <= ESDM_EGD_SERVE_RUN_MAX) {
+		*len += in[2 * num + 1];
+		num++;
+	}
+
+	return num;
+}
+
+/*
+ * A run of blocking reads, see esdm_egd_serve_run(): one read of the backend
+ * of @len bytes for all of them, and one write. The answer of a blocking read
+ * is the bytes asked for and nothing else, so the bytes of the one read are
+ * the answers of the commands in order. Each read of the backend is an RPC
+ * request or a request to another host, whose round trip was the time of a
+ * pipelined read; the bytes were not. A read that fails ends the connection,
+ * as one of the commands would have.
+ */
+static int esdm_egd_serve_read_run(const struct esdm_egd_serve_conn *c,
+				   size_t len)
+{
+	uint8_t *resp = malloc(len);
+	size_t generated = 0;
+	int ret;
+
+	if (!resp)
+		return -ENOMEM;
+
+	ret = c->ops->get_random(c->be, ESDM_EGD_SERVE_FULL, resp, len,
+				 &generated);
+	if (!ret && generated != len)
+		ret = -EIO;
+	if (ret) {
+		if (!esdm_egd_serve_fatal(ret))
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_SERVER,
+				"EGD: blocking reads of %zu bytes for %s failed, closing the connection: %s\n",
+				len, c->peer, strerror(-ret));
+		goto out;
+	}
+
+	ret = esdm_egd_serve_write(c, resp, len);
+
+out:
+	memset_secure(resp, 0, len);
+	free(resp);
 	return ret;
 }
 
@@ -349,6 +416,7 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 
 	for (;;) {
 		ssize_t cmd_len, n;
+		size_t run, run_len;
 		int timeout;
 
 		if (c->stop && atomic_load(c->stop)) {
@@ -412,7 +480,14 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 				c->first_command(c->be);
 		}
 
-		ret = esdm_egd_serve_cmd(c, in);
+		/* Blocking reads in a row are answered together */
+		run = esdm_egd_serve_run(in, in_len, &run_len);
+		if (run > 1 && run_len) {
+			cmd_len = 2 * (ssize_t)run;
+			ret = esdm_egd_serve_read_run(c, run_len);
+		} else {
+			ret = esdm_egd_serve_cmd(c, in);
+		}
 
 		/*
 		 * Consumed, and wiped behind what is left: client supplied
