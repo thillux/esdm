@@ -146,9 +146,22 @@ static inline bool esdm_es_ext_utf8_valid(const char *text, size_t len)
 }
 
 /*
+ * Is @cp a bidirectional control of Unicode (Bidi_Control): U+061C, U+200E,
+ * U+200F, the embeddings and overrides U+202A to U+202E, or the isolates
+ * U+2066 to U+2069? They reorder the text around them where it is shown: a
+ * name or a status holding one could have the terminal of whoever reads the
+ * ESDM status show the text of another source, or another text.
+ */
+static inline bool esdm_es_ext_bidi_control(uint32_t cp)
+{
+	return cp == 0x61c || cp == 0x200e || cp == 0x200f ||
+	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+}
+
+/*
  * Is @name of @len bytes one a source may declare: 1 to ESDM_ES_EXT_NAME_MAX
  * bytes of UTF-8 without control characters - neither C0 nor DEL nor C1, and
- * so no NUL either?
+ * so no NUL either, nor a bidirectional control?
  */
 static inline bool esdm_es_ext_name_valid(const char *name, size_t len)
 {
@@ -161,7 +174,8 @@ static inline bool esdm_es_ext_name_valid(const char *name, size_t len)
 	while (i < len) {
 		if (!esdm_es_ext_utf8_next((const unsigned char *)name, len, &i,
 					   &cp) ||
-		    cp < 0x20 || (cp >= 0x7f && cp <= 0x9f))
+		    cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) ||
+		    esdm_es_ext_bidi_control(cp))
 			return false;
 	}
 

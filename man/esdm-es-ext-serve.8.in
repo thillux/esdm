@@ -103,7 +103,10 @@ is the status the plugin reports of itself with its
 .I status_json
 callback \- or null for a plugin without one, one failing, one whose status is
 no JSON object of up to 512 bytes, nested no deeper than 8 levels, without NaN
-or infinities, and one that does not fit next to the fields of the server;
+or infinities and without a C1 control or a bidirectional control in a
+string \- see
+.BR libesdm_es_ext (3)
+\- and one that does not fit next to the fields of the server;
 never a status cut short.
 .B server
 holds the fields of

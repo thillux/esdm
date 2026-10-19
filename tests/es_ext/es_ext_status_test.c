@@ -112,6 +112,18 @@ static void test_objects(void)
 	test_nested(buf, sizeof(buf), ESDM_ES_EXT_STATUS_MAX_DEPTH);
 	CHECK(test_taken_str(buf), "the deepest status is not taken: %s", buf);
 
+	/*
+	 * Next to the code points that steer a terminal: no C1 control, no
+	 * bidirectional control - and the C0 controls, which the text form of
+	 * the status replaces
+	 */
+	CHECK(test_taken_str("{\"a\":\"\\u007f\\u00a0\\u00e4\\u061b\\u061d"
+			     "\\u200d\\u2010\\u2029\\u202f\\u2065\\u206a"
+			     "\\u0001\\u001b\\n\"}"),
+	      "the code points next to those steering a terminal are not taken");
+	CHECK(test_taken_str("{\"\xc2\xa0\xe2\x80\xaf\":1}"),
+	      "a member name next to those steering a terminal is not taken");
+
 	/* The largest one */
 	memset(buf, 'a', sizeof(buf));
 	memcpy(buf, "{\"x\":\"", 6);
@@ -164,6 +176,33 @@ static void test_refused(void)
 		"{\"\xed\xa0\x80\":1}",
 		"{\"\xf4\x90\x80\x80\":1}",
 		"{\"\xf5\x80\x80\x80\":1}",
+		/*
+		 * What steers a terminal rather than shows as text - escaped
+		 * in a string, or as it is in a member name: a C1 control,
+		 * U+009B the CSI of a terminal taking UTF-8, ...
+		 */
+		"{\"a\":\"\\u009b2J\\u009b31mOK\"}",
+		"{\"a\":\"\\u0080\"}",
+		"{\"a\":\"x\\u0085\"}",
+		"{\"a\":\"\\u009f\"}",
+		"{\"\xc2\x9b\":1}",
+		"{\"\\u009b\":1}",
+		"{\"o\":{\"p\":[1,\"\\u009b\"]}}",
+		/* ... and the bidirectional controls */
+		"{\"a\":\"OK \\u202eevil\"}",
+		"{\"a\":\"\\u202a\"}",
+		"{\"a\":\"\\u202b\"}",
+		"{\"a\":\"\\u202c\"}",
+		"{\"a\":\"\\u202d\"}",
+		"{\"a\":\"\\u2066\"}",
+		"{\"a\":\"\\u2067\"}",
+		"{\"a\":\"\\u2068\"}",
+		"{\"a\":\"\\u2069\"}",
+		"{\"a\":\"\\u200e\"}",
+		"{\"a\":\"\\u200f\"}",
+		"{\"a\":\"\\u061c\"}",
+		"{\"\xe2\x80\xae\":1}",
+		"{\"\\u202e\":1}",
 	};
 	char buf[ESDM_ES_EXT_STATUS_MAX + 2];
 	bool warned = false;

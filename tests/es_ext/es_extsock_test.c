@@ -1483,6 +1483,7 @@ static void test_names(void)
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	static const char *const bad[] = {
 		"tab\there", "\xff\xfe", "esc\x1b[31m", "c1\xc2\x9b",
+		"rlo\xe2\x80\xae",
 	};
 	struct json_object *state;
 	unsigned int conns, i;

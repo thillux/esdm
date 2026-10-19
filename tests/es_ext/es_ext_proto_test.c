@@ -562,6 +562,8 @@ static void test_names(void)
 		"a", "es-ext-test", "Rauschquelle \xc3\xa4\xc3\xb6\xc3\xbc",
 		"\xe2\x82\xac \xf0\x9f\x8e\xb2",
 		"0123456789abcdef0123456789abcdef",
+		/* Next to the bidirectional controls: NBSP, ZWJ, U+202F, U+206A */
+		"\xc2\xa0\xe2\x80\x8d\xe2\x80\xaf\xe2\x81\xaa",
 	};
 	static const char *const invalid[] = {
 		"",
@@ -570,6 +572,10 @@ static void test_names(void)
 		/* C1, overlong, a surrogate, a lone continuation, cut short */
 		"c1\xc2\x85", "\xc0\xaf", "\xed\xa0\x80", "\x80", "\xe2\x82",
 		"\xff",
+		/* Bidirectional controls: RLO, LRI, PDI, LRM, RLM, ALM, LRE */
+		"rlo\xe2\x80\xae", "\xe2\x81\xa6lri", "pdi\xe2\x81\xa9",
+		"lrm\xe2\x80\x8e", "rlm\xe2\x80\x8f", "alm\xd8\x9c",
+		"lre\xe2\x80\xaa",
 	};
 	unsigned int i;
 
