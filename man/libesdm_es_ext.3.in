@@ -105,11 +105,19 @@ and 8 levels of nesting. It is asked for whenever the ESDM status is, but not
 while a request of the ESDM to the source is in progress, and must not block
 for long.
 .PP
-The callbacks are never called concurrently. Both the ESDM and the provider
-server call
+The callbacks are never called concurrently. The ESDM calls
 .I init
-before the ESDM drops its privileges and isolates itself, so a device the
-source needs is opened there.
+while it still has its privileges, so that a device the source needs is opened
+there \- but
+.BR esdm\-server (8)
+has left the mount, cgroup and network namespaces of the host by then already:
+.I init
+sees the file system of the host and can connect to a UNIX domain socket bound
+to a path, but has no network \- no TCP or UDP endpoint, no abstract UNIX
+domain socket of the host. The other callbacks run in the same namespaces,
+after the ESDM dropped its privileges. A source that needs the network is
+served by a provider instead: the provider server calls all callbacks in its
+own process, with the privileges and in the namespaces it was started with.
 .SS Entropy credit
 The ESDM credits a block with the entropy the source claims for it, but at
 most with what the entropy rate configured for the source allows

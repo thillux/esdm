@@ -223,7 +223,10 @@ as a plugin and handed to the daemon in one of two ways.
 A plugin library given with
 .B \-\-es_ext_lib
 is loaded into the daemon and its initialization callback run while the daemon
-still has its privileges \- a device the plugin reads is opened there.
+still has its privileges \- a device the plugin reads is opened there. The
+daemon has left the mount, cgroup and network namespaces of the host before,
+so the callback reaches no network already: no TCP or UDP endpoint and no
+abstract UNIX domain socket of the host, only a socket bound to a path.
 Afterwards the plugin runs with the privileges and in the namespaces of the
 daemon. A library that cannot be loaded, exports no plugin of the supported
 version, or fails its initialization leaves the source switched off; the

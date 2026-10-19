@@ -91,9 +91,14 @@ extern "C" {
  * server of libesdm_es_ext, serialize them.
  *
  * The ESDM loads a plugin and calls @init while it still has its privileges -
- * a device the plugin needs is to be opened there. Afterwards the ESDM drops
- * its privileges and isolates itself in namespaces of its own; @get_entropy
- * runs in that environment.
+ * a device the plugin needs is to be opened there. The esdm-server has left
+ * the mount, cgroup and network namespaces of the host by then already: @init
+ * sees the file system of the host and reaches a Unix domain socket bound to a
+ * path, but no network - no TCP or UDP endpoint, no abstract Unix domain
+ * socket of the host. Afterwards the ESDM drops its privileges; @get_entropy
+ * and the other callbacks run in that environment. A source that needs the
+ * network is served by a provider instead, whose callbacks all run in the
+ * process of the provider, as it was started.
  *
  * @version: ESDM_ES_EXT_PLUGIN_VERSION
  * @name: Name of the source, shown in the ESDM status. May be NULL.
