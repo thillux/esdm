@@ -48,6 +48,15 @@
  * responses are matched to requests purely by their order on the stream, and
  * clients keep the connection open and issue an arbitrary number of commands
  * on it.
+ *
+ * A client reading more than 255 bytes therefore sends the commands of its
+ * transfers at once and reads the answers after, rather than paying a round
+ * trip per transfer - libesdm_egd_client does for the blocking read, the
+ * esdm_cdev module for its reads. The ESDM's EGD server answers such a run of
+ * the same read command - 0x01, 0x02 or 0xe2 - with one response, the
+ * esdm-egd-net-server and -relay a run of blocking reads with one read of
+ * their backend. The answers are those of the commands one by one; nothing
+ * about the protocol changes.
  */
 
 #define ESDM_EGD_CMD_ENTROPY_COUNT 0x00

@@ -20,6 +20,17 @@ reads (esdm_egd_client_get_random_pr), libesdm-egd-provider.so serves OpenSSL's
 prediction resistance requests with them and libesdm-egd-provider-pr.so all
 requests
 
+* EGD interface: reads beyond the 255 bytes of one transfer cost a round trip
+per 64 KiB rather than per 255 bytes - libesdm_egd_client sends the commands of
+a blocking read at once, the esdm_cdev module the commands of up to 64 KiB and
+takes the answers in bulk, and the esdm-server answers a run of the same read
+command with one response, the esdm-egd-net-server and -relay a run of blocking
+reads with one read of their backend. The EGD server reads the coarse
+monotonic clock for its timeouts, and the DRNGs for their reseed interval,
+which a clocksource without a vDSO serves without a system call.
+egd_net_bench (meson test --benchmark) measures the EGD socket, the RPC
+interface and egd-net, esdm-cdev-check throughput the devices of the module
+
 * Add the EGD protocol over the network (meson option egd-net): the
 esdm-egd-net-server serves the EGD protocol of the ESDM on TCP and answers it
 through the unprivileged RPC interface, so nothing of the network reaches the
