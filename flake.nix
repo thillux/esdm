@@ -1071,6 +1071,30 @@
                   machine.succeed("${check} reads")
                   machine.succeed("${check} ioctl-priv")
 
+              # The module against a fake EGD server of the check script, for
+              # what the ESDM cannot be made to do: see its fake-egd command.
+              def fake_egd(mode, params=""):
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.succeed("rm -f /tmp/fake-egd.log")
+                  machine.succeed(
+                      "nohup ${check} fake-egd /run/fake-egd.socket "
+                      f"/tmp/fake-egd.log {mode} > /dev/null 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q listening /tmp/fake-egd.log", 30)
+                  machine.succeed(
+                      f"modprobe esdm_cdev egd_socket=/run/fake-egd.socket {params}"
+                  )
+
+              def real_egd():
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.succeed("pkill -f 'esdm_cdev_check.py [f]ake-egd'")
+                  machine.succeed("modprobe esdm_cdev")
+
+              with subtest("an ESDM that accepts but does not answer is backed off from"):
+                  fake_egd("mute", "connections=1 timeout_ms=200")
+                  machine.succeed("${check} backoff /tmp/fake-egd.log 8")
+                  real_egd()
+
               with subtest("unloading once the reader is gone"):
                   machine.succeed(
                       "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"

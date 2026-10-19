@@ -11,8 +11,10 @@ import json
 import os
 import re
 import select
+import socket
 import struct
 import sys
+import threading
 import time
 
 # linux/random.h
@@ -371,7 +373,6 @@ def cmd_throughput(args):
         read_exact(dev, size)
         dt = time.monotonic() - t
         print(f"{dev}: {size / dt / 1e6:.1f} MB/s")
-    import socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(args[0] if args else "/run/esdm-egd.socket")
     for batch in (1, 16):
@@ -387,6 +388,101 @@ def cmd_throughput(args):
     s.close()
 
 
+def cmd_fake_egd(args):
+    # An EGD server in place of the ESDM, for what the real one cannot be
+    # made to do: answer like an ESDM that is not operational yet ("notop"),
+    # or accept connections and never answer ("mute"). It logs every
+    # connection and every command that changes something to args[1].
+    path, log, mode = args[0], args[1], args[2]
+    lock = threading.Lock()
+
+    def note(line):
+        with lock, open(log, "a") as f:
+            f.write(line + "\n")
+
+    def recv(c, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = c.recv(n - len(buf))
+            if not chunk:
+                raise EOFError
+            buf += chunk
+        return buf
+
+    def serve(c):
+        try:
+            while True:
+                cmd = recv(c, 1)[0]
+                if cmd == 0x00:
+                    c.sendall(bytes(4))
+                elif cmd in (0x01, 0xe0, 0xe2):
+                    # Nothing before the ESDM is operational
+                    recv(c, 1)
+                    c.sendall(b"\0")
+                elif cmd == 0x03:
+                    hdr = recv(c, 3)
+                    data = recv(c, hdr[2])
+                    note(f"write {int.from_bytes(hdr[:2], 'big')} {len(data)}")
+                elif cmd == 0xe3:
+                    # Not operational, nothing in the pool
+                    c.sendall(bytes([5]) + struct.pack(">5I", 0, 0, 256, 64, 60))
+                elif cmd in (0xe4, 0xe5):
+                    c.sendall(bytes(4))
+                elif cmd in (0xe6, 0xe9, 0xea):
+                    arg = int.from_bytes(recv(c, 4), "big")
+                    note(f"{cmd:02x} {arg}")
+                    # Time for a signal to arrive while the answer is due
+                    if cmd == 0xe6:
+                        time.sleep(1)
+                    c.sendall(bytes(4))
+                elif cmd in (0xe7, 0xe8):
+                    note(f"{cmd:02x}")
+                    c.sendall(bytes(4))
+                else:
+                    break
+        except (EOFError, OSError):
+            pass
+        c.close()
+
+    if os.path.exists(path):
+        os.unlink(path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(64)
+    note("listening")
+    mute = []
+    while True:
+        c, _ = srv.accept()
+        note("connect")
+        if mode == "mute":
+            mute.append(c)
+        else:
+            threading.Thread(target=serve, args=(c,), daemon=True).start()
+
+
+def fake_log(log):
+    with open(log) as f:
+        return [line.split() for line in f]
+
+
+def cmd_backoff(args):
+    # Against a mute fake-egd: every read waits for the timeout once its
+    # connection is made, after that the reconnects back off up to 2 s
+    log, seconds = args[0], float(args[1])
+    before = sum(1 for e in fake_log(log) if e == ["connect"])
+    end = time.monotonic() + seconds
+    reads = 0
+    while time.monotonic() < end:
+        read_exact("/dev/esdm_urandom", 64)
+        reads += 1
+    connects = sum(1 for e in fake_log(log) if e == ["connect"]) - before
+    print(f"backoff: {reads} reads, {connects} connects in {seconds} s")
+    # Timeout and backoff from 50 ms to 2 s: about one connect per second
+    if connects > seconds * 1.5 + 2:
+        fail(f"{connects} connects to an ESDM that does not answer")
+    print("backoff ok")
+
+
 CMDS = {
     "throughput": cmd_throughput,
     "reads": cmd_reads,
@@ -400,6 +496,8 @@ CMDS = {
     "proc-empty": cmd_proc_empty,
     "loop": cmd_loop,
     "block": cmd_block,
+    "fake-egd": cmd_fake_egd,
+    "backoff": cmd_backoff,
 }
 
 if __name__ == "__main__":

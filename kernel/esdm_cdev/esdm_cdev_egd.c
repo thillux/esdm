@@ -35,9 +35,11 @@
  * no request identifiers, so answers are matched to requests by their order.
  * A request takes a connection that is free, or waits for one. A connection
  * that failed in any way is closed, as the position of the stream is unknown
- * then, and made anew by the next request on it. One that cannot be made is
- * not tried again for a while, growing up to ESDM_CDEV_BACKOFF_MAX_MS, so that
- * a missing ESDM costs a failed connect now and then rather than one per read.
+ * then, and made anew by the next request on it. One that cannot be made, or
+ * that failed by the ESDM's fault, is not made again for a while, growing up to
+ * ESDM_CDEV_BACKOFF_MAX_MS until a request on it succeeds, so that a missing or
+ * frozen ESDM costs a failed connect or a timeout now and then rather than one
+ * per read.
  *
  * Every answer is untrusted input: its lengths are checked against what was
  * asked for and against the protocol's bounds before anything is read, and a
@@ -270,8 +272,12 @@ static int esdm_cdev_conn_connect(struct esdm_cdev_conn *conn)
 		return -ENOTCONN;
 	}
 
+	/*
+	 * The backoff stays until a request succeeded: an ESDM that accepts
+	 * connections but does not answer would otherwise be waited for the
+	 * full timeout on every request.
+	 */
 	conn->sock = sock;
-	conn->backoff_ms = 0;
 	if (atomic_xchg(&esdm_cdev_reachable, 1) != 1)
 		pr_info("connected to the ESDM at %s\n", egd_socket);
 
@@ -408,8 +414,10 @@ static int esdm_cdev_invoke(int (*op)(struct socket *sock, void *arg,
 		WRITE_ONCE(conn->sock->sk->sk_sndtimeo, tmo);
 
 		ret = op(conn->sock, arg, &sent);
-		if (!ret)
+		if (!ret) {
+			conn->backoff_ms = 0;
 			break;
+		}
 
 		/* Interrupted, or the ESDM went wrong: the stream is lost */
 		if (esdm_cdev_interrupted(ret) || signal_pending(current)) {
