@@ -162,7 +162,9 @@ as external entropy source instead of the one the build was configured with
 .BR es_ext_lib_path ),
 see
 .B EXTERNAL ENTROPY SOURCES
-below.
+below. Like all options of the external entropy sources, it may be given once
+for each source of its kind the build has: the n-th occurrence configures the
+n-th source.
 .TP
 .BR \-\-es_ext_lib_entropy_rate " \fIBITS\fR"
 Credit a block of the plugin with at most
@@ -231,6 +233,35 @@ Afterwards the plugin runs with the privileges and in the namespaces of the
 daemon. A library that cannot be loaded, exports no plugin of the supported
 version, or fails its initialization leaves the source switched off; the
 reason is logged.
+.PP
+The daemon has as many plugin library sources and provider socket sources as
+the build was configured with (meson options
+.B es_ext_lib_num
+and
+.BR es_ext_socket_num ,
+one of each by default, up to 16 each). Each is an entropy source of its own,
+with its own plugin or provider, entropy rate, accepted user and state, credited
+and failing on its own. The options of the external entropy sources configure
+one source each time they are given, the n-th occurrence of an option the n-th
+source of its kind, counted per option; an occurrence beyond the sources of the
+build is refused. With one source of a kind, it is called
+.B ExternalLib
+or
+.B ExternalSocket
+in the status; with several, they are called
+.BR ExternalLib0 ,
+.B ExternalLib1
+and so on. A plugin library serves one source: a second source given the plugin
+another one uses refuses it. Several providers are served by several
+.BR esdm\-es\-ext\-serve (8)
+processes, each on a socket of its own:
+.PP
+.nf
+esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/a.so \-\-socket /run/esdm\-es\-a.socket
+esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/b.so \-\-socket /run/esdm\-es\-b.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-a.socket \-\-es_ext_socket_entropy_rate 128 \\
+	\-\-es_ext_socket /run/esdm\-es\-b.socket \-\-es_ext_socket_entropy_rate 64
+.fi
 .PP
 Each block is credited with the entropy the plugin claims for it, but with at
 most what the configured rate allows. A plugin that fails to deliver, or claims

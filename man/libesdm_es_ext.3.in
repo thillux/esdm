@@ -44,6 +44,24 @@ A plugin in the ESDM runs with the privileges and in the namespaces of the
 daemon and takes it down when it crashes; a provider keeps its own privileges,
 its own address space and its own life cycle, at the cost of a round trip per
 seed.
+.PP
+An ESDM may be built with several sources of each kind (meson options
+.B es_ext_lib_num
+and
+.BR es_ext_socket_num ,
+one each by default): each is an entropy source of its own, named
+.BR ExternalLib0 ,
+.BR ExternalLib1 ,
+\&...
+.BR ExternalSocket0 ,
+\&... in the status of the ESDM \- or
+.B ExternalLib
+and
+.B ExternalSocket
+as the one source of its kind \- with its own plugin or provider, entropy rate
+and state. A plugin library serves one source, as its callbacks are never
+called concurrently; a provider process serves one plugin, and several
+providers serve on sockets of their own.
 .SS The plugin
 .nf
 struct esdm_es_ext_plugin {

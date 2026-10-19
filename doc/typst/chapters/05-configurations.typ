@@ -101,7 +101,10 @@ to the ESDM applies:
     `es_pkcs11_entropy_rate`, `es_ext_lib_entropy_rate` and
     `es_ext_socket_entropy_rate` or by completely disabling them by not
     selecting the meson configuration options of `es_hwrand`, `es_tpm2`,
-    `es_pkcs11` and `es_ext`.
+    `es_pkcs11` and `es_ext`. The rate options of the external entropy
+    sources take one rate for all sources of their kind, or one per source
+    for a build with several (`es_ext_lib_num`, `es_ext_socket_num`), each of
+    which is assessed on its own.
 
   - The kernel RNG entropy source is never credited with entropy when the
     oversampling is compiled in, as the kernel RNG is not considered

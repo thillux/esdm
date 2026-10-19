@@ -103,11 +103,35 @@ Print the usage.
 .TP
 .B \-\-version
 Print the version.
+.SH SEVERAL SOURCES
+One
+.B esdm\-es\-ext\-serve
+serves one plugin. An ESDM built with several provider socket sources (meson
+option
+.BR es_ext_socket_num )
+reads several providers, one per source: run one
+.B esdm\-es\-ext\-serve
+per plugin, each on a socket of its own, and give the ESDM one
+.B \-\-es_ext_socket
+per socket, the n-th for its n-th source \- see
+.BR esdm\-server (8).
+The processes are independent of each other: each is restarted, and fails, on
+its own, and the ESDM credits each of them at the rate configured for its
+source.
 .SH EXAMPLE
 .nf
 esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/my_es.so \\
 	\-\-socket /run/esdm\-es\-ext.socket
 esdm\-server \-\-es_ext_socket /run/esdm\-es\-ext.socket
+.fi
+.PP
+Two plugins, served to an ESDM with two provider socket sources:
+.PP
+.nf
+esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/a.so \-\-socket /run/esdm\-es\-a.socket
+esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/b.so \-\-socket /run/esdm\-es\-b.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-a.socket \\
+	\-\-es_ext_socket /run/esdm\-es\-b.socket
 .fi
 .SH SEE ALSO
 .BR libesdm_es_ext (3),

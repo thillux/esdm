@@ -1345,6 +1345,21 @@ once a rate is configured. A source claiming more than the block holds, or
 failing, is credited with nothing until it delivers again, and one failing its
 self test until a self test passes.]
 
+The ESDM has `es_ext_lib_num` plugin library sources and `es_ext_socket_num`
+provider socket sources, one each by default and up to 16 each. Each is an
+entropy source of its own with a slot of its own in the seed buffer, its own
+plugin or provider, entropy rate, accepted user and state, so that the ES
+manager, its monitor, the NTG.1 seeding strategy, the status and the seeding
+treat it like any other entropy source. A kind with one source calls it
+ExternalLib or ExternalSocket; with several, the names carry the index:
+ExternalLib0, ExternalLib1 and so on. The meson options above take comma
+separated lists whose i-th entry configures the i-th source - a single rate or
+uid applies to all sources of the kind - and each option of the ESDM server
+may be given once per source, its n-th occurrence configuring the n-th
+source. A plugin library serves one source, as the callbacks of a plugin are
+never called concurrently; several providers are served by several
+`esdm-es-ext-serve` processes on sockets of their own.
+
 == DRNG Seeding Operation <sec:seeding>
 
 The seeding operation obtains random data from all available entropy sources.

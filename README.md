@@ -276,6 +276,24 @@ configured. A source claiming more than the block holds, or failing, is
 credited with nothing until it delivers again, and one failing its self test
 until a self test passes.
 
+The ESDM has one source of each kind by default, `ExternalLib` and
+`ExternalSocket`. The meson options `es_ext_lib_num` and `es_ext_socket_num`
+give it up to 16 of each, `ExternalLib0`, `ExternalLib1`, ... in the status,
+each an entropy source of its own with its own plugin or provider, rate and
+state. The options above configure one source each: the i-th entry of the
+comma separated meson option, the n-th occurrence of the `esdm-server` option
+for the n-th source; a single meson rate or uid applies to all sources of the
+kind. A plugin library serves one source, and one `esdm-es-ext-serve` serves
+one plugin - several providers run as several processes on sockets of their
+own:
+
+```
+esdm-es-ext-serve --plugin /usr/lib/esdm/a.so --socket /run/esdm-es-a.socket
+esdm-es-ext-serve --plugin /usr/lib/esdm/b.so --socket /run/esdm-es-b.socket
+esdm-server --es_ext_socket /run/esdm-es-a.socket \
+	--es_ext_socket /run/esdm-es-b.socket
+```
+
 The PKCS#11 entropy source takes its provider module from the command line
 as well: `esdm-server --pkcs11_module /path/to/pkcs11-module.so`.
 
