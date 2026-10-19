@@ -105,8 +105,11 @@ int set_fd_nonblocking(int fd)
 
 #define TEST_SLOTS ESDM_EGD_MAX_CONNECTIONS
 
-/* Backstop below the harness timeout, see egd_server_raw_test.c. */
-#define TEST_WATCHDOG_SEC 120
+/*
+ * Backstop below the harness timeout, see egd_server_raw_test.c - with room
+ * for the idle waits of the tests, several times ESDM_EGD_IDLE_TIMEOUT_MS.
+ */
+#define TEST_WATCHDOG_SEC 240
 
 /* How long an answer is waited for. */
 #define TEST_RESPONSE_MS 10000

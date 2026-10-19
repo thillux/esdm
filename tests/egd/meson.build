@@ -102,8 +102,11 @@ if get_option('esdm-server').enabled()
 	# down to a few slots, more of them per UID than in all - a single UID
 	# stands for a user connecting under each UID of its subordinate range
 	# - and slots are short from three quarters of them on. Idle
-	# connections time out after three seconds, well above how long the
-	# tests not about them take. Several UIDs, and the tests needing them,
+	# connections time out after eight seconds, well above how long the
+	# tests not about them take even under a sanitizer: opening all slots
+	# and touching all but two of them one after the other took close to
+	# three seconds in the TSan build, and the last ones were then closed
+	# as idle before their turn. Several UIDs, and the tests needing them,
 	# take root.
 	egd_server_evict_test = executable(
 			'egd_server_evict_test',
@@ -113,7 +116,7 @@ if get_option('esdm-server').enabled()
 				'-DESDM_EGD_MAX_CONNECTIONS=16',
 				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=24',
 				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=12',
-				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=8000',
 			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
