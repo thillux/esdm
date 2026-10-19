@@ -15,6 +15,21 @@ if get_option('esdm-tool').enabled()
 
 	test('esdm-tool helper code', tool_common_test)
 
+	# The worker of the stress modes, with the ESDM replaced by the RPC call
+	# it makes: that it reports its end on every way out of it, which the
+	# collector above waits for.
+	tool_stress_delay_test = executable(
+			'tool_stress_delay_test',
+			[ files('../../frontends/tool/common.c'),
+			  'tool_stress_delay_test.c' ],
+			include_directories: [
+				include_dirs_client,
+				include_directories('../../frontends/tool'),
+				include_directories('../common') ],
+		)
+
+	test('esdm-tool stress worker', tool_stress_delay_test)
+
 	# The command line layer is driven through the installed binary rather
 	# than linked, because what is under test is what a user gets: the exit
 	# status and the message, not a function's return value.

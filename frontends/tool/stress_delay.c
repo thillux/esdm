@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 #include <esdm_rpc_client.h>
 #include <unistd.h>
@@ -40,13 +41,20 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 	double alpha = 0.2;
 	double duration;
 	uint64_t bytes = 0;
+	struct test_msg msg;
 	uint8_t *rnd_buffer;
+	ssize_t written;
 	ssize_t ret;
 
 	rnd_buffer = malloc(request_size);
 	if (rnd_buffer == NULL) {
+		/*
+		 * The collector waits for the exit message of every worker, so
+		 * leaving without one would hold it - and the tool - forever.
+		 * The worker reports itself done, having requested nothing.
+		 */
 		fprintf(stderr, "Failed to allocate stress request buffer\n");
-		return;
+		goto out;
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -68,7 +76,7 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 		duration = timespec_diff(&before, &after);
 
 		if (mean_duration > 0.0 && duration > 100.0 * mean_duration) {
-			struct test_msg msg = { 0 };
+			memset(&msg, 0, sizeof(msg));
 			msg.id = id;
 			msg.duration = duration;
 			msg.max_duration = max_duration;
@@ -79,8 +87,7 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 			msg.bytes = bytes;
 			msg.request_size = request_size;
 
-			ssize_t written =
-				write(sock_fd, &msg, sizeof(struct test_msg));
+			written = write(sock_fd, &msg, sizeof(struct test_msg));
 			assert(written == sizeof(struct test_msg));
 			(void)written;
 		}
@@ -93,19 +100,23 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 		}
 	}
 
-	struct test_msg msg = { 0 };
+out:
+	memset(&msg, 0, sizeof(msg));
 	msg.is_exit = 1;
 	msg.id = id;
 	msg.duration = 0.0;
 	msg.max_duration = max_duration;
 	msg.mean_duration = mean_duration;
-	msg.req_per_sec = (double)requests / total_duration;
-	msg.bytes_per_sec = (double)bytes / total_duration;
+	/* Nothing was requested, and no time spent, without the buffer */
+	if (total_duration > 0.0) {
+		msg.req_per_sec = (double)requests / total_duration;
+		msg.bytes_per_sec = (double)bytes / total_duration;
+	}
 	msg.requests = requests;
 	msg.bytes = bytes;
 	msg.request_size = request_size;
 
-	ssize_t written = write(sock_fd, &msg, sizeof(struct test_msg));
+	written = write(sock_fd, &msg, sizeof(struct test_msg));
 	assert(written == sizeof(struct test_msg));
 	(void)written;
 
