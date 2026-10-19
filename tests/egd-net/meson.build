@@ -78,6 +78,22 @@ test('EGD network server', egd_net_server_test,
 	depends: [ esdm_egd_net_server ],
 	timeout: 300, suite: 'egd-net')
 
+# The local connection slots of the esdm-egd-net-relay, all of them taken.
+# Needs neither an ESDM nor a server; the part with several users needs root.
+egd_net_relay_slots_test = executable(
+		'egd_net_relay_slots_test',
+		[ 'relay_slots_test.c' ],
+		c_args: egd_net_test_args,
+		include_directories: [ include_dirs_egd_net ],
+		dependencies: [ dependency('threads') ] + egd_net_tls_deps,
+		link_with: esdm_common_static_lib
+	)
+
+test('EGD network relay slots', egd_net_relay_slots_test,
+	env: [ 'ESDM_EGD_NET_RELAY=' + esdm_egd_net_relay.full_path() ],
+	depends: [ esdm_egd_net_relay ],
+	timeout: 120, suite: 'egd-net')
+
 # The network modes of the client library against a server the test plays:
 # a connection the server closed is replaced.
 egd_net_client_test = executable(

@@ -32,7 +32,9 @@
  * libesdm_egd_client in its network mode -, which keeps the order of the
  * answers as the consumer expects it, and lets the library's reconnect hide a
  * restart of the server between two commands. The local connections are
- * bounded per user, as those of the esdm-server's EGD socket are.
+ * bounded per user and in all, as those of the esdm-server's EGD socket are,
+ * and with all slots taken, a new connection is served at the expense of the
+ * user holding the most - see relay_evict_candidate().
  *
  * In TLS mode, the main thread keeps house as the server does: it takes up
  * renewed TLS files on SIGHUP and when they change, closes the upstream
@@ -88,6 +90,10 @@ struct relay_conn {
 	char peer[64];
 	uid_t account;
 	bool account_counted;
+	/* Closed for another connection, see relay_accept() */
+	bool evicted;
+	/* When its consumer sent something last, monotonic milliseconds */
+	_Atomic uint64_t active;
 	/* Set under the lock of the connections, see relay_check_conns() */
 	struct esdm_egd_client *upstream;
 	TAILQ_ENTRY(relay_conn) tailq;
@@ -124,6 +130,8 @@ static struct {
 static pthread_mutex_t relay_conns_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct relay_conn_list relay_conns = TAILQ_HEAD_INITIALIZER(relay_conns);
 static unsigned int relay_conn_num = 0;
+/* Of them, the ones closed for another connection, but not released yet */
+static unsigned int relay_evicted_num = 0;
 static struct esdm_peer_limit relay_peer_limit =
 	ESDM_PEER_LIMIT_INIT("EGD relay", 64);
 static struct esdm_egd_serve_pool relay_pool = ESDM_EGD_SERVE_POOL_INIT;
@@ -274,6 +282,8 @@ static ssize_t relay_read(void *io, uint8_t *buf, size_t len, int timeout_ms)
 		ssize_t n = recv(conn->fd, buf, len, MSG_DONTWAIT);
 		int ret;
 
+		if (n > 0)
+			atomic_store(&conn->active, relay_now_ms());
 		if (n >= 0)
 			return n;
 		if (errno == EINTR)
@@ -388,6 +398,8 @@ static void relay_conn_release(struct relay_conn *conn)
 	pthread_mutex_lock(&relay_conns_lock);
 	TAILQ_REMOVE(&relay_conns, conn, tailq);
 	relay_conn_num--;
+	if (conn->evicted)
+		relay_evicted_num--;
 	pthread_mutex_unlock(&relay_conns_lock);
 
 	if (conn->account_counted)
@@ -435,6 +447,52 @@ out:
 	return NULL;
 }
 
+/*
+ * The connection to close for a new one of the account @newcomer once all
+ * slots are taken, as the esdm-server's EGD socket chooses it. Caller holds
+ * the lock of the connections.
+ *
+ * It is a connection of an account holding the most connections, with the new
+ * one accounted already: whoever fills the slots holds many, so this takes the
+ * slots from that user and leaves the consumers of everybody else alone. If
+ * @newcomer is among those holding the most, it pays for the new connection
+ * itself. Among those, the least recently active connection is closed. Root's
+ * connections are never closed, and a connection of an account holding fewer
+ * than the most is not either: the new connection is refused then.
+ *
+ * @return the connection to close, NULL if none may be
+ */
+static struct relay_conn *relay_evict_candidate(uid_t newcomer)
+{
+	unsigned int top = esdm_peer_limit_max_count(&relay_peer_limit);
+	struct relay_conn *conn, *victim = NULL;
+	bool victim_own = false;
+
+	TAILQ_FOREACH (conn, &relay_conns, tailq) {
+		bool own;
+
+		if (conn->evicted || !conn->account_counted || !conn->account ||
+		    esdm_peer_limit_count(&relay_peer_limit, conn->account) <
+			    top)
+			continue;
+
+		own = conn->account == newcomer;
+		if (victim) {
+			if (!own && victim_own)
+				continue;
+			if (own == victim_own &&
+			    atomic_load(&conn->active) >=
+				    atomic_load(&victim->active))
+				continue;
+		}
+
+		victim = conn;
+		victim_own = own;
+	}
+
+	return victim;
+}
+
 static void relay_accept(int lfd)
 {
 	struct relay_conn *conn;
@@ -469,20 +527,7 @@ static void relay_accept(int lfd)
 	}
 	snprintf(conn->peer, sizeof(conn->peer), "UID %u PID %d",
 		 (unsigned int)cred.uid, (int)cred.pid);
-
-	pthread_mutex_lock(&relay_conns_lock);
-	if (relay_conn_num >= relay_cfg.max_connections) {
-		pthread_mutex_unlock(&relay_conns_lock);
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-			    "%s: refusing %s, all slots are taken\n",
-			    RELAY_NAME, conn->peer);
-		free(conn);
-		close(fd);
-		return;
-	}
-	relay_conn_num++;
-	TAILQ_INSERT_TAIL(&relay_conns, conn, tailq);
-	pthread_mutex_unlock(&relay_conns_lock);
+	atomic_store(&conn->active, relay_now_ms());
 
 	/* The user the peer acts for, see esdm_peer_account.h */
 	conn->account = esdm_peer_account(fd, &cred);
@@ -490,10 +535,44 @@ static void relay_accept(int lfd)
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 			    "%s: refusing %s (user %u)\n", RELAY_NAME,
 			    conn->peer, (unsigned int)conn->account);
-		relay_conn_release(conn);
+		free(conn);
+		close(fd);
 		return;
 	}
 	conn->account_counted = true;
+
+	/*
+	 * With all slots taken, a connection of the user holding the most is
+	 * closed for the new one: its thread ends with the end of its socket,
+	 * and releases the slot then - counted as free from here on.
+	 */
+	pthread_mutex_lock(&relay_conns_lock);
+	if (relay_conn_num - relay_evicted_num >= relay_cfg.max_connections) {
+		struct relay_conn *victim =
+			relay_evict_candidate(conn->account);
+
+		if (!victim) {
+			pthread_mutex_unlock(&relay_conns_lock);
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+				    "%s: refusing %s, all slots are taken\n",
+				    RELAY_NAME, conn->peer);
+			esdm_peer_limit_put(&relay_peer_limit, conn->account);
+			free(conn);
+			close(fd);
+			return;
+		}
+		victim->evicted = true;
+		relay_evicted_num++;
+		shutdown(victim->fd, SHUT_RDWR);
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_ANY,
+			"%s: all slots are taken, closing %s (user %u) for %s\n",
+			RELAY_NAME, victim->peer, (unsigned int)victim->account,
+			conn->peer);
+	}
+	relay_conn_num++;
+	TAILQ_INSERT_TAIL(&relay_conns, conn, tailq);
+	pthread_mutex_unlock(&relay_conns_lock);
 
 	ret = esdm_egd_serve_pool_spawn(&relay_pool, relay_conn_thread, conn);
 	if (ret) {

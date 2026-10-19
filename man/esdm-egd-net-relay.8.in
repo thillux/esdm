@@ -144,6 +144,14 @@ plain mode, from its address: the server serves no more of them than its
 allows, 64 by default, and refuses the connections beyond, which fails the
 requests of the consumers whose turn it is. Keep this at or below that bound
 of the server.
+.IP
+With all of them taken, a new connection closes one of the user holding the
+most \- the one its consumer used least recently \- as the EGD socket of
+.BR esdm\-server (8)
+does: a few users filling the slots cannot lock anybody else out, and a new
+connection of a user holding the most costs that user one of its own. Root's
+connections are not closed; a new connection that would close no other is
+refused.
 .TP
 .BI \-\-max_per_uid " N"
 Local connections per user \- the subordinate UIDs of a user count as the user,
