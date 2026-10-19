@@ -155,6 +155,12 @@ static void esdm_dtls_openssl_init(void)
  * connection or a send(2) or recv(2) telling so -, -EIO for another error of
  * the socket, -EPROTO for anything else. The error queue of the thread is
  * cleared - errors are per connection here, not per thread.
+ *
+ * SSL_get_error() reports any error on the queue of the thread as one of the
+ * operation it is asked about. The handshake clears the queue as it starts, a
+ * read or a write does not: every SSL operation below starts on an empty queue,
+ * as the client runs on the threads of the application, which may have left an
+ * error there, and a read waiting for the peer would fail with -EPROTO.
  */
 static int esdm_dtls_openssl_error(SSL *ssl, int ret)
 {
@@ -325,14 +331,20 @@ void esdm_dtls_backend_conn_free(void *conn)
 
 int esdm_dtls_backend_handshake(void *conn)
 {
-	int ret = SSL_do_handshake(conn);
+	int ret;
+
+	ERR_clear_error();
+	ret = SSL_do_handshake(conn);
 
 	return ret == 1 ? 0 : esdm_dtls_openssl_error(conn, ret);
 }
 
 int esdm_dtls_backend_send(void *conn, const uint8_t *buf, size_t len)
 {
-	int ret = SSL_write(conn, buf, (int)len);
+	int ret;
+
+	ERR_clear_error();
+	ret = SSL_write(conn, buf, (int)len);
 
 	if (ret == (int)len)
 		return 0;
@@ -343,7 +355,10 @@ int esdm_dtls_backend_send(void *conn, const uint8_t *buf, size_t len)
 
 ssize_t esdm_dtls_backend_recv(void *conn, uint8_t *buf, size_t len)
 {
-	int ret = SSL_read(conn, buf, (int)len);
+	int ret;
+
+	ERR_clear_error();
+	ret = SSL_read(conn, buf, (int)len);
 
 	return ret > 0 ? ret : esdm_dtls_openssl_error(conn, ret);
 }

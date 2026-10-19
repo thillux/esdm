@@ -25,7 +25,8 @@
  * - messages of one record, of several, and of none at all, both ways, and
  *   none of them readable on the socket;
  * - a message larger than allowed, a record that is not one of ours, and a
- *   peer that is gone end the connection.
+ *   peer that is gone end the connection;
+ * - an error the application left with the TLS stack is none of the DTLS.
  */
 
 #include <errno.h>
@@ -42,7 +43,23 @@
 
 #ifdef ESDM_DTLS
 
+#ifdef ESDM_OPENSSL
+#include <openssl/err.h>
+#endif
+
 #define TEST_MAX_MSG (64 * 1024)
+
+/*
+ * An error the application left on the error queue of the thread, which
+ * OpenSSL keeps per thread rather than per connection: a call of the DTLS
+ * waiting for the peer must not take it for one of its own.
+ */
+static void test_app_error(void)
+{
+#ifdef ESDM_OPENSSL
+	ERR_raise(ERR_LIB_USER, ERR_R_INTERNAL_ERROR);
+#endif
+}
 
 /* Drive both handshakes until neither waits any more */
 static int test_handshake(struct esdm_dtls *client, struct esdm_dtls *server,
@@ -55,10 +72,14 @@ static int test_handshake(struct esdm_dtls *client, struct esdm_dtls *server,
 		struct pollfd pfd[2] = { { .fd = cfd, .events = POLLIN },
 					 { .fd = sfd, .events = POLLIN } };
 
-		if (c == -EAGAIN)
+		if (c == -EAGAIN) {
+			test_app_error();
 			c = esdm_dtls_handshake(client);
-		if (s == -EAGAIN)
+		}
+		if (s == -EAGAIN) {
+			test_app_error();
 			s = esdm_dtls_handshake(server);
+		}
 		if (c && c != -EAGAIN)
 			return c;
 		if (s && s != -EAGAIN)
@@ -77,7 +98,10 @@ static ssize_t test_recv(struct esdm_dtls *dtls, int fd, void *buf, size_t len)
 
 	for (i = 0; i < 100; i++) {
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };
-		ssize_t n = esdm_dtls_recv(dtls, buf, len);
+		ssize_t n;
+
+		test_app_error();
+		n = esdm_dtls_recv(dtls, buf, len);
 
 		if (n != -EAGAIN)
 			return n;
@@ -177,6 +201,7 @@ static void test_dtls(void)
 
 	/* A record of the socket that DTLS does not know - dropped by DTLS */
 	CHECK_EQ(send(sv[0], "not a record", 12, MSG_NOSIGNAL), 12);
+	test_app_error();
 	CHECK_EQ(esdm_dtls_recv(server, got, sizeof(got)), -EAGAIN);
 
 	/* The peer gone */
