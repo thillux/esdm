@@ -30,6 +30,11 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +42,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "egd_peer.h"
@@ -592,6 +598,134 @@ static int test_failure_wipes_buffer(void)
 }
 
 /*
+ * Bound on the waits of the client under signals, and how long the signals go
+ * on for at most: long enough after the bound for a client that starts its
+ * wait over with every signal to stand out, short enough that it does not run
+ * into the watchdog then.
+ */
+#define TEST_SIGNAL_TIMEOUT_MS 300
+#define TEST_SIGNAL_INTERVAL_MS 10
+#define TEST_SIGNAL_DURATION_MS 8000
+
+struct test_signaller {
+	pthread_t target;
+	atomic_bool stop;
+	atomic_uint sent;
+};
+
+static volatile sig_atomic_t test_signals_received;
+
+static void test_signal_handler(int sig)
+{
+	(void)sig;
+	test_signals_received++;
+}
+
+/* Interrupt @target with SIGUSR1 at a short interval, as an interval timer would. */
+static void *test_signaller_thread(void *arg)
+{
+	struct test_signaller *s = arg;
+	const struct timespec interval = {
+		.tv_sec = 0,
+		.tv_nsec = TEST_SIGNAL_INTERVAL_MS * 1000L * 1000L,
+	};
+	unsigned int i;
+
+	for (i = 0;
+	     i < TEST_SIGNAL_DURATION_MS / TEST_SIGNAL_INTERVAL_MS &&
+	     !atomic_load(&s->stop);
+	     i++) {
+		nanosleep(&interval, NULL);
+		if (!pthread_kill(s->target, SIGUSR1))
+			atomic_fetch_add(&s->sent, 1);
+	}
+
+	return NULL;
+}
+
+static uint64_t test_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+/*
+ * The timeout bounds a wait for a peer that does not answer also while signals
+ * keep interrupting it. Starting the wait over with every signal, a client
+ * under a periodic one - an interval timer, a stream of SIGCHLD - never times
+ * out at all.
+ */
+static int test_timeout_under_signals(void)
+{
+	struct test_signaller signaller;
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct sigaction sa, old_sa;
+	pthread_t thread;
+	uint64_t start, elapsed;
+	uint32_t bits = 0;
+	int rc, ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("signals"), EGD_PEER_SILENT))
+		return 1;
+
+	if (esdm_egd_client_alloc(&client, test_socket("signals"),
+				  TEST_SIGNAL_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	/* A handler, so that the signal interrupts the poll rather than kill */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = test_signal_handler;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, &old_sa);
+	test_signals_received = 0;
+
+	signaller.target = pthread_self();
+	atomic_init(&signaller.stop, false);
+	atomic_init(&signaller.sent, 0);
+	if (pthread_create(&thread, NULL, test_signaller_thread, &signaller)) {
+		sigaction(SIGUSR1, &old_sa, NULL);
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	start = test_now_ms();
+	rc = esdm_egd_client_entropy_count(client, &bits);
+	elapsed = test_now_ms() - start;
+
+	atomic_store(&signaller.stop, true);
+	pthread_join(thread, NULL);
+	sigaction(SIGUSR1, &old_sa, NULL);
+
+	CHECK(rc == -ETIMEDOUT,
+	      "an unanswered request under signals returned %d, expected %d",
+	      rc, -ETIMEDOUT);
+	CHECK(test_signals_received > 0,
+	      "no signal interrupted the request, %u were sent",
+	      atomic_load(&signaller.sent));
+
+	/*
+	 * The request is tried twice, once on a new connection, and each try
+	 * waits for its answer once - with time to spare for a loaded machine,
+	 * but well below the duration of the signals.
+	 */
+	CHECK(elapsed < TEST_SIGNAL_DURATION_MS / 2,
+	      "an unanswered request under signals took %llu ms with a timeout of %u ms",
+	      (unsigned long long)elapsed, TEST_SIGNAL_TIMEOUT_MS);
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
  * An application may close descriptor ranges it did not open - OpenSSH does on
  * its way into the pre-authentication child - freeing the number for reuse.
  * Reading "random" data out of whatever took its place would be a silent and
@@ -986,6 +1120,7 @@ int main(int argc, char *argv[])
 		  test_socket_path_from_env },
 		{ "reconnect after a hangup", test_reconnect },
 		{ "buffer cleansing on failure", test_failure_wipes_buffer },
+		{ "timeout under signals", test_timeout_under_signals },
 		{ "descriptor identity", test_descriptor_identity },
 		{ "release with a foreign descriptor",
 		  test_free_foreign_descriptor },

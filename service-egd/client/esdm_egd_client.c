@@ -318,6 +318,11 @@ static int esdm_egd_client_remaining_ms(uint64_t deadline_ms)
 /*
  * Wait for @events on @fd, bounded by @timeout_ms.
  *
+ * A signal interrupting the wait does not start it over: the wait goes on for
+ * what is left of @timeout_ms. A periodic signal - an interval timer, a stream
+ * of SIGCHLD - would otherwise keep a wait for a wedged peer from ever running
+ * out.
+ *
  * @return 0 when the descriptor is ready, -ETIMEDOUT when the wait ran out,
  *	   negative errno otherwise. @revents, when given, reports what poll
  *	   found - an error condition is not turned into a failure here, as the
@@ -330,11 +335,11 @@ static int esdm_egd_client_wait(int fd, short events, int timeout_ms,
 		.fd = fd,
 		.events = events,
 	};
+	uint64_t deadline = esdm_egd_client_now_ms() + (uint64_t)timeout_ms;
 	int ret;
 
-	do {
-		ret = poll(&pfd, 1, timeout_ms);
-	} while (ret < 0 && errno == EINTR);
+	while ((ret = poll(&pfd, 1, timeout_ms)) < 0 && errno == EINTR)
+		timeout_ms = esdm_egd_client_remaining_ms(deadline);
 
 	if (revents)
 		*revents = pfd.revents;
