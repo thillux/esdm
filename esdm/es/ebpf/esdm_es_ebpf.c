@@ -631,10 +631,10 @@ static void esdm_ebpf_pool_dealloc(struct esdm_ebpf_es *es)
 /*
  * Make sure the conditioning pool is started, starting it over if an XOF
  * failure left it discarded. What it absorbed is gone, and the entropy
- * credited for it with it - the extraction that failed cleared the credited
- * events already. A pool that cannot be started now is tried again by the
- * next caller, so a passing XOF failure does not take the source out until a
- * reset or a reinitialization.
+ * credited for it with it - the extraction or the insert that failed cleared
+ * the credited events already. A pool that cannot be started now is tried
+ * again by the next caller, so a passing XOF failure does not take the source
+ * out until a reset or a reinitialization.
  */
 static int esdm_ebpf_pool_restart(struct esdm_ebpf_es *es)
 {
@@ -900,10 +900,19 @@ static void esdm_ebpf_handle_events(struct esdm_ebpf_es *es,
 				rec->health_epoch, events);
 	es->ingested += (uint32_t)events;
 
-	/* The deltas are inserted in full, not folded into bytes */
+	/*
+	 * The deltas are inserted in full, not folded into bytes.
+	 *
+	 * An XOF failure discards the XDRBG and with it the data of every
+	 * event credited so far: fail closed for those, as a failed extraction
+	 * does. The next insert starts a new instantiation, which is credited
+	 * with no more than it absorbs from then on.
+	 */
 	if (esdm_ebpf_pool_insert(es, (const uint8_t *)rec->delta,
-				  events * sizeof(rec->delta[0])))
+				  events * sizeof(rec->delta[0]))) {
+		es->credited_events = 0;
 		return;
+	}
 
 	/*
 	 * Events observed under a previous reset generation were in flight in

@@ -26,6 +26,8 @@
  * entropy credited for it. It must not lose the source: the pool once stayed
  * uninitialized after such a failure, every later insert was refused, and the
  * source never credited anything again until it was reset or reinitialized.
+ * An insert whose XDRBG fails loses the same, and must not keep the credit
+ * for it either.
  *
  * The pool needs neither the eBPF programs nor privileges, but its functions
  * are internal to the glue, so the glue is compiled into the test. A source
@@ -45,6 +47,8 @@ enum ebpf_pool_fail {
 	ebpf_pool_fail_final,
 	/* Starting the pool over fails as well */
 	ebpf_pool_fail_all,
+	/* Absorbing data fails */
+	ebpf_pool_fail_update,
 };
 
 static enum ebpf_pool_fail ebpf_pool_fail = ebpf_pool_fail_none;
@@ -56,6 +60,13 @@ static int ebpf_pool_xof_init(void *xof)
 	if (ebpf_pool_fail == ebpf_pool_fail_all)
 		return -EFAULT;
 	return ebpf_pool_xof_real->xof_init(xof);
+}
+
+static int ebpf_pool_xof_update(void *xof, const uint8_t *in, size_t inlen)
+{
+	if (ebpf_pool_fail == ebpf_pool_fail_update)
+		return -EFAULT;
+	return ebpf_pool_xof_real->xof_update(xof, in, inlen);
 }
 
 static int ebpf_pool_xof_final(void *xof, uint8_t *out, size_t outlen)
@@ -191,6 +202,52 @@ static void ebpf_pool_uncredited(struct esdm_ebpf_es *es)
 	ebpf_pool_rate_bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 }
 
+/*
+ * An insert whose XDRBG fails discards the pool and the data of every event
+ * credited so far. The count of those events once survived it, and the next
+ * record - absorbed by a new instantiation - was credited on top of it: the
+ * source claimed entropy for data that was gone.
+ */
+static void ebpf_pool_insert_failure(struct esdm_ebpf_es *es)
+{
+	struct esdm_ebpf_event_rec rec;
+	unsigned int i;
+
+	memset(&rec, 0, sizeof(rec));
+	rec.type = esdm_ebpf_rec_event;
+	rec.cpu = UINT32_MAX;
+	rec.events = ESDM_EBPF_BATCH_EVENTS;
+	rec.reset_gen = es->reset_gen;
+	rec.health_epoch = es->health_epoch;
+	for (i = 0; i < ESDM_EBPF_BATCH_EVENTS; i++)
+		rec.delta[i] = i * 104729 + 7;
+
+	/* Room for two records' worth of credit, so no cap interferes */
+	CHECK(esdm_ebpf_events_per_block(es) > 2 * ESDM_EBPF_BATCH_EVENTS,
+	      "one output block costs too few events for this test");
+
+	es->credited_events = 0;
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	CHECK_EQ(es->credited_events, ESDM_EBPF_BATCH_EVENTS);
+
+	ebpf_pool_fail = ebpf_pool_fail_update;
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	ebpf_pool_fail = ebpf_pool_fail_none;
+	CHECK(!esdm_xdrbg_started(&es->pool),
+	      "the pool absorbed data its XOF refused");
+	CHECK_EQ(es->credited_events, 0);
+
+	/* The new instantiation is credited with what it absorbed, no more */
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	CHECK(esdm_xdrbg_started(&es->pool),
+	      "an insert did not start the pool over");
+	CHECK_EQ(es->credited_events, ESDM_EBPF_BATCH_EVENTS);
+	CHECK_EQ(esdm_ebpf_collected_entropy(es),
+		 esdm_ebpf_entropy_of(es, ESDM_EBPF_BATCH_EVENTS));
+
+	es->credited_events = 0;
+}
+
 int main(void)
 {
 	struct esdm_ebpf_es es = {
@@ -205,6 +262,7 @@ int main(void)
 	ebpf_pool_xof_real = esdm_default_xof_cb;
 	ebpf_pool_xof_cb = *ebpf_pool_xof_real;
 	ebpf_pool_xof_cb.xof_init = ebpf_pool_xof_init;
+	ebpf_pool_xof_cb.xof_update = ebpf_pool_xof_update;
 	ebpf_pool_xof_cb.xof_final = ebpf_pool_xof_final;
 	esdm_default_xof_cb = &ebpf_pool_xof_cb;
 
@@ -254,6 +312,7 @@ int main(void)
 	CHECK(esdm_xdrbg_started(&es.pool),
 	      "an insert did not start the pool over");
 
+	ebpf_pool_insert_failure(&es);
 	ebpf_pool_uncredited(&es);
 
 	esdm_ebpf_pool_dealloc(&es);
