@@ -37,7 +37,8 @@
  *   the token label holds.
  * - A PIN the token refuses is tried once and never again - not when the token
  *   is looked for again, not when it is opened anew after a failed read. The
- *   token is used without a login then.
+ *   token is used without a login then. A login failing for another reason
+ *   keeps the PIN, and the token is looked for, and logged in to, again.
  * - A failed C_GenerateRandom drops the token, which is looked for again on
  *   the next request, and logged in to again.
  * - A token repeating its output fails the self test and is credited with
@@ -669,6 +670,64 @@ static void test_wrong_pin(void)
 }
 
 /*
+ * A login failing for another reason than the PIN - the token failing it with
+ * CKR_DEVICE_ERROR - is no refusal of the PIN: the PIN is kept, the token is
+ * looked for again after the retry interval, and logged in to with it then
+ */
+static void test_login_failure(void)
+{
+	const char *const args[] = { "--module",  pk.shim,	"--token_label",
+				     TOKEN_LABEL, "--pin_file", pk.pin_good,
+				     NULL };
+	struct json_object *status;
+	uint32_t bits;
+
+	CHECK(!pk_write_file(pk.fail_login, "", 0600), "cannot fail the login");
+	if (!pk_start(args, NULL)) {
+		CHECK(0, "esdm-es-pkcs11 does not serve with a failing login");
+		unlink(pk.fail_login);
+		return;
+	}
+	CHECK(test_connect(), "cannot connect");
+
+	status = test_status();
+	CHECK_STR_EQ(test_plugin_str(status, "pin"), "set");
+	CHECK(test_plugin_bool(status, "logged_in", false) &&
+		      test_plugin_bool(status, "token_present", false) &&
+		      test_plugin_str(status, "last_error") &&
+		      strstr(test_plugin_str(status, "last_error"),
+			     "login to the token failed"),
+	      "the failed login is not reported: %s", test_print(status));
+	json_object_put(status);
+	CHECK_EQ(pk_count_lines(pk.login_log, "C_Login user 1 rv 0x30"), 1);
+	CHECK_EQ(pk_count_lines(pk.daemon_log, "refused the PIN"), 0);
+
+	/*
+	 * Looked for again on the first request, as a token not there at
+	 * start up is, and not again within the retry interval
+	 */
+	CHECK_EQ(test_get(32, NULL, &bits), -ENODEV);
+	CHECK_EQ(test_get(32, NULL, &bits), -ENODEV);
+	CHECK_EQ(pk_count_lines(pk.login_log, "C_Login user 1 rv 0x30"), 2);
+	CHECK_EQ(pk_count_lines(pk.login_log, "C_Login"), 2);
+
+	/* Found again after it, and logged in to with the PIN kept */
+	unlink(pk.fail_login);
+	sleep(PK_RETRY_INTERVAL_SEC + 1);
+	CHECK_EQ(test_get(32, NULL, &bits), 0);
+	status = test_status();
+	CHECK(test_plugin_bool(status, "token_present", true) &&
+		      test_plugin_bool(status, "logged_in", true),
+	      "the token was not logged in to again: %s", test_print(status));
+	CHECK_STR_EQ(test_plugin_str(status, "pin"), "set");
+	json_object_put(status);
+	CHECK_EQ(pk_count_lines(pk.login_log, "C_Login user 1 rv 0x0"), 1);
+
+	es_ext_test_client_close(&test_client);
+	test_stop();
+}
+
+/*
  * A token repeating its output fails the self test and is credited with
  * nothing - its data still handed out - until a self test passes again
  */
@@ -865,6 +924,7 @@ int main(int argc, char *argv[])
 	test_pin_file();
 	test_pin_credential();
 	test_wrong_pin();
+	test_login_failure();
 	test_repetition();
 	test_labels();
 	/* Last: it creates the token it looks for */

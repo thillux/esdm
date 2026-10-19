@@ -23,7 +23,10 @@
  *
  * - C_Login is recorded, one line per call with its result, in the file
  *   $ESDM_PKCS11_SHIM_LOG. SoftHSM counts no PIN retries, so this is how a test
- *   tells that a PIN the token refused is not tried again.
+ *   tells that a PIN the token refused is not tried again. It fails with
+ *   CKR_DEVICE_ERROR, without asking SoftHSM, while the file
+ *   $ESDM_PKCS11_SHIM_FAIL_LOGIN exists, as a token failing for another
+ *   reason than the PIN does.
  * - C_GenerateRandom fails with CKR_DEVICE_ERROR while the file
  *   $ESDM_PKCS11_SHIM_FAIL exists, as a smartcard pulled mid-request does,
  *   and hands out the same bytes every time while the file
@@ -32,8 +35,8 @@
  * The real module is $ESDM_PKCS11_SHIM_MODULE. The PKCS#11 types are spelled
  * out here rather than taken from a pkcs11.h, which no dependency of the ESDM
  * installs: the function list of PKCS#11 2.40 is a version followed by the 68
- * functions, and the two calls are found in it by the addresses the real
- * module exports them under rather than by their position.
+ * functions, and the calls are found in it by the addresses the real module
+ * exports them under rather than by their position.
  */
 
 #define _GNU_SOURCE
@@ -77,11 +80,21 @@ static struct ck_function_list shim_list;
 static ck_login real_login;
 static ck_generate_random real_generate_random;
 
+/* Does the file named by the environment variable @var exist? */
+static int shim_file(const char *var)
+{
+	const char *path = getenv(var);
+
+	return path && !access(path, F_OK);
+}
+
 static CK_RV shim_login(CK_SESSION_HANDLE session, CK_USER_TYPE user,
 			CK_BYTE *pin, CK_ULONG pin_len)
 {
 	const char *log = getenv("ESDM_PKCS11_SHIM_LOG");
-	CK_RV rv = real_login(session, user, pin, pin_len);
+	CK_RV rv = shim_file("ESDM_PKCS11_SHIM_FAIL_LOGIN") ?
+			   CKR_DEVICE_ERROR :
+			   real_login(session, user, pin, pin_len);
 
 	if (log) {
 		int fd = open(log, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC,

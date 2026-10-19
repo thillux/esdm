@@ -112,8 +112,11 @@ if get_option('es_pkcs11').enabled()
 		c_args: [ '-DESDM_ES_PKCS11_VERSION="' + meson.project_version() + '"' ],
 		include_directories: include_dirs_es_ext_daemons,
 		link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
+		# libcrypto for the error queue of OpenSSL, on which libp11
+		# reports why a login failed - see esdm_es_pkcs11_login()
 		dependencies: [ dependency('threads'), dl_dep, json_c_dep,
-				dependency('libp11', required: true) ] +
+				dependency('libp11', required: true),
+				dependency('libcrypto', required: true) ] +
 			      dtls_deps + es_ext_net_deps,
 		install: true
 		)

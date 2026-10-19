@@ -23,7 +23,8 @@
  * found next to the softhsm2-util on the path, and the daemon started in
  * front of it - through es_pkcs11_shim.c, which counts the logins into
  * pk.login_log, fails C_GenerateRandom while pk.fail exists and repeats its
- * output while pk.repeat does.
+ * output while pk.repeat does, and fails C_Login for another reason than the
+ * PIN while pk.fail_login exists.
  */
 
 #ifndef _ES_PKCS11_TEST_UTIL_H
@@ -69,6 +70,7 @@ static struct {
 	char login_log[PK_PATH_SIZE];
 	char fail[PK_PATH_SIZE];
 	char repeat[PK_PATH_SIZE];
+	char fail_login[PK_PATH_SIZE];
 	char daemon_log[PK_PATH_SIZE];
 	char pin_good[PK_PATH_SIZE];
 	char pin_wrong[PK_PATH_SIZE];
@@ -124,6 +126,7 @@ static inline int pk_setup(const char *daemon, const char *shim)
 	snprintf(pk.login_log, sizeof(pk.login_log), "%s/login.log", pk.dir);
 	snprintf(pk.fail, sizeof(pk.fail), "%s/fail", pk.dir);
 	snprintf(pk.repeat, sizeof(pk.repeat), "%s/repeat", pk.dir);
+	snprintf(pk.fail_login, sizeof(pk.fail_login), "%s/fail-login", pk.dir);
 	snprintf(pk.daemon_log, sizeof(pk.daemon_log), "%s/daemon.log", pk.dir);
 	snprintf(pk.pin_good, sizeof(pk.pin_good), "%s/pin", pk.dir);
 	snprintf(pk.pin_wrong, sizeof(pk.pin_wrong), "%s/wrong-pin", pk.dir);
@@ -262,7 +265,7 @@ static inline pid_t pk_spawn(const char *const *args, const char *const *env)
 {
 	char uid[16], conf[PK_PATH_SIZE + 32], module[PATH_MAX + 32];
 	char login[PK_PATH_SIZE + 32], fail[PK_PATH_SIZE + 32];
-	char repeat[PK_PATH_SIZE + 32];
+	char repeat[PK_PATH_SIZE + 32], fail_login[PK_PATH_SIZE + 32];
 	char *argv[40], *envp[16];
 	posix_spawn_file_actions_t fa;
 	unsigned int n = 0, e = 0;
@@ -287,11 +290,14 @@ static inline pid_t pk_spawn(const char *const *args, const char *const *env)
 	snprintf(fail, sizeof(fail), "ESDM_PKCS11_SHIM_FAIL=%s", pk.fail);
 	snprintf(repeat, sizeof(repeat), "ESDM_PKCS11_SHIM_REPEAT=%s",
 		 pk.repeat);
+	snprintf(fail_login, sizeof(fail_login),
+		 "ESDM_PKCS11_SHIM_FAIL_LOGIN=%s", pk.fail_login);
 	envp[e++] = conf;
 	envp[e++] = module;
 	envp[e++] = login;
 	envp[e++] = fail;
 	envp[e++] = repeat;
+	envp[e++] = fail_login;
 	while (env && *env && e < sizeof(envp) / sizeof(envp[0]) - 1)
 		envp[e++] = (char *)*env++;
 	envp[e] = NULL;

@@ -41,7 +41,9 @@
  *   asks for a login. Every failed login uses up one of the PIN retries of the
  *   token, after which it locks the PIN: a PIN the token refused is wiped and
  *   not tried again - neither by the look-ups for a token nor by a re-open -
- *   until the daemon is started anew with another one.
+ *   until the daemon is started anew with another one. A login failing for
+ *   another reason - the token refusing no PIN - keeps the PIN, and the token
+ *   is looked for again.
  * - A token that is not there - pulled, not inserted yet, or lost to a failed
  *   C_GenerateRandom - is looked for again on demand, at most every
  *   ESDM_PKCS11_RETRY_INTERVAL_SEC. The module is loaded anew when its slots
@@ -69,6 +71,7 @@
 #include <time.h>
 
 #include <libp11.h>
+#include <openssl/err.h>
 
 #include "esdm_es_ext.h"
 #include "esdm_es_ext_proto.h"
@@ -314,14 +317,52 @@ static PKCS11_SLOT *esdm_es_pkcs11_pick_slot(struct esdm_es_pkcs11 *p)
 }
 
 /*
+ * Did the token refuse the PIN in the login that failed last - as wrong, as no
+ * PIN it takes, as one of the wrong length, as locked or as expired - rather
+ * than the login fail for another reason, a session that could not be opened,
+ * a device error, a token pulled? PKCS11_login() returns -1 for anything that
+ * goes wrong, but libp11 puts the CKR_ value a failed C_Login returned on the
+ * OpenSSL error queue, as the reason of an error of its own library. The
+ * queue is emptied.
+ */
+static bool esdm_es_pkcs11_pin_refused(void)
+{
+	/* The CKR_PIN_* values of PKCS#11, which libp11 does not export */
+	static const unsigned long refused[] = {
+		0xa0, /* CKR_PIN_INCORRECT */
+		0xa1, /* CKR_PIN_INVALID */
+		0xa2, /* CKR_PIN_LEN_RANGE */
+		0xa3, /* CKR_PIN_EXPIRED */
+		0xa4, /* CKR_PIN_LOCKED */
+	};
+	int lib = ERR_get_CKR_code();
+	unsigned long err;
+	bool ret = false;
+	unsigned int i;
+
+	while ((err = ERR_get_error())) {
+		if (ERR_GET_LIB(err) != lib)
+			continue;
+		for (i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+			if ((unsigned long)ERR_GET_REASON(err) == refused[i])
+				ret = true;
+		}
+	}
+
+	return ret;
+}
+
+/*
  * Log in to the token of the bound slot with the PIN, if there is one and the
  * token asks for it.
  *
  * A PIN the token refuses is wiped, and so not tried again. Nor is a PIN tried
- * on a token reporting its user PIN locked.
+ * on a token reporting its user PIN locked. A login that fails for another
+ * reason keeps the PIN: the token is looked for again, and logged in to again,
+ * as one lost to a failed read is.
  *
  * Returns 0 when logged in or when no login is needed, -EACCES when the token
- * refused the PIN.
+ * refused the PIN, -EIO when the login failed otherwise.
  */
 static int esdm_es_pkcs11_login(struct esdm_es_pkcs11 *p)
 {
@@ -351,7 +392,16 @@ static int esdm_es_pkcs11_login(struct esdm_es_pkcs11 *p)
 		return -EACCES;
 	}
 
+	/* What the login leaves on the queue is to be about the login */
+	ERR_clear_error();
 	if (PKCS11_login(p->slot, 0, p->config.pin) != 0) {
+		if (!esdm_es_pkcs11_pin_refused()) {
+			esdm_es_pkcs11_error(
+				p, LOGGER_WARN,
+				"the login to the token failed, the token is looked for again");
+			return -EIO;
+		}
+
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"PKCS#11 entropy source: token '%s' refused the PIN, which is not tried again\n",
@@ -415,7 +465,8 @@ out:
  * it.
  *
  * Returns 0 with a token bound, -ENOENT when no matching token is present,
- * -EACCES when the login fails, -EIO when the token does not deliver.
+ * -EACCES when the token refused the PIN, -EIO when the login failed otherwise
+ * or the token does not deliver.
  */
 static int esdm_es_pkcs11_bind(struct esdm_es_pkcs11 *p)
 {
