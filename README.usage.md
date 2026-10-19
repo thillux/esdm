@@ -375,6 +375,53 @@ consumer therefore has to be connected before it confines itself, and a process
 forking into the sandbox cannot be served at all; an unconfined consumer sees a
 restarted ESDM transparently.
 
+### EGD over the network
+
+Built with the meson option `egd-net`, the EGD protocol of an ESDM reaches the
+hosts of a network: `esdm-egd-net-server` serves it on TCP, port 7378 by
+default, and answers it through the unprivileged RPC interface of the
+`esdm-server` - nothing of the network reaches the `esdm-server` itself, and
+every client is unprivileged. On a host without an ESDM, `esdm-egd-net-relay`
+serves the EGD socket where the consumers above look for it, so libgcrypt,
+`RAND_egd()` and the EGD provider use the ESDM on the network unchanged -
+sandboxed consumers included, as they keep speaking to a Unix domain socket.
+`libesdm_egd_client` reaches the server directly with
+`esdm_egd_client_alloc_net()`.
+
+There are two modes:
+
+* TLS 1.3 with mutual authentication: both sides present a certificate of one
+  private CA, the clients are identified by the fingerprint of theirs, and
+  CRLs are checked the same way with every TLS stack. Certificates, trust
+  anchors and CRLs are taken up while the daemons run. The TLS stack is that
+  of the crypto backend - OpenSSL, GnuTLS or Botan.
+
+* Plain TCP, neither encrypted nor authenticated. It is meant only for
+  networks that protect the traffic underneath - IPsec, WireGuard - and has to
+  be asked for with `--plain`; the daemons refuse to start with neither TLS
+  files nor `--plain`. It needs no TLS stack and builds with every backend.
+
+On the host of the ESDM, with the TLS files of the server in
+`/etc/esdm/egd-net/` (`server.crt`, `server.key`, and `ca.crt`, the CA of the
+clients):
+
+```
+   systemctl enable --now esdm-egd-net-server.socket
+```
+
+On a host without an ESDM, with `client.crt`, `client.key` and `ca.crt` there
+and the server in `/etc/esdm/egd-net-relay.env`:
+
+```
+   echo 'ESDM_EGD_NET_RELAY_ARGS="--connect egd.example"' > /etc/esdm/egd-net-relay.env
+   systemctl enable --now esdm-egd-net-relay.socket
+```
+
+`esdm-egd-net-server(8)` and `esdm-egd-net-relay(8)` describe the options, the
+bounds of the connections, the rotation of the files, exactly what the CRLs are
+checked for and the timer downloading them; the check of both hosts together
+is `nix build .#checks.<system>.egd_net`.
+
 ## Additional Hardening Measures
 
 The ESDM already executes with different execution domains and without any

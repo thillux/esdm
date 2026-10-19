@@ -1,0 +1,17 @@
+# Download the CRLs %i of the EGD network daemons periodically - see
+# esdm-egd-net-crl-update@.service. Hourly: a CA publishes its CRLs well ahead
+# of their nextUpdate, and the daemons warn of a CRL less than a day away from
+# it.
+
+[Unit]
+Description=Download the CRLs %i of the ESDM EGD network daemons periodically
+Documentation=man:esdm-egd-net-server(8)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+# The EGD socket of a host without an ESDM, served by the esdm-egd-net-relay
+# through an esdm-egd-net-server on another host - see esdm-egd-net-relay(8).
+#
+# The socket is where the consumers of the EGD protocol look for the ESDM's -
+# libgcrypt, OpenSSL's RAND_egd(), the EGD provider of the ESDM -, so it
+# replaces the EGD socket of a local esdm-server, which it conflicts with.
+#
+#	systemctl enable --now esdm-egd-net-relay.socket
+
+[Unit]
+Description=ESDM EGD network relay socket
+Documentation=man:esdm-egd-net-relay(8)
+Conflicts=esdm-server-egd.socket
+
+[Socket]
+ListenStream=@SOCKET_PATH@
+# The consumers are ordinary applications of every user. Nothing reachable
+# through the socket is privileged: the server of the network treats every
+# client as unprivileged, and the relay answers the privileged commands with
+# -EPERM itself.
+SocketMode=0666
+SocketUser=root
+SocketGroup=root
+Service=esdm-egd-net-relay.service
+
+[Install]
+WantedBy=sockets.target

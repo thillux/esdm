@@ -1,0 +1,445 @@
+.TH ESDM\-EGD\-NET\-SERVER 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-egd\-net\-server \- serve the EGD protocol of the ESDM to a network
+.SH SYNOPSIS
+.B esdm\-egd\-net\-server
+.RB [ \-\-listen
+.IR [HOST]:PORT ]...
+.B \-\-cert
+.I FILE
+.B \-\-key
+.I FILE
+.B \-\-ca
+.I FILE
+.RB [ \-\-crl
+.IR FILE ]...
+.RI [ OPTIONS ]
+.br
+.B esdm\-egd\-net\-server
+.RB [ \-\-listen
+.IR [HOST]:PORT ]...
+.B \-\-plain
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B esdm\-egd\-net\-server
+serves the EGD (Entropy Gathering Daemon) protocol of the ESDM \- the one of
+the EGD socket of
+.BR esdm\-server (8),
+ESDM extensions included \- on TCP to the hosts of a network. Its clients are
+.BR esdm\-egd\-net\-relay (8),
+which serves the EGD socket of a host without an ESDM, and any other program
+using the network modes of
+.BR libesdm_egd_client (3).
+.PP
+It is a client of the ESDM like any other: it answers the EGD commands through
+the unprivileged RPC interface of the
+.BR esdm\-server (8)
+on its host, and nothing of the network reaches the
+.B esdm\-server
+but these RPC calls. Every client of the network is unprivileged: an entropy
+claim attached to inserted data (command 0x03) is dropped and the data
+inserted without credit, and the commands changing the entropy accounting or
+the DRNGs (0xe6 to 0xea) are answered with \-EPERM, the connection staying
+usable. The get PID command (0x04) answers the PID of this daemon.
+.PP
+Two modes, chosen at the start:
+.TP
+.B TLS
+TLS 1.3 with mutual authentication \- the default, and the only mode in which
+the network itself may be untrusted. The server presents its certificate and
+requires one of every client, which has to chain to the trust anchors given
+with
+.BR \-\-ca ,
+be within its validity period, be issued for TLS client authentication if it
+has an extended key usage, and \- with CRLs \- not be revoked. A client is
+identified by the SHA\-256 fingerprint of its certificate. TLS is provided by
+the TLS stack of the crypto backend the ESDM is built with \- OpenSSL, GnuTLS
+or Botan \- and missing in a build with the builtin or the leancrypto backend
+(meson option
+.BR egd\-net\-tls ),
+which refuses the TLS options at the start.
+.TP
+.B plain TCP
+The EGD protocol as it is, neither encrypted nor authenticated: only for a
+network whose transport is protected underneath, by IPsec or WireGuard, say.
+It is never a default: the server runs in plain mode only with
+.BR \-\-plain ,
+refuses
+.B \-\-plain
+next to any TLS option, refuses to start with neither TLS files nor
+.BR \-\-plain ,
+and logs a warning at its start that the network has to provide encryption and
+authentication. A client is identified by its source address \- the IPv4
+address, or the /64 of an IPv6 address, as a single host usually holds a whole
+/64; an IPv4\-mapped IPv6 address counts as the IPv4 address.
+.PP
+Each connection is served by a thread of its own, which waits for the
+answers of the ESDM as long as they take: a blocking read before the ESDM is
+operational waits for it. A non\-blocking read waits at most 250 ms for the
+ESDM. Commands of one connection are answered in order; a client pipelining
+them is served one after the other.
+.SH OPTIONS
+.TP
+.BR \-l ", " \-\-listen " \fI[HOST]:PORT\fR"
+Listen on
+.I PORT
+of
+.I HOST
+\- an address or a name; an IPv6 address in brackets, as in
+.BR [2001:db8::1]:@EGD_NET_PORT@ .
+Without
+.IR HOST ,
+or with
+.BR * ,
+on every address. May be given up to 16 times. Sockets handed over by socket
+activation
+.RB ( LISTEN_FDS )
+are served next to these; without either the server refuses to start. The port
+of the shipped socket unit is @EGD_NET_PORT@ (meson option
+.BR egd\-net\-port ).
+.TP
+.B \-\-plain
+Plain TCP, see above.
+.TP
+.BI \-\-cert " FILE"
+Certificate of the server, PEM, optionally followed by the intermediate
+certificates of its chain. It has to chain to the trust anchors of
+.B \-\-ca
+as well: the server and its clients are issued in one trust domain.
+.TP
+.BI \-\-key " FILE"
+Private key of the certificate, PEM, unencrypted, PKCS#8 \- the format
+.B openssl genpkey
+writes; Botan reads no other.
+.TP
+.BI \-\-ca " FILE"
+Trust anchors the certificates of the clients have to chain to, PEM, one or
+more certificates.
+.TP
+.BI \-\-crl " FILE"
+CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
+only, no delta CRLs nor ones with an issuing distribution point. See
+.BR REVOCATION .
+.TP
+.B \-\-crl_check_all
+Require a CRL for every CA certificate of a client's chain as well, not only
+for its own certificate.
+.TP
+.B \-\-crl_allow_expired
+Use a CRL past its nextUpdate with a warning, rather than refusing the clients
+it covers.
+.TP
+.BI \-\-reload_interval " SEC"
+Check the TLS files \- certificate, key, trust anchors and CRLs \- for a change
+this often, and take them up when they changed. 0 checks them on
+.B SIGHUP
+only. The default is 60. See
+.BR "ROTATION" .
+.TP
+.BI \-\-allow " CIDR"
+Serve only clients from the network
+.IR CIDR ,
+such as
+.B 192.0.2.0/24
+or
+.BR 2001:db8::/48 ,
+or from a single address. May be given up to 64 times. A connection from
+anywhere else is closed right after it was accepted. In both modes; the
+default is every address.
+.TP
+.BI \-\-max_connections " N"
+Connections served at a time, in all. The default is 512.
+.TP
+.BI \-\-max_handshakes " N"
+Connections on probation at a time: connected, but in TLS mode not yet
+authenticated by their handshake, in plain mode not yet past their first
+command. The default is 64.
+.TP
+.BI \-\-max_handshakes_per_source " N"
+The same per source address \- per /64 for IPv6. The default is 8.
+.TP
+.BI \-\-max_per_client " N"
+Connections per client \- per certificate in TLS mode, per source address in
+plain mode. The default is 64, which is as many as an
+.BR esdm\-egd\-net\-relay (8)
+opens at most by default: it takes one per local connection. A connection of a
+client beyond its bound is closed \- right after the handshake in TLS mode, at
+once in plain mode.
+.TP
+.BI \-\-handshake_timeout " SEC"
+Length of the probation: a connection that did not complete its handshake \-
+in plain mode, sent no command \- by then is closed. The default is 10.
+.TP
+.BI \-\-idle_timeout " SEC"
+A connection whose client sent no command for this long is closed; 0 for
+never. The default is 600.
+.B libesdm_egd_client
+and the relay reconnect at their next command; a sandboxed consumer of the
+network modes cannot, see
+.BR libesdm_egd_client (3).
+.TP
+.BI \-\-io_timeout " SEC"
+Bound of the rest of a command once it started, and of a client taking its
+answer. The default is 30.
+.TP
+.BR \-u ", " \-\-username " \fIUSER\fR"
+User to switch to after the sockets are bound and the TLS files loaded, when
+started as root. The default is
+.BR nobody .
+The files are read as that user when they are taken up later.
+.TP
+.BR \-g ", " \-\-groupname " \fIGROUP\fR"
+Supplementary group to switch to. The default is none.
+.TP
+.BR \-S ", " \-\-syslog
+Log to syslog.
+.TP
+.BR \-v ", " \-\-verbose
+More verbose logging, may be repeated. Warnings and errors are logged without.
+With debug logging, the server logs the subject and the fingerprint of every
+client that connects.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.PP
+A file named without a slash is a credential of the service: it is taken from
+.BR $CREDENTIALS_DIRECTORY ,
+where systemd places what
+.B LoadCredential=
+names. Without
+.BR \-\-cert ,
+.B \-\-key
+and
+.BR \-\-ca ,
+in TLS mode, the credentials
+.BR cert ,
+.B key
+and
+.B ca
+are used \- what the shipped unit loads.
+.SH BOUNDS
+The listener faces the network, and anybody who can reach it may connect, so
+the connections are bounded \- each a connection that is closed at once when
+it would exceed one:
+.IP \(bu 2
+.B \-\-max_connections
+in all,
+.IP \(bu 2
+.B \-\-max_handshakes
+on probation and
+.B \-\-max_handshakes_per_source
+of them per source address \- a peer that connects and stays silent holds a
+slot for no longer than
+.BR \-\-handshake_timeout ,
+in plain mode as well,
+.IP \(bu 2
+.B \-\-max_per_client
+per client,
+.IP \(bu 2
+.B \-\-idle_timeout
+of silence, and
+.B \-\-io_timeout
+for a command or an answer under way.
+.PP
+A client reaching its bound is logged once, until it drops below it.
+.SH ROTATION
+The server takes up renewed TLS files without a restart: on
+.BR SIGHUP ,
+and when one of the files changes, which it checks every
+.B \-\-reload_interval
+seconds by the path, device, inode, size and modification time of each file.
+That covers a file written in place, one renamed into its place, and a
+symbolic link switched to another directory, as Kubernetes does with the
+.B ..data
+link of a secret.
+.PP
+A reload builds a complete new context first: the certificate and the key
+parse, the key belongs to the certificate, the certificate chains to the trust
+anchors, every CRL parses. Only then does it replace the context in use \-
+otherwise the error is logged and the old context stays in service, so that a
+broken rotation, or one caught half way, never takes the service down. New
+handshakes use the new context; established connections keep theirs until
+they close.
+.PP
+The credentials of
+.B LoadCredential=
+are copies, made by systemd when the service starts: a reload sees no change of
+them. A rotation without a restart needs the paths of the files, readable by
+the user of the service, given with
+.BR \-\-cert ,
+.BR \-\-key ,
+.B \-\-ca
+and
+.B \-\-crl
+instead.
+.SH REVOCATION
+With
+.BR \-\-crl ,
+the server checks the chain of every client against the CRLs it loaded, the
+same way with every TLS stack \- their own revocation checks are not used. The
+chain is the one the TLS stack verified, from the certificate of the client up
+to one of the trust anchors of
+.BR \-\-ca ,
+and up to a self\-signed one if
+.B \-\-ca
+holds a CA certificate that is not: such a CA certificate is checked against
+the CRL of its issuer as any other. A certificate the client sends along
+claiming to be a trust anchor is never taken for one. For each certificate of
+the chain but the trust anchor:
+.IP \(bu 2
+Its CRL is a CRL whose issuer is the subject of the next certificate of the
+chain and whose signature verifies with that certificate's key. Of several,
+the one with the latest thisUpdate counts. A CRL signed by anybody else is
+none.
+.IP \(bu 2
+The certificate of the client must have a CRL: without one, the handshake
+fails \- fail closed. A client whose certificate is itself a trust anchor has
+no issuer whose CRL could cover it and fails as well.
+.IP \(bu 2
+A CA certificate between the client's and the trust anchor is checked against
+its CRL if there is one. With
+.B \-\-crl_check_all
+it must have one, too.
+.IP \(bu 2
+A CRL past its nextUpdate fails the handshake. With
+.B \-\-crl_allow_expired
+it is used all the same, with a warning in the log. A CRL without a
+nextUpdate does not expire.
+.IP \(bu 2
+A certificate the CRL lists is revoked, and fails the handshake.
+.PP
+The check is part of the verification of the TLS stack: a client it refuses
+fails the handshake with an alert telling why \- certificate_revoked,
+certificate_expired for an expired CRL, unknown_ca for a missing one \- which
+a TLS 1.3 client receives on its first read, as its own handshake completes
+before the server has judged its certificate.
+.PP
+A CRL is taken for the complete list of what its issuer revoked. A delta CRL
+(extension deltaCRLIndicator) lists only what changed since a base CRL, and an
+issuing distribution point limits a CRL to a part of the certificates of its
+issuer: neither is supported. CRL files holding one do not load \- at the
+start, the server refuses to start, at a reload it keeps the files loaded
+before \- rather than have certificates the CRL does not cover pass.
+.PP
+EGD clients hold their connection for their whole life, so revocation has to
+bite on established connections too: after every reload, the server checks the
+chains of its connections against the new CRLs and closes those of a revoked
+certificate \- a handshake that began before the reload is checked against the
+new CRLs once it completes. A CRL missing or expired after a reload closes
+nothing \- only a listed certificate does. Every 30 seconds, it closes the connections whose
+client certificate expired. Both are logged with the subject and the
+fingerprint of the client.
+.PP
+The server logs a warning once a CRL is less than 24 hours away from its
+nextUpdate, and an error once it is past it \- each once per state, and again
+after a reload.
+.SH CRL UPDATES
+The daemons have no HTTP client. A systemd service and timer download CRLs
+into a file the daemons read:
+.B esdm\-egd\-net\-crl\-update@.timer
+starts
+.B esdm\-egd\-net\-crl\-update@.service
+hourly, which fetches the URLs of
+.I /etc/esdm/egd\-net\-crl/INSTANCE.env
+with
+.BR curl (1),
+retrying, checks each CRL with
+.BR openssl (1),
+converts DER to PEM, and writes all of them atomically \- a file next to it,
+renamed into its place \- to
+.IR /var/lib/esdm\-egd\-net\-crl/INSTANCE.pem .
+A URL that fails leaves the file as it was. The daemon takes the file up by
+itself:
+.PP
+.nf
+# /etc/esdm/egd\-net\-crl/clients.env
+CRL_URLS="http://ca.example/crl/intermediate.crl http://ca.example/crl/root.crl"
+
+systemctl enable \-\-now esdm\-egd\-net\-crl\-update@clients.timer
+esdm\-egd\-net\-server ... \-\-crl /var/lib/esdm\-egd\-net\-crl/clients.pem
+.fi
+.PP
+The URLs are the CRL distribution points of the CAs that issue the clients'
+certificates \- and with
+.BR \-\-crl_check_all ,
+of the CAs above them:
+.TP
+.B step\-ca
+publishes the CRL of its intermediate CA at
+.BR https://CA/crl ,
+DER, when
+.B crl.enabled
+is set in its
+.BR ca.json ;
+.B crl.generateOnRevoke
+renews it with every revocation, and
+.B crl.cacheDuration
+sets its nextUpdate.
+.TP
+.BR "openssl ca"
+writes a CRL with
+.B openssl ca \-gencrl \-out crl.pem
+after each
+.BR "openssl ca \-revoke" ,
+valid for
+.B default_crl_days
+of its configuration \- to be put where a web server serves it, or straight
+into the file of
+.B \-\-crl
+on the server. Renew it well before its nextUpdate.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload the TLS files at once.
+.TP
+.BR SIGTERM ", " SIGINT
+Close the connections and exit with status 0.
+.SH SYSTEMD
+.B esdm\-egd\-net\-server.socket
+listens on port @EGD_NET_PORT@ of every address and starts
+.BR esdm\-egd\-net\-server.service ,
+which runs as a user of its own
+.RB ( DynamicUser= ),
+loads the TLS files as credentials from
+.I /etc/esdm/egd\-net/server.crt ,
+.I server.key
+and
+.IR ca.crt ,
+and takes further options from
+.B ESDM_EGD_NET_SERVER_ARGS
+of
+.IR /etc/esdm/egd\-net\-server.env .
+Starting the socket unit is what puts the ESDM on the network; nothing starts
+it on its own.
+.SH EXAMPLES
+TLS, with the clients of one network, and CRLs taken up as they are renewed:
+.PP
+.nf
+esdm\-egd\-net\-server \-\-listen :@EGD_NET_PORT@ \\
+	\-\-cert /etc/esdm/egd\-net/server.crt \\
+	\-\-key /etc/esdm/egd\-net/server.key \\
+	\-\-ca /etc/esdm/egd\-net/ca.crt \\
+	\-\-crl /var/lib/esdm\-egd\-net\-crl/clients.pem \\
+	\-\-allow 192.0.2.0/24
+.fi
+.PP
+Plain TCP on a WireGuard interface:
+.PP
+.nf
+esdm\-egd\-net\-server \-\-plain \-\-listen 10.8.0.1:@EGD_NET_PORT@ \\
+	\-\-allow 10.8.0.0/24
+.fi
+.SH EXIT STATUS
+0 after
+.BR SIGTERM ,
+1 when the options, the TLS files or the sockets do not allow it to start.
+.SH SEE ALSO
+.BR esdm\-egd\-net\-relay (8),
+.BR libesdm_egd_client (3),
+.BR esdm\-server (8),
+.BR systemd.socket (5)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

@@ -397,6 +397,19 @@ on at most 256; a client beyond is refused DTLS and served in the clear.
 Processes running as root are exempt from the bound per user. With debug
 logging, the daemon logs every connection switching to DTLS with its cipher
 suite.
+.SH EGD OVER THE NETWORK
+The EGD socket is a local one. To hosts without an ESDM, the EGD protocol of
+this daemon is served by
+.BR esdm\-egd\-net\-server (8),
+which answers it through the unprivileged RPC interface \- nothing of the
+network reaches the
+.B esdm\-server
+itself \- in TLS 1.3 with mutual authentication, or in plain TCP on a network
+protected underneath. On such a host,
+.BR esdm\-egd\-net\-relay (8)
+serves the EGD socket where its consumers look for it. Every client of the
+network is unprivileged. Built with the meson option
+.BR egd\-net .
 .SH EGD PROTOCOL EXTENSIONS
 Next to the five standard commands of the EGD protocol, the EGD socket serves
 commands of the ESDM's own. Their codes lie far from the standard ones, so that
@@ -571,6 +584,9 @@ requested interfaces.
 .BR esdm\-kernel\-seeder (8),
 .BR esdm\-server\-signal\-helper (8),
 .BR libesdm (3),
-.BR libesdm_rpc_client (3)
+.BR libesdm_rpc_client (3),
+.BR libesdm_egd_client (3),
+.BR esdm\-egd\-net\-server (8),
+.BR esdm\-egd\-net\-relay (8)
 .SH AUTHOR
 Stephan Mueller <smueller@chronox.de>

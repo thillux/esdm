@@ -1,0 +1,258 @@
+.TH ESDM\-EGD\-NET\-RELAY 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-egd\-net\-relay \- serve the EGD socket of a host from an ESDM on the network
+.SH SYNOPSIS
+.B esdm\-egd\-net\-relay
+.B \-\-connect
+.I HOST[:PORT]
+.B \-\-cert
+.I FILE
+.B \-\-key
+.I FILE
+.B \-\-ca
+.I FILE
+.RI [ OPTIONS ]
+.br
+.B esdm\-egd\-net\-relay
+.B \-\-connect
+.I HOST[:PORT]
+.B \-\-plain
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B esdm\-egd\-net\-relay
+serves the EGD (Entropy Gathering Daemon) socket of a host that has no ESDM of
+its own, and forwards every command to an
+.BR esdm\-egd\-net\-server (8)
+on another host. The consumers of the EGD protocol \- libgcrypt built with its
+EGD module (rndegd), OpenSSL's
+.BR RAND_egd (3),
+the EGD provider of the ESDM, see
+.BR esdm\-openssl\-provider (7)
+\- know nothing but a UNIX domain socket, and find this one where they look for
+the ESDM's:
+.I @EGD_SOCKET_PATH@
+by default (meson option
+.BR esdm\-server\-egd\-socket\-path ).
+They use the ESDM on the network unchanged.
+.PP
+Every local connection has an upstream connection of its own \- a client of
+.BR libesdm_egd_client (3)
+in its network mode \- which keeps the answers in the order the consumer
+expects. The library's reconnect makes a restart of the server between two
+commands invisible to the consumer. The relay answers the get PID command
+(0x04) with its own PID and the privileged commands (0xe6 to 0xea) with
+\-EPERM itself; everything else is answered by the server, which treats every
+client as unprivileged: an entropy claim attached to inserted data is dropped.
+.PP
+A consumer confined by seccomp keeps its syscall discipline with the relay \-
+it speaks to a UNIX domain socket, see
+.BR libesdm_egd_client (3)
+\- which the TLS mode of the library does not keep.
+.PP
+Upstream, the same two modes as the server:
+.TP
+.B TLS
+TLS 1.3 with mutual authentication: the relay presents its certificate, and
+verifies that of the server against the trust anchors of
+.BR \-\-ca ,
+that it is issued for the name of the server \- the host of
+.B \-\-connect
+or
+.BR \-\-server_name ,
+a DNS name or an IP address \- and, if it has an extended key usage, for TLS
+server authentication. With
+.BR \-\-crl ,
+the server's chain is checked exactly as the server checks the clients', see
+.B REVOCATION
+in
+.BR esdm\-egd\-net\-server (8).
+.TP
+.B plain TCP
+Neither encrypted nor authenticated: only for a network whose transport is
+protected underneath, by IPsec or WireGuard, say. Only with
+.BR \-\-plain ,
+which refuses any TLS option next to it; with neither TLS files nor
+.B \-\-plain
+the relay refuses to start. A warning is logged at the start.
+.SH OPTIONS
+.TP
+.BR \-C ", " \-\-connect " \fIHOST[:PORT]\fR"
+The server: a name or an address, an IPv6 address in brackets, as in
+.BR [2001:db8::1]:@EGD_NET_PORT@ .
+The port defaults to @EGD_NET_PORT@. The name is resolved at every connection,
+and its addresses are tried in turn. Required.
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR"
+The local socket, created with mode 0666 \- the consumers are applications of
+every user. A socket left behind by an earlier relay is replaced, one served
+by a running process is not. The default is
+.IR @EGD_SOCKET_PATH@ ,
+unless a socket is handed over by socket activation, which is served then.
+.TP
+.B \-\-plain
+Plain TCP upstream, see above.
+.TP
+.BI \-\-cert " FILE"
+Certificate of the relay, PEM, optionally followed by the intermediate
+certificates of its chain. It has to chain to the trust anchors of
+.BR \-\-ca .
+.TP
+.BI \-\-key " FILE"
+Its private key, PEM, unencrypted, PKCS#8.
+.TP
+.BI \-\-ca " FILE"
+Trust anchors the server's certificate has to chain to, PEM.
+.TP
+.BI \-\-server_name " NAME"
+Name the server's certificate has to be issued for, when it is not the host of
+.BR \-\-connect .
+.TP
+.BI \-\-crl " FILE"
+CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
+only, no delta CRLs nor ones with an issuing distribution point \- see
+.B REVOCATION
+in
+.BR esdm\-egd\-net\-server (8).
+.TP
+.B \-\-crl_check_all
+Require CRLs of the CA certificates of the server's chain as well.
+.TP
+.B \-\-crl_allow_expired
+Use a CRL past its nextUpdate with a warning.
+.TP
+.BI \-\-reload_interval " SEC"
+Check the TLS files for a change this often \- to report a rotation that does
+not load right away, and the CRLs close to or past their nextUpdate. The
+upstream connections check the files themselves, see
+.BR ROTATION .
+0 checks them on
+.B SIGHUP
+only. The default is 60.
+.TP
+.BI \-\-timeout " SEC"
+Bound of a step upstream \- making a connection with its handshake, or a
+transfer. A blocking read waits that long for an answer of the server, which
+itself waits for the ESDM to become operational. The default is 30.
+.TP
+.BI \-\-max_connections " N"
+Local connections at a time, in all. The default is 64. Each takes a connection
+to the server of its own, all of them with the certificate of the relay \- in
+plain mode, from its address: the server serves no more of them than its
+.B \-\-max_per_client
+allows, 64 by default, and refuses the connections beyond, which fails the
+requests of the consumers whose turn it is. Keep this at or below that bound
+of the server.
+.TP
+.BI \-\-max_per_uid " N"
+Local connections per user \- the subordinate UIDs of a user count as the user,
+as for the EGD socket of
+.BR esdm\-server (8);
+root is exempt. The default is 16.
+.TP
+.BI \-\-idle_timeout " SEC"
+A local connection whose consumer sent nothing for this long is closed; 0 for
+never, the default: a consumer confined by seccomp after connecting cannot
+connect again.
+.TP
+.BI \-\-io_timeout " SEC"
+Bound of the rest of a command once it started, and of a consumer taking its
+answer. The default is 30.
+.TP
+.BR \-u ", " \-\-username " \fIUSER\fR"
+User to switch to after the socket is bound, when started as root. The default
+is
+.BR nobody .
+The TLS files are read as that user by every new upstream connection.
+.TP
+.BR \-g ", " \-\-groupname " \fIGROUP\fR"
+Supplementary group to switch to. The default is none.
+.TP
+.BR \-S ", " \-\-syslog
+Log to syslog.
+.TP
+.BR \-v ", " \-\-verbose
+More verbose logging, may be repeated. Warnings and errors are logged without.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.PP
+A file named without a slash is a credential of the service, taken from
+.BR $CREDENTIALS_DIRECTORY ;
+without
+.BR \-\-cert ,
+.B \-\-key
+and
+.BR \-\-ca ,
+in TLS mode, the credentials
+.BR cert ,
+.B key
+and
+.B ca
+are used.
+.SH ROTATION
+Client certificates expire, too. Each new upstream connection \- that of a new
+local consumer, and the reconnect of an existing one \- checks the TLS files
+for a change, by the path, device, inode, size and modification time of each,
+and loads them anew when they changed. Only files that load completely \- the
+key belongs to the certificate, the certificate chains to the trust anchors,
+the CRLs parse \- replace the ones in use; otherwise the error is logged and
+the connections go on with what was loaded before. Established connections
+keep the certificate they were made with.
+.PP
+The credentials of
+.B LoadCredential=
+are copies made when the service starts; a rotation without a restart needs
+the paths of the files, readable by the user of the service. The CRLs are
+downloaded as described in
+.B CRL UPDATES
+of
+.BR esdm\-egd\-net\-server (8).
+.SH SIGNALS
+.TP
+.B SIGHUP
+Check the TLS files at once, and report what is wrong with them.
+.TP
+.BR SIGTERM ", " SIGINT
+Close the connections and exit with status 0.
+.SH SYSTEMD
+.B esdm\-egd\-net\-relay.socket
+creates the socket \- and conflicts with
+.BR esdm\-server\-egd.socket ,
+the EGD socket of a local ESDM, which it replaces \- and starts
+.BR esdm\-egd\-net\-relay.service ,
+which runs as a user of its own, loads the TLS files as credentials from
+.I /etc/esdm/egd\-net/client.crt ,
+.I client.key
+and
+.IR ca.crt ,
+and takes its options, the server among them, from
+.B ESDM_EGD_NET_RELAY_ARGS
+of
+.IR /etc/esdm/egd\-net\-relay.env :
+.PP
+.nf
+ESDM_EGD_NET_RELAY_ARGS="\-\-connect egd.example"
+.fi
+.SH EXAMPLES
+.nf
+esdm\-egd\-net\-relay \-\-connect egd.example:@EGD_NET_PORT@ \\
+	\-\-cert /etc/esdm/egd\-net/client.crt \\
+	\-\-key /etc/esdm/egd\-net/client.key \\
+	\-\-ca /etc/esdm/egd\-net/ca.crt
+
+esdm\-egd\-net\-relay \-\-plain \-\-connect 10.8.0.1
+.fi
+.SH EXIT STATUS
+0 after
+.BR SIGTERM ,
+1 when the options, the TLS files or the socket do not allow it to start.
+.SH SEE ALSO
+.BR esdm\-egd\-net\-server (8),
+.BR libesdm_egd_client (3),
+.BR esdm\-server (8),
+.BR esdm\-openssl\-provider (7)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

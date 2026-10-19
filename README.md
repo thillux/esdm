@@ -470,7 +470,23 @@ The ESDM consists of the following components:
   used by the EGD OpenSSL provider and usable on its own (`esdm_egd_client.h`).
   It owns a single connection, serializes the command stream on it, bounds every
   wait, and reconnects transparently when the daemon was restarted or the client
-  is used after a `fork()`.
+  is used after a `fork()`. With `egd-net`, it reaches an `esdm-egd-net-server`
+  over TCP as well, in TLS or plain TCP.
+
+* `esdm-egd-net-server` and `esdm-egd-net-relay` (meson option `egd-net`): the
+  EGD protocol over the network. The server serves the ESDM's EGD protocol on
+  TCP to the hosts of a network and answers it through the unprivileged RPC
+  interface - nothing of the network reaches the `esdm-server` - so every
+  client is unprivileged. The relay serves the EGD socket of a host without an
+  ESDM, where libgcrypt, OpenSSL's `RAND_egd()` and the EGD OpenSSL provider
+  find it, and forwards to such a server; `libesdm_egd_client` speaks to it
+  directly in its network modes. Two modes: TLS 1.3 with mutual authentication
+  by certificates - with CRLs, and certificates and CRLs taken up while the
+  daemons run - and plain TCP, which is neither encrypted nor authenticated
+  and therefore only meant for networks protected underneath, by IPsec or
+  WireGuard, say. Plain TCP is never a default and builds with every crypto
+  backend; TLS needs the TLS stack of OpenSSL, GnuTLS or Botan. See
+  `esdm-egd-net-server(8)` and `esdm-egd-net-relay(8)`.
 
 * `esdm-server-signal-helper`: This small tool is used to support proper
   quiescing of the ESDM server when the system suspends or sleeps. When invoking

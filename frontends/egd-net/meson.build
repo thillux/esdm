@@ -48,3 +48,32 @@ esdm_egd_net_relay = executable('esdm-egd-net-relay',
 	link_with: [ esdm_egd_client_linked_lib, esdm_common_static_lib ],
 	install: true
 	)
+
+# The CRLs, downloaded by a timer of their own - see the CRL UPDATES section of
+# esdm-egd-net-server(8). No HTTP client in the daemons.
+install_data('esdm-egd-net-crl-update.sh',
+	rename: 'esdm-egd-net-crl-update',
+	install_dir: get_option('libexecdir'),
+	install_mode: 'rwxr-xr-x')
+
+egd_net_conf_data = configuration_data()
+egd_net_conf_data.set('PATH', get_option('prefix') / get_option('bindir'))
+egd_net_conf_data.set('LIBEXECDIR',
+		      get_option('prefix') / get_option('libexecdir'))
+egd_net_conf_data.set('PORT', get_option('egd-net-port'))
+# The consumers find the socket of the relay where they look for the ESDM's
+egd_net_conf_data.set('SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
+egd_net_conf_data.set('SERVICE_TYPE', get_option('systemd').enabled() ?
+					      'Type=notify' : 'Type=simple')
+
+foreach unit : [ 'esdm-egd-net-server.service', 'esdm-egd-net-server.socket',
+		 'esdm-egd-net-relay.service', 'esdm-egd-net-relay.socket',
+		 'esdm-egd-net-crl-update@.service' ]
+	install_data(configure_file(
+			input: unit + '.in',
+			output: unit,
+			configuration: egd_net_conf_data),
+		     install_dir: get_option('prefix') / 'lib/systemd/system')
+endforeach
+install_data('esdm-egd-net-crl-update@.timer',
+	     install_dir: get_option('prefix') / 'lib/systemd/system')

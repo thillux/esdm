@@ -1,0 +1,71 @@
+# The EGD socket of a host without an ESDM - see esdm-egd-net-relay(8).
+#
+# The server to relay to is configured in /etc/esdm/egd-net-relay.env:
+#
+#	ESDM_EGD_NET_RELAY_ARGS="--connect egd.example:@PORT@"
+#
+# TLS: the certificate of the relay, its key and the trust anchors of the
+# server are credentials of the service, loaded below from /etc/esdm/egd-net/.
+# systemd copies them at the start of the service; to have a renewed
+# certificate taken up by the next upstream connection while the relay runs,
+# give their paths in ESDM_EGD_NET_RELAY_ARGS instead, readable by the
+# service, and reset the LoadCredential= lines in a drop-in. CRLs are given
+# with --crl.
+#
+# Plain TCP - only on a network that protects the traffic underneath, by IPsec
+# or WireGuard, say - is asked for explicitly, with --plain, and without the
+# credentials:
+#
+#	# /etc/systemd/system/esdm-egd-net-relay.service.d/plain.conf
+#	[Service]
+#	LoadCredential=
+
+[Unit]
+Description=ESDM EGD network relay
+Documentation=man:esdm-egd-net-relay(8)
+Requires=esdm-egd-net-relay.socket
+After=esdm-egd-net-relay.socket network-online.target
+Wants=network-online.target
+
+[Service]
+@SERVICE_TYPE@
+EnvironmentFile=/etc/esdm/egd-net-relay.env
+LoadCredential=cert:/etc/esdm/egd-net/client.crt
+LoadCredential=key:/etc/esdm/egd-net/client.key
+LoadCredential=ca:/etc/esdm/egd-net/ca.crt
+ExecStart=@PATH@/esdm-egd-net-relay --syslog $ESDM_EGD_NET_RELAY_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+DynamicUser=yes
+# Two descriptors per local consumer: its own, and its upstream connection
+LimitNOFILE=4096
+CapabilityBoundingSet=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=yes
+Restart=on-failure
+RestartSec=5s
+# The local socket, and the network for the server
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+UMask=0077
+
+[Install]
+Also=esdm-egd-net-relay.socket

@@ -1,4 +1,4 @@
-.TH LIBESDM_EGD_CLIENT 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_EGD_CLIENT 3 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_egd_client \- client library for the ESDM EGD interface
 .SH SYNOPSIS
@@ -31,6 +31,11 @@ and
 .BR esdm_egd_client_get_random_pr_nonblock ()
 use, see
 .BR esdm\-server (8).
+.PP
+In its network modes, the library speaks the same protocol over TCP to an
+.BR esdm\-egd\-net\-server (8),
+which serves the EGD protocol of the ESDM on another host \- see
+.BR "NETWORK MODES" .
 .SS Clients and concurrency
 A client owns exactly one connection. The EGD protocol carries no request
 identifiers \- responses are matched to requests purely by their order on the
@@ -60,10 +65,18 @@ A descriptor inherited across
 .BR fork (2)
 refers to the parent's connection, and two processes interleaving commands on
 it would desynchronize the stream. A fork handler closes every inherited
-connection in the child; the next operation there opens one of its own. Should
-the fork have bypassed the handler \- a direct
+connection in the child; the next operation there opens one of its own. The
+TLS state of an inherited TLS connection is left to leak in the child, as a
+parent thread may have been using it at the fork. Should the fork have bypassed
+the handler \- a direct
 .BR clone (2),
 say \- the client notices at its next use and reconnects then.
+.IP \(bu 2
+A server of the network closes a connection that was idle for long, which a
+TCP connection only shows as the end of its stream \- data written into it
+afterwards is lost. Before every request on a network connection, the client
+checks whether anything arrived on it unasked, and replaces it if so: an
+insertion, which is not answered, would otherwise be lost silently.
 .IP \(bu 2
 An application may close the client's descriptor behind its back \- OpenSSH
 runs
@@ -74,6 +87,64 @@ descriptor still is the connection it made, by the socket cookie or, where the
 kernel has none, by the peer's address. One that is not is left to the
 application, never closed by the client, and a fresh connection is made.
 .RE
+.SH NETWORK MODES
+A client allocated with
+.BR esdm_egd_client_alloc_net ()
+connects to an
+.BR esdm\-egd\-net\-server (8).
+Everything said above holds there as well \- one connection per client, the
+serialized operations, the reconnect and the retry, the fork handling \- and
+the server treats every client of the network as unprivileged.
+.TP
+.B Plain TCP
+The protocol as it is, neither encrypted nor authenticated: only for a network
+whose transport is protected underneath, by IPsec or WireGuard, say. Once
+connected, a client keeps the
+.B SYSCALL DISCIPLINE
+below, so a sandboxed process may use it as it uses the UNIX domain socket,
+connected before it enters its sandbox. The server closes a connection idle
+for its
+.BR \-\-idle_timeout ,
+though, which such a process does not survive.
+.TP
+.B TLS
+TLS 1.3 with mutual authentication: the client presents its certificate and
+verifies the server's chain against its trust anchors, and that the
+certificate is issued for the name it expects \- a DNS name, or an IPv4 or IPv6
+address. With CRLs, the server's chain is checked as described in
+.B REVOCATION
+of
+.BR esdm\-egd\-net\-server (8).
+The TLS stack is that of the crypto backend the ESDM is built with \- OpenSSL,
+GnuTLS or Botan. The library does not link it: the first client in TLS mode
+loads it with the TLS module of the library,
+.IR esdm\-egd\-tls.so ,
+so that a process that never allocates such a client has no TLS stack loaded,
+which would make syscalls of its own when it is loaded and unloaded. TLS mode
+does not keep the syscall discipline: the TLS stack sends and receives with
+.BR send (2)
+and
+.BR recv (2)
+and uses whatever else it needs. A sandboxed process uses the
+.BR esdm\-egd\-net\-relay (8)
+through its UNIX domain socket instead.
+.PP
+The TLS files are read when the client is allocated. Each later connection
+checks them for a change \- their inode, size and modification time \- and
+loads them anew when they changed: a renewed certificate is taken up by the
+next connection. Files that do not load completely leave the client with what
+was loaded before, and the error is logged. The clients of a process with the
+same files share what they loaded.
+.PP
+The network modes exist in a build with the meson option
+.BR egd\-net ,
+the TLS mode with
+.B egd\-net\-tls
+and a crypto backend with a TLS stack;
+.BR esdm_egd_client_alloc_net ()
+reports
+.B \-EOPNOTSUPP
+otherwise.
 .SH FUNCTIONS
 .TP
 .BI "int esdm_egd_client_alloc(struct esdm_egd_client **" client ", const char *" socket_path ", unsigned int " timeout_ms ");"
@@ -98,11 +169,80 @@ Returns 0 on success, and a negative value only when no client could be
 allocated. A failure to connect is not an error here \- it is reported through
 the ESDM logger and the client is usable regardless.
 .TP
+.BI "int esdm_egd_client_alloc_net(struct esdm_egd_client **" client ", const struct esdm_egd_client_net_config *" cfg ");"
+Allocate a client of an
+.BR esdm\-egd\-net\-server (8)
+and connect it, as
+.BR esdm_egd_client_alloc ().
+.I cfg
+is read during the call only:
+.RS
+.TP
+.B size_t size
+.B sizeof(struct esdm_egd_client_net_config)
+of the caller. Fields are only ever appended to the structure, and the library
+takes those
+.I size
+covers and zero for the rest: initialize the whole structure with zeros.
+.TP
+.B enum esdm_egd_client_net_mode mode
+.B ESDM_EGD_CLIENT_NET_TLS
+or
+.BR ESDM_EGD_CLIENT_NET_PLAIN .
+There is no default.
+.TP
+.B const char *address
+The server: "host:port", "[IPv6 address]:port", or either without the port
+for the one the ESDM was built with (meson option
+.BR egd\-net\-port ).
+Resolved with
+.BR getaddrinfo (3)
+at every connection; its addresses are tried in turn.
+.TP
+.B unsigned int timeout_ms
+As for
+.BR esdm_egd_client_alloc (),
+the connection setup being the TCP connection and the TLS handshake.
+.TP
+.B const char *cert_file, *key_file, *ca_file
+TLS only: the certificate of the client, PEM, optionally followed by its
+intermediate certificates; its key, PEM, unencrypted PKCS#8; the trust anchors
+of the server, PEM. The client's certificate has to chain to them as well.
+.TP
+.B const char *server_name
+TLS only: the name the server's certificate has to be issued for; NULL takes
+the host of
+.IR address .
+.TP
+.B const char *const *crl_files
+TLS only: NULL, or up to
+.B ESDM_EGD_CLIENT_NET_MAX_CRL
+CRL files, PEM, NULL\-terminated.
+.TP
+.B unsigned int crl_flags
+TLS only:
+.B ESDM_EGD_CLIENT_NET_CRL_CHECK_ALL
+requires CRLs for the CA certificates of the server's chain as well,
+.B ESDM_EGD_CLIENT_NET_CRL_ALLOW_EXPIRED
+uses a CRL past its nextUpdate with a warning.
+.RE
+.IP
+A TLS field in plain mode is an error, as is TLS without the certificate, its
+key and the trust anchors, an address that does not parse, and TLS files that
+do not load:
+.B \-EINVAL
+then.
+.B \-EOPNOTSUPP
+reports a build without the mode. A server that cannot be reached is no error,
+as for
+.BR esdm_egd_client_alloc ().
+.TP
 .BI "void esdm_egd_client_free(struct esdm_egd_client *" client ");"
 Close the connection and release the client. Passing NULL is a no\-op.
 .TP
 .BI "const char *esdm_egd_client_socket_path(const struct esdm_egd_client *" client ");"
-The socket path this client talks to. The string is owned by the client.
+The socket path this client talks to \- in a network mode, the address of the
+server. The string is owned by the client.
 .TP
 .BI "int esdm_egd_client_get_random(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ");"
 Obtain
@@ -137,6 +277,46 @@ Like
 but served by the prediction resistance DRNG: the answer holds what its
 entropy sources can deliver right away, often less than asked for.
 .TP
+.BI "int esdm_egd_client_get_random_unseeded(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"
+Obtain at most
+.B ESDM_EGD_MAX_TRANSFER
+bytes with the semantics of
+.IR /dev/urandom :
+from the DRNG, without waiting for all DRNGs to be fully seeded. Before the
+ESDM is operational it hands out nothing, which is no error \-
+.I generated
+is 0 then.
+.TP
+.BI "int esdm_egd_client_get_state(struct esdm_egd_client *" client ", uint32_t *" fields ", unsigned int *" num_fields ");"
+The state of the ESDM: the fields indexed by
+.B ESDM_EGD_STATE_*
+of
+.IR esdm_egd_protocol.h
+\- flags (operational, fully seeded), the entropy and the size of the
+auxiliary pool, the write wakeup threshold, the maximum reseed interval.
+.I num_fields
+holds the room of
+.I fields
+on entry and the number of fields the ESDM reported on return, of which the
+first ones up to the room were stored. A newer ESDM may report more fields
+than the caller knows of.
+.TP
+.BI "int esdm_egd_client_status(struct esdm_egd_client *" client ", char *" buf ", size_t " buflen ");"
+The status report of the ESDM as text, NUL\-terminated \- at most
+.B ESDM_EGD_MAX_STATUS
+bytes and the NUL. Returns its length, 0 if the ESDM had none, and
+.B \-EMSGSIZE
+if it did not fit, with as much of it in
+.I buf
+as did.
+.TP
+.BI "int esdm_egd_client_status_json(struct esdm_egd_client *" client ", char *" buf ", size_t " buflen ");"
+The same as JSON document, except that a document that does not fit leaves
+.I buf
+empty with
+.BR \-EMSGSIZE :
+a document cut short is none.
+.TP
 .BI "int esdm_egd_client_entropy_count(struct esdm_egd_client *" client ", uint32_t *" entropy_bits ");"
 Entropy the ESDM currently holds, in bits.
 .TP
@@ -155,9 +335,12 @@ PID of the daemon serving the socket.
 .SH RETURN VALUE
 All functions returning
 .B int
-return 0 on success and a negative errno value on error.
+return 0 on success \- the status functions the length of the report \- and a
+negative errno value on error.
 .SH SYSCALL DISCIPLINE
-Once connected, the operations stay within
+On the UNIX domain socket, and in plain TCP \- not in TLS mode, see
+.B NETWORK MODES
+\- once connected, the operations stay within
 .BR read (2),
 .BR write (2),
 .BR poll (2),
@@ -217,6 +400,16 @@ sandbox on the reconnect.
 Path of the EGD socket, used when
 .BR esdm_egd_client_alloc ()
 is called without an explicit one.
+.TP
+.B ESDM_EGD_TLS_MODULE
+Path of the TLS module, instead of the one the library was built with. Not
+taken from the environment of a process gaining privileges, as
+.BR secure_getenv (3)
+tells.
+.SH FILES
+.TP
+.I @EGD_TLS_MODULE@
+The TLS module, loaded by the first client in TLS mode.
 .SH EXAMPLE
 .nf
 #include <esdm/esdm_egd_client.h>
@@ -241,6 +434,8 @@ int get_random(uint8_t *buf, size_t buflen)
 .BR libesdm_rpc_client (3),
 .BR libesdm (3),
 .BR libesdm_aux_client (3),
-.BR esdm\-server (8)
+.BR esdm\-server (8),
+.BR esdm\-egd\-net\-server (8),
+.BR esdm\-egd\-net\-relay (8)
 .SH AUTHOR
 Markus Theil <theil.markus@gmail.com>

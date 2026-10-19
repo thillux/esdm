@@ -1,0 +1,51 @@
+# Download the CRLs of the EGD network daemons - see the CRL UPDATES section
+# of esdm-egd-net-server(8).
+#
+# The instance names a set of CRLs, configured in
+# /etc/esdm/egd-net-crl/<instance>.env:
+#
+#	CRL_URLS="http://ca.example/intermediate.crl http://ca.example/root.crl"
+#
+# and written, in PEM, to /var/lib/esdm-egd-net-crl/<instance>.pem - which is
+# what --crl names to the daemons, whose reload takes it up:
+#
+#	systemctl enable --now esdm-egd-net-crl-update@clients.timer
+#	esdm-egd-net-server ... --crl /var/lib/esdm-egd-net-crl/clients.pem
+#
+# The download needs curl(1) and openssl(1). Nothing is written when one of
+# the CRLs cannot be fetched or does not parse.
+
+[Unit]
+Description=Download the CRLs %i of the ESDM EGD network daemons
+Documentation=man:esdm-egd-net-server(8)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/esdm/egd-net-crl/%i.env
+StateDirectory=esdm-egd-net-crl
+StateDirectoryMode=0755
+ExecStart=@LIBEXECDIR@/esdm-egd-net-crl-update /var/lib/esdm-egd-net-crl/%i.pem $CRL_URLS
+DynamicUser=yes
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0022

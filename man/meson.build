@@ -2,6 +2,10 @@
 # the .TH line, so building the documentation needs no extra tool chain.
 man_conf_data = configuration_data()
 man_conf_data.set('VERSION', meson.project_version())
+man_conf_data.set('EGD_NET_PORT', get_option('egd-net-port'))
+man_conf_data.set('EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
+man_conf_data.set('EGD_TLS_MODULE', get_option('prefix') / get_option('libdir') /
+				    'esdm' / 'esdm-egd-tls.so')
 
 # Pages that are always installed: the ESDM library, plus the client libraries
 # that are built unconditionally.
@@ -55,6 +59,10 @@ endif
 
 if get_option('vhost-user-rng').enabled()
 	man_pages += [ 'esdm-vhost-user-rng.8' ]
+endif
+
+if get_option('egd-net').enabled()
+	man_pages += [ 'esdm-egd-net-server.8', 'esdm-egd-net-relay.8' ]
 endif
 
 # Raw entropy measurement tooling - only built for validation, so only

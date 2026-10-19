@@ -1,0 +1,75 @@
+# The EGD protocol of the ESDM on the network - see esdm-egd-net-server(8).
+#
+# The server runs as a user of its own (DynamicUser=) and reaches the ESDM over
+# its unprivileged RPC interface, as any other client does. It is started by
+# esdm-egd-net-server.socket.
+#
+# TLS: the certificate of the server, its key and the trust anchors of the
+# clients are credentials of the service, loaded below from
+# /etc/esdm/egd-net/. systemd copies them at the start of the service, so a
+# renewed certificate is taken up by a restart. To have it taken up while the
+# server runs - by SIGHUP (systemctl reload) or when the files change, see
+# --reload_interval -, give their paths in ESDM_EGD_NET_SERVER_ARGS instead,
+# readable by the service, and reset the LoadCredential= lines in a drop-in.
+#
+# Plain TCP - only on a network that protects the traffic underneath, by IPsec
+# or WireGuard, say - is asked for explicitly:
+#
+#	# /etc/systemd/system/esdm-egd-net-server.service.d/plain.conf
+#	[Service]
+#	LoadCredential=
+#
+#	# /etc/esdm/egd-net-server.env
+#	ESDM_EGD_NET_SERVER_ARGS="--plain --allow 192.0.2.0/24"
+#
+# Further options, such as --allow, --crl and the bounds of the connections,
+# go into ESDM_EGD_NET_SERVER_ARGS of /etc/esdm/egd-net-server.env as well.
+
+[Unit]
+Description=ESDM EGD network server
+Documentation=man:esdm-egd-net-server(8)
+Requires=esdm-egd-net-server.socket
+After=esdm-egd-net-server.socket esdm-server.service
+
+[Service]
+@SERVICE_TYPE@
+EnvironmentFile=-/etc/esdm/egd-net-server.env
+LoadCredential=cert:/etc/esdm/egd-net/server.crt
+LoadCredential=key:/etc/esdm/egd-net/server.key
+LoadCredential=ca:/etc/esdm/egd-net/ca.crt
+ExecStart=@PATH@/esdm-egd-net-server --syslog $ESDM_EGD_NET_SERVER_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+DynamicUser=yes
+# Every client holds a connection for as long as it lives
+LimitNOFILE=4096
+CapabilityBoundingSet=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=yes
+Restart=on-failure
+RestartSec=5s
+# The network for the clients, a Unix domain socket for the ESDM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+UMask=0077
+
+[Install]
+Also=esdm-egd-net-server.socket

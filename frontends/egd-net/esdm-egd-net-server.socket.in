@@ -1,0 +1,29 @@
+# The EGD protocol of the ESDM, served to the hosts of a network by the
+# esdm-egd-net-server - see esdm-egd-net-server(8).
+#
+# Not started by anything on its own: enabling this unit is what puts the ESDM
+# on the network.
+#
+#	systemctl enable --now esdm-egd-net-server.socket
+#
+# The server takes the socket over when it starts, and traffic on it starts a
+# stopped server. Bind it to an address of its own with a drop-in:
+#
+#	[Socket]
+#	ListenStream=
+#	ListenStream=192.0.2.1:@PORT@
+
+[Unit]
+Description=ESDM EGD network server socket
+Documentation=man:esdm-egd-net-server(8)
+
+[Socket]
+# Every address, IPv4 and IPv6 - restrict the clients with --allow or a
+# firewall, and the address with a drop-in, see above.
+ListenStream=@PORT@
+Backlog=128
+NoDelay=yes
+Service=esdm-egd-net-server.service
+
+[Install]
+WantedBy=sockets.target
