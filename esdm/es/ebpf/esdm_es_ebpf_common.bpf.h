@@ -389,14 +389,17 @@ static __always_inline void esdm_ebpf_collect(void)
 	/*
 	 * Collect the time between events rather than the time stamps: the
 	 * entropy is in the spacing, the high-order bits are predictable. It is
-	 * also what the SP800-90B assessment of the raw samples measures
-	 * (iter_deltas() of esdm_ebpf_raw.py), so what is credited here is what
+	 * also what the SP800-90B assessment of the raw samples measures (the
+	 * deltas esdm-ebpf-collect writes), so what is credited here is what
 	 * was assessed there. The unsigned subtraction handles a wraparound.
 	 *
-	 * Two time stamps form no delta and only set the predecessor up: the
-	 * first one a CPU sees, and the first one after the timer granularity
-	 * became known, whose predecessor is on the undivided scale. The kernel
-	 * kernel module does the same (esdm_time_process_common()).
+	 * Every delta is on the divided scale, so none is formed before the
+	 * timer granularity is known: the ESDM_EBPF_GCD_WINDOW time stamps it
+	 * is learned from form none, and neither does the first one after them,
+	 * which only sets the predecessor up - ESDM_EBPF_GCD_WINDOW + 1 time
+	 * stamps per CPU, after the load and after every reset. The kernel
+	 * module skips the first time stamp of a CPU only and processes those
+	 * of its learning window undivided (esdm_time_process_common()).
 	 *
 	 * Only deltas the health tests vouch for are collected, so the record
 	 * carries no health state of this CPU - only the health epoch, which

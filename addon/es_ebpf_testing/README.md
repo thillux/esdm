@@ -130,8 +130,9 @@ data are four events - and the oversampling rate is `ceil(1 / H)`.
 The two have to agree. The accounting credits the smaller of what each yields,
 `min(rate / 4, 1 / OSR)` bits per event, and `OSR` is a whole number: an event
 measured above 1 bit cannot be claimed as such, because `OSR = 1` is the most
-precise setting there is. `analyze_non_iid.sh` caps its suggestion at
-`4 / OSR` accordingly.
+precise setting there is. `analyze_non_iid.sh` suggests no rate - it passes the
+estimate through as it stands - so cap the rate derived from it at `4 / OSR`
+accordingly.
 
 Use the **minimum** across all measured environments, CPUs, bit widths and
 load profiles, and configure it at build time
@@ -161,10 +162,11 @@ CPU, with the timer granularity already divided out.
 The eBPF program forms them, always between two events the CPU observed back
 to back, and hands each one over on its own. Nothing user space receives can
 therefore span a gap: a record the ring buffer had no room for is a sample
-that never arrives, not a delta stretched across the ones it swallowed. Two
-events yield no delta at all - the first one a CPU sees, and the first one
-after a reset, whose predecessor was taken before the timer granularity was
-known.
+that never arrives, not a delta stretched across the ones it swallowed. The
+first 101 events of every CPU yield no delta at all - the 100 time stamps the
+timer granularity is learned from, and the one after them, which only becomes
+the predecessor of the first delta. Every run of `esdm-ebpf-collect` starts
+over with them.
 
 `--events` counts written deltas, so an interrupted collection yields exactly
 the requested number and the losses show up as a longer collection rather than

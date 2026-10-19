@@ -317,8 +317,9 @@ the events is where the entropy is, and it is the signal the
 SP800-90B assessment measures. A buffer is handed to a BPF ring
 buffer once it is full, or after an idle deadline when its CPU
 falls quiet before that. The ESDM server reads them from there
-when it wants entropy, conditions them with the configured hash
-into an entropy pool and stops reading once that pool is full.
+when it wants entropy, conditions them into an entropy pool - an
+XDRBG-256 over SHAKE256 like the auxiliary pool - and stops
+reading once that pool is full.
 Events collected while nobody reads are discarded.
 
 This entropy source is mutually exclusive with the es_sched

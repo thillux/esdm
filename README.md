@@ -209,11 +209,12 @@ The deltas are collected in per-CPU buffers and handed to a BPF ring
 buffer once a buffer is full - or, for a CPU that falls quiet with a
 partially filled one, after an idle deadline, so that nothing collected
 lingers unaccounted. The `esdm-server` reads them from there when it wants
-entropy and conditions them into a per-source entropy pool with the
-configured hash; it stops reading once that pool holds all the entropy one
-output block can carry, and an extraction fetches what its block still
-costs. Events collected while nobody reads fill the buffers up and are then
-dropped - nothing needs them, and what is already collected is no worse.
+entropy and conditions them into a per-source entropy pool, an XDRBG-256 over
+SHAKE256 like the auxiliary pool; it stops reading once that pool holds all
+the entropy one output block can carry, and an extraction fetches what its
+block still costs. Events collected while nobody reads fill the buffers up and
+are then dropped - nothing needs them, and what is already collected is no
+worse.
 
 Only events the health tests vouch for are collected, so no health state
 travels with them. What the programs report back - the deltas each CPU

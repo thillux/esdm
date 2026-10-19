@@ -37,11 +37,9 @@ enum esdm_ebpf_rec_type {
 	esdm_ebpf_rec_wipe = 0,
 	esdm_ebpf_rec_event = 1, /* struct esdm_ebpf_event_rec */
 	/*
-	 * This is the on-disk record type of the raw collections
-	 * esdm-ebpf-collect writes, so REC_TYPE_RAW of
-	 * addon/es_ebpf_testing/esdm_ebpf_raw.py has to move with it - a parser
-	 * that disagrees skips every record of a collection rather than
-	 * reporting anything wrong with it.
+	 * Only ever in the ring buffer: esdm-ebpf-collect takes these records
+	 * from it and writes their deltas as decimal text, one per line, so
+	 * the type appears in no file.
 	 */
 	esdm_ebpf_rec_raw = 2, /* struct esdm_ebpf_raw_rec (testing only) */
 };
@@ -63,7 +61,7 @@ enum esdm_ebpf_rec_type {
  * the signal the SP800-90B assessment of the raw samples measures - so the
  * ESDM server credits exactly what was assessed.
  *
- * A delta is carried in full, so the conditioning hash sees the whole
+ * A delta is carried in full, so the conditioning pool sees the whole
  * measurement instead of a truncation of it.
  *
  * The record carries no health state: only events that passed the health

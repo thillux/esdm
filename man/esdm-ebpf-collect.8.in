@@ -76,8 +76,9 @@ The deltas are formed in the eBPF program, always between two events one CPU
 observed back to back, and each is handed over on its own. Nothing user space
 receives can therefore span a gap: a record the ring buffer had no room for is
 a sample that never arrives, not a delta stretched across the ones it
-swallowed. Two events yield no delta at all \- the first one a CPU sees, and
-the first one after a reset.
+swallowed. The first 101 events of every CPU yield no delta at all \- the 100
+time stamps the timer granularity is learned from, and the one after them,
+which only becomes the predecessor of the first delta.
 .SH EXAMPLES
 Collect a million deltas of CPU 0 from the scheduler source:
 .PP
