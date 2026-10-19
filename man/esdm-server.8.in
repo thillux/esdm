@@ -110,7 +110,7 @@ core dumps. Keeping seed material out of swap and out of crash dumps is the
 point of this option.
 .TP
 .BR \-M ", " \-\-small_memory
-Reduce the memory footprint: 1 MiB thread stacks and a single DRNG node
+Reduce the memory footprint: 2 MiB thread stacks and a single DRNG node
 instead of one per CPU node.
 .TP
 .B \-\-keep_ipc

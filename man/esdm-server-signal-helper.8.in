@@ -3,9 +3,8 @@
 esdm\-server\-signal\-helper \- notify the ESDM server about suspend and resume
 .SH SYNOPSIS
 .B esdm\-server\-signal\-helper
-.B \-\-suspend
-.RB [ \-\-pid
-.IR PIDFILE ]
+.B \-\-suspend \-\-pid
+.I PIDFILE
 .br
 .B esdm\-server\-signal\-helper
 .B \-\-resume
@@ -50,8 +49,10 @@ Signal the completed resume.
 .BR \-p ", " \-\-pid " \fIPIDFILE\fR"
 Read the PID of the daemon from
 .IR PIDFILE .
-Only used by
-.BR \-\-suspend .
+Required by
+.BR \-\-suspend ,
+which does not guess a PID file and fails without one; not used by
+.BR \-\-resume .
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary and exit with a non\-zero status.

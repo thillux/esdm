@@ -1768,7 +1768,7 @@ static const char *usage =
 	"    --help|-h               print this help message\n"
 	"    --maj=MAJ|-M MAJ        device major number\n"
 	"    --min=MIN|-m MIN        device minor number\n"
-	"    --name=NAME|-n NAME     device name (mandatory)\n"
+	"    --name=NAME|-n NAME     device name (default: esdm or uesdm)\n"
 	"    --verbosity=NUM|-v NUM  verbosity level\n"
 	"    --username=USER|-u USER unprivileged user name (default: \"nobody\")\n"
 	"    --pid_namespace         fork the daemon into an isolating PID namespace\n"

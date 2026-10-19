@@ -124,7 +124,7 @@ static bool signal_resume(void)
 static void usage(void)
 {
 	fprintf(stderr,
-		"esdm-server-signal-helper --suspend [--pid PIDFILE] | --resume | --help\n");
+		"esdm-server-signal-helper --suspend --pid PIDFILE | --resume | --help\n");
 }
 
 int main(int argc, char **argv)

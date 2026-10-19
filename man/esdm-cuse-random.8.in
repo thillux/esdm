@@ -78,7 +78,14 @@ Minor number of the device to create.
 .BR \-n ", " \-\-name= \fINAME\fR
 Name of the device to create below
 .IR /dev .
-Mandatory.
+Defaults to
+.B esdm
+for
+.B esdm\-cuse\-random
+and
+.B uesdm
+for
+.BR esdm\-cuse\-urandom .
 .TP
 .BR \-v ", " \-\-verbosity= \fINUM\fR
 Logging verbosity level.
@@ -106,6 +113,14 @@ Run in the foreground.
 .TP
 .B \-s
 Disable multi\-threaded operation.
+.TP
+.BI "\-o max_threads=" NUM
+Maximum number of worker threads serving the device, 1024 by default. Workers
+are started on demand; a request waiting for the ESDM, such as a read of
+.I /dev/random
+before the ESDM is seeded, holds its worker until it is answered; once all of
+them are taken, every other request waits for one to become free. Needs
+libfuse 3.12 or later, older versions ignore it with a warning.
 .TP
 .BR \-S ", " \-\-syslog
 Log via syslog.

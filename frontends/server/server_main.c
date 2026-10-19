@@ -122,7 +122,7 @@ static void usage(void)
 	fprintf(stderr,
 		"\t-m --memlock\tLock all memory from being swapped out and disable core dumps\n");
 	fprintf(stderr,
-		"\t-M --small_memory\tReduce memory consumption (1 MiB thread stacks, single DRNG node)\n");
+		"\t-M --small_memory\tReduce memory consumption (2 MiB thread stacks, single DRNG node)\n");
 	fprintf(stderr,
 		"\t   --keep_ipc\tDo not remove the RPC sockets, status SHM segment and\n");
 	fprintf(stderr,
