@@ -44,7 +44,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "esdm_es_ext.h"
+/* Where the ESDM installs it, as a plugin built on its own includes it */
+#include <esdm/esdm_es_ext.h>
 
 #ifndef ESDM_ES_EXT_EXAMPLE_DEVICE
 #define ESDM_ES_EXT_EXAMPLE_DEVICE "/dev/hwrng"

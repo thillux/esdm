@@ -33,11 +33,14 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		include_directories: include_dirs_es_ext_test,
 	)
 	# The example of es-ext/example, reading a device every test system
-	# has, so that it is built and run rather than only shipped.
+	# has, so that it is built and run rather than only shipped. It
+	# includes the header as installed, see include/esdm.
+	subdir('include/esdm')
 	es_ext_example_plugin = shared_module('esdm_es_ext_example',
 		'../../es-ext/example/esdm_es_ext_example.c',
 		c_args: [ '-DESDM_ES_EXT_EXAMPLE_DEVICE="/dev/urandom"' ],
-		include_directories: include_dirs_es_ext_test,
+		include_directories: include_directories('include'),
+		implicit_include_directories: false,
 	)
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
