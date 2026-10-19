@@ -419,6 +419,50 @@ static void test_status_nonblocking(void)
 }
 
 /*
+ * The status names the token by its label - which PKCS#11 has a token report
+ * in UTF-8, but nothing holds a token to that, and json-c writes the bytes it
+ * is given: a label that is not UTF-8 made the whole JSON status invalid, and
+ * a control character went into the text status, to the terminal. SoftHSM
+ * creates no such token, so one is made up.
+ */
+static void test_label_sanitized(void)
+{
+	/*
+	 * Valid: a two and a three byte sequence. Not: ESC, a lone
+	 * continuation byte, an overlong '/', the C1 control CSI and a
+	 * sequence cut short by the end of the label.
+	 */
+	char label[] =
+		"\xc3\xa4-\xe2\x82\xac\x1b[2J\x80\xc0\xaf\xc2\x9b\xe2\x82";
+	PKCS11_TOKEN token;
+	PKCS11_SLOT slot, *bound;
+	struct json_object *state;
+
+	memset(&token, 0, sizeof(token));
+	memset(&slot, 0, sizeof(slot));
+	token.label = label;
+	slot.token = &token;
+
+	mutex_lock(&pkcs11_mutex);
+	bound = pkcs11_slot;
+	pkcs11_slot = &slot;
+	esdm_es_pkcs11_publish_locked();
+	pkcs11_slot = bound;
+	mutex_unlock(&pkcs11_mutex);
+
+	state = es_state_get(esdm_es[ES_IDX]);
+	CHECK(es_state_str_is(state, "token",
+			      "\xc3\xa4-\xe2\x82\xac?[2J??????"),
+	      "the label was not sanitized: %s", es_state_print(state));
+	json_object_put(state);
+
+	/* Back to the token bound */
+	mutex_lock(&pkcs11_mutex);
+	esdm_es_pkcs11_publish_locked();
+	mutex_unlock(&pkcs11_mutex);
+}
+
+/*
  * Clearing the runtime overrides must not leave the source wedged: an empty
  * string falls back to the compile-time defaults, and the source has to keep
  * answering either way.
@@ -570,6 +614,7 @@ int main(int argc, char *argv[])
 	test_get_entropy_differs();
 	test_state();
 	test_status_nonblocking();
+	test_label_sanitized();
 	test_module_kept();
 	test_reject_null();
 	test_token_appears();

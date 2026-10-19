@@ -197,18 +197,97 @@ static uint32_t esdm_es_pkcs11_buf_credit(uint32_t requested_bits)
 
 static bool esdm_es_pkcs11_active(void);
 
+/* The length of the valid UTF-8 sequence @s starts with, 0 if there is none */
+static unsigned int esdm_es_pkcs11_utf8_len(const unsigned char *s)
+{
+	unsigned char lo = 0x80, hi = 0xbf;
+	unsigned int len, i;
+
+	if (s[0] < 0x80)
+		return 1;
+	if (s[0] < 0xc2) {
+		/* A continuation byte, or the start of an overlong form */
+		return 0;
+	} else if (s[0] < 0xe0) {
+		len = 2;
+	} else if (s[0] < 0xf0) {
+		len = 3;
+		if (s[0] == 0xe0)
+			lo = 0xa0; /* overlong */
+		else if (s[0] == 0xed)
+			hi = 0x9f; /* UTF-16 surrogates */
+	} else if (s[0] < 0xf5) {
+		len = 4;
+		if (s[0] == 0xf0)
+			lo = 0x90; /* overlong */
+		else if (s[0] == 0xf4)
+			hi = 0x8f; /* above U+10FFFF */
+	} else {
+		return 0;
+	}
+
+	/* Ends at the terminating NUL at the latest */
+	for (i = 1; i < len; i++) {
+		if (s[i] < lo || s[i] > hi)
+			return 0;
+		lo = 0x80;
+		hi = 0xbf;
+	}
+
+	return len;
+}
+
+/*
+ * Copy the token label @label for the status. PKCS#11 has a token report its
+ * label in UTF-8, but nothing holds a token to that, and json-c writes the
+ * bytes it is given: a label that is not UTF-8 made the whole JSON status
+ * invalid. What is not, and a control character - which the text status hands
+ * to the terminal of whoever reads it - is replaced by a '?' each.
+ */
+static void esdm_es_pkcs11_label_copy(char *dst, size_t dstlen,
+				      const char *label)
+{
+	const unsigned char *s = (const unsigned char *)label;
+	size_t i = 0;
+
+	while (*s) {
+		unsigned int len = esdm_es_pkcs11_utf8_len(s);
+		bool control = (len == 1 && (s[0] < 0x20 || s[0] == 0x7f)) ||
+			       /* C1: U+0080 to U+009F */
+			       (len == 2 && s[0] == 0xc2 && s[1] < 0xa0);
+
+		if (!len || control) {
+			if (i + 1 >= dstlen)
+				break;
+			dst[i++] = '?';
+			s += len ? len : 1;
+			continue;
+		}
+
+		if (i + len >= dstlen)
+			break;
+		memcpy(dst + i, s, len);
+		i += len;
+		s += len;
+	}
+
+	dst[i] = '\0';
+}
+
 /*
  * Tell the readers that do not take pkcs11_mutex which token is bound now.
  * Caller must hold pkcs11_mutex (write lock).
  */
 static void esdm_es_pkcs11_publish_locked(void)
 {
+	const char *label = "(none)";
+
+	if (pkcs11_slot && pkcs11_slot->token && pkcs11_slot->token->label)
+		label = pkcs11_slot->token->label;
+
 	mutex_lock(&pkcs11_status_mutex);
-	snprintf(pkcs11_status_token, sizeof(pkcs11_status_token), "%s",
-		 pkcs11_slot && pkcs11_slot->token &&
-				 pkcs11_slot->token->label ?
-			 pkcs11_slot->token->label :
-			 "(none)");
+	esdm_es_pkcs11_label_copy(pkcs11_status_token,
+				  sizeof(pkcs11_status_token), label);
 	mutex_unlock(&pkcs11_status_mutex);
 	atomic_store(&pkcs11_bound, pkcs11_slot != NULL);
 }
