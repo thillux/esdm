@@ -14,6 +14,9 @@ of them are parsed before anything about the peer is established:
   protocol of egd.pl and prngd to legacy consumers, and the **EGD client
   library** on the other end of that socket, which believes a length byte
   about how much random data or how long a PID string follows,
+* the **vhost-user back-end** `esdm-vhost-user-rng`, which parses the control
+  messages of a VMM and, in the memory of a guest, the request queue of a
+  virtio entropy device - the guest writing that memory while it is read,
 * the **OpenSSL RAND providers**, which are the ESDM loaded into somebody
   else's process: everything a provider is handed comes from libcrypto on one
   side - a number of bytes, an entropy strength, a seed of at least this and at
@@ -45,6 +48,8 @@ it.
 | `ossl_seed_src_prov_fuzz` | the same, against the SEED-SRC only build | slow |
 | `ossl_egd_prov_fuzz` | a script of provider calls, then the answers an impostor server gives them | slow - every call is a round trip over a socket |
 | `ossl_egd_prov_pr_fuzz` | the same, against the build serving everything with prediction resistance | slow |
+| `vhost_user_msg_fuzz` | the byte stream of a VMM in the writes it arrives in, each with the file descriptors attached to it | fast |
+| `vhost_user_ring_fuzz` | the configuration of a queue, then the image of guest memory: descriptors, rings, indirect tables | fast |
 
 `egd_client_fuzz` is the same socket seen from the other side. The harness is
 the server: it answers the client's calls with the bytes of the input rather
@@ -63,6 +68,27 @@ bytes: an input is a sequence of records, each a length byte and that many
 bytes, and each record is one read the connection sees. Command by command is
 the ordinary case; half a write command followed by the rest of it two reads
 later is what the state machine has to survive.
+
+## The vhost-user back-end
+
+`esdm-vhost-user-rng` takes its input from two sides. The VMM sends control
+messages on a Unix domain socket, with file descriptors - guest memory and
+eventfds - attached: `vhost_user_msg_fuzz` writes its input to a socket pair as
+records, each one write with the number and kind of descriptors its first byte
+asks for, so a message may span writes and descriptors may arrive in the middle
+of one. The harness checks the frame of every reply and that the back-end has
+closed every descriptor it was handed once the device is released.
+
+The guest writes the memory the request queue lives in, and keeps writing it
+while the back-end reads it. `vhost_user_ring_fuzz` sets a queue up through the
+control messages - features, queue size, ring base and where the rings lie come
+from the input - over three regions of guest memory, the first two adjacent and
+the third behind a gap, fills them with the rest of the input and has the queue
+served from a source of the harness. Every byte of guest memory that changed has
+to lie in the used ring or in a buffer the guest made writable, and be a byte of
+the source there. A bit of the input has a control message arrive while a
+request waits for its random bytes - a stop, a disable, a region removed or
+replaced, a reset -, which must keep the request from arriving.
 
 ## The OpenSSL providers
 

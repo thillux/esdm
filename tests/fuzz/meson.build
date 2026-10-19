@@ -220,6 +220,33 @@ if get_option('openssl-rand-provider').enabled()
 	]
 endif
 
+# esdm-vhost-user-rng: the control messages of the front-end, and the request
+# ring in the memory of the guest. The protocol code is compiled in, the daemon
+# around it is not - a harness is the front-end, and the guest.
+if get_option('vhost-user-rng').enabled()
+	vhost_user_fuzz_include = [ include_dirs_client,
+				    include_directories('../../frontends/vhost-user-rng') ]
+
+	fuzz_targets += [
+		{
+			'name': 'vhost_user_msg',
+			'sources': [ vhost_user_rng_core_src,
+				     files('vhost_user_msg_fuzz.c') ],
+			'include': vhost_user_fuzz_include,
+			'deps': dependencies_client,
+			'link': [ esdm_common_static_lib ],
+		},
+		{
+			'name': 'vhost_user_ring',
+			'sources': [ vhost_user_rng_core_src,
+				     files('vhost_user_ring_fuzz.c') ],
+			'include': vhost_user_fuzz_include,
+			'deps': dependencies_client,
+			'link': [ esdm_common_static_lib ],
+		},
+	]
+endif
+
 # The same request path as the first harness, driven by several threads at
 # once: what a fuzzer cannot reach on its own, as it feeds one input at a time.
 rpc_stress_test = executable(
