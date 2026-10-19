@@ -107,8 +107,6 @@ LIBESDM_1.0 {
 		esdm_config_es_ext_socket_entropy_rate_set;
 		esdm_config_es_krng_entropy_rate;
 		esdm_config_es_krng_entropy_rate_set;
-		esdm_config_es_pkcs11_entropy_rate;
-		esdm_config_es_pkcs11_entropy_rate_set;
 		esdm_config_es_sched_ebpf_entropy_rate;
 		esdm_config_es_sched_ebpf_entropy_rate_set;
 		esdm_config_es_sched_entropy_rate;
@@ -144,7 +142,9 @@ LIBESDM_PRIVATE_1.0 {
 
 		/*
 		 * esdm_es_jent_kernel.h - the kernel RNG the server sets from
-		 * its command line. Only built when es_jent_kernel is enabled.
+		 * its command line. Only built when es_jent_kernel is enabled;
+		 * the linker is asked for --undefined-version so naming it
+		 * here costs nothing in a build without that source.
 		 */
 		esdm_es_jent_kernel_set_name;
 
@@ -156,17 +156,6 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_es_ext_lib_set_path;
 		esdm_es_ext_socket_set_path;
 		esdm_es_ext_socket_set_peer_uid;
-
-		/*
-		 * esdm_es_pkcs11.h - the module the server sets from its
-		 * command line and the token configuration it sets from its
-		 * RPC handler. Only built when es_pkcs11 is enabled;
-		 * the linker is asked for --undefined-version so naming them
-		 * here costs nothing in a build without that source.
-		 */
-		esdm_es_pkcs11_set_module_path;
-		esdm_es_pkcs11_set_pin;
-		esdm_es_pkcs11_set_token_label;
 
 		/* esdm_shm_status.h */
 		esdm_shm_status_cleanup_ipc;

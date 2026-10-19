@@ -75,11 +75,6 @@ if get_option('es_tpm2').enabled()
 	esdm_src += files('es/esdm_es_tpm2.c')
 endif
 
-if get_option('es_pkcs11').enabled()
-	dependencies_esdm_lib += dependency('libp11', required: true)
-	esdm_src += files('es/esdm_es_pkcs11.c')
-endif
-
 if get_option('es_ext').enabled()
 	dependencies_esdm_lib += dl_dep
 	esdm_src += files('es/esdm_es_ext_status.c')

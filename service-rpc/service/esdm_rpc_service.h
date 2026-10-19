@@ -92,8 +92,8 @@ extern "C" {
  * esdm_status() prints the entropy sources first and the DRNG, reseed worker
  * and self test sections last, so a report cut short loses those. A build
  * with every source the ESDM has renders about 2700 bytes without the
- * entropy sources of the kernel, each of which adds about 160, PKCS#11 about
- * 200, and each external entropy source up to its ESDM_ES_EXT_STATUS_MAX
+ * entropy sources of the kernel, each of which adds about 160, and each
+ * external entropy source about 200 and up to its ESDM_ES_EXT_STATUS_MAX
  * bytes of status: two of these took the report past the 4096 bytes this
  * was before. Four times that leaves room for sources yet to come. A report
  * longer still ends in a line saying so - see

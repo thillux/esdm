@@ -25,8 +25,9 @@
  * the floor under a reseed - and with it under how often a DRNG can be
  * reseeded before the reseeding, rather than the generation, is what sets the
  * throughput. Which source dominates that sum is the thing worth knowing, and
- * it is not the same source on every machine: a TPM or a PKCS#11 token answers
- * in milliseconds where the CPU source answers in microseconds.
+ * it is not the same source on every machine: a TPM, or a provider reading a
+ * PKCS#11 token, answers in milliseconds where the CPU source answers in
+ * microseconds.
  *
  * The durations are printed rather than asserted on - they belong to the
  * hardware. What is checked is that every source reporting itself as available

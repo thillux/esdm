@@ -582,68 +582,49 @@ at a different location.
 ################################################################################
 
 option('es_pkcs11', type: 'feature', value: 'disabled',
-       description: '''Enable support for a PKCS#11-based entropy source.
+       description: '''Build esdm-es-pkcs11, the PKCS#11 entropy source.
 
-The ESDM may use a PKCS#11 token (e.g. a smart card or HSM) as entropy source
-via the libp11 wrapper around the underlying PKCS#11 module. The token must
-expose a hardware random number generator (CKF_RNG / C_GenerateRandom).
+esdm-es-pkcs11 reads the random number generator of a PKCS#11 token (e.g. a
+smart card or HSM, CKF_RNG / C_GenerateRandom) through libp11 and serves it to
+the ESDM as an external entropy source on a Unix domain socket, which the ESDM
+reads through one of its provider socket sources (es_ext_socket_num,
+esdm-server --es_ext_socket) - see esdm-es-pkcs11(8). The ESDM itself does
+not load PKCS#11 modules, and neither libesdm nor esdm-server links libp11.
 
-Note, if this option is enabled and no usable PKCS#11 token is found at
-runtime, the ESDM will automatically detect this and ignore the source.
+Needs libp11 and esdm-es-ext. The options below are the defaults of the daemon,
+which its command line overrides; the PIN is never one of them - the daemon
+reads it from a file or a systemd credential.
 ''')
 
 # Option for: ESDM_PKCS11_ENTROPY_RATE
 option('es_pkcs11_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
-       description:'''PKCS#11 entropy source entropy rate.
+       description:'''Entropy rate esdm-es-pkcs11 declares.
 
-The option defines the amount of entropy the ESDM applies to 256
-bits of data obtained from the PKCS#11 entropy source. The ESDM
-enforces the limit that this value must be in the range between 0 and 256.
+The amount of entropy per 256 bits of data the PKCS#11 entropy source declares
+to the ESDM, 0 to 256: the ESDM credits it at that rate unless a rate is
+configured for its provider socket source (es_ext_socket_entropy_rate,
+esdm-server --es_ext_socket_entropy_rate). esdm-es-pkcs11 --entropy_rate
+declares another one.
 
-When configuring this value to 0, the PKCS#11 entropy source will provide
-256 bits of data without being credited to contain entropy.
-''')
-
-# Option for: ESDM_PKCS11_ENTROPY_BLOCKS
-option('es_pkcs11_entropy_blocks', type: 'integer', value: 64,
-       description:'''PKCS#11 entropy buffer size
-
-The PKCS#11 entropy source can use an asynchronous block cache that is filled
-by a separate thread. This ensures that data is readily available when needed.
-
-This option sets the size of the cache in number of blocks. It must be a power
-of two and at least 4. When set to zero, the cache is disabled and the source
-delivers data synchronously.
+When configuring this value to 0, the PKCS#11 entropy source provides data
+without it being credited to contain entropy.
 ''')
 
 option('es_pkcs11_module_path', type: 'string', value: '',
-       description: '''PKCS#11 module path used by the PKCS#11 entropy source.
+       description: '''PKCS#11 module esdm-es-pkcs11 loads by default.
 
 Path of the PKCS#11 module shared library to load (e.g.
 /usr/lib/softhsm/libsofthsm2.so or /usr/lib/pkcs11/opensc-pkcs11.so).
-
-esdm-server --pkcs11_module PATH loads another module in its place.
-
-When left empty and not given on the command line either, the PKCS#11 entropy
-source is disabled at runtime even if it was compiled in.
+esdm-es-pkcs11 --module PATH loads another module in its place; when this is
+left empty, the option is required.
 ''')
 
 option('es_pkcs11_token_label', type: 'string', value: '',
-       description: '''Optional PKCS#11 token label for the PKCS#11 entropy source.
+       description: '''PKCS#11 token label esdm-es-pkcs11 looks for by default.
 
 If set, only a token whose label matches this value will be used. Otherwise the
 first slot with a present token that exposes an RNG is selected.
-''')
-
-option('es_pkcs11_pin', type: 'string', value: '',
-       description: '''Optional PKCS#11 user PIN for the PKCS#11 entropy source.
-
-C_GenerateRandom usually does not require a login. Set this only for tokens
-that require an authenticated session before random data can be obtained.
-
-Every failed login uses up one of the PIN retries of the token: a PIN the token
-refuses is not tried again until one is set at runtime (esdm-tool
---pkcs11-pin).
+esdm-es-pkcs11 --token_label LABEL looks for another one.
 ''')
 
 ################################################################################
@@ -947,7 +928,7 @@ option('es_parallel_fetch', type: 'feature', value: 'enabled',
 When enabled, the entropy source manager spawns one thread per entropy
 source to gather seed material concurrently during a reseed, joining them
 afterwards. This reduces reseed latency when slow entropy sources (e.g.
-TPM 2.0 or PKCS#11 tokens) are configured.
+a TPM 2.0, or a provider reading a PKCS#11 token) are configured.
 
 Parallel fetching is only used at runtime if more than one processor core
 is available; otherwise the sources are queried sequentially. If thread

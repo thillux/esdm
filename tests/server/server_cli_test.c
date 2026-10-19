@@ -275,45 +275,29 @@ static void test_errors_without_verbose(void)
 }
 
 /*
- * The PKCS#11 provider module named on the command line. A build without the
- * PKCS#11 entropy source refuses the option rather than ignoring it, as the
- * module asked for would not be used. The module is only loaded by
- * esdm_init(), so an unprivileged run accepts any path.
+ * The PKCS#11 entropy source is esdm-es-pkcs11, which the ESDM reads as an
+ * external one, and which takes its module on its own command line. The
+ * option of the server that named the module is gone: a setup still giving it
+ * has to learn so - with the usage, as for any unknown option - rather than
+ * run without the token it asked for. Nor does the usage offer it.
  */
-static void test_pkcs11_module_option(void)
+static void test_pkcs11_module_gone(void)
 {
 	const char *const opts[] = { "--pkcs11_module",
 				     "/nonexistent/libpkcs11-test.so", NULL };
-	const char *const empty[] = { "--pkcs11_module", "", NULL };
 	struct test_run r;
 
-#ifdef ESDM_ES_PKCS11
-	/* Accepted, as root the daemon would start */
-	if (geteuid()) {
-		CHECK_EQ(test_run(&r, opts, NULL), 1);
-		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-		      "--pkcs11_module was not accepted (output: %.300s)",
-		      r.err);
-	}
-#else
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
-	CHECK(strstr(r.err, "not part of this build") != NULL,
-	      "--pkcs11_module was not refused without the PKCS#11 ES (output: %.300s)",
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "--pkcs11_module was not rejected with the usage (output: %.300s)",
 	      r.err);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
 	      "--pkcs11_module was refused only after the parsing (output: %.300s)",
 	      r.err);
-#endif
-
-	/* A module path that names nothing is a mistake, not the default */
-	CHECK_EQ(test_run(&r, empty, NULL), 1);
-	CHECK(strstr(r.err, "must not be empty") != NULL,
-	      "an empty --pkcs11_module was not refused (output: %.300s)",
-	      r.err);
 
 	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
-	CHECK(strstr(r.err, "--pkcs11_module") != NULL,
-	      "the usage does not mention --pkcs11_module");
+	CHECK(strstr(r.err, "pkcs11") == NULL,
+	      "the usage still offers a PKCS#11 option");
 }
 
 /*
@@ -553,7 +537,7 @@ int main(int argc, char *argv[])
 	test_syslog();
 	test_pid_file_option();
 	test_errors_without_verbose();
-	test_pkcs11_module_option();
+	test_pkcs11_module_gone();
 	test_es_ext_lib_options();
 	test_es_ext_socket_options();
 	test_es_ext_repeated_options();

@@ -42,14 +42,18 @@ and
 .BR \-\-groupname .
 Entropy sources that need privileges for their setup are initialized before
 the privileges are dropped, and keep what they opened then: the TPM 2.0 entropy
-source its device, the PKCS#11 entropy source its module. After a failure \-
-an I/O error of the TPM, a token that fails or is removed \- they try again at
-most every 5 seconds, on what they keep: the TPM device is opened anew only
-where the privileges left still allow it, and a token is looked for among the
-slots of the loaded module, which sees a token added later only if the module
-reports one without being loaded again (SoftHSM does not). A device or module
-that could not be opened at startup is not opened again once the privileges
-are dropped.
+source its device. After a failure \- an I/O error of the TPM \- it tries again
+at most every 5 seconds, on what it keeps: the TPM device is opened anew only
+where the privileges left still allow it. A device that could not be opened at
+startup is not opened again once the privileges are dropped.
+.PP
+The PKCS#11 entropy source is not part of the daemon: it is
+.BR esdm\-es\-pkcs11 (8),
+a process of its own serving a PKCS#11 token as an external entropy source,
+which the daemon reads through one of its provider sockets
+.RB ( \-\-es_ext_socket ,
+see
+.BR "EXTERNAL ENTROPY SOURCES" ).
 .PP
 On systemd installations the daemon is normally not started by hand but
 through the shipped
@@ -141,18 +145,6 @@ Additionally serve the EGD protocol on the UNIX domain socket
 Disabled by default. The EGD protocol cannot ask for prediction resistance;
 the socket serves it with commands of the ESDM's own, see
 .BR "EGD PROTOCOL EXTENSIONS" .
-.TP
-.BR \-\-pkcs11_module " \fIPATH\fR"
-Load the PKCS#11 provider module
-.I PATH
-for the PKCS#11 entropy source instead of the module the build was configured
-with (meson option
-.BR es_pkcs11_module_path ).
-The module is loaded while the daemon still has its privileges, and not loaded
-again once they are dropped (see
-.BR DESCRIPTION ).
-Refused by a build without the PKCS#11 entropy source (meson option
-.BR es_pkcs11 ).
 .TP
 .BR \-\-es_ext_lib " \fIPATH\fR"
 Load the plugin library
@@ -354,6 +346,19 @@ asks the provider to encrypt the connection with DTLS, and uses it unencrypted
 if the provider cannot; the status of the source says which. The DTLS is
 unauthenticated \- the credentials of the provider remain what it is trusted
 for \- and keeps the data credited as entropy from being read off the channel.
+.SS PKCS#11 tokens
+The random number generator of a PKCS#11 token is read by
+.BR esdm\-es\-pkcs11 (8),
+a provider like any other: give the daemon one provider socket source for it
+\- one more than the other providers need \- with its socket and the user it
+runs as. The daemon declares its name \- "PKCS#11" and the token label \- and
+its entropy rate, and reports the token, the login and the last error in the
+status of the source:
+.PP
+.nf
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
+	\-\-es_ext_socket_uid esdm\-es\-pkcs11
+.fi
 .SH ENCRYPTION
 A daemon built with DTLS (meson option
 .BR dtls )
@@ -550,6 +555,8 @@ exits with a non\-zero status when it cannot initialize the ESDM or the
 requested interfaces.
 .SH SEE ALSO
 .BR esdm\-tool (1),
+.BR esdm\-es\-ext\-serve (8),
+.BR esdm\-es\-pkcs11 (8),
 .BR esdm\-cuse\-random (8),
 .BR esdm\-cuse\-urandom (8),
 .BR esdm\-proc (8),

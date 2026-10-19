@@ -270,35 +270,6 @@ if get_option('es_irq_ebpf').enabled()
 	test('ES Interrupt eBPF', es_irq_ebpf_tester, timeout: 120)
 endif
 
-if get_option('es_pkcs11').enabled()
-	es_pkcs11_tester = executable(
-		'es_pkcs11_tester',
-		[ esdm_ipc_ns, 'es_pkcs11_test.c' ],
-		include_directories: include_dirs_server,
-		link_with: esdm_static_lib,
-	)
-	test('ES PKCS11', es_pkcs11_tester)
-
-	# The test above passes with the source switched off for want of a
-	# token, so it never reaches the half that matters. SoftHSM is a
-	# PKCS#11 module that needs no hardware, so when the build points at
-	# one this test creates a token and drives the source against it for
-	# real. It skips at runtime if softhsm2-util is not installed.
-	if get_option('es_pkcs11_module_path') != ''
-		# The source is compiled into the test - see the file header.
-		es_pkcs11_softhsm_tester = executable(
-			'es_pkcs11_softhsm_tester',
-			[ esdm_ipc_ns, 'es_pkcs11_softhsm_test.c' ],
-			dependencies: [ dependencies_server,
-					dependency('libp11') ],
-			include_directories: include_dirs_server,
-			link_with: esdm_static_lib,
-		)
-		test('ES PKCS11 with SoftHSM', es_pkcs11_softhsm_tester,
-			timeout: 120)
-	endif
-endif
-
 # The health tests the eBPF programs run are plain C, which the test compiles
 # in - see the file header. It needs neither libbpf nor eBPF support, so it is
 # built whether or not an eBPF entropy source is.

@@ -40,7 +40,6 @@
 #include "esdm_es_extlib.h"
 #include "esdm_es_extsock.h"
 #include "esdm_es_jent_kernel.h"
-#include "esdm_es_pkcs11.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
 #include "helper.h"
@@ -137,11 +136,6 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
 	fprintf(stderr,
-		"\t   --pkcs11_module <PATH>\tLoad the PKCS#11 provider module PATH for\n");
-	fprintf(stderr,
-		"\t\t\tthe PKCS#11 entropy source instead of the one the build\n");
-	fprintf(stderr, "\t\t\tconfigured (es_pkcs11_module_path)\n");
-	fprintf(stderr,
 		"\t   --es_ext_lib <PATH>\tLoad the plugin library PATH as external\n");
 	fprintf(stderr,
 		"\t\t\tentropy source instead of the one the build configured\n");
@@ -183,33 +177,6 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tthe DTLS clients ask for (offered by default where built)\n");
 	exit(1);
-}
-
-/*
- * The PKCS#11 provider module of the PKCS#11 entropy source, in place of the
- * one the build names (es_pkcs11_module_path). It is loaded by esdm_init(),
- * while the daemon still has its privileges.
- */
-static void set_pkcs11_module(const char *path)
-{
-	int ret;
-
-	if (path[0] == '\0') {
-		fprintf(stderr, "The PKCS#11 module path must not be empty\n");
-		exit(1);
-	}
-
-	ret = esdm_es_pkcs11_set_module_path(path);
-	if (ret == -ENOENT) {
-		fprintf(stderr,
-			"The PKCS#11 entropy source is not part of this build (meson option es_pkcs11)\n");
-		exit(1);
-	}
-	if (ret) {
-		fprintf(stderr, "Cannot set the PKCS#11 module %s: %s\n", path,
-			strerror(-ret));
-		exit(1);
-	}
 }
 
 /*
@@ -453,7 +420,6 @@ static void parse_opts(int argc, char *argv[])
 			{ "keep_ipc", 0, 0, 0 },
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
-			{ "pkcs11_module", 1, 0, 0 },
 			{ "es_ext_lib", 1, 0, 0 },
 			{ "es_ext_lib_entropy_rate", 1, 0, 0 },
 			{ "es_ext_socket", 1, 0, 0 },
@@ -551,37 +517,33 @@ static void parse_opts(int argc, char *argv[])
 					exit(1);
 				break;
 			case 17:
-				/* pkcs11_module */
-				set_pkcs11_module(optarg);
-				break;
-			case 18:
 				/* es_ext_lib */
 				set_es_ext_lib(optarg);
 				break;
-			case 19:
+			case 18:
 				/* es_ext_lib_entropy_rate */
 				set_es_ext_rate(&es_ext_lib_rate_opt, optarg,
 						esdm_config_es_ext_lib_entropy_rate_set);
 				break;
-			case 20:
+			case 19:
 				/* es_ext_socket */
 				set_es_ext_socket(optarg);
 				break;
-			case 21:
+			case 20:
 				/* es_ext_socket_entropy_rate */
 				set_es_ext_rate(
 					&es_ext_socket_rate_opt, optarg,
 					esdm_config_es_ext_socket_entropy_rate_set);
 				break;
-			case 22:
+			case 21:
 				/* es_ext_socket_uid */
 				set_es_ext_socket_uid(optarg);
 				break;
-			case 23:
+			case 22:
 				/* es_jent_kernel_name */
 				set_es_jent_kernel_name(optarg);
 				break;
-			case 24:
+			case 23:
 				/* no_dtls */
 				esdm_rpc_server_set_dtls(false);
 				break;

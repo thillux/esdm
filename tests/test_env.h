@@ -40,9 +40,11 @@ extern "C" {
  * too would interpose the very calls it is meant to answer.
  *
  * A few variables have to survive that isolation nonetheless: they configure
- * libraries the daemon loads, not the test. SOFTHSM2_CONF is one - the PKCS#11
- * entropy source loads its module at every startup, and SoftHSM logs three
- * errors per load when it finds no configuration.
+ * libraries the daemon loads, not the test. SOFTHSM2_CONF is one - a daemon
+ * loading SoftHSM logs three errors per load when it finds no configuration.
+ * The ESDM daemons no longer do since the PKCS#11 entropy source became
+ * esdm-es-pkcs11, which its tests start with an environment of their own, but
+ * a setup pointing the ESDM at a provider loading it still may.
  */
 static const char *const test_env_pass[] = {
 	"SOFTHSM2_CONF=",
