@@ -48,6 +48,7 @@
 #include <botan/tls_server.h>
 #include <botan/tls_session.h>
 #include <botan/tls_session_manager_noop.h>
+#include <botan/version.h>
 #include <botan/x509self.h>
 
 #include <sys/socket.h>
@@ -131,12 +132,16 @@ class Esdm_Dtls_Policy final : public Botan::TLS::Policy {
 	/*
 	 * The cookie exchange protects a server against spoofed addresses -
 	 * a client making it send a flight to somebody else. A connected Unix
-	 * domain socket has no address to spoof.
+	 * domain socket has no address to spoof. Botan requires it from 3.13
+	 * on; before, the empty Credentials_Manager::dtls_cookie_secret() of
+	 * Esdm_Dtls_Credentials turns it off.
 	 */
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 13, 0)
 	bool dtls_server_require_cookie_exchange() const override
 	{
 		return false;
 	}
+#endif
 };
 
 /*
