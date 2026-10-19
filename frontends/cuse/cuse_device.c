@@ -1051,20 +1051,56 @@ out:
 }
 
 /*
- * Whether a privileged RPC was interrupted after its request went out
- * (-EINPROGRESS): the ESDM may apply it all the same, so it must not be
- * followed by the kernel fallback, which would credit the entropy a second
- * time. Its effect is unknown then, as that of an interrupted ioctl of the
- * kernel can be, whose caller is told EINTR - and is gone anyway, as the
- * RPC is only interrupted when the caller interrupted its request.
+ * Whether the caller of a failed privileged RPC interrupted its request. The
+ * RPC is abandoned then, after its request went out (-EINPROGRESS) - the ESDM
+ * may apply it all the same - or before (-EAGAIN, or the error of a connection
+ * attempt cut short). Either way the caller is told EINTR, as for an
+ * interrupted ioctl of the kernel, whose effect is unknown as well, and it is
+ * not served by the kernel fallback: it is gone, and the fallback could credit
+ * the entropy a second time.
  */
-static bool esdm_cuse_priv_in_progress(int *ret)
+static bool esdm_cuse_priv_interrupted(fuse_req_t req, int *ret)
 {
-	if (*ret != -EINPROGRESS)
+	if (*ret != -EINPROGRESS && !fuse_req_interrupted(req))
 		return false;
 
 	*ret = -EINTR;
 	return true;
+}
+
+/*
+ * Whether a failed privileged RPC certainly did not reach the ESDM, which is
+ * when the kernel fallback may take the request instead - it keeps the ioctl
+ * working while there is no ESDM to take it.
+ *
+ * A request that went out may have been applied by the ESDM whatever the RPC
+ * reports, and the fallback would credit its entropy a second time. The RPC
+ * client does not know whether the server applied a request once the answer
+ * is missing: after the time a privileged request is waited for (-ETIMEDOUT),
+ * when the server closed the connection, e.g. as it restarts (-ECONNRESET),
+ * or with a garbled answer. It does not send such a request again either.
+ *
+ * So the fallback takes only the errors that occur before a request goes out
+ * and that the server does not answer with: no server listening on the socket
+ * (-ENOENT, -ECONNREFUSED) or not to be reached by the caller (-EACCES), the
+ * connection gone and not to be re-established for the send (-EPIPE), the
+ * RPC client shut down (-ESHUTDOWN), a request too large for a message
+ * (-EMSGSIZE). A send that timed out also reports -ETIMEDOUT, which is left to
+ * the caller as well, and so is every answer of the server.
+ */
+static bool esdm_cuse_priv_unsent(int ret)
+{
+	switch (ret) {
+	case -ENOENT:
+	case -ECONNREFUSED:
+	case -EACCES:
+	case -EPIPE:
+	case -ESHUTDOWN:
+	case -EMSGSIZE:
+		return true;
+	default:
+		return false;
+	}
 }
 
 void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
@@ -1139,8 +1175,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 
 			esdm_invoke(esdm_rpcc_rnd_add_to_ent_cnt_int(
 				ent_count_bits, req));
-			/* In case of an error, update the kernel */
-			if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+			/* The kernel takes what certainly did not reach the ESDM */
+			if (ret && !esdm_cuse_priv_interrupted(req, &ret) &&
+			    esdm_cuse_priv_unsent(ret)) {
 				if (backend_fd >= 0 &&
 				    ioctl(backend_fd, RNDADDTOENTCNT,
 					  &ent_count_bits) == -1)
@@ -1206,8 +1243,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			(const uint8_t *)rpi->buf, (size_t)rpi->buf_size,
 			ent_count_bits, req));
 
-		/* In case of an error, update the kernel */
-		if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+		/* The kernel takes what certainly did not reach the ESDM */
+		if (ret && !esdm_cuse_priv_interrupted(req, &ret) &&
+		    esdm_cuse_priv_unsent(ret)) {
 			if (backend_fd >= 0 &&
 			    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
 				ret = -errno;
@@ -1237,7 +1275,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			    ioctl(backend_fd, RNDCLEARPOOL) == -1)
 				ret = -errno;
 		} else {
-			esdm_cuse_priv_in_progress(&ret);
+			esdm_cuse_priv_interrupted(req, &ret);
 		}
 		esdm_cuse_drop_privilege_transient();
 		if (ret)
@@ -1261,7 +1299,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			    ioctl(backend_fd, RNDRESEEDCRNG) == -1)
 				ret = -errno;
 		} else {
-			esdm_cuse_priv_in_progress(&ret);
+			esdm_cuse_priv_interrupted(req, &ret);
 		}
 		esdm_cuse_drop_privilege_transient();
 		if (ret)

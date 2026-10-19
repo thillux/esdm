@@ -167,6 +167,21 @@ or
 .BR write (2),
 so that a stopped or crashed ESDM does not take the system's random device
 down with it.
+.PP
+The
+.BR ioctl (2)
+commands crediting entropy,
+.B RNDADDTOENTCNT
+and
+.BR RNDADDENTROPY ,
+are handed to that descriptor only when the request certainly did not reach
+the ESDM, such as while no
+.BR esdm\-server (8)
+is listening. A request the ESDM may have applied fails with the error of the
+request instead \- one left unanswered for 60 seconds, or whose connection the
+ESDM closed as it restarted \- as the kernel would credit its entropy a second
+time. A caller interrupting such a command is told
+.BR EINTR .
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-proc (8),
