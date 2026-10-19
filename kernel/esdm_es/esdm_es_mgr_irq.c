@@ -28,7 +28,7 @@ int esdm_es_mgr_irq_ioctl(unsigned int cmd, unsigned long arg)
 	struct entropy_buf eb __aligned(ESDM_KCAPI_ALIGN);
 	char status[250];
 	char status_json[ESDM_STATUS_JSON_BUFLEN];
-	u32 data, data2, __user *p = (int __user *)arg;
+	u32 data, data2, bits, __user *p = (int __user *)arg;
 	int ret = 0;
 	void __user *argp = (void __user *)arg;
 
@@ -62,19 +62,23 @@ int esdm_es_mgr_irq_ioctl(unsigned int cmd, unsigned long arg)
 		if (get_user(data2, p++))
 			return -EFAULT;
 
+		/*
+		 * Requested bits, 0 for unchanged: checked before anything is
+		 * carried out, so that a request refused with -EINVAL leaves
+		 * the entropy source as it is, without the reset it asks for.
+		 */
+		bits = data & ESDM_ES_MGR_REQ_BITS_MASK;
+		if (bits && bits != ESDM_DRNG_INIT_SEED_SIZE_BITS &&
+		    bits != (ESDM_DRNG_SECURITY_STRENGTH_BITS +
+			     ESDM_OVERSAMPLE_ES_BITS) &&
+		    bits != ESDM_DRNG_SECURITY_STRENGTH_BITS)
+			return -EINVAL;
+
 		if (data & ESDM_ES_MGR_RESET_BIT)
 			esdm_es_mgr_irq_reset();
 
-		/* Requested bits */
-		data &= ESDM_ES_MGR_REQ_BITS_MASK;
-		if (data > 0) {
-			if (data != ESDM_DRNG_INIT_SEED_SIZE_BITS &&
-			    data != (ESDM_DRNG_SECURITY_STRENGTH_BITS +
-				     ESDM_OVERSAMPLE_ES_BITS) &&
-			    data != ESDM_DRNG_SECURITY_STRENGTH_BITS)
-				return -EINVAL;
-			esdm_requested_irq_bits = data;
-		}
+		if (bits)
+			esdm_requested_irq_bits = bits;
 
 		/*
 		 * Events per 256 bits of entropy: the setter keeps it from

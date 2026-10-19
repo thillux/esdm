@@ -34,15 +34,24 @@
 #define ESDM_IRQ_ENT_BUF_IOCTL(type) _IOR(ESDMIO, 0x02, type)
 
 /*
- * IRQ ES: configure entropy source with the following protocol
+ * IRQ ES: configure the entropy source with two 32-bit words:
  *
- * 1. When writing 2 * sizeof(u32): the first 4 bits are interpreted as a bit
- *    field with:
- * 	ESDM_ES_MGR_RESET_BIT set -> reset entropy source
- * 	ESDM_ES_MGR_REQ_BITS_MASK: amount of requested entropy in bits
- *    The second 4 bits are interpreted as entropy rate.
+ * 1. A bit field of
+ *	ESDM_ES_MGR_RESET_BIT: reset the entropy source, discarding the events
+ *	  it collected so far.
+ *	ESDM_ES_MGR_REQ_BITS_MASK: the entropy in bits a read of the entropy
+ *	  buffer asks for - 0 leaves it unchanged, any other value has to be
+ *	  one of the seed sizes of esdm_seed_sizes.h:
+ *	  ESDM_DRNG_SECURITY_STRENGTH_BITS, with ESDM_OVERSAMPLE_ES_BITS added
+ *	  or not, or ESDM_DRNG_INIT_SEED_SIZE_BITS. The mask holds 511 at most.
+ *	The other bits are ignored.
+ * 2. The entropy rate: the number of events credited with 256 bits of
+ *    entropy - 0 leaves it unchanged. The module keeps it from going below
+ *    the rate it was loaded with, so it never credits more entropy than that;
+ *    0xffffffff credits none.
  *
- * Any other value is treated as an error.
+ * A requested entropy that is none of the seed sizes fails with -EINVAL
+ * before anything is carried out, the reset included.
  */
 #define ESDM_IRQ_CONF _IOW(ESDMIO, 0x03, __u32[2])
 
@@ -82,7 +91,7 @@
 #define ESDM_STATUS_JSON_BUFLEN 500
 
 /* The bits of the first word of ESDM_IRQ_CONF / ESDM_SCHED_CONF */
-/* low 9 bits - can set 512 bits of entropy max */
+/* low 9 bits - can request 511 bits of entropy at most */
 #define ESDM_ES_MGR_REQ_BITS_MASK 0x1ff
 #define ESDM_ES_MGR_RESET_BIT 0x80000000
 
