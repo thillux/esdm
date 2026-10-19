@@ -265,6 +265,17 @@ if get_option('crypto_backend') == 'builtin'
 	   get_option('hash_sha3_512').enabled()
 		error('Only one conditioning hash can be enabled')
 	endif
+
+	# The builtin backend has nothing else to fall back on
+	if not get_option('drng_hash_drbg').enabled() and \
+	   not get_option('drng_chacha20').enabled()
+		error('The builtin crypto backend needs a DRNG - enable drng_hash_drbg or drng_chacha20')
+	endif
+
+	if not get_option('hash_sha512').enabled() and \
+	   not get_option('hash_sha3_512').enabled()
+		error('The builtin crypto backend needs a conditioning hash - enable hash_sha512 or hash_sha3_512')
+	endif
 endif
 
 if get_option('crypto_backend') == 'gnutls'
