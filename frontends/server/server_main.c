@@ -162,6 +162,13 @@ static void usage(void)
 		"\t   --es_ext_socket_uid <USER>\tAccept a provider running as USER\n");
 	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
 	fprintf(stderr,
+		"\t\t\tThe --es_ext options may be repeated: the n-th occurrence\n");
+	fprintf(stderr,
+		"\t\t\tof one configures the n-th source of its kind, of which\n");
+	fprintf(stderr,
+		"\t\t\tthis build has %u plugin libraries and %u provider sockets\n",
+		ESDM_EXT_LIB_NUM, ESDM_EXT_SOCKET_NUM);
+	fprintf(stderr,
 		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
 	fprintf(stderr,
 		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
@@ -223,12 +230,91 @@ static uint32_t parse_entropy_rate(const char *opt, const char *arg)
 }
 
 /*
- * The plugin library of the external entropy source, in place of the one the
+ * The options of the external entropy sources may be given once for each
+ * source of their kind: the n-th occurrence of an option configures the n-th
+ * source, counted per option.
+ */
+struct es_ext_option {
+	/* The option, its kind of source, and the meson option of its number */
+	const char *name;
+	const char *kind;
+	const char *num_option;
+	unsigned int num;
+	/* How often it was given so far */
+	unsigned int given;
+};
+
+static struct es_ext_option es_ext_lib_opt = {
+	"--es_ext_lib", "plugin library", "es_ext_lib_num", ESDM_EXT_LIB_NUM, 0
+};
+static struct es_ext_option es_ext_lib_rate_opt = {
+	"--es_ext_lib_entropy_rate", "plugin library", "es_ext_lib_num",
+	ESDM_EXT_LIB_NUM, 0
+};
+static struct es_ext_option es_ext_socket_opt = {
+	"--es_ext_socket", "provider socket", "es_ext_socket_num",
+	ESDM_EXT_SOCKET_NUM, 0
+};
+static struct es_ext_option es_ext_socket_rate_opt = {
+	"--es_ext_socket_entropy_rate", "provider socket", "es_ext_socket_num",
+	ESDM_EXT_SOCKET_NUM, 0
+};
+static struct es_ext_option es_ext_socket_uid_opt = {
+	"--es_ext_socket_uid", "provider socket", "es_ext_socket_num",
+	ESDM_EXT_SOCKET_NUM, 0
+};
+
+/*
+ * The source the occurrence of @opt configures. One occurrence more than the
+ * build has sources of its kind is an error, as is any without external
+ * sources at all.
+ */
+static unsigned int es_ext_instance(struct es_ext_option *opt)
+{
+#ifdef ESDM_ES_EXT
+	if (opt->given < opt->num)
+		return opt->given++;
+
+	if (!opt->num)
+		fprintf(stderr,
+			"%s: this build has no %s sources (meson option %s)\n",
+			opt->name, opt->kind, opt->num_option);
+	else
+		fprintf(stderr,
+			"%s is given more often than this build has %s sources, which is %u (meson option %s)\n",
+			opt->name, opt->kind, opt->num, opt->num_option);
+#else
+	fprintf(stderr,
+		"External entropy sources are not part of this build (meson option es_ext), %s is not taken\n",
+		opt->name);
+#endif
+	exit(1);
+}
+
+/*
+ * The entropy rate of an external entropy source, @opt for the source of its
+ * occurrence, set with @set
+ */
+static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
+			    int (*set)(unsigned int idx, uint32_t ent))
+{
+	uint32_t rate = parse_entropy_rate(opt->name, arg);
+
+	if (set(es_ext_instance(opt), rate)) {
+		fprintf(stderr, "Cannot set the entropy rate of %s %s\n",
+			opt->name, arg);
+		exit(1);
+	}
+}
+
+/*
+ * A plugin library of the external entropy sources, in place of the one the
  * build names (es_ext_lib_path). It is loaded and initialized by esdm_init(),
  * while the daemon still has its privileges.
  */
 static void set_es_ext_lib(const char *path)
 {
+	unsigned int idx;
 	int ret;
 
 	if (path[0] == '\0') {
@@ -237,12 +323,8 @@ static void set_es_ext_lib(const char *path)
 		exit(1);
 	}
 
-	ret = esdm_es_ext_lib_set_path(0, path);
-	if (ret == -ENOENT) {
-		fprintf(stderr,
-			"External entropy sources are not part of this build (meson option es_ext)\n");
-		exit(1);
-	}
+	idx = es_ext_instance(&es_ext_lib_opt);
+	ret = esdm_es_ext_lib_set_path(idx, path);
 	if (ret) {
 		fprintf(stderr,
 			"Cannot set the external ES plugin library %s: %s\n",
@@ -252,12 +334,13 @@ static void set_es_ext_lib(const char *path)
 }
 
 /*
- * The socket of the external entropy source provider, in place of the one the
+ * A socket of the external entropy source providers, in place of the one the
  * build names (es_ext_socket_path). It is connected to by esdm_init(), and
  * again whenever the connection is lost.
  */
 static void set_es_ext_socket(const char *path)
 {
+	unsigned int idx;
 	int ret;
 
 	if (path[0] == '\0') {
@@ -266,12 +349,8 @@ static void set_es_ext_socket(const char *path)
 		exit(1);
 	}
 
-	ret = esdm_es_ext_socket_set_path(0, path);
-	if (ret == -ENOENT) {
-		fprintf(stderr,
-			"External entropy sources are not part of this build (meson option es_ext)\n");
-		exit(1);
-	}
+	idx = es_ext_instance(&es_ext_socket_opt);
+	ret = esdm_es_ext_socket_set_path(idx, path);
 	if (ret) {
 		fprintf(stderr,
 			"Cannot set the external ES provider socket %s: %s\n",
@@ -307,10 +386,12 @@ static void set_es_jent_kernel_name(const char *name)
 	}
 }
 
-/* The user the provider may run as next to root: a uid or a user name */
+/* The user a provider may run as next to root: a uid or a user name */
 static void set_es_ext_socket_uid(const char *arg)
 {
 	unsigned long val;
+	unsigned int idx;
+	int64_t uid;
 	char *end;
 	int ret;
 
@@ -318,7 +399,7 @@ static void set_es_ext_socket_uid(const char *arg)
 	val = strtoul(arg, &end, 10);
 	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
 	    val < UINT32_MAX) {
-		ret = esdm_es_ext_socket_set_peer_uid(0, (int64_t)val);
+		uid = (int64_t)val;
 	} else {
 		struct passwd *pw = getpwnam(arg);
 
@@ -328,14 +409,12 @@ static void set_es_ext_socket_uid(const char *arg)
 				arg);
 			exit(1);
 		}
-		ret = esdm_es_ext_socket_set_peer_uid(0, (int64_t)pw->pw_uid);
+		uid = (int64_t)pw->pw_uid;
 	}
 
-	if (ret == -ENOENT) {
-		fprintf(stderr,
-			"External entropy sources are not part of this build (meson option es_ext)\n");
-		exit(1);
-	}
+	idx = es_ext_instance(&es_ext_socket_uid_opt);
+	ret = esdm_es_ext_socket_set_peer_uid(idx, uid);
+
 	if (ret) {
 		fprintf(stderr, "Cannot accept the uid %s: %s\n", arg,
 			strerror(-ret));
@@ -475,11 +554,8 @@ static void parse_opts(int argc, char *argv[])
 				break;
 			case 19:
 				/* es_ext_lib_entropy_rate */
-				esdm_config_es_ext_lib_entropy_rate_set(
-					0,
-					parse_entropy_rate(
-						"--es_ext_lib_entropy_rate",
-						optarg));
+				set_es_ext_rate(&es_ext_lib_rate_opt, optarg,
+						esdm_config_es_ext_lib_entropy_rate_set);
 				break;
 			case 20:
 				/* es_ext_socket */
@@ -487,11 +563,9 @@ static void parse_opts(int argc, char *argv[])
 				break;
 			case 21:
 				/* es_ext_socket_entropy_rate */
-				esdm_config_es_ext_socket_entropy_rate_set(
-					0,
-					parse_entropy_rate(
-						"--es_ext_socket_entropy_rate",
-						optarg));
+				set_es_ext_rate(
+					&es_ext_socket_rate_opt, optarg,
+					esdm_config_es_ext_socket_entropy_rate_set);
 				break;
 			case 22:
 				/* es_ext_socket_uid */

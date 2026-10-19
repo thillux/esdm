@@ -331,13 +331,18 @@ static void test_es_ext_lib_options(void)
 	struct test_run r;
 	unsigned int i;
 
-#ifdef ESDM_ES_EXT
+#if ESDM_EXT_LIB_NUM > 0
 	/* Accepted, as root the daemon would start */
 	if (geteuid()) {
 		CHECK_EQ(test_run(&r, opts, NULL), 1);
 		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 		      "--es_ext_lib was not accepted (output: %.300s)", r.err);
 	}
+#elif defined(ESDM_ES_EXT)
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "this build has no plugin library sources") != NULL,
+	      "--es_ext_lib was not refused without plugin library sources (output: %.300s)",
+	      r.err);
 #else
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
@@ -383,7 +388,7 @@ static void test_es_ext_socket_options(void)
 					 NULL };
 	struct test_run r;
 
-#ifdef ESDM_ES_EXT
+#if ESDM_EXT_SOCKET_NUM > 0
 	/* Accepted, as root the daemon would start */
 	if (geteuid()) {
 		CHECK_EQ(test_run(&r, opts, NULL), 1);
@@ -396,6 +401,12 @@ static void test_es_ext_socket_options(void)
 		      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
 		      r.err);
 	}
+#elif defined(ESDM_ES_EXT)
+	(void)by_name;
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "this build has no provider socket sources") != NULL,
+	      "--es_ext_socket was not refused without provider socket sources (output: %.300s)",
+	      r.err);
 #else
 	(void)by_name;
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
@@ -417,6 +428,74 @@ static void test_es_ext_socket_options(void)
 	CHECK(strstr(r.err, "entropy rate from 0 to 256") != NULL,
 	      "--es_ext_socket_entropy_rate 300 was not refused (output: %.300s)",
 	      r.err);
+}
+
+/*
+ * The options of the external sources may be given once per source of their
+ * kind, the n-th occurrence of an option configuring the n-th source: as often
+ * as the build has sources of the kind is accepted, once more is refused -
+ * before the parsing is done, with a message that says why.
+ */
+static void test_es_ext_repeated_options(void)
+{
+#ifdef ESDM_ES_EXT
+	static const struct {
+		const char *opt;
+		const char *arg;
+		unsigned int num;
+		const char *none;
+	} opts[] = {
+		{ "--es_ext_lib", "/nonexistent/libesdm-es-ext-test.so",
+		  ESDM_EXT_LIB_NUM, "no plugin library sources" },
+		{ "--es_ext_lib_entropy_rate", "128", ESDM_EXT_LIB_NUM,
+		  "no plugin library sources" },
+		{ "--es_ext_socket", "/nonexistent/esdm-es-ext.socket",
+		  ESDM_EXT_SOCKET_NUM, "no provider socket sources" },
+		{ "--es_ext_socket_entropy_rate", "64", ESDM_EXT_SOCKET_NUM,
+		  "no provider socket sources" },
+		{ "--es_ext_socket_uid", "1234", ESDM_EXT_SOCKET_NUM,
+		  "no provider socket sources" },
+	};
+	/* Up to 16 sources of a kind, and one occurrence more */
+	const char *argv[2 * 17 + 1];
+	const char *want;
+	struct test_run r;
+	unsigned int i, n;
+
+	for (i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
+		for (n = 0; n <= opts[i].num; n++) {
+			argv[2 * n] = opts[i].opt;
+			argv[2 * n + 1] = opts[i].arg;
+		}
+
+		/* Once per source */
+		argv[2 * opts[i].num] = NULL;
+		if (opts[i].num && geteuid()) {
+			CHECK_EQ(test_run(&r, argv, NULL), 1);
+			CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+			      "%s given %u times was not accepted (output: %.300s)",
+			      opts[i].opt, opts[i].num, r.err);
+		}
+
+		/* And once more */
+		argv[2 * opts[i].num] = opts[i].opt;
+		argv[2 * opts[i].num + 2] = NULL;
+		want = opts[i].num ? "is given more often than this build has" :
+				     opts[i].none;
+		CHECK_EQ(test_run(&r, argv, NULL), 1);
+		CHECK(strstr(r.err, want) != NULL,
+		      "%s given %u times was not refused (output: %.300s)",
+		      opts[i].opt, opts[i].num + 1, r.err);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
+		      "%s given too often was refused only after the parsing (output: %.300s)",
+		      opts[i].opt, r.err);
+	}
+
+	/* The usage tells how many sources the options configure */
+	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
+	CHECK(strstr(r.err, "n-th occurrence") != NULL,
+	      "the usage does not say the options configure one source each");
+#endif
 }
 
 /* The kernel crypto API RNG of the kernel Jitter RNG source */
@@ -468,6 +547,7 @@ int main(int argc, char *argv[])
 	test_pkcs11_module_option();
 	test_es_ext_lib_options();
 	test_es_ext_socket_options();
+	test_es_ext_repeated_options();
 	test_es_jent_kernel_name_option();
 
 	test_run_fini();
