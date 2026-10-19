@@ -159,8 +159,8 @@ struct esdm_es_cb *esdm_es[] = {
 	&esdm_es_jent_kernel,
 #endif
 #ifdef ESDM_ES_EXT
-	&esdm_es_extlib,
-	&esdm_es_extsock,
+	&esdm_es_extlib[0],
+	&esdm_es_extsock[0],
 #endif
 	&esdm_es_aux
 };

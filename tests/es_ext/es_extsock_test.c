@@ -289,7 +289,7 @@ static int test_evil_start(pthread_t *thread)
  * Tests
  ******************************************************************************/
 
-#define ES (&esdm_es_extsock)
+#define ES (&esdm_es_extsock[0])
 
 static uint32_t test_get(uint32_t bits, uint8_t *first_byte)
 {
@@ -323,9 +323,9 @@ static bool test_state_has(const char *key, const char *what)
 /* Make the next state ask the provider for its status anew */
 static void test_status_expire(void)
 {
-	mutex_lock(&extsock_state_mutex);
-	extsock_status.at = 0;
-	mutex_unlock(&extsock_state_mutex);
+	mutex_lock(&extsock[0].state_mutex);
+	extsock[0].status.at = 0;
+	mutex_unlock(&extsock[0].state_mutex);
 }
 
 /*
@@ -352,9 +352,9 @@ static struct json_object *test_provider(struct json_object **state)
 /* Is a request in progress, holding the source? */
 static bool test_busy(void)
 {
-	if (pthread_rwlock_tryrdlock(&extsock_mutex))
+	if (pthread_rwlock_tryrdlock(&extsock[0].mutex))
 		return true;
-	pthread_rwlock_unlock(&extsock_mutex);
+	pthread_rwlock_unlock(&extsock[0].mutex);
 	return false;
 }
 
@@ -920,9 +920,10 @@ static void test_evicted(void)
 
 	/* Closed to make room for the last client, once that is accepted */
 	for (i = 0; i < 200; i++) {
-		mutex_lock(&extsock_mutex);
-		closed = extsock_fd >= 0 && esdm_es_extsock_closed_locked();
-		mutex_unlock(&extsock_mutex);
+		mutex_lock(&extsock[0].mutex);
+		closed = extsock[0].fd >= 0 &&
+			 esdm_es_extsock_closed_locked(&extsock[0]);
+		mutex_unlock(&extsock[0].mutex);
 		if (closed)
 			break;
 		nanosleep(&ts, NULL);

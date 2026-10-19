@@ -56,7 +56,16 @@
 #define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 60
 #endif
 
-extern struct esdm_es_cb esdm_es_extsock;
+/*
+ * The provider socket sources: ESDM_EXT_SOCKET_NUM of them, each an entry of
+ * the ES table of its own. ESDM_EXT_SOCKET_INSTANCES(X) expands X(i) for each
+ * index i.
+ */
+#define ESDM_EXT_SOCKET_NUM 1
+#define ESDM_EXT_SOCKET_INSTANCES(X) X(0)
+#define ESDM_ES_EXTSOCK_NAME(i) "ExternalSocket"
+
+extern struct esdm_es_cb esdm_es_extsock[ESDM_EXT_SOCKET_NUM];
 
 /**
  * @brief Select the socket of the external entropy source provider

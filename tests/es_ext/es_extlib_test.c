@@ -64,7 +64,7 @@
 #include "esdm_status_txt.h"
 #include "es_ext_test_plugin.h"
 
-#define ES (&esdm_es_extlib)
+#define ES (&esdm_es_extlib[0])
 
 static struct esdm_es_ext_test_control *ctl;
 
@@ -233,9 +233,9 @@ static void test_credit(const char *path)
 /* Make the next state ask the plugin for its status anew */
 static void test_status_expire(void)
 {
-	mutex_lock(&extlib_state_mutex);
-	extlib_status.at = 0;
-	mutex_unlock(&extlib_state_mutex);
+	mutex_lock(&extlib[0].state_mutex);
+	extlib[0].status.at = 0;
+	mutex_unlock(&extlib[0].state_mutex);
 }
 
 /*
@@ -262,9 +262,9 @@ static struct json_object *test_provider(struct json_object **state)
 /* Is a request in progress, holding the source? */
 static bool test_busy(void)
 {
-	if (pthread_rwlock_tryrdlock(&extlib_mutex))
+	if (pthread_rwlock_tryrdlock(&extlib[0].mutex))
 		return true;
-	pthread_rwlock_unlock(&extlib_mutex);
+	pthread_rwlock_unlock(&extlib[0].mutex);
 	return false;
 }
 

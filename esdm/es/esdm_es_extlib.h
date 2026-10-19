@@ -36,7 +36,15 @@
 #define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 5
 #endif
 
-extern struct esdm_es_cb esdm_es_extlib;
+/*
+ * The plugin library sources: ESDM_EXT_LIB_NUM of them, each an entry of the
+ * ES table of its own. ESDM_EXT_LIB_INSTANCES(X) expands X(i) for each index i.
+ */
+#define ESDM_EXT_LIB_NUM 1
+#define ESDM_EXT_LIB_INSTANCES(X) X(0)
+#define ESDM_ES_EXTLIB_NAME(i) "ExternalLib"
+
+extern struct esdm_es_cb esdm_es_extlib[ESDM_EXT_LIB_NUM];
 
 /**
  * @brief Select the plugin library loaded as external entropy source
