@@ -126,7 +126,10 @@ instead of one per CPU node.
 .B \-\-keep_ipc
 Do not remove the RPC sockets, the status shared memory segment and the
 semaphores on shutdown. This lets running CUSE clients survive a restart of
-the daemon.
+the daemon. Only the supervisor of
+.B \-\-pid_namespace
+removes them: without it, the daemon has dropped the privileges it would need
+by then and leaves them in place, and the next start replaces them.
 .TP
 .B \-\-pid_namespace
 Fork the daemon into an isolating PID namespace. The starting process remains
