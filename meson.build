@@ -430,6 +430,11 @@ testdirs += [
 	'tests/openssl-rand-provider',
 ]
 endif
+if egd_net
+testdirs += [
+	'tests/egd-net',
+]
+endif
 foreach n : testdirs
 	subdir(n)
 endforeach
