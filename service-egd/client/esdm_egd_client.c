@@ -74,8 +74,63 @@
 
 static const struct esdm_egd_tls_module *esdm_egd_tls_mod = NULL;
 #define EGDC_TLS(fn) (esdm_egd_tls_mod->fn)
-#else
+#elif defined(ESDM_EGD_NET_TLS)
 #define EGDC_TLS(fn) esdm_tls_##fn
+#else
+/*
+ * No TLS mode: no client ever has a TLS, and none of these is called. The TLS
+ * layer may still be built - for es-ext-net -, but it is not for this library
+ * to link it, and with it the TLS stack: the library needs the C library and
+ * nothing else.
+ */
+#define EGDC_TLS(fn) esdm_egd_notls_##fn
+
+static inline void esdm_egd_notls_free(struct esdm_tls *tls)
+{
+	(void)tls;
+}
+
+static inline void esdm_egd_notls_close_notify(struct esdm_tls *tls)
+{
+	(void)tls;
+}
+
+static inline ssize_t esdm_egd_notls_send(struct esdm_tls *tls,
+					  const void *buf, size_t len)
+{
+	(void)tls;
+	(void)buf;
+	(void)len;
+	return -EOPNOTSUPP;
+}
+
+static inline int esdm_egd_notls_flush(struct esdm_tls *tls)
+{
+	(void)tls;
+	return -EOPNOTSUPP;
+}
+
+static inline ssize_t esdm_egd_notls_recv(struct esdm_tls *tls, void *buf,
+					  size_t len)
+{
+	(void)tls;
+	(void)buf;
+	(void)len;
+	return -EOPNOTSUPP;
+}
+
+static inline int esdm_egd_notls_wait(struct esdm_tls *tls, int timeout_ms)
+{
+	(void)tls;
+	(void)timeout_ms;
+	return -EOPNOTSUPP;
+}
+
+static inline const char *esdm_egd_notls_error(struct esdm_tls *tls)
+{
+	(void)tls;
+	return "no TLS";
+}
 #endif
 
 /*

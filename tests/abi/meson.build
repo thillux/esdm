@@ -114,3 +114,20 @@ if nm.found() and get_option('default_library') != 'static'
 		endforeach
 	endif
 endif
+
+# What libesdm_egd_client needs: the C library alone, whatever the TLS of the
+# build - see check_needed.py. The TLS layer of es-ext-net in the common
+# library was linked into it once.
+readelf = find_program('readelf', required: false)
+
+if readelf.found() and get_option('default_library') != 'static'
+	test('Libraries needed by libesdm_egd_client', python,
+		args: [ files('check_needed.py'), '--readelf',
+			readelf.full_path(), '--lib',
+			esdm_egd_client_lib.get_shared_lib(),
+			'--allow', 'libc\\.so\\..*', '--allow', 'libdl\\.so\\..*',
+			'--allow', 'libpthread\\.so\\..*',
+			'--allow', 'ld-linux.*\\.so\\..*' ],
+		depends: esdm_egd_client_lib.get_shared_lib(),
+		suite: 'abi')
+endif
