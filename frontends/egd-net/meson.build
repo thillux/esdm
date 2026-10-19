@@ -32,3 +32,19 @@ esdm_egd_net_server = executable('esdm-egd-net-server',
 		     esdm_common_static_lib ],
 	install: true
 	)
+
+# A client of an esdm-egd-net-server, by the EGD client library; the
+# accounting of the local peers and the creation of the socket are those of
+# the esdm-server.
+esdm_egd_net_relay = executable('esdm-egd-net-relay',
+	[ 'esdm_egd_net_relay.c', egd_net_common_src, egd_serve_src,
+	  egd_net_privileges_src,
+	  '../../service-egd/server/esdm_peer_account.c',
+	  '../../service-egd/server/esdm_peer_limit.c',
+	  '../../service-egd/server/esdm_server_socket.c' ],
+	c_args: [ egd_net_version_arg ],
+	include_directories: include_dirs_egd_net,
+	dependencies: [ dependency('threads') ] + egd_net_tls_deps,
+	link_with: [ esdm_egd_client_linked_lib, esdm_common_static_lib ],
+	install: true
+	)
