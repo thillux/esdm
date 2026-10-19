@@ -73,7 +73,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_full_timeout_buf buffer;
-	size_t maxbuflen = buflen, orig_buflen = buflen;
+	/* See esdm_rpcc_get_random_bytes_full_int() */
+	size_t maxbuflen = min_size(buflen, ESDM_RPC_MAX_DATA),
+	       orig_buflen = buflen;
 	struct timespec timeout;
 	ssize_t ret = 0;
 

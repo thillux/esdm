@@ -534,6 +534,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * Add rpc_bench (meson test --benchmark): the throughput and the CPU time per request of the RPC interface by the calls of its consumers - full, prediction resistant and unseeded reads, getrandom(2) through libesdm_getrandom and, for comparison, the kernel's -, in requests of 32 bytes to 1 MiB, from several threads of several processes
 
+* RPC client: a read larger than one answer carries asks for no more than the server serves from its first request on, rather than learning that by a request refused for its size on every call - a round trip saved per call, one in three for a read of 64 KiB
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

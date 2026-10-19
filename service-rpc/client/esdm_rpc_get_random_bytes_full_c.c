@@ -69,7 +69,14 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_full_buf buffer;
-	size_t maxbuflen = buflen, orig_buflen = buflen;
+	/*
+	 * No more per request than the server serves: asked for more, it only
+	 * answers with its maximum, and every larger call paid a round trip
+	 * for being told what is known here already. A server serving less
+	 * still says so, and is asked for that much from then on.
+	 */
+	size_t maxbuflen = min_size(buflen, ESDM_RPC_MAX_DATA),
+	       orig_buflen = buflen;
 	ssize_t ret = 0;
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
