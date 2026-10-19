@@ -25,14 +25,14 @@ entropy rate of one of them at runtime sets the others to zero
 
 - The indigo marked parts refer to the scheduler entropy source of the kernel
   module `kernel/esdm_es` that records the time stamps of context switches
-  in per-CPU rings. The recorded time stamps are post-processed with an
-  SP800-90A DRBG of the kernel module when seeding of the DRNG is to be
+  in per-CPU rings. The recorded time stamps are post-processed with a
+  DRBG of the kernel module when seeding of the DRNG is to be
   performed.
 
 - The orange marked parts refer to the interrupt entropy source of the same
   kernel module which has an identical architecture compared to the
   scheduler-based entropy source: the time stamps of interrupts are recorded
-  in per-CPU rings and post-processed with an SP800-90A DRBG.
+  in per-CPU rings and post-processed with a DRBG.
 
 - The eBPF-based scheduler and interrupt entropy sources collect the same
   event timing on a stock Linux kernel: eBPF programs attached to the
@@ -371,8 +371,7 @@ operations. The operation $"SHAKE256"(x, l)$ refers to the extendable output
 function SHAKE256 provided by the crypto backend returning $l$ bits of output,
 the operation $"SHA"()$ to the conditioning hash of the crypto backend
 (SHA-512 or SHA3-512, see section @sec:backends), the operations
-$"DRBG.Seed"$ and $"DRBG.Generate"$ to the SP800-90A DRBG of the kernel
-module.
+$"DRBG.Seed"$ and $"DRBG.Generate"$ to the DRBG of the kernel module.
 
 === Scheduler and Interrupt Entropy Sources of the Kernel Module <sec:dp-sched-irq>
 
@@ -411,10 +410,10 @@ module.
   $ "EP"_n = "DRBG.Seed"("EP"_(n-1), "CP"_("CPU0") || "CP"_("CPU1") || ...
     || "CP"_("CPUX")) $ <eq:ep-cpu>
 
-  The DRBG is the HMAC_DRBG with SHA-512 per default (module parameter
-  `esdm_drbg_type`: 0 HMAC_DRBG, 1 Hash_DRBG with SHA-512, 2 CTR_DRBG with
-  AES-256, all of the kernel crypto API). From Linux 7.2 on, the kernel module
-  uses an HMAC_DRBG with SHA-512 of its own.
+  The DRBG is the XDRBG-256 of the ESDM (`esdm/crypto/esdm_xdrbg.c`), which
+  the kernel module compiles, over the SHAKE256 of the kernel's SHA-3 library
+  (`CONFIG_CRYPTO_LIB_SHA3`), which Linux 7.2 and later require. On an older kernel without that library, it is the HMAC_DRBG with
+  SHA-512 of the kernel crypto API.
 
 + Generation: An output block is generated from the DRBG with the additional
   input "ESDM_IRQ_DRBG" for domain separation:
@@ -765,7 +764,7 @@ The interrupt entropy source is provided by the kernel module
 default). The kernel patch `0002-ESDM-interrupt-entropy-source-hooks` hooks a
 callback of the module into the interrupt handling of the Linux kernel. The
 ESDM reads the entropy source via the IOCTLs of the device `/dev/esdm_es`
-(`kernel/esdm_es/esdm_es_ioctl.h`).
+(`kernel/shared/esdm_es_ioctl.h`).
 
 The ESDM interrupt processing callback is the hot code path in the ESDM and
 special care is taken that it is as short as possible and that it operates

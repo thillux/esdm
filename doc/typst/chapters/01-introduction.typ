@@ -88,7 +88,7 @@ contemporary and future-proof entropy source and DRNG management framework:
 
   - Exclusive use of cryptographic mechanisms for conditioning entropy data
     with a clear mathematical description as given in section
-    @sec:data-processing: an SP800-90A DRBG in the kernel module, an
+    @sec:data-processing: a DRBG in the kernel module, an
     XDRBG-256 over SHAKE256 for the auxiliary pool and the conditioning pool
     of the eBPF entropy sources, and the conditioning hash for the
     compression of CPU entropy source data – non-cryptographic operations

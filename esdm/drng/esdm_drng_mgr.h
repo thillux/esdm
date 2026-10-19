@@ -36,7 +36,6 @@ extern struct thread_wait_queue esdm_init_wait;
 extern mutex_w_t esdm_crypto_cb_update;
 extern const struct esdm_drng_cb *esdm_default_drng_cb;
 extern const struct esdm_hash_cb *esdm_default_hash_cb;
-extern const struct esdm_xof_cb *esdm_default_xof_cb;
 
 /* DRNG state handle */
 struct esdm_drng {

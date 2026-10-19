@@ -5,6 +5,15 @@
 }:
 
 let
+  # From 7.2 on CRYPTO_FIPS depends on the kernel's own DRBG being built in.
+  # esdm_es does not use that DRBG there (drbg.nix).
+  drbgConfig = lib.optionalAttrs (!lib.versionOlder kernel.version "7.2") (
+    with lib.kernel;
+    {
+      CRYPTO_DRBG = yes;
+    }
+  );
+
   selfestConfig =
     if (lib.versionOlder kernel.version "6.15") then
       with lib.kernel;
@@ -29,6 +38,7 @@ in
         MODULE_SIG = lib.mkForce yes;
         MODULE_SIG_ALL = yes;
       }
-      // selfestConfig;
+      // selfestConfig
+      // drbgConfig;
   }
 ]

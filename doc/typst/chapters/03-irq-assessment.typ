@@ -16,8 +16,8 @@ entropy assessment.
 The interrupt entropy source assessed here is the one implemented by the Linux
 kernel module `esdm_es.ko` of kernel/esdm\_es: hook patches for the
 supported kernel versions call the module for every interrupt, the module
-collects and health tests the time stamps and conditions them with an
-SP800-90A DRBG, and the ESDM reads the result through the ioctls of the device
+collects and health tests the time stamps and conditions them with a
+DRBG, and the ESDM reads the result through the ioctls of the device
 file /dev/esdm\_es (section @sec:irq-processing). The eBPF-based interrupt
 entropy source (`es_irq_ebpf`, section @sec:ebpf) observes the same noise
 source - the timing of interrupts - on a stock kernel, but processes it
@@ -417,11 +417,10 @@ test failures, section @sec:health-tests explains the applied actions.
 
 The kernel module uses the following conditioning component:
 
-- The collected time stamps are post-processed with an SP800-90A DRBG of the
-  kernel module: the HMAC_DRBG with SHA-512 by default, alternatively the
-  Hash_DRBG with SHA-512 or the CTR_DRBG with AES-256 as selected with the
-  module parameter `esdm_drbg_type` on kernels up to Linux 7.1; from Linux 7.2
-  on, the module carries its own HMAC_DRBG with SHA-512
+- The collected time stamps are post-processed with a DRBG of the kernel
+  module: the XDRBG-256 of the ESDM (esdm\_xdrbg.c), which the module
+  compiles, over the SHAKE256 of the kernel's SHA-3 library, which Linux 7.2 and later require; on an older kernel without that
+  library, the SP800-90A HMAC_DRBG with SHA-512 of the kernel crypto API
   (esdm\_drbg\_kcapi.c). The time stamps are the seed of a DRBG reseed, after
   which the DRBG generates one output block of its security strength of 256
   bits (`esdm_es_drbg_pool_extract_block`).
@@ -570,7 +569,7 @@ validation passes according to SP800-90B section 3.1.4.]
 === SP800-90B Section 3.1.5 <sec:90b-315>
 
 The conditioning component applied to the interrupt entropy source is the
-SP800-90A DRBG of the kernel module outlined in section @sec:ig718-c3. Each
+DRBG of the kernel module outlined in section @sec:ig718-c3. Each
 output block of 256 bits is generated as follows
 (`esdm_es_drbg_pool_extract_block`):
 
@@ -581,11 +580,12 @@ output block of 256 bits is generated as follows
   (kernel booted with `fips=1`), $o$ is 64 + 1 bits, and 128 + 1 bits for the
   first block after the DRBG was allocated (`esdm_compress_osr`,
   `esdm_init_osr`) - the additional bit reaches full entropy in the internal
-  state after the HMAC update, as the code notes. Without FIPS mode, $o$ is
+  state after the DRBG update, as the code notes. Without FIPS mode, $o$ is
   zero.
 
 + Conditioning: the collected time stamps are the seed of a reseed of the DRBG
-  (the DRBG update function of SP800-90A), followed by one generate operation
+  (the reseed function of the XDRBG, the update function of the SP800-90A
+  HMAC_DRBG), followed by one generate operation
   of 256 bits with the string “ESDM\_IRQ\_DRBG” as additional input. The DRBG
   was instantiated with that string as personalization string.
 
@@ -609,7 +609,8 @@ are concatenated as seed of the DRBG, and the blocks of a request of more than
 #paragraph[DRBG][The input of the conditioning $n_"in"$ is the number of
 collected time stamps times 64 bits. The output $n_"out"$ is one DRBG output
 block of 256 bits. The narrowest internal width $n w$ is the size of the
-internal state of the DRBG, 512 bits for the HMAC_DRBG with SHA-512.]
+internal state of the DRBG, 512 bits for the XDRBG-256 (its state $V$) as
+for the HMAC_DRBG with SHA-512.]
 
 SP800-90B section 3.1.5.1.2 defines the output entropy of a conditioning
 component. Applying it to one block with the default values - $R = 768$
@@ -863,18 +864,19 @@ SP800-90C as outlined in section @sec:sp80090c.
 
 === SP800-90B Section 3.2.3 Requirement 1 <sec:90b-323-1>
 
-The conditioning component is the SP800-90A DRBG of the kernel module. See
+The conditioning component is the DRBG of the kernel module. See
 section @sec:90b-315 for a discussion of the input and output sizes.
 
 === SP800-90B Section 3.2.3 Requirement 2 <sec:90b-323-2>
 
-On kernels up to Linux 7.1, the conditioning uses the DRBG implementation of
-the Linux kernel crypto API, whose functions the kernel patch
-0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM exports. From Linux
-7.2 on, the kernel module carries an HMAC_DRBG with SHA-512 built on the
-HMAC-SHA512 library of the kernel; a known-answer test with the NIST ACVP
-vector the kernel used for its `drbg_nopr_hmac_sha512` guards that
-implementation (esdm\_drbg\_kcapi.c).
+On a kernel with the SHA-3 library (`CONFIG_CRYPTO_LIB_SHA3`), required from
+Linux 7.2 on, the kernel module compiles the XDRBG-256 implementation of the
+ESDM (esdm\_xdrbg.c, the one of its auxiliary pools) and operates it on the
+SHAKE256 of that library; the known-answer test of that implementation, run
+when the module is loaded, covers it and the SHAKE256 (esdm\_drbg\_kcapi.c).
+On an older kernel without that library, the conditioning uses the HMAC_DRBG
+implementation of the Linux kernel crypto API, whose functions the kernel patch
+0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM exports.
 
 === SP800-90B Section 3.2.3 Requirement 3 <sec:90b-323-3>
 
@@ -887,7 +889,7 @@ See section @sec:90b-323-3: no key is supplied to the conditioning component.
 
 === SP800-90B Section 3.2.3 Requirement 5 <sec:90b-323-5>
 
-The conditioning component is the SP800-90A DRBG. See section @sec:90b-315
+The conditioning component is the DRBG. See section @sec:90b-315
 for a discussion of the narrowest internal width and the output block size.
 
 === SP800-90B Section 3.2.4 Requirement 1 <sec:90b-324-1>

@@ -19,14 +19,12 @@
  * DAMAGE.
  */
 
-#include <errno.h>
-#include <string.h>
-
-#include "build_bug_on.h"
-#include "esdm_drng_mgr.h"
+/*
+ * The kernel module esdm_es compiles this file as well, with the environment
+ * esdm_portable.h provides there.
+ */
+#include "esdm_portable.h"
 #include "esdm_xdrbg.h"
-#include "memset_secure.h"
-#include "ret_checkers.h"
 #include "selftest_kat.h"
 
 int esdm_xdrbg_alloc(struct esdm_xdrbg *xdrbg)

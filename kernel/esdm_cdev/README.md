@@ -27,7 +27,9 @@ ESDM at all, see below.
     make KERNEL_DIR=/lib/modules/$(uname -r)/build
     insmod esdm_cdev.ko
 
-The module needs no kernel patches and builds on Linux 6.1 and later. The flake
+in this directory of the ESDM source tree, whose
+`service-egd/esdm_egd_protocol.h` the module takes the EGD protocol from. The
+module needs no kernel patches and builds on Linux 6.1 and later. The flake
 of this repository packages it as `esdm_cdev` of its kernel package sets, and
 builds it against every kernel it knows (`esdm_cdev_<version>`, with the
 warnings of `W=1` as errors).

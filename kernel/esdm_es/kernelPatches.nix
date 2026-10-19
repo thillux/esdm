@@ -33,7 +33,9 @@ in
   }
 ]
 # Since 7.2 the kernel DRBG is a private HMAC_DRBG without the internals this
-# patch exported; esdm_es brings its own HMAC_DRBG there (esdm_drbg_kcapi.c).
+# patch exported; esdm_es uses the XDRBG-256 of the ESDM over the kernel's
+# SHAKE256 there (esdm_drbg_kcapi.c), as on every kernel with the SHA-3
+# library.
 # 6.12 and 6.18 differ only in the namespace of the exports, a string literal
 # since 6.13.
 ++ lib.optional (lib.versionOlder kernel.version "7.2") {

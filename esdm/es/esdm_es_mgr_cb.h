@@ -205,8 +205,4 @@ void esdm_kernel_set_requested_bits(uint32_t *configured_bits,
 		}                                                                                         \
 	} while (0)
 
-/* Kernel entropy sources */
-#define ESDM_ES_MGR_REQ_BITS_MASK 0x1ff
-#define ESDM_ES_MGR_RESET_BIT 0x80000000
-
 #endif /* _ESDM_ES_MGR_CB_H */

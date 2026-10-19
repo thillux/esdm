@@ -104,8 +104,8 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 		return false;
 	}
 
-	/* insert gathered entropy as additional input, HMAC-DRBG will insert
-	 * this into his state before generating output! */
+	/* insert the gathered entropy into the DRBG state as a reseed before
+	 * generating output */
 	ret = esdm_drbg_cb->drbg_seed(drbg_state, &seedlist);
 	if (ret) {
 		pr_warn("unable to seed drbg in %s-based noise source\n",

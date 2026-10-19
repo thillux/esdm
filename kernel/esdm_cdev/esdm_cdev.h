@@ -11,7 +11,7 @@
 #include <linux/types.h>
 #include <linux/uio.h>
 
-#include "esdm_cdev_egd_protocol.h"
+#include "esdm_egd_protocol.h"
 
 /* State of the ESDM as the answer to ESDM_EGD_CMD_ESDM_GET_STATE reports it */
 struct esdm_cdev_state {

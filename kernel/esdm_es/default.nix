@@ -22,7 +22,21 @@ stdenv.mkDerivation rec {
       );
     in
     builtins.head (builtins.head matches);
-  src = ./.;
+  # The sources of the module and those it shares with the ESDM
+  src = lib.fileset.toSource {
+    root = ../..;
+    fileset = lib.fileset.unions [
+      ./Makefile
+      (lib.fileset.fileFilter (file: file.hasExt "c" || file.hasExt "h") ./.)
+      ../shared
+      ../../esdm/crypto/esdm_xdrbg.c
+      ../../esdm/crypto/esdm_xdrbg.h
+      ../../esdm/crypto/esdm_xof.h
+      ../../common/esdm_portable.h
+      ../../common/selftest_kat.h
+    ];
+  };
+  sourceRoot = "${src.name}/kernel/esdm_es";
 
   preBuild = ''
     sed -i '/depmod/d' Makefile

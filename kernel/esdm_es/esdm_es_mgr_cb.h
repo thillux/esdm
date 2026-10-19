@@ -23,6 +23,10 @@ struct entropy_buf {
 	u32 e_bits;
 };
 
+/* The IOCTLs reading the entropy buffer, see kernel/shared/esdm_es_ioctl.h */
+#define ESDM_IRQ_ENT_BUF ESDM_IRQ_ENT_BUF_IOCTL(struct entropy_buf)
+#define ESDM_SCHED_ENT_BUF ESDM_SCHED_ENT_BUF_IOCTL(struct entropy_buf)
+
 void esdm_reset_state(enum esdm_internal_es es);
 
 /*

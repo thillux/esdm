@@ -22,15 +22,17 @@ stdenv.mkDerivation rec {
       );
     in
     builtins.head (builtins.head matches);
-  # The sources only: a change of the README or the VM test does not rebuild
-  # the module against every kernel.
+  # The sources only, the EGD protocol of the ESDM included: a change of the
+  # README or the VM test does not rebuild the module against every kernel.
   src = lib.fileset.toSource {
-    root = ./.;
+    root = ../..;
     fileset = lib.fileset.unions [
       ./Makefile
       (lib.fileset.fileFilter (file: file.hasExt "c" || file.hasExt "h") ./.)
+      ../../service-egd/esdm_egd_protocol.h
     ];
   };
+  sourceRoot = "${src.name}/kernel/esdm_cdev";
 
   # python3 for the kernel-doc check of W=1, which newer kernels run in it
   nativeBuildInputs = [

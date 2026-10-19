@@ -34,10 +34,6 @@
 /* Alignmask that is intended to be identical to CRYPTO_MINALIGN */
 #define ESDM_KCAPI_ALIGN ARCH_KMALLOC_MINALIGN
 
-/* low 9 bits - can set 512 bits of entropy max */
-#define ESDM_ES_MGR_REQ_BITS_MASK 0x1ff
-#define ESDM_ES_MGR_RESET_BIT 0x80000000
-
 /****************************** Helper code ***********************************/
 
 /*
@@ -97,7 +93,7 @@ static inline bool esdm_sp80090c_compliant(void)
 static inline u32 esdm_compress_osr(void)
 {
 	/*
-	 * adjusted by 1 bit too reach full entropy in internal state after HMAC
+	 * adjusted by 1 bit too reach full entropy in internal state after DRBG
 	 * update
 	 */
 	return esdm_sp80090c_compliant() ? (ESDM_OVERSAMPLE_ES_BITS + 1) : 0;
@@ -106,7 +102,7 @@ static inline u32 esdm_compress_osr(void)
 static inline u32 esdm_init_osr(void)
 {
 	/*
-	 * adjusted by 1 bit too reach full entropy in internal state after HMAC
+	 * adjusted by 1 bit too reach full entropy in internal state after DRBG
 	 * update
 	 */
 	return esdm_sp80090c_compliant() ?

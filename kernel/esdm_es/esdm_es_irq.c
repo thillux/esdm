@@ -223,7 +223,6 @@ static void esdm_es_irq_set_callbackfn(struct work_struct *work)
 	 * and treats a NULL DRBG state as no entropy available. So nothing it
 	 * may use is ever freed in the error paths below.
 	 */
-	/* switch to XDRBG, if upstream in the kernel */
 	drbg_state = esdm_drbg_cb->drbg_alloc(
 		(u8 *)esdm_irq_drbg_domain_separation,
 		sizeof(esdm_irq_drbg_domain_separation) - 1);

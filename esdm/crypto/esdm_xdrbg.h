@@ -20,12 +20,20 @@
 #ifndef _ESDM_XDRBG_H
 #define _ESDM_XDRBG_H
 
+#ifdef __KERNEL__
+#include <linux/types.h>
+#else
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#endif
 
-#include "esdm_crypto.h"
+/*
+ * ESDM_DRNG_INIT_SEED_SIZE_BYTES: in the kernel module esdm_es, which
+ * compiles esdm_xdrbg.c as well, the one of its own esdm_definitions.h
+ */
 #include "esdm_definitions.h"
+#include "esdm_xof.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,8 +59,10 @@ extern "C" {
  * gives the backtracking resistance; a single unknown input after an
  * extraction suffices for the prediction resistance of the next one.
  *
- * The SHAKE256 is the one of the crypto backend, esdm_default_xof_cb. The
- * caller serializes the calls on one XDRBG.
+ * The SHAKE256 is esdm_default_xof_cb: the one of the crypto backend, or the
+ * kernel's in the kernel module esdm_es, whose interrupt and scheduler
+ * entropy sources condition their time stamps with this XDRBG-256 as well.
+ * The caller serializes the calls on one XDRBG.
  */
 
 /* Size of the state V, which is the most entropy a pool holds */

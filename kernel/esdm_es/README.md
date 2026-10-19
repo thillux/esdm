@@ -39,8 +39,11 @@ To use the entropy source, the following kernel patches must be applied
 - `0001-ESDM-scheduler-entropy-source-hooks*.patch`
 - `0002-ESDM-interrupt-entropy-source-hooks*.patch`
 - `0003-ESDM-crypto-DRBG-externalize-DRBG-functions-for-ESDM*.patch`
-  (only up to Linux 7.1; from 7.2 on the kernel DRBG is private and the
-  module carries its own HMAC_DRBG)
+  (only for kernels without the SHA-3 library, i.e. without
+  `CONFIG_CRYPTO_LIB_SHA3`, up to Linux 7.1: the module uses the kernel's
+  HMAC_DRBG there; with the SHA-3 library it uses the XDRBG-256 of the ESDM
+  over the kernel's SHAKE256, which Linux 7.2 and later require, e.g. by
+  `CONFIG_CRYPTO_SHA3`)
 and the Linux kernel compiled. Use the patch suffixed with the highest kernel
 version not newer than the target kernel (hooks: `_6.1`, `_6.6`, `_6.12`,
 `_6.18`, `_7.3`, the `_6.18` hooks apply up to 7.2; DRBG: `_6.6` for 6.1 to
@@ -51,10 +54,13 @@ This patch adds a small framework that allows a kernel
 module to be inserted into the kernel at runtime that will provide the
 entropy source implementation.
 
-Both entropy sources must be compiled by invoking `make`. Specific options
-can be set in the corresponding `Makefile` allowing selectively disabling
-either entropy source. This generates a kernel module `esdm_es.ko` that can now
-be inserted into the kernel at any time.
+Both entropy sources must be compiled by invoking `make` in this directory of
+the ESDM source tree: the module shares code with the ESDM, which it takes from
+the tree - the IOCTL interface of `/dev/esdm_es` and the cutoffs of the health
+tests in `kernel/shared`, and the XDRBG-256 of `esdm/crypto/esdm_xdrbg.c`.
+Specific options can be set in the corresponding `Makefile` allowing
+selectively disabling either entropy source. This generates a kernel module
+`esdm_es.ko` that can now be inserted into the kernel at any time.
 
 ## Usage
 

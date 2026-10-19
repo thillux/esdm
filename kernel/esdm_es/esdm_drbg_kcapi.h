@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 /*
- * ESDM SP800-90A definitions
+ * ESDM DRBG definitions
  *
  * Copyright (C) 2025 - 2026, Stephan Mueller <smueller@chronox.de>
  */
