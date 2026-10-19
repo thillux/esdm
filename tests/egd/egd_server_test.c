@@ -53,7 +53,7 @@
  */
 #define TEST_TIMEOUT_MS 30000
 
-/* How long the server is given to create its socket. */
+/* How long the server is given to accept on its socket. */
 #define TEST_SERVER_START_SEC 30
 
 /*
@@ -76,6 +76,23 @@ static pid_t server_pid;
 			ret = 1;                                               \
 		}                                                              \
 	} while (0)
+
+/* Does the server accept connections on its socket yet? */
+static int server_accepts(void)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	int ret;
+
+	if (fd < 0)
+		return 0;
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
+	ret = !connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+	close(fd);
+
+	return ret;
+}
 
 static int server_start(void)
 {
@@ -120,9 +137,12 @@ static int server_start(void)
 		_exit(1);
 	}
 
-	/* The socket appears once the server is ready to serve it. */
+	/*
+	 * The server is ready once it accepts on its socket: the file is there
+	 * from the bind(2) on, but a connection is refused until the listen(2).
+	 */
 	for (i = 0; i < TEST_SERVER_START_SEC * 5; i++) {
-		if (!stat(sockpath, &sb) && S_ISSOCK(sb.st_mode))
+		if (server_accepts())
 			return 0;
 		if (waitpid(server_pid, NULL, WNOHANG) == server_pid) {
 			printf("The esdm-server terminated during its start\n");
@@ -132,7 +152,7 @@ static int server_start(void)
 		nanosleep(&wait, NULL);
 	}
 
-	printf("The esdm-server did not create %s\n", sockpath);
+	printf("The esdm-server did not accept on %s\n", sockpath);
 
 	return 1;
 }

@@ -101,9 +101,9 @@ static int server_start(void)
 		_exit(127);
 	}
 
-	/* The server is up once it has bound its unprivileged RPC socket */
-	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-				TEST_WAIT_TIMEOUT_MS)) {
+	/* The server is up once it accepts on its unprivileged RPC socket */
+	if (!test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+				    TEST_WAIT_TIMEOUT_MS)) {
 		printf("the esdm-server did not come up\n");
 		return 1;
 	}

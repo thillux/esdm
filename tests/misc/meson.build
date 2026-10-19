@@ -105,3 +105,13 @@ if get_option('linux-devfiles').enabled()
 		priority: -10,
 		suite: 'cuse')
 endif
+
+# The helpers the tests start their daemons with - tests/test_wait.h
+test_env_test = executable(
+		'test_env_test',
+		[ 'test_env_test.c' ],
+		include_directories: include_directories('../common'),
+		dependencies: dependency('threads'),
+	)
+
+test('Test environment helpers', test_env_test)

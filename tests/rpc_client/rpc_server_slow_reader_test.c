@@ -143,8 +143,8 @@ static int test_server_start(void)
 	}
 	test_server_pid = pid;
 
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+	test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+			       TEST_WAIT_TIMEOUT_MS);
 
 	return 0;
 }
