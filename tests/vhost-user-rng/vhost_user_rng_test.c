@@ -1705,6 +1705,77 @@ out_log:
 }
 
 /*
+ * The ESDM gone, and its socket with it: the daemon asks again after 100 ms,
+ * doubling the wait up to 5 seconds - what the RPC client logs about every
+ * attempt in debug messages shows when it does. A daemon of its own, logging
+ * into a file.
+ */
+static void test_lifecycle_esdm_backoff(void)
+{
+	uint64_t start, last = 0, gap, gap_max = 0;
+	unsigned int seen = 0, n;
+	struct fe_mem mem;
+	struct fe fe;
+	int log_fd, ret;
+	pid_t pid;
+
+	TEST_STEP("the ESDM gone: asked again at most every 5 seconds");
+	log_fd = test_log_open();
+	CHECK(log_fd >= 0, "log file");
+	if (log_fd < 0)
+		return;
+	pid = test_start_log(NULL, log_fd, true);
+	CHECK(pid > 0, "daemon started: %d", (int)pid);
+	if (pid <= 0)
+		goto out_log;
+
+	CHECK(!fe_mem_create(&mem, TEST_MEM_SIZE, TEST_GPA), "memfd");
+	ret = fe_setup(&fe, test_sock, &mem, 0, TEST_PFEATURES, TEST_NUM);
+	CHECK(!ret, "set-up: %d", ret);
+	if (ret)
+		goto out;
+	drv_desc(&fe, 0, fe_data_gpa(&fe, 0), 64, VIRTQ_DESC_F_WRITE, 0);
+	test_serve(&fe, 0, 64);
+
+	standin_stop();
+	drv_avail(&fe, 0);
+
+	/*
+	 * Attempts after 0.1, 0.3, 0.7, 1.5, 3.1, 6.3 and 11.3 s: the wait
+	 * before the last one is the first of 5 seconds
+	 */
+	start = fe_now_ms();
+	while (fe_now_ms() - start < 16000 && gap_max < 4500) {
+		n = test_log_count(log_fd, "not available");
+		if (n != seen) {
+			uint64_t now = fe_now_ms();
+
+			gap = now - last;
+			if (seen && gap > gap_max)
+				gap_max = gap;
+			seen = n;
+			last = now;
+		}
+		fe_sleep_ms(20);
+	}
+	CHECK(gap_max >= 4500 && gap_max < 6000,
+	      "%u attempts, the longest wait between two %llu ms", seen,
+	      (unsigned long long)gap_max);
+
+	ret = standin_start();
+	CHECK(!ret, "the stand-in back: %d", ret);
+	CHECK(drv_wait_used(&fe, 2, 3 * TEST_WAIT_MS),
+	      "served once the ESDM is back");
+
+out:
+	fe_close(&fe);
+	fe_mem_destroy(&mem);
+	test_end(pid);
+out_log:
+	test_log_close(log_fd);
+}
+
+/*
  * A request waits for the ESDM to be seeded, and what the front-end does
  * meanwhile is never held up by it
  */
@@ -1924,6 +1995,7 @@ static int test_group_lifecycle(void)
 
 	/* Daemons of their own, after the one of the group ended */
 	test_lifecycle_esdm_refusing();
+	test_lifecycle_esdm_backoff();
 
 	return 0;
 }

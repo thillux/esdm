@@ -65,7 +65,7 @@
 /* Reads of a kick descriptor in a row that make it no eventfd */
 #define VU_RNG_KICK_READS 16
 
-/* Wait between failed attempts to reach the ESDM, growing up to the second */
+/* Wait between failed attempts to reach the ESDM, doubling up to 5 seconds */
 #define VU_RNG_BACKOFF_MIN_MS 100
 #define VU_RNG_BACKOFF_MAX_MS 5000
 
@@ -194,8 +194,9 @@ static int vu_rng_fill(void *ctx, uint8_t *buf, size_t len, unsigned int gen)
 		vu_rng_set_failing(rng, true);
 
 		vu_rng_sleep(rng, gen, backoff);
-		if (backoff < VU_RNG_BACKOFF_MAX_MS)
-			backoff *= 2;
+		backoff = backoff < VU_RNG_BACKOFF_MAX_MS / 2 ?
+				  2 * backoff :
+				  VU_RNG_BACKOFF_MAX_MS;
 	}
 }
 
