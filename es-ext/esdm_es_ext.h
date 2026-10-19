@@ -122,7 +122,8 @@ extern "C" {
  * @version: ESDM_ES_EXT_PLUGIN_VERSION
  * @name: Name of the source: the ESDM shows the source under it in its
  *	  status, and in its log, in place of the name of the entropy source it
- *	  is loaded as - "ExternalLib", "ExternalLib1" and so on - which the
+ *	  is loaded as - "ExternalLib", or "ExternalLib0", "ExternalLib1" and
+ *	  so on in an ESDM with several - which the
  *	  status keeps as the "instance" of the source. 1 to
  *	  ESDM_ES_EXT_NAME_MAX bytes of UTF-8 without control characters,
  *	  terminated by a NUL; a name that is none of that, or the name of

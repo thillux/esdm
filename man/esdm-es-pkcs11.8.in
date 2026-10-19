@@ -145,7 +145,8 @@ if one is given and both make a valid name of up to 32 bytes \-
 or the name of
 .BR \-\-name .
 The ESDM shows the source under this name in its status and its log, with its
-instance name (ExternalSocket, ExternalSocket1, ...) next to it, which tells
+instance name (ExternalSocket, or ExternalSocket0, ExternalSocket1, ... in an
+ESDM with several) next to it, which tells
 several daemons apart.
 .TP
 entropy rate

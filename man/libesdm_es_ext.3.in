@@ -90,8 +90,10 @@ is the name of the source: the ESDM shows the source under it in its status
 member of the source \- and in its log, in place of the name of the entropy
 source the plugin is loaded as
 .RB ( ExternalLib ,
+or
+.BR ExternalLib0 ,
 .B ExternalLib1
-and so on), which the status keeps as the
+and so on with several), which the status keeps as the
 .B instance
 of the source. It is 1 to
 .B ESDM_ES_EXT_NAME_MAX
