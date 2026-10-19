@@ -1307,12 +1307,20 @@ static void esdm_egd_conn_arm(int epfd, struct esdm_egd_conn *conn)
 	conn->armed = ev.events;
 }
 
-/* Consume @len bytes from the head of the connection's input buffer. */
+/*
+ * Consume @len bytes from the head of the connection's input buffer.
+ *
+ * The @len bytes behind what is left are wiped: client supplied entropy data
+ * must not linger in the buffer, neither of the consumed command nor of what
+ * follows it - the beginning of the next insertion, say - whose copy the move
+ * leaves at its old offset.
+ */
 static void esdm_egd_consume(struct esdm_egd_conn *conn, size_t len)
 {
 	conn->in_len -= len;
 	if (conn->in_len)
 		memmove(conn->in, conn->in + len, conn->in_len);
+	memset_secure(conn->in + conn->in_len, 0, len);
 }
 
 /* Does the command change something rather than only produce an answer? */
@@ -1502,8 +1510,6 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		}
 
 consume:
-		/* Do not leave client supplied entropy data in the buffer. */
-		memset_secure(conn->in, 0, cmd_len);
 		esdm_egd_consume(conn, cmd_len);
 
 		if (ret)

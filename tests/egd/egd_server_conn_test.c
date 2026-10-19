@@ -95,13 +95,35 @@ static atomic_size_t test_inserted;
 /* Time each insertion takes on top, in microseconds. */
 static atomic_uint test_insert_delay_us;
 
+/*
+ * What lies behind the data of an insertion in the server's input buffer, see
+ * test_input_wiped(): the length of the insertion to look behind, 0 for none,
+ * how many bytes to look at, and whether one was seen and found anything.
+ */
+static atomic_uint test_probe_len;
+static atomic_uint test_probe_span;
+static atomic_bool test_probe_seen;
+static atomic_bool test_probe_stale;
+
 int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 			 uint32_t entropy_bits);
 int test_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 			 uint32_t entropy_bits)
 {
 	unsigned int delay_us = atomic_load(&test_insert_delay_us);
+	unsigned int probe_len = atomic_load(&test_probe_len);
 	int rc = esdm_pool_insert_aux(inbuf, inbuflen, entropy_bits);
+
+	if (probe_len && inbuflen == probe_len) {
+		unsigned int i, span = atomic_load(&test_probe_span);
+		bool stale = false;
+
+		for (i = 0; i < span; i++)
+			stale |= (inbuf[inbuflen + i] != 0);
+
+		atomic_store(&test_probe_stale, stale);
+		atomic_store(&test_probe_seen, true);
+	}
 
 	if (delay_us) {
 		struct timespec ts = { .tv_sec = 0,
@@ -605,6 +627,80 @@ out:
 #undef TEST_UID_CONNECTIONS
 }
 
+/*
+ * No copy of what a client inserted lingers in the server's input buffer.
+ * Consuming a command moves what follows it - the beginning of the next
+ * insertion, say - to the front of the buffer, and the bytes it was moved from
+ * have to be wiped as well as the command itself.
+ *
+ * The insertion wrapper looks for them: the second insertion arrives in two
+ * parts, the first together with the insertion before it, and is the only
+ * command in the buffer by the time it is inserted. Behind its data, as far as
+ * the first part reached, nothing but wiped memory may follow - the copy of the
+ * first part left at its old offset otherwise.
+ */
+static void test_input_wiped(void)
+{
+#define TEST_FIRST 250
+#define TEST_SECOND 201
+#define TEST_SECOND_PART 100
+	uint8_t stream[4 + TEST_FIRST + 4 + TEST_SECOND];
+	const size_t split = 4 + TEST_FIRST + 4 + TEST_SECOND_PART;
+	size_t expected = atomic_load(&test_inserted);
+	unsigned int i;
+	int fd;
+
+	printf("EGD conn: inserted data does not linger in the input buffer\n");
+
+	/* Without an entropy claim, and none of the data bytes zero. */
+	memset(stream, 0, sizeof(stream));
+	stream[0] = ESDM_EGD_CMD_WRITE_ENTROPY;
+	stream[3] = TEST_FIRST;
+	for (i = 0; i < TEST_FIRST; i++)
+		stream[4 + i] = (uint8_t)(i | 0x80);
+	stream[4 + TEST_FIRST] = ESDM_EGD_CMD_WRITE_ENTROPY;
+	stream[4 + TEST_FIRST + 3] = TEST_SECOND;
+	for (i = 0; i < TEST_SECOND; i++)
+		stream[4 + TEST_FIRST + 4 + i] = (uint8_t)(i | 0x40);
+
+	atomic_store(&test_probe_span, (unsigned int)(split - 4 - TEST_SECOND));
+	atomic_store(&test_probe_seen, false);
+	atomic_store(&test_probe_stale, false);
+	atomic_store(&test_probe_len, TEST_SECOND);
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		goto out;
+	}
+
+	/*
+	 * The first insertion with the first part of the second, then the rest
+	 * of it once the first went in - and with it the move.
+	 */
+	CHECK(test_send(fd, stream, split) == 0,
+	      "the first insertion could not be sent");
+	CHECK(test_wait_inserted(expected + TEST_FIRST),
+	      "the first insertion was not inserted");
+	CHECK(test_send(fd, stream + split, sizeof(stream) - split) == 0,
+	      "the rest of the second insertion could not be sent");
+	CHECK(test_wait_inserted(expected + TEST_FIRST + TEST_SECOND),
+	      "the second insertion was not inserted");
+
+	CHECK(atomic_load(&test_probe_seen),
+	      "the second insertion did not reach the pool");
+	CHECK(!atomic_load(&test_probe_stale),
+	      "a copy of the second insertion lingers in the input buffer");
+
+	close(fd);
+
+out:
+	atomic_store(&test_probe_len, 0);
+#undef TEST_FIRST
+#undef TEST_SECOND
+#undef TEST_SECOND_PART
+}
+
 struct test_flooder {
 	int fd;
 	pthread_t thread;
@@ -817,6 +913,7 @@ int main(int argc, char *argv[])
 	test_hangup_deferred();
 	test_hangup_after_write();
 	test_hangup_after_pipelined_request();
+	test_input_wiped();
 	test_flood();
 	test_idle_kept();
 	test_idle_uid_exhausted();
