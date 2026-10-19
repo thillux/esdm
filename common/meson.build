@@ -274,14 +274,70 @@ foreach es_ext_kind : [ [ 'LIB', es_ext_lib_num ],
 		      ' '.join(es_ext_instances))
 endforeach
 
-conf_data.set_quoted('ESDM_EXT_LIB_PATH', get_option('es_ext_lib_path'))
-conf_data.set('ESDM_EXT_LIB_ENTROPY_RATE',
-	      get_option('es_ext_lib_entropy_rate'))
-conf_data.set_quoted('ESDM_EXT_SOCKET_PATH', get_option('es_ext_socket_path'))
-conf_data.set('ESDM_EXT_SOCKET_ENTROPY_RATE',
-	      get_option('es_ext_socket_entropy_rate'))
-conf_data.set('ESDM_EXT_SOCKET_PEER_UID',
-	      get_option('es_ext_socket_peer_uid'))
+
+# The configuration of the external sources: the i-th entry of a list sets
+# ESDM_EXT_*_<i> for the i-th source of its kind. A path for each source, or
+# for fewer, the others getting none; a rate or a uid for each source, or one
+# for all of them.
+foreach es_ext_opt : [
+		[ 'es_ext_lib_path', es_ext_lib_num, 'ESDM_EXT_LIB_PATH_' ],
+		[ 'es_ext_lib_entropy_rate', es_ext_lib_num,
+		  'ESDM_EXT_LIB_ENTROPY_RATE_' ],
+		[ 'es_ext_socket_path', es_ext_socket_num,
+		  'ESDM_EXT_SOCKET_PATH_' ],
+		[ 'es_ext_socket_entropy_rate', es_ext_socket_num,
+		  'ESDM_EXT_SOCKET_ENTROPY_RATE_' ],
+		[ 'es_ext_socket_peer_uid', es_ext_socket_num,
+		  'ESDM_EXT_SOCKET_PEER_UID_' ] ]
+	es_ext_name = es_ext_opt[0]
+	es_ext_num = es_ext_opt[1]
+	es_ext_vals = get_option(es_ext_name)
+	if es_ext_num == 0
+		continue
+	endif
+
+	if es_ext_name.endswith('_path')
+		if es_ext_vals.length() > es_ext_num
+			error('@0@ names @1@ paths, for @2@ sources of its kind'.format(
+			      es_ext_name, es_ext_vals.length(), es_ext_num))
+		endif
+	elif es_ext_vals.length() == 1
+		es_ext_one = es_ext_vals[0]
+		es_ext_vals = []
+		foreach i : range(es_ext_num)
+			es_ext_vals += es_ext_one
+		endforeach
+	elif es_ext_vals.length() != es_ext_num
+		error('@0@ takes one value for all sources of its kind or one for each of the @1@ sources, not @2@ values'.format(
+		      es_ext_name, es_ext_num, es_ext_vals.length()))
+	endif
+
+	foreach i : range(es_ext_num)
+		es_ext_val = i < es_ext_vals.length() ? es_ext_vals[i].strip() : ''
+		if es_ext_name.endswith('_path')
+			conf_data.set_quoted(es_ext_opt[2] + i.to_string(),
+					     es_ext_val)
+			continue
+		endif
+
+		if es_ext_name.endswith('_uid') and es_ext_val == '-1'
+			es_ext_int = -1
+		elif es_ext_val != '' and es_ext_val.strip('0123456789') == ''
+			# Nothing but digits
+			es_ext_int = es_ext_val.to_int()
+		else
+			es_ext_int = -2
+		endif
+		if es_ext_name.endswith('_uid') and (es_ext_int < -1 or es_ext_int > 4294967294)
+			error('@0@ takes uids from 0 to 4294967294, or -1, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		elif not es_ext_name.endswith('_uid') and (es_ext_int < 0 or es_ext_int > 256)
+			error('@0@ takes entropy rates from 0 to 256, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		endif
+		conf_data.set(es_ext_opt[2] + i.to_string(), es_ext_int)
+	endforeach
+endforeach
 conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
 
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())

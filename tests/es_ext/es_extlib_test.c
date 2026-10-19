@@ -21,7 +21,7 @@
  * The external entropy source of a plugin library loaded into the ESDM.
  *
  * - Without a plugin configured, the source is there and does nothing.
- * - A plugin set with esdm_es_ext_lib_set_path() - what esdm-server
+ * - A plugin set with esdm_es_ext_lib_set_path(0, ) - what esdm-server
  *   --es_ext_lib does - is loaded and initialized by the init of the source,
  *   and the path outlives its fini.
  * - A block is credited with what the plugin claims, at most with what the
@@ -117,8 +117,13 @@ static void test_credit(const char *path)
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	uint8_t first;
 
-	CHECK_EQ(esdm_es_ext_lib_set_path(NULL), -EINVAL);
-	CHECK_EQ(esdm_es_ext_lib_set_path(path), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, NULL), -EINVAL);
+	/* No source beyond those the build has */
+	CHECK_EQ(esdm_es_ext_lib_set_path(ESDM_EXT_LIB_NUM, path), -EINVAL);
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(ESDM_EXT_LIB_NUM, 256),
+		 -EINVAL);
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate(ESDM_EXT_LIB_NUM), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
 	CHECK_EQ(ES->init(), 0);
 	CHECK(ES->active(), "the plugin was not loaded");
 	CHECK_EQ(ctl->init_calls, 1);
@@ -132,7 +137,7 @@ static void test_credit(const char *path)
 	 * pass of the ESDM runs before the first seeding - one that fails
 	 * keeps it that way.
 	 */
-	esdm_config_es_ext_lib_entropy_rate_set(256);
+	esdm_config_es_ext_lib_entropy_rate_set(0, 256);
 	CHECK(test_state_has("status", "awaiting its self test"),
 	      "the state does not say the self test is due");
 	CHECK_EQ(ES->curr_entropy(bits), 0);
@@ -160,7 +165,7 @@ static void test_credit(const char *path)
 	CHECK_EQ(ctl->last_buflen, ESDM_DRNG_INIT_SEED_SIZE_BYTES);
 
 	/* The rate caps the claim */
-	esdm_config_es_ext_lib_entropy_rate_set(64);
+	esdm_config_es_ext_lib_entropy_rate_set(0, 64);
 	CHECK_EQ(test_get(bits, NULL), test_level(64, bits));
 
 	/* A smaller claim stands */
@@ -169,10 +174,10 @@ static void test_credit(const char *path)
 	ctl->claim_bits = UINT32_MAX;
 
 	/* No rate, no credit, data all the same */
-	esdm_config_es_ext_lib_entropy_rate_set(0);
+	esdm_config_es_ext_lib_entropy_rate_set(0, 0);
 	CHECK_EQ(test_get(bits, &first), 0);
 	CHECK_EQ(first, ctl->get_calls & 0xff);
-	esdm_config_es_ext_lib_entropy_rate_set(256);
+	esdm_config_es_ext_lib_entropy_rate_set(0, 256);
 
 	/* A claim beyond the block: nothing credited, the data not handed on */
 	ctl->claim_bits = bits + 1;
@@ -429,7 +434,7 @@ static void test_status(const char *good, const char *v1)
 	json_object_put(state);
 
 	/* A plugin of version 1 has none, whatever lies beyond its struct */
-	CHECK_EQ(esdm_es_ext_lib_set_path(v1), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, v1), 0);
 	dl = dlopen(v1, RTLD_NOW | RTLD_NOLOAD);
 	if (dl) {
 		ctl_v1 = dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL);
@@ -445,7 +450,7 @@ static void test_status(const char *good, const char *v1)
 	if (ctl_v1)
 		CHECK_EQ(ctl_v1->status_calls, 0);
 
-	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, good), 0);
 	CHECK(ES->active(), "the test plugin is not back");
 }
 
@@ -491,34 +496,34 @@ static void test_bad_plugins(const char *good, const char *bad_version,
 	unsigned int selftest_calls = ctl->selftest_calls;
 
 	/* Set while the source runs, a plugin is loaded - and tested - at once */
-	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, good), 0);
 	CHECK(ES->active(), "the plugin was not loaded at once");
 	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
 	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
 
 	/* One failing the self test is used, but credited with nothing */
 	ctl->selftest_ret = -ENODEV;
-	CHECK_EQ(esdm_es_ext_lib_set_path(good), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, good), 0);
 	CHECK(ES->active(), "a plugin failing its self test is not used");
 	CHECK_EQ(ES->curr_entropy(bits), 0);
 	CHECK(test_state_has("status", "failing its self test"),
 	      "the state does not say the self test fails");
 	ctl->selftest_ret = 0;
 
-	CHECK_EQ(esdm_es_ext_lib_set_path(bad_version), -EPROTO);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, bad_version), -EPROTO);
 	CHECK(!ES->active(), "a plugin of another version is used");
-	CHECK_EQ(esdm_es_ext_lib_set_path(no_get), -EPROTO);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, no_get), -EPROTO);
 	CHECK(!ES->active(), "a plugin without get_entropy is used");
-	CHECK_EQ(esdm_es_ext_lib_set_path(no_plugin), -ENOEXEC);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, no_plugin), -ENOEXEC);
 	CHECK(!ES->active(), "a library without a plugin is used");
-	CHECK_EQ(esdm_es_ext_lib_set_path("/nonexistent/libnothing.so"),
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, "/nonexistent/libnothing.so"),
 		 -ENOENT);
 	CHECK(!ES->active(), "a missing library is used");
 	CHECK(test_state_has("plugin_library", "/nonexistent/libnothing.so"),
 	      "the state does not name the library configured");
 
 	/* Back to the build's, which names none */
-	CHECK_EQ(esdm_es_ext_lib_set_path(""), 0);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, ""), 0);
 	CHECK(!ES->active(), "a plugin is used without one configured");
 	CHECK(test_state_has("plugin_library", "(unset)"),
 	      "the state names a plugin library");

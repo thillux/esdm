@@ -74,6 +74,9 @@
  * instance it belongs to to the functions below - see ESDM_ES_EXTLIB_CB.
  */
 struct esdm_es_extlib {
+	/* Index of the source among the plugin library sources */
+	unsigned int idx;
+
 	/*
 	 * How the log messages name the source: by its name in the ES table if
 	 * it is one of several of its kind, not at all otherwise - and what
@@ -86,10 +89,12 @@ struct esdm_es_extlib {
 	mutex_t mutex;
 
 	/*
-	 * Override of the plugin path, as given on the command line of the
-	 * server. NULL means "use the compile-time default ESDM_EXT_LIB_PATH".
-	 * Configuration like the entropy rates: it outlives esdm_fini().
+	 * The compile-time default of the plugin path, the entry of the source
+	 * in the meson option es_ext_lib_path - and its override, as given on
+	 * the command line of the server, NULL for none. Configuration like
+	 * the entropy rates: it outlives esdm_fini().
 	 */
+	const char *default_path;
 	char *runtime_path;
 
 	/* The plugin loaded and initialized, all NULL if none is */
@@ -153,9 +158,11 @@ struct esdm_es_extlib {
 
 #define ESDM_ES_EXTLIB_INSTANCE(i)                                             \
 	[i] = {                                                                \
+		.idx = i,                                                      \
 		.tag = ESDM_ES_EXTLIB_TAG(i),                                  \
 		.who = "plugin" ESDM_ES_EXTLIB_TAG(i),                         \
 		.mutex = MUTEX_UNLOCKED,                                       \
+		.default_path = ESDM_EXT_LIB_PATH_##i,                         \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
 		.state_name = "(none)",                                        \
 		.state_status = "not loaded",                                  \
@@ -178,7 +185,7 @@ static DEFINE_MUTEX_UNLOCKED(extlib_claim_mutex);
 /* The name of @lib in the ES table */
 static const char *esdm_es_extlib_name(const struct esdm_es_extlib *lib)
 {
-	return esdm_es_extlib[lib - extlib].name;
+	return esdm_es_extlib[lib->idx].name;
 }
 
 /*
@@ -211,7 +218,7 @@ esdm_es_extlib_claim_locked(struct esdm_es_extlib *lib,
 /* Caller must hold the mutex of @lib. */
 static const char *esdm_es_extlib_path_locked(const struct esdm_es_extlib *lib)
 {
-	return lib->runtime_path ? lib->runtime_path : ESDM_EXT_LIB_PATH;
+	return lib->runtime_path ? lib->runtime_path : lib->default_path;
 }
 
 /* Is the plugin credited at all? Caller must hold the mutex of @lib. */
@@ -410,7 +417,7 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 		LOGGER_STATUS, LOGGER_C_ES,
 		"External ES plugin%s: %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
 		lib->tag, p->name ? p->name : "(unnamed)", path,
-		esdm_config_es_ext_lib_entropy_rate());
+		esdm_config_es_ext_lib_entropy_rate(lib->idx));
 
 	return 0;
 }
@@ -438,13 +445,14 @@ static void esdm_es_extlib_fini(struct esdm_es_extlib *lib)
 	esdm_es_extlib_unlock(lib);
 }
 
-static uint32_t esdm_es_extlib_level(bool credited, uint32_t requested_bits)
+static uint32_t esdm_es_extlib_level(const struct esdm_es_extlib *lib,
+				     bool credited, uint32_t requested_bits)
 {
 	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
-		esdm_config_es_ext_lib_entropy_rate(), requested_bits);
+		esdm_config_es_ext_lib_entropy_rate(lib->idx), requested_bits);
 }
 
 /* Caller must hold the mutex of @lib. */
@@ -452,7 +460,7 @@ static uint32_t
 esdm_es_extlib_entropylevel_locked(const struct esdm_es_extlib *lib,
 				   uint32_t requested_bits)
 {
-	return esdm_es_extlib_level(esdm_es_extlib_credited_locked(lib),
+	return esdm_es_extlib_level(lib, esdm_es_extlib_credited_locked(lib),
 				    requested_bits);
 }
 
@@ -460,7 +468,7 @@ esdm_es_extlib_entropylevel_locked(const struct esdm_es_extlib *lib,
 static uint32_t esdm_es_extlib_entropylevel(struct esdm_es_extlib *lib,
 					    uint32_t requested_bits)
 {
-	return esdm_es_extlib_level(atomic_load(&lib->published_credited),
+	return esdm_es_extlib_level(lib, atomic_load(&lib->published_credited),
 				    requested_bits);
 }
 
@@ -676,15 +684,16 @@ static int esdm_es_extlib_selftest(struct esdm_es_extlib *lib)
 }
 
 DSO_PUBLIC
-int esdm_es_ext_lib_set_path(const char *path)
+int esdm_es_ext_lib_set_path(unsigned int idx, const char *path)
 {
-	struct esdm_es_extlib *lib = &extlib[0];
+	struct esdm_es_extlib *lib;
 	char *new_copy = NULL;
 	char *old;
 	int ret = 0;
 
-	if (!path)
+	if (idx >= ESDM_EXT_LIB_NUM || !path)
 		return -EINVAL;
+	lib = &extlib[idx];
 
 	if (path[0] != '\0') {
 		new_copy = strdup(path);

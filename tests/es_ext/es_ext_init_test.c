@@ -66,9 +66,9 @@ int main(int argc, char *argv[])
 		return common_test_result("es_ext_init");
 
 	esdm_test_es_rates_zero();
-	esdm_config_es_ext_socket_entropy_rate_set(0);
-	esdm_config_es_ext_lib_entropy_rate_set(256);
-	CHECK_EQ(esdm_es_ext_lib_set_path(argv[1]), 0);
+	esdm_config_es_ext_socket_entropy_rate_set(0, 0);
+	esdm_config_es_ext_lib_entropy_rate_set(0, 256);
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, argv[1]), 0);
 
 	ctl->selftest_ret = -ENODEV;
 	ret = esdm_init();

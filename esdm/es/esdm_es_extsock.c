@@ -50,6 +50,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <inttypes.h>
 #include <json-c/json.h>
 #include <limits.h>
 #include <poll.h>
@@ -87,6 +88,9 @@
  * instance it belongs to to the functions below - see ESDM_ES_EXTSOCK_CB.
  */
 struct esdm_es_extsock {
+	/* Index of the source among the provider socket sources */
+	unsigned int idx;
+
 	/*
 	 * How the log messages name the source: by its name in the ES table if
 	 * it is one of several of its kind, not at all otherwise - and what
@@ -99,15 +103,16 @@ struct esdm_es_extsock {
 	mutex_t mutex;
 
 	/*
-	 * Override of the socket path, as given on the command line of the
-	 * server. NULL means "use the compile-time default
-	 * ESDM_EXT_SOCKET_PATH". Configuration like the entropy rates: it
-	 * outlives esdm_fini().
+	 * The compile-time default of the socket path, the entry of the source
+	 * in the meson option es_ext_socket_path - and its override, as given
+	 * on the command line of the server, NULL for none. Configuration like
+	 * the entropy rates: it outlives esdm_fini().
 	 */
+	const char *default_path;
 	char *runtime_path;
 
-	/* The uid accepted next to root, -1 for none */
-	long peer_uid;
+	/* The uid accepted next to root, -1 for none - configuration as well */
+	int64_t peer_uid;
 
 	int fd;
 	/* The uid of the provider connected to */
@@ -182,7 +187,7 @@ struct esdm_es_extsock {
 	mutex_t state_mutex;
 	char state_path[ESDM_ES_EXTSOCK_PATH_SIZE];
 	char state_status[64];
-	long state_peer_uid;
+	int64_t state_peer_uid;
 	struct esdm_es_ext_status_cache status;
 };
 
@@ -194,14 +199,16 @@ struct esdm_es_extsock {
 
 #define ESDM_ES_EXTSOCK_INSTANCE(i)                                            \
 	[i] = {                                                                \
+		.idx = i,                                                      \
 		.tag = ESDM_ES_EXTSOCK_TAG(i),                                 \
 		.who = "provider" ESDM_ES_EXTSOCK_TAG(i),                      \
 		.mutex = MUTEX_UNLOCKED,                                       \
-		.peer_uid = ESDM_EXT_SOCKET_PEER_UID,                          \
+		.default_path = ESDM_EXT_SOCKET_PATH_##i,                      \
+		.peer_uid = ESDM_EXT_SOCKET_PEER_UID_##i,                      \
 		.fd = -1,                                                      \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
 		.state_status = "not connected",                               \
-		.state_peer_uid = ESDM_EXT_SOCKET_PEER_UID,                    \
+		.state_peer_uid = ESDM_EXT_SOCKET_PEER_UID_##i,                \
 	},
 
 /* The provider socket sources, ESDM_EXT_SOCKET_NUM of them */
@@ -213,7 +220,7 @@ static struct esdm_es_extsock extsock[ESDM_EXT_SOCKET_NUM] = {
 static const char *
 esdm_es_extsock_path_locked(const struct esdm_es_extsock *sock)
 {
-	return sock->runtime_path ? sock->runtime_path : ESDM_EXT_SOCKET_PATH;
+	return sock->runtime_path ? sock->runtime_path : sock->default_path;
 }
 
 /* Caller must hold the mutex of @sock. */
@@ -547,7 +554,7 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 		"External ES provider%s %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
 		sock->tag, path, (unsigned int)sock->connected_uid,
 		esdm_es_extsock_encrypted_locked(sock) ? "DTLS" : "unencrypted",
-		esdm_config_es_ext_socket_entropy_rate());
+		esdm_config_es_ext_socket_entropy_rate(sock->idx));
 	sock->was_connected = true;
 
 	/* A provider not tested yet is tested before it is asked for anything */
@@ -794,13 +801,15 @@ static void esdm_es_extsock_fini(struct esdm_es_extsock *sock)
 	esdm_es_extsock_unlock(sock);
 }
 
-static uint32_t esdm_es_extsock_level(bool credited, uint32_t requested_bits)
+static uint32_t esdm_es_extsock_level(const struct esdm_es_extsock *sock,
+				      bool credited, uint32_t requested_bits)
 {
 	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
-		esdm_config_es_ext_socket_entropy_rate(), requested_bits);
+		esdm_config_es_ext_socket_entropy_rate(sock->idx),
+		requested_bits);
 }
 
 /* Caller must hold the mutex of @sock. */
@@ -808,16 +817,16 @@ static uint32_t
 esdm_es_extsock_entropylevel_locked(const struct esdm_es_extsock *sock,
 				    uint32_t requested_bits)
 {
-	return esdm_es_extsock_level(esdm_es_extsock_credited_locked(sock),
-				     requested_bits);
+	return esdm_es_extsock_level(
+		sock, esdm_es_extsock_credited_locked(sock), requested_bits);
 }
 
 /* As published: a request in progress is not waited for */
 static uint32_t esdm_es_extsock_entropylevel(struct esdm_es_extsock *sock,
 					     uint32_t requested_bits)
 {
-	return esdm_es_extsock_level(atomic_load(&sock->published_credited),
-				     requested_bits);
+	return esdm_es_extsock_level(
+		sock, atomic_load(&sock->published_credited), requested_bits);
 }
 
 static uint32_t esdm_es_extsock_poolsize(struct esdm_es_extsock *sock)
@@ -1060,7 +1069,7 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 	char path[ESDM_ES_EXTSOCK_PATH_SIZE], status[64], accepted[48];
 	struct json_object *provider;
 	time_t now = esdm_es_extsock_now();
-	long peer_uid;
+	int64_t peer_uid;
 	bool due;
 
 	mutex_lock(&sock->state_mutex);
@@ -1095,7 +1104,7 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 	entropy_rate = esdm_es_extsock_entropylevel(sock, 256);
 
 	if (peer_uid >= 0)
-		snprintf(accepted, sizeof(accepted), "root and uid %ld",
+		snprintf(accepted, sizeof(accepted), "root and uid %" PRId64,
 			 peer_uid);
 	else
 		snprintf(accepted, sizeof(accepted), "root");
@@ -1192,14 +1201,16 @@ out:
 }
 
 DSO_PUBLIC
-int esdm_es_ext_socket_set_path(const char *path)
+int esdm_es_ext_socket_set_path(unsigned int idx, const char *path)
 {
-	struct esdm_es_extsock *sock = &extsock[0];
+	struct esdm_es_extsock *sock;
 	char *new_copy = NULL;
 	char *old;
 
-	if (!path || strlen(path) >= ESDM_ES_EXTSOCK_PATH_SIZE)
+	if (idx >= ESDM_EXT_SOCKET_NUM || !path ||
+	    strlen(path) >= ESDM_ES_EXTSOCK_PATH_SIZE)
 		return -EINVAL;
+	sock = &extsock[idx];
 
 	if (path[0] != '\0') {
 		new_copy = strdup(path);
@@ -1222,13 +1233,15 @@ int esdm_es_ext_socket_set_path(const char *path)
 }
 
 DSO_PUBLIC
-int esdm_es_ext_socket_set_peer_uid(long uid)
+int esdm_es_ext_socket_set_peer_uid(unsigned int idx, int64_t uid)
 {
-	struct esdm_es_extsock *sock = &extsock[0];
+	struct esdm_es_extsock *sock;
 
 	/* (uid_t)-1 is no uid, see setreuid(2) */
-	if (uid < -1 || (uid >= 0 && (unsigned long)uid >= UINT32_MAX))
+	if (idx >= ESDM_EXT_SOCKET_NUM || uid < -1 ||
+	    (uid >= 0 && (uint64_t)uid >= UINT32_MAX))
 		return -EINVAL;
+	sock = &extsock[idx];
 
 	mutex_lock(&sock->mutex);
 	sock->peer_uid = uid;

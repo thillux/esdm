@@ -743,44 +743,56 @@ With one source, it is called ExternalSocket in the ESDM status; with several,
 they are ExternalSocket0, ExternalSocket1 and so on.
 ''')
 
-option('es_ext_lib_path', type: 'string', value: '',
-       description: '''Plugin library of the external entropy source.
+option('es_ext_lib_path', type: 'array', value: [],
+       description: '''Plugin libraries of the external entropy sources.
 
-Path of a shared library exporting a struct esdm_es_ext_plugin, loaded into
-the ESDM as external entropy source. esdm-server --es_ext_lib PATH loads
-another one in its place. When empty and not given on the command line, no
-plugin is loaded.
+Paths of shared libraries exporting a struct esdm_es_ext_plugin, loaded into
+the ESDM as external entropy sources: the i-th path is the plugin of the i-th
+plugin library source, a comma separated list of up to es_ext_lib_num of them.
+A source without a path, or with an empty one, loads no plugin unless one is
+given on the command line: esdm-server --es_ext_lib PATH loads another one in
+its place, the n-th occurrence of the option for the n-th source.
 ''')
 
-option('es_ext_lib_entropy_rate', type: 'integer', min: 0, max: 256, value: 256,
-       description: '''Entropy rate cap of the external entropy source plugin.
+option('es_ext_lib_entropy_rate', type: 'array', value: ['256'],
+       description: '''Entropy rate cap of the external entropy source plugins.
 
-A block of data from the plugin library is credited with the entropy the
+A block of data from a plugin library is credited with the entropy the
 plugin claims for it, but with at most what this rate allows: the amount of
-entropy per 256 bits of data. With the default of 256 the claim of the plugin
-is taken as it is - the plugin is chosen by whoever configures the ESDM, and it
-knows its noise source. esdm-server --es_ext_lib_entropy_rate overrides it.
+entropy per 256 bits of data, 0 to 256. With the default of 256 the claim of
+the plugin is taken as it is - the plugin is chosen by whoever configures the
+ESDM, and it knows its noise source. esdm-server --es_ext_lib_entropy_rate
+overrides it, the n-th occurrence of the option for the n-th source.
+
+One rate applies to all plugin library sources; a comma separated list of
+es_ext_lib_num rates sets the i-th rate for the i-th source.
 
 When configuring this value to 0, the plugin provides data without being
 credited to contain entropy.
 ''')
 
-option('es_ext_socket_path', type: 'string', value: '',
-       description: '''Socket of the external entropy source provider.
+option('es_ext_socket_path', type: 'array', value: [],
+       description: '''Sockets of the external entropy source providers.
 
-Path of the Unix domain socket a provider process serves an external entropy
-source on - with libesdm_es_ext, e.g. esdm-es-ext-serve. The ESDM connects to
-it, and again whenever the connection is lost. esdm-server --es_ext_socket
-PATH names another one. When empty and not given on the command line, no
-provider is used.
+Paths of the Unix domain sockets provider processes serve external entropy
+sources on - with libesdm_es_ext, e.g. esdm-es-ext-serve: the i-th path is the
+socket of the i-th provider socket source, a comma separated list of up to
+es_ext_socket_num of them. The ESDM connects to it, and again whenever the
+connection is lost. esdm-server --es_ext_socket PATH names another one, the
+n-th occurrence of the option for the n-th source. A source without a path, or
+with an empty one, uses no provider unless one is given on the command line.
 ''')
 
-option('es_ext_socket_entropy_rate', type: 'integer', min: 0, max: 256, value: 0,
-       description: '''Entropy rate cap of the external entropy source provider.
+option('es_ext_socket_entropy_rate', type: 'array', value: ['0'],
+       description: '''Entropy rate cap of the external entropy source providers.
 
-A block of data from the provider is credited with the entropy the provider
+A block of data from a provider is credited with the entropy the provider
 claims for it, but with at most what this rate allows: the amount of entropy
-per 256 bits of data. esdm-server --es_ext_socket_entropy_rate overrides it.
+per 256 bits of data, 0 to 256. esdm-server --es_ext_socket_entropy_rate
+overrides it, the n-th occurrence of the option for the n-th source.
+
+One rate applies to all provider socket sources; a comma separated list of
+es_ext_socket_num rates sets the i-th rate for the i-th source.
 
 The default is 0: the provider delivers data without being credited to contain
 entropy until a rate is configured. Unlike a plugin library, which runs in the
@@ -789,14 +801,17 @@ another process whose only trust anchor is the user it runs as; crediting its
 claims is a decision to be taken explicitly. 256 takes them as they are.
 ''')
 
-option('es_ext_socket_peer_uid', type: 'integer', min: -1, max: 4294967294,
-       value: -1,
-       description: '''User the external entropy source provider may run as.
+option('es_ext_socket_peer_uid', type: 'array', value: ['-1'],
+       description: '''User the external entropy source providers may run as.
 
 The ESDM checks the credentials of the provider it connects to: whoever can
 create the socket file could otherwise feed it with data credited as entropy.
-A provider running as root is accepted, and one running as the uid set here;
--1 accepts root only. esdm-server --es_ext_socket_uid overrides it.
+A provider running as root is accepted, and one running as the uid set here,
+0 to 4294967294; -1 accepts root only. esdm-server --es_ext_socket_uid
+overrides it, the n-th occurrence of the option for the n-th source.
+
+One uid applies to all provider socket sources; a comma separated list of
+es_ext_socket_num uids sets the i-th uid for the i-th source.
 ''')
 
 ################################################################################

@@ -237,7 +237,7 @@ static void set_es_ext_lib(const char *path)
 		exit(1);
 	}
 
-	ret = esdm_es_ext_lib_set_path(path);
+	ret = esdm_es_ext_lib_set_path(0, path);
 	if (ret == -ENOENT) {
 		fprintf(stderr,
 			"External entropy sources are not part of this build (meson option es_ext)\n");
@@ -266,7 +266,7 @@ static void set_es_ext_socket(const char *path)
 		exit(1);
 	}
 
-	ret = esdm_es_ext_socket_set_path(path);
+	ret = esdm_es_ext_socket_set_path(0, path);
 	if (ret == -ENOENT) {
 		fprintf(stderr,
 			"External entropy sources are not part of this build (meson option es_ext)\n");
@@ -318,7 +318,7 @@ static void set_es_ext_socket_uid(const char *arg)
 	val = strtoul(arg, &end, 10);
 	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
 	    val < UINT32_MAX) {
-		ret = esdm_es_ext_socket_set_peer_uid((long)val);
+		ret = esdm_es_ext_socket_set_peer_uid(0, (int64_t)val);
 	} else {
 		struct passwd *pw = getpwnam(arg);
 
@@ -328,7 +328,7 @@ static void set_es_ext_socket_uid(const char *arg)
 				arg);
 			exit(1);
 		}
-		ret = esdm_es_ext_socket_set_peer_uid((long)pw->pw_uid);
+		ret = esdm_es_ext_socket_set_peer_uid(0, (int64_t)pw->pw_uid);
 	}
 
 	if (ret == -ENOENT) {
@@ -476,6 +476,7 @@ static void parse_opts(int argc, char *argv[])
 			case 19:
 				/* es_ext_lib_entropy_rate */
 				esdm_config_es_ext_lib_entropy_rate_set(
+					0,
 					parse_entropy_rate(
 						"--es_ext_lib_entropy_rate",
 						optarg));
@@ -487,6 +488,7 @@ static void parse_opts(int argc, char *argv[])
 			case 21:
 				/* es_ext_socket_entropy_rate */
 				esdm_config_es_ext_socket_entropy_rate_set(
+					0,
 					parse_entropy_rate(
 						"--es_ext_socket_entropy_rate",
 						optarg));

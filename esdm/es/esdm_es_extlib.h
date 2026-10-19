@@ -54,32 +54,38 @@ extern struct esdm_es_cb esdm_es_extlib[ESDM_EXT_LIB_NUM];
 /**
  * @brief Select the plugin library loaded as external entropy source
  *
- * The path replaces the compile-time default ESDM_EXT_LIB_PATH (meson option
- * es_ext_lib_path). Set before esdm_init(), as the server does for its
- * --es_ext_lib option, the plugin is loaded and initialized by the
- * initialization of the source, while the daemon still has its privileges; set
- * later, the plugin in use is released and the new one loaded right away. Pass
- * an empty string to go back to the compile-time default.
+ * The path replaces the compile-time default of the plugin library source @idx
+ * (its entry in the meson option es_ext_lib_path). Set before esdm_init(), as
+ * the server does for its --es_ext_lib option, the plugin is loaded and
+ * initialized by the initialization of the source, while the daemon still has
+ * its privileges; set later, the plugin in use is released and the new one
+ * loaded right away. Pass an empty string to go back to the compile-time
+ * default.
  *
  * The path is kept across esdm_fini() and applies to a later esdm_init() or
- * esdm_reinit() again. See libesdm_es_ext(3) on the plugins.
+ * esdm_reinit() again. A plugin library serves one source: a source asked to
+ * load the plugin another one uses refuses it. See libesdm_es_ext(3) on the
+ * plugins.
  *
+ * @param [in] idx Index of the plugin library source, below ESDM_EXT_LIB_NUM
  * @param [in] path NUL-terminated path of the plugin library, must not be NULL.
  *
- * @return 0 on success, -EINVAL if path is NULL, -ENOMEM on allocation
- *	   failure, or - when the source already runs - a negative errno from
- *	   loading the plugin: -ENOENT if the library cannot be loaded, -ENOEXEC
- *	   if it exports no plugin, -EPROTO if the plugin does not fit, or the
- *	   error of the plugin's init callback.
+ * @return 0 on success, -EINVAL if there is no source @idx or path is NULL,
+ *	   -ENOMEM on allocation failure, or - when the source already runs - a
+ *	   negative errno from loading the plugin: -ENOENT if the library cannot
+ *	   be loaded, -ENOEXEC if it exports no plugin, -EPROTO if the plugin does
+ *	   not fit, -EBUSY if another source uses it, or the error of the
+ *	   plugin's init callback.
  */
 DSO_PUBLIC
-int esdm_es_ext_lib_set_path(const char *path);
+int esdm_es_ext_lib_set_path(unsigned int idx, const char *path);
 
 #else /* ESDM_EXT_LIB_NUM */
 
 /* No such source: -ENOENT without external sources, -EINVAL without this kind */
-static inline int esdm_es_ext_lib_set_path(const char *path)
+static inline int esdm_es_ext_lib_set_path(unsigned int idx, const char *path)
 {
+	(void)idx;
 	(void)path;
 #ifdef ESDM_ES_EXT
 	return -EINVAL;
