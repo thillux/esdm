@@ -82,7 +82,7 @@ The ioctls of `drivers/char/random.c`, with its checks:
 |----------------------------------|--------------------------------------|--------------------|
 | `RNDGETENTCNT`                   | everybody                            | entropy of the auxiliary pool in bits |
 | `RNDADDTOENTCNT`                 | `CAP_SYS_ADMIN`                      | credits the given bits to the auxiliary pool |
-| `RNDADDENTROPY`                  | `CAP_SYS_ADMIN`                      | inserts the data with the given entropy, no more than its bits |
+| `RNDADDENTROPY`                  | `CAP_SYS_ADMIN`                      | inserts the data, then credits the given bits, no more than the data has, as `RNDADDTOENTCNT` |
 | `RNDZAPENTCNT`, `RNDCLEARPOOL`   | `CAP_SYS_ADMIN`                      | sets the entropy of the auxiliary pool to zero |
 | `RNDRESEEDCRNG`                  | `CAP_SYS_ADMIN`                      | reseeds the DRNGs at their next use |
 

@@ -521,6 +521,34 @@ def fake_log(log):
         return [line.split() for line in f]
 
 
+def cmd_addentropy(args):
+    # Against a notop fake-egd: RNDADDENTROPY inserts all of the data
+    # without entropy, and credits it after that in one go, with no more
+    # than the data has bits
+    log = args[0]
+    fd = os.open("/dev/esdm_random", os.O_RDWR)
+    try:
+        for bits, size, credit in [(256, 1000, 256), (4096, 4, 32),
+                                   (0, 300, 0)]:
+            before = len(fake_log(log))
+            fcntl.ioctl(fd, RNDADDENTROPY,
+                        struct.pack("ii", bits, size) + os.urandom(size))
+            cmds = [e for e in fake_log(log)[before:] if e != ["connect"]]
+            print(f"RNDADDENTROPY of {bits} bits on {size} bytes: {cmds}")
+            writes = [e for e in cmds if e[0] == "write"]
+            if any(e[1] != "0" for e in writes):
+                fail("insertions credited")
+            if sum(int(e[2]) for e in writes) != size:
+                fail("not all of the data inserted")
+            want = [["e6", str(credit)]] if credit else []
+            if [e for e in cmds if e[0] == "e6"] != want or \
+               (credit and cmds[-1] != want[0]):
+                fail(f"not credited with {credit} bits after the data")
+    finally:
+        os.close(fd)
+    print("addentropy ok")
+
+
 def cmd_backoff(args):
     # Against a mute fake-egd: every read waits for the timeout once its
     # connection is made, after that the reconnects back off up to 2 s
@@ -555,6 +583,7 @@ CMDS = {
     "stalled-writers": cmd_stalled_writers,
     "fake-egd": cmd_fake_egd,
     "backoff": cmd_backoff,
+    "addentropy": cmd_addentropy,
 }
 
 if __name__ == "__main__":

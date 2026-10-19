@@ -333,7 +333,7 @@ static ssize_t esdm_cdev_write(struct file *file, const char __user *ubuf,
 		return 0;
 
 	/* Without entropy credit, as for everybody */
-	ret = esdm_cdev_egd_insert_user(ubuf, count, 0);
+	ret = esdm_cdev_egd_insert_user(ubuf, count);
 	if (ret >= 0 || ret == -EFAULT)
 		return ret;
 	if (ret == -ERESTARTSYS)
@@ -408,6 +408,7 @@ static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
 					  true, (u32)ent_count);
 	case RNDADDENTROPY: {
 		ssize_t written;
+		u32 bits;
 
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
@@ -423,18 +424,29 @@ static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
 			return 0;
 
 		/*
-		 * Credited with no more than the data has bits, which the
-		 * ESDM enforces per insertion as well.
+		 * As random_ioctl(): all of the data first, then the credit,
+		 * and none unless all of the data went in. The data goes in
+		 * without entropy, into every auxiliary pool of the ESDM, the
+		 * credit after it as that of RNDADDTOENTCNT, to the first one.
+		 * The insertions themselves cannot carry it: each holds 255
+		 * bytes, the claim for all of the data would be given to the
+		 * first ones, and kept when a later one failed - a caller
+		 * trying again would be credited twice.
 		 */
 		written = esdm_cdev_egd_insert_user((const char __user *)p,
-						    (size_t)size,
-						    (u32)ent_count);
+						    (size_t)size);
 		if (written < 0)
 			return (long)written;
 		/* As the kernel: credited, so it has to be all of it */
 		if (written != size)
 			return -EFAULT;
-		return 0;
+
+		/* No more than the data has bits */
+		bits = (u32)min_t(u64, (u64)ent_count, (u64)size * 8);
+		if (!bits)
+			return 0;
+		return esdm_cdev_egd_priv(ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT,
+					  true, bits);
 	}
 	case RNDZAPENTCNT:
 	case RNDCLEARPOOL:

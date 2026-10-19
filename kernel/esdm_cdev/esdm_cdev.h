@@ -41,16 +41,12 @@ int esdm_cdev_egd_read(u8 cmd, u8 *buf, size_t len);
 
 /*
  * Insert @len bytes of user memory at @ubuf into the auxiliary pool of the
- * ESDM, crediting @entropy_bits to them. The entropy is only credited because
- * the module's connections are root's towards the ESDM - the caller has to
- * have checked that its own caller may do that. Returns the number of bytes
- * inserted, fewer than @len when user memory was not readable, a signal or an
- * error of the ESDM came after some of them; without any, -EFAULT when user
- * memory was not readable, or another negative errno when the ESDM could not
- * be reached.
+ * ESDM, without entropy credit. Returns the number of bytes inserted, fewer
+ * than @len when user memory was not readable, a signal or an error of the
+ * ESDM came after some of them; without any, -EFAULT when user memory was not
+ * readable, or another negative errno when the ESDM could not be reached.
  */
-ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len,
-				  u32 entropy_bits);
+ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len);
 
 int esdm_cdev_egd_get_state(struct esdm_cdev_state *state);
 

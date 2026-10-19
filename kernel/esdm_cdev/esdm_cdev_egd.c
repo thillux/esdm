@@ -581,12 +581,11 @@ static int esdm_cdev_insert_op(struct socket *sock, void *arg, bool *sent)
 
 /*
  * Copy up to ESDM_CDEV_INSERT_MAX bytes of user memory at @ubuf into the
- * insertions of @op, crediting them with what is left of *@bits. Returns the
- * number of bytes copied, fewer than @len when user memory was not readable.
+ * insertions of @op, without entropy. Returns the number of bytes copied,
+ * fewer than @len when user memory was not readable.
  */
 static size_t esdm_cdev_insert_fill(struct esdm_cdev_insert_op *op,
-				    const char __user *ubuf, size_t len,
-				    u32 *bits)
+				    const char __user *ubuf, size_t len)
 {
 	size_t done = 0;
 	u8 *p = op->cmd;
@@ -594,17 +593,14 @@ static size_t esdm_cdev_insert_fill(struct esdm_cdev_insert_op *op,
 	while (done < len) {
 		size_t chunk = min_t(size_t, len - done, ESDM_EGD_MAX_TRANSFER);
 		size_t left = copy_from_user(p + 4, ubuf + done, chunk);
-		u32 credit;
 
 		chunk -= left;
 		if (chunk) {
-			credit = min3(*bits, (u32)chunk * 8, (u32)U16_MAX);
 			p[0] = ESDM_EGD_CMD_WRITE_ENTROPY;
-			p[1] = (u8)(credit >> 8);
-			p[2] = (u8)credit;
+			p[1] = 0;
+			p[2] = 0;
 			p[3] = (u8)chunk;
 			p += 4 + chunk;
-			*bits -= credit;
 			done += chunk;
 		}
 		if (left)
@@ -618,8 +614,7 @@ static size_t esdm_cdev_insert_fill(struct esdm_cdev_insert_op *op,
 	return done;
 }
 
-ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len,
-				  u32 entropy_bits)
+ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len)
 {
 	struct esdm_cdev_insert_op op;
 	size_t done = 0;
@@ -644,8 +639,7 @@ ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len,
 		 * connection would be held for that long, with every request
 		 * of every other caller waiting for it.
 		 */
-		got = esdm_cdev_insert_fill(&op, ubuf + done, want,
-					    &entropy_bits);
+		got = esdm_cdev_insert_fill(&op, ubuf + done, want);
 		if (!got) {
 			ret = -EFAULT;
 			break;
