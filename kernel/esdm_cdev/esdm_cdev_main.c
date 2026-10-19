@@ -88,6 +88,20 @@ static void esdm_cdev_set_state(enum esdm_cdev_esdm_state state)
 	wake_up_interruptible_all(&esdm_cdev_wait);
 }
 
+/*
+ * Would a read of /dev/esdm_random without O_SYNC return data rather than
+ * wait, or -EAGAIN with O_NONBLOCK? From the ESDM once it is operational, and
+ * from the kernel's RNG once that is initialized while the ESDM cannot be
+ * reached.
+ */
+static bool esdm_cdev_readable(void)
+{
+	int state = atomic_read(&esdm_cdev_esdm);
+
+	return state == ESDM_CDEV_OPERATIONAL ||
+	       (state == ESDM_CDEV_UNREACHABLE && rng_is_initialized());
+}
+
 static void esdm_cdev_watch_kick(void)
 {
 	if (!READ_ONCE(esdm_cdev_stopping))
@@ -120,6 +134,14 @@ static void esdm_cdev_watch(struct work_struct *work)
 					    ESDM_CDEV_NOT_OPERATIONAL);
 		esdm_cdev_watch_ms = ESDM_CDEV_WATCH_MS;
 	}
+
+	/*
+	 * A change of the state woke the pollers. The kernel's RNG turning
+	 * initialized while the ESDM cannot be reached is none, but makes the
+	 * device readable as well.
+	 */
+	if (esdm_cdev_readable() && atomic_xchg(&esdm_cdev_pollers, 0))
+		wake_up_interruptible_all(&esdm_cdev_wait);
 
 	if (atomic_read(&esdm_cdev_esdm) == ESDM_CDEV_OPERATIONAL)
 		return;
@@ -235,6 +257,15 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 		}
 
 		/*
+		 * The ESDM's answer tells its state: it hands out nothing from
+		 * its DRNG before it is operational. Only its answer - what the
+		 * kernel's RNG serves below tells nothing about the ESDM.
+		 */
+		if (!pr && got >= 0)
+			esdm_cdev_set_state(got ? ESDM_CDEV_OPERATIONAL :
+						  ESDM_CDEV_NOT_OPERATIONAL);
+
+		/*
 		 * Nothing from the ESDM but an answer short of all: the
 		 * unseeded read is only short on an error.
 		 */
@@ -276,9 +307,6 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 				break;
 			continue;
 		}
-
-		if (!pr)
-			esdm_cdev_set_state(ESDM_CDEV_OPERATIONAL);
 
 		if (copy_to_user(ubuf + done, block, got)) {
 			ret = -EFAULT;
@@ -347,17 +375,14 @@ static ssize_t esdm_cdev_write(struct file *file, const char __user *ubuf,
 /*
  * poll() of /dev/esdm_random, as the kernel's random_poll(): readable once the
  * ESDM is operational, writable before. The kernel's RNG decides while the
- * ESDM cannot be reached, as it serves the reads then.
+ * ESDM cannot be reached, as it serves the reads then. That is, readable when
+ * a read would return data, see esdm_cdev_readable().
  */
 static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
 {
-	int state;
-
 	poll_wait(file, &esdm_cdev_wait, wait);
 
-	state = atomic_read(&esdm_cdev_esdm);
-	if (state == ESDM_CDEV_OPERATIONAL ||
-	    (state == ESDM_CDEV_UNREACHABLE && rng_is_initialized()))
+	if (esdm_cdev_readable())
 		return EPOLLIN | EPOLLRDNORM;
 
 	/* The watcher tells the poller once that changes */

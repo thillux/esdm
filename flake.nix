@@ -1108,6 +1108,13 @@
                   machine.succeed("${check} addtoentcnt-signal /tmp/fake-egd.log")
                   real_egd()
 
+              with subtest("poll() reports what a read does of an ESDM not operational"):
+                  fake_egd("notop")
+                  # The watcher, kicked at load, learned the state
+                  machine.sleep(1)
+                  machine.succeed("${check} poll-notop")
+                  real_egd()
+
               with subtest("unloading once the reader is gone"):
                   machine.succeed(
                       "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"

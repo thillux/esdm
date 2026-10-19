@@ -572,6 +572,37 @@ def cmd_addtoentcnt_signal(args):
     print("addtoentcnt-signal ok")
 
 
+def cmd_poll_notop(args):
+    # Against a notop fake-egd: poll() of /dev/esdm_random reports it
+    # readable only when a read with O_NONBLOCK gets data - not after the
+    # kernel's RNG served /dev/esdm_urandom, nor at all, as an ESDM that is
+    # not operational serves /dev/esdm_random nothing
+    read_exact("/dev/esdm_urandom", 64)
+    fd = os.open("/dev/esdm_random", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        p = select.poll()
+        p.register(fd, select.POLLIN)
+        end = time.monotonic() + 3
+        polls = 0
+        while time.monotonic() < end:
+            polls += 1
+            if p.poll(200):
+                try:
+                    os.read(fd, 64)
+                except BlockingIOError:
+                    fail(f"poll {polls}: readable, the read gives EAGAIN")
+                fail(f"poll {polls}: readable, an ESDM that is not operational served")
+        try:
+            os.read(fd, 64)
+            fail("an ESDM that is not operational served")
+        except BlockingIOError:
+            pass
+    finally:
+        os.close(fd)
+    print(f"poll-notop: {polls} polls, none readable")
+    print("poll-notop ok")
+
+
 def cmd_backoff(args):
     # Against a mute fake-egd: every read waits for the timeout once its
     # connection is made, after that the reconnects back off up to 2 s
@@ -608,6 +639,7 @@ CMDS = {
     "backoff": cmd_backoff,
     "addentropy": cmd_addentropy,
     "addtoentcnt-signal": cmd_addtoentcnt_signal,
+    "poll-notop": cmd_poll_notop,
 }
 
 if __name__ == "__main__":
