@@ -19,10 +19,12 @@
 
 /*
  * The backend independent part of esdm_dtls.h: messages of any size on top of
- * the records of the backend, and the busy marker of the thread.
+ * the records of the backend - or of the DTLS with certificates, see
+ * esdm_dtls_tls.c -, and the busy marker of the thread.
  */
 
 #include <errno.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +54,9 @@ struct esdm_dtls_ctx {
 
 struct esdm_dtls {
 	void *backend;
+
+	/* The records of the connection, NULL for the ones of the backend */
+	const struct esdm_dtls_ops *ops;
 
 	/* The largest message the peer may send */
 	size_t max_msg;
@@ -88,13 +93,20 @@ bool esdm_dtls_busy(void)
 DSO_PUBLIC
 int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 {
+#ifdef ESDM_DTLS
 	struct esdm_dtls_ctx *c;
 	int ret;
+#endif
 
 	if (!ctx)
 		return -EINVAL;
 	*ctx = NULL;
 
+#ifndef ESDM_DTLS
+	/* No opportunistic DTLS in this build, only the one of esdm_tls.h */
+	(void)server;
+	return -EOPNOTSUPP;
+#else
 	c = calloc(1, sizeof(*c));
 	if (!c)
 		return -ENOMEM;
@@ -110,6 +122,7 @@ int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 
 	*ctx = c;
 	return 0;
+#endif
 }
 
 DSO_PUBLIC
@@ -118,9 +131,11 @@ void esdm_dtls_ctx_free(struct esdm_dtls_ctx *ctx)
 	if (!ctx)
 		return;
 
+#ifdef ESDM_DTLS
 	esdm_dtls_enter();
 	esdm_dtls_backend_ctx_free(ctx->backend);
 	esdm_dtls_leave();
+#endif
 	free(ctx);
 }
 
@@ -128,13 +143,18 @@ DSO_PUBLIC
 int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 		    struct esdm_dtls **dtls)
 {
+#ifdef ESDM_DTLS
 	struct esdm_dtls *d;
 	int ret;
+#endif
 
 	if (!ctx || !dtls || fd < 0 || !max_msg)
 		return -EINVAL;
 	*dtls = NULL;
 
+#ifndef ESDM_DTLS
+	return -EOPNOTSUPP;
+#else
 	d = calloc(1, sizeof(*d));
 	if (!d)
 		return -ENOMEM;
@@ -151,6 +171,66 @@ int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 
 	*dtls = d;
 	return 0;
+#endif
+}
+
+int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
+		      size_t max_msg, struct esdm_dtls **dtls)
+{
+	struct esdm_dtls *d = calloc(1, sizeof(*d));
+
+	if (!d) {
+		ops->free(conn);
+		return -ENOMEM;
+	}
+	d->ops = ops;
+	d->backend = conn;
+	d->max_msg = max_msg;
+
+	*dtls = d;
+	return 0;
+}
+
+void *esdm_dtls_ops_conn(struct esdm_dtls *dtls,
+			 const struct esdm_dtls_ops *ops)
+{
+	return (dtls && dtls->ops == ops) ? dtls->backend : NULL;
+}
+
+/* The records of the connection, of the backend or of its ops */
+static int esdm_dtls_rec_handshake(struct esdm_dtls *dtls)
+{
+	if (dtls->ops)
+		return dtls->ops->handshake(dtls->backend);
+#ifdef ESDM_DTLS
+	return esdm_dtls_backend_handshake(dtls->backend);
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+static int esdm_dtls_rec_send(struct esdm_dtls *dtls, const uint8_t *buf,
+			      size_t len)
+{
+	if (dtls->ops)
+		return dtls->ops->send(dtls->backend, buf, len);
+#ifdef ESDM_DTLS
+	return esdm_dtls_backend_send(dtls->backend, buf, len);
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+static ssize_t esdm_dtls_rec_recv(struct esdm_dtls *dtls, uint8_t *buf,
+				  size_t len)
+{
+	if (dtls->ops)
+		return dtls->ops->recv(dtls->backend, buf, len);
+#ifdef ESDM_DTLS
+	return esdm_dtls_backend_recv(dtls->backend, buf, len);
+#else
+	return -EOPNOTSUPP;
+#endif
 }
 
 static void esdm_dtls_drop_partial(struct esdm_dtls *dtls)
@@ -172,7 +252,12 @@ void esdm_dtls_free(struct esdm_dtls *dtls)
 
 	esdm_dtls_drop_partial(dtls);
 	esdm_dtls_enter();
-	esdm_dtls_backend_conn_free(dtls->backend);
+	if (dtls->ops)
+		dtls->ops->free(dtls->backend);
+#ifdef ESDM_DTLS
+	else
+		esdm_dtls_backend_conn_free(dtls->backend);
+#endif
 	esdm_dtls_leave();
 	free(dtls);
 }
@@ -186,10 +271,18 @@ int esdm_dtls_handshake(struct esdm_dtls *dtls)
 		return -EINVAL;
 
 	esdm_dtls_enter();
-	ret = esdm_dtls_backend_handshake(dtls->backend);
+	ret = esdm_dtls_rec_handshake(dtls);
 	esdm_dtls_leave();
 
 	return ret;
+}
+
+DSO_PUBLIC
+short esdm_dtls_want(struct esdm_dtls *dtls)
+{
+	if (dtls && dtls->ops)
+		return dtls->ops->want(dtls->backend);
+	return POLLIN;
 }
 
 DSO_PUBLIC
@@ -215,10 +308,13 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 		rec[0] = len > part ? ESDM_DTLS_MORE : ESDM_DTLS_LAST;
 		if (part)
 			memcpy(rec + 1, p, part);
-		ret = esdm_dtls_backend_send(dtls->backend, rec, part + 1);
+		ret = esdm_dtls_rec_send(dtls, rec, part + 1);
 		p += part;
 		len -= part;
 	} while (!ret && len);
+	/* What the records of the ops hold of it goes out now */
+	if (!ret && dtls->ops)
+		ret = dtls->ops->flush(dtls->backend);
 	esdm_dtls_leave();
 
 	memset_secure(rec, 0, recsize);
@@ -247,8 +343,7 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 
 	esdm_dtls_enter();
 	for (;;) {
-		n = esdm_dtls_backend_recv(dtls->backend, rec,
-					   ESDM_DTLS_RECORD_BUF);
+		n = esdm_dtls_rec_recv(dtls, rec, ESDM_DTLS_RECORD_BUF);
 		if (n < 0) {
 			ret = n;
 			goto out;
@@ -310,7 +405,14 @@ bool esdm_dtls_pending(struct esdm_dtls *dtls)
 		return false;
 
 	esdm_dtls_enter();
-	ret = esdm_dtls_backend_pending(dtls->backend);
+	if (dtls->ops)
+		ret = dtls->ops->pending(dtls->backend);
+	else
+#ifdef ESDM_DTLS
+		ret = esdm_dtls_backend_pending(dtls->backend);
+#else
+		ret = false;
+#endif
 	esdm_dtls_leave();
 
 	return ret;
@@ -319,5 +421,13 @@ bool esdm_dtls_pending(struct esdm_dtls *dtls)
 DSO_PUBLIC
 const char *esdm_dtls_cipher(struct esdm_dtls *dtls)
 {
-	return dtls ? esdm_dtls_backend_cipher(dtls->backend) : "none";
+	if (!dtls)
+		return "none";
+	if (dtls->ops)
+		return dtls->ops->cipher(dtls->backend);
+#ifdef ESDM_DTLS
+	return esdm_dtls_backend_cipher(dtls->backend);
+#else
+	return "none";
+#endif
 }

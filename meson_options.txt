@@ -1208,6 +1208,34 @@ name. No port is assigned to the EGD protocol; 7378 was unassigned by IANA
 when this was written.
 ''')
 
+option('es-ext-net', type: 'feature', value: 'disabled',
+       description: '''Serve external entropy sources over the network.
+
+The provider server of libesdm_es_ext gains a network mode, which
+esdm-es-ext-serve and esdm-es-pkcs11 offer with --listen: the entropy source
+is served on SCTP with mutually authenticated DTLS 1.2, as RFC 6083 has it -
+SCTP-AUTH for the chunks, DTLS for the records, certificates and CRLs as the
+TLS of egd-net has them. The esdm-es-ext-relay is built as well: it serves a
+local provider socket, which the ESDM reads as one of its ExternalSocket
+sources, and forwards each request to such a provider on another host.
+
+The ESDM itself takes no part in the network: it reads the relay like any
+local provider, and trusts it by the user it runs as.
+
+The DTLS is provided by the TLS stack of the crypto backend: crypto_backend
+openssl, gnutls or botan. The builtin and the leancrypto backend have none.
+Linux only, with SCTP (the kernel module sctp) on both hosts.
+''')
+
+option('es-ext-net-port', type: 'integer', min: 1, max: 65535, value: 7379,
+       description: '''SCTP port of a provider served on the network (default: 7379)
+
+The port the units of esdm-es-ext-serve listen on, the esdm-es-ext-relay
+connects to unless told otherwise, and the man pages name. No port is
+assigned to the external entropy source protocol; 7379, next to the 7378 of
+egd-net, was unassigned by IANA when this was written.
+''')
+
 option('esdm-es-ext', type: 'feature', value: 'enabled',
        description: '''Enable the external entropy source library
 

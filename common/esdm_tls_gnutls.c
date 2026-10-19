@@ -18,11 +18,18 @@
  */
 
 /*
- * TLS of esdm_tls_backend.h by GnuTLS, for crypto_backend=gnutls.
+ * TLS of esdm_tls_backend.h by GnuTLS, for crypto_backend=gnutls: TLS 1.3 on a
+ * stream socket, DTLS 1.2 on SCTP - with the same files, the same verification
+ * and the same revocation policy, see esdm_tls_gnutls_files() and
+ * esdm_tls_gnutls_verify().
  *
  * GnuTLS reaches the socket through push and pull functions of its own, one
  * send(2) with MSG_NOSIGNAL or recv(2) each on the non-blocking socket, which
- * makes every call return GNUTLS_E_AGAIN rather than wait for the peer.
+ * makes every call return GNUTLS_E_AGAIN rather than wait for the peer. On
+ * SCTP, they hand the records - several of a flight in one push - to the
+ * association of esdm_tls_sctp.h and take each from it; the session is a
+ * datagram one without the replay detection of DTLS, which RFC 6083 rules out
+ * (GNUTLS_NO_REPLAY_PROTECTION), and with timeouts too long to ever retransmit.
  *
  * GnuTLS decrypts a record into a buffer of its own, which gnutls_record_recv()
  * frees without wiping it: the packet is taken from GnuTLS instead, handed out
@@ -37,6 +44,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <gnutls/dtls.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <poll.h>
@@ -55,6 +63,22 @@
 /* TLS 1.3 exactly; the tickets are turned off with the session flags */
 #define ESDM_TLS_GNUTLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.3"
 
+/*
+ * DTLS 1.2 exactly on SCTP: ECDHE with the key of the certificate, ECDSA or
+ * RSA, and AEAD ciphers only
+ */
+#define ESDM_TLS_GNUTLS_DTLS_PRIORITY                                          \
+	"NORMAL:-VERS-ALL:+VERS-DTLS1.2:-CIPHER-ALL:+AES-256-GCM:"             \
+	"+CHACHA20-POLY1305:+AES-128-GCM:-MAC-ALL:+AEAD:-KX-ALL:"              \
+	"+ECDHE-ECDSA:+ECDHE-RSA"
+
+/*
+ * The retransmission and the total timeout of the DTLS handshake, in
+ * milliseconds: long enough to never run out - SCTP retransmits, DTLS must not
+ * (RFC 6083 section 3.5), and the callers bound the handshake themselves
+ */
+#define ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS (600 * 1000)
+
 /* The extensions of a CRL that is no complete one, see esdm_tls_crl_info */
 #define ESDM_TLS_GNUTLS_OID_DELTA_CRL "2.5.29.27"
 #define ESDM_TLS_GNUTLS_OID_IDP "2.5.29.28"
@@ -62,6 +86,7 @@
 struct esdm_tls_gnutls_ctx {
 	gnutls_certificate_credentials_t cred;
 	gnutls_priority_t prio;
+	bool sctp;
 	gnutls_x509_crl_t *crls;
 	unsigned int crl_num;
 	/* The trust anchors of cred, for esdm_tls_gnutls_chain() */
@@ -73,6 +98,8 @@ struct esdm_tls_gnutls_conn {
 	gnutls_session_t session;
 	struct esdm_tls_gnutls_ctx *ctx;
 	int fd;
+	/* The association on SCTP, NULL on a stream socket */
+	struct esdm_tls_sctp *sctp;
 
 	/* The packet being handed out, and how much of it is */
 	gnutls_packet_t pkt;
@@ -116,6 +143,56 @@ static ssize_t esdm_tls_gnutls_pull(gnutls_transport_ptr_t ptr, void *buf,
 		gnutls_transport_set_errno(c->session, errno);
 
 	return n;
+}
+
+/* SCTP: the records of a push queued, see esdm_tls_sctp.h */
+static ssize_t esdm_tls_gnutls_sctp_push(gnutls_transport_ptr_t ptr,
+					 const void *buf, size_t len)
+{
+	struct esdm_tls_gnutls_conn *c = ptr;
+	int ret = esdm_tls_sctp_queue(c->sctp, buf, len);
+
+	if (ret) {
+		gnutls_transport_set_errno(c->session, -ret);
+		return -1;
+	}
+
+	return (ssize_t)len;
+}
+
+static ssize_t esdm_tls_gnutls_sctp_pull(gnutls_transport_ptr_t ptr, void *buf,
+					 size_t len)
+{
+	struct esdm_tls_gnutls_conn *c = ptr;
+	ssize_t n = esdm_tls_sctp_recv(c->sctp, buf, len);
+
+	/*
+	 * The end of the association is an error to a datagram session, which
+	 * would take 0 for an empty datagram
+	 */
+	if (n < 0) {
+		gnutls_transport_set_errno(c->session, (int)-n);
+		return -1;
+	}
+
+	return n;
+}
+
+/*
+ * Is a message there? Always, to the DTLS of GnuTLS - and the pull tells
+ * whether one really is. The answer only decides whether it retransmits its
+ * flight, which it must not on SCTP. And it asks before it reads the Finished
+ * of the peer even when it parsed that Finished already, with the
+ * ChangeCipherSpec before it - on UDP the two come in one datagram, on SCTP
+ * each in a user message of its own: an answer by the socket would have the
+ * handshake wait for a message that is not to come.
+ */
+static int esdm_tls_gnutls_sctp_pull_timeout(gnutls_transport_ptr_t ptr,
+					     unsigned int ms)
+{
+	(void)ptr;
+	(void)ms;
+	return 1;
 }
 
 /* An alert that is about a certificate: refused, or not presented */
@@ -422,29 +499,16 @@ void esdm_tls_backend_ctx_free(void *ctx)
 	free(c);
 }
 
-int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
-			     void **ctx)
+/*
+ * The files of one side, the same on either transport: the trust anchors, the
+ * own certificate with its key - which has to chain to them - and the CRLs -
+ * see "Contexts" in esdm_tls.h.
+ */
+static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
+				 const struct esdm_tls_config *cfg)
 {
-	struct esdm_tls_gnutls_ctx *c = calloc(1, sizeof(*c));
 	unsigned int i;
 	int ret;
-
-	(void)server;
-
-	if (!c)
-		return -ENOMEM;
-
-	if (gnutls_certificate_allocate_credentials(&c->cred) < 0) {
-		c->cred = NULL;
-		ret = -ENOMEM;
-		goto err;
-	}
-	if (gnutls_priority_init(&c->prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) <
-	    0) {
-		c->prio = NULL;
-		ret = -ENOMEM;
-		goto err;
-	}
 
 	ret = gnutls_certificate_set_x509_trust_file(c->cred, cfg->ca_file,
 						     GNUTLS_X509_FMT_PEM);
@@ -454,12 +518,11 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 			    cfg->ca_file,
 			    ret < 0 ? gnutls_strerror(ret) :
 				      "no certificate in it");
-		ret = -EINVAL;
-		goto err;
+		return -EINVAL;
 	}
 	ret = esdm_tls_gnutls_load_cas(c);
 	if (ret)
-		goto err;
+		return ret;
 
 	if (cfg->cert_file) {
 		/* Checks that the key belongs to the certificate as well */
@@ -472,20 +535,52 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 				"TLS: cannot load the certificate %s with the key %s: %s\n",
 				cfg->cert_file, cfg->key_file,
 				gnutls_strerror(ret));
-			ret = -EINVAL;
-			goto err;
+			return -EINVAL;
 		}
 		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
 						cfg->ca_file);
 		if (ret)
-			goto err;
+			return ret;
 	}
 
 	for (i = 0; i < cfg->crl_files_num; i++) {
 		ret = esdm_tls_gnutls_load_crls(c, cfg->crl_files[i]);
 		if (ret)
-			goto err;
+			return ret;
 	}
+
+	return 0;
+}
+
+int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
+			     void **ctx)
+{
+	struct esdm_tls_gnutls_ctx *c = calloc(1, sizeof(*c));
+	int ret;
+
+	(void)server;
+
+	if (!c)
+		return -ENOMEM;
+	c->sctp = cfg->transport == ESDM_TLS_TRANSPORT_SCTP;
+
+	if (gnutls_certificate_allocate_credentials(&c->cred) < 0) {
+		c->cred = NULL;
+		ret = -ENOMEM;
+		goto err;
+	}
+	if (gnutls_priority_init(&c->prio,
+				 c->sctp ? ESDM_TLS_GNUTLS_DTLS_PRIORITY :
+					   ESDM_TLS_GNUTLS_PRIORITY,
+				 NULL) < 0) {
+		c->prio = NULL;
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	ret = esdm_tls_gnutls_files(c, cfg);
+	if (ret)
+		goto err;
 
 	*ctx = c;
 	return 0;
@@ -897,24 +992,34 @@ static void esdm_tls_gnutls_alert(struct esdm_tls_gnutls_conn *d, int ret)
 }
 
 int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      struct esdm_tls_sctp *sctp,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
 {
 	struct esdm_tls_gnutls_ctx *c = ctx;
-	struct esdm_tls_gnutls_conn *d = calloc(1, sizeof(*d));
+	struct esdm_tls_gnutls_conn *d;
 	unsigned char addr[sizeof(struct in6_addr)];
+	unsigned int flags = (server ? GNUTLS_SERVER : GNUTLS_CLIENT) |
+			     GNUTLS_NONBLOCK | GNUTLS_NO_TICKETS;
 
+	if (c->sctp != !!sctp)
+		return -EINVAL;
+
+	d = calloc(1, sizeof(*d));
 	if (!d)
 		return -ENOMEM;
 	d->fd = fd;
 	d->ctx = c;
+	d->sctp = sctp;
 	d->check = check;
 	d->check_arg = arg;
 
-	if (gnutls_init(&d->session, (server ? GNUTLS_SERVER : GNUTLS_CLIENT) |
-					     GNUTLS_NONBLOCK |
-					     GNUTLS_NO_TICKETS) < 0) {
+	/* No replay detection of DTLS on SCTP, see the file header */
+	if (sctp)
+		flags |= GNUTLS_DATAGRAM | GNUTLS_NO_REPLAY_PROTECTION;
+
+	if (gnutls_init(&d->session, flags) < 0) {
 		free(d);
 		return -ENOMEM;
 	}
@@ -959,8 +1064,25 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 	gnutls_session_set_verify_function(d->session, esdm_tls_gnutls_verify);
 
 	gnutls_transport_set_ptr(d->session, d);
-	gnutls_transport_set_push_function(d->session, esdm_tls_gnutls_push);
-	gnutls_transport_set_pull_function(d->session, esdm_tls_gnutls_pull);
+	if (sctp) {
+		gnutls_transport_set_push_function(d->session,
+						   esdm_tls_gnutls_sctp_push);
+		gnutls_transport_set_pull_function(d->session,
+						   esdm_tls_gnutls_sctp_pull);
+		gnutls_transport_set_pull_timeout_function(
+			d->session, esdm_tls_gnutls_sctp_pull_timeout);
+
+		/* The MTU of RFC 6083, and no retransmission of DTLS */
+		gnutls_dtls_set_mtu(d->session, ESDM_TLS_SCTP_MTU);
+		gnutls_dtls_set_timeouts(d->session,
+					 ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS,
+					 ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS);
+	} else {
+		gnutls_transport_set_push_function(d->session,
+						   esdm_tls_gnutls_push);
+		gnutls_transport_set_pull_function(d->session,
+						   esdm_tls_gnutls_pull);
+	}
 
 	*conn = d;
 	return 0;
@@ -1054,6 +1176,14 @@ ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
 	}
 
 	gnutls_packet_get(d->pkt, &data, NULL);
+
+	/* On SCTP, a record whole, or none */
+	if (d->sctp && data.size > len) {
+		esdm_tls_gnutls_drop_pkt(d);
+		snprintf(d->error, sizeof(d->error),
+			 "a record larger than %zu bytes", len);
+		return -EMSGSIZE;
+	}
 	n = data.size - d->pkt_off;
 	if (n > len)
 		n = len;
@@ -1094,4 +1224,26 @@ const char *esdm_tls_backend_error(void *conn)
 	struct esdm_tls_gnutls_conn *d = conn;
 
 	return d->error;
+}
+
+/*
+ * The exporter of GnuTLS takes the master secret of the security parameters
+ * of the session being negotiated, which it holds from the key exchange on -
+ * before the handshake is complete. A context of NULL is no context, unlike
+ * an empty one.
+ */
+int esdm_tls_backend_export(void *conn, const uint8_t *label,
+			    size_t label_len, uint8_t *out, size_t out_len)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	int ret = gnutls_prf_rfc5705(d->session, label_len, (const char *)label,
+				     0, NULL, out_len, (char *)out);
+
+	if (ret < 0) {
+		snprintf(d->error, sizeof(d->error), "exporter: %s",
+			 gnutls_strerror(ret));
+		return -EINVAL;
+	}
+
+	return 0;
 }

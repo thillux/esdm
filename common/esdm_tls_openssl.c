@@ -18,12 +18,19 @@
  */
 
 /*
- * TLS of esdm_tls_backend.h by OpenSSL, for crypto_backend=openssl.
+ * TLS of esdm_tls_backend.h by OpenSSL, for crypto_backend=openssl: TLS 1.3 on
+ * a stream socket, DTLS 1.2 on SCTP - with the same files, the same
+ * verification and the same revocation policy, see esdm_tls_openssl_files()
+ * and esdm_tls_openssl_verify().
  *
  * The socket is reached through a BIO of its own, as the one of OpenSSL
  * write(2)s - and with that raises SIGPIPE in the process the client library is
  * linked into for a peer that went away: one send(2) with MSG_NOSIGNAL or one
- * recv(2) per call, on the non-blocking socket.
+ * recv(2) per call, on the non-blocking socket. On SCTP, the BIO hands each
+ * record to the association of esdm_tls_sctp.h and takes each from it - not
+ * OpenSSL's own SCTP BIO, which only an OpenSSL built with SCTP support has,
+ * and which would make OpenSSL handle the keys of SCTP-AUTH itself: the other
+ * TLS stacks need the code of esdm_tls_sctp.c, and so all three use it.
  *
  * Everything is created in a library context of its own with the default
  * provider, like the DTLS - see esdm_dtls_openssl.c: the TLS must not take its
@@ -59,13 +66,30 @@
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
 
+/*
+ * DTLS 1.2 on SCTP: ECDHE with the key of the certificate, ECDSA or RSA, and
+ * AEAD ciphers only
+ */
+#define ESDM_TLS_OPENSSL_DTLS_CIPHERS                                          \
+	"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"           \
+	"ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"           \
+	"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+
+/*
+ * The timer of the DTLS handshake, in microseconds: long enough to never run
+ * out - SCTP retransmits, DTLS must not (RFC 6083 section 3.5)
+ */
+#define ESDM_TLS_OPENSSL_DTLS_TIMER_US 600000000U
+
 struct esdm_tls_openssl_ctx {
 	SSL_CTX *ssl_ctx;
 	STACK_OF(X509_CRL) *crls;
+	bool sctp;
 };
 
 struct esdm_tls_openssl_conn {
 	SSL *ssl;
+	struct esdm_tls_sctp *sctp;
 	esdm_tls_backend_check check;
 	void *check_arg;
 	char error[ESDM_TLS_TEXT_LEN];
@@ -77,6 +101,7 @@ struct esdm_tls_openssl_conn {
 
 static OSSL_LIB_CTX *esdm_tls_openssl_libctx = NULL;
 static BIO_METHOD *esdm_tls_openssl_bio_meth = NULL;
+static BIO_METHOD *esdm_tls_openssl_sctp_meth = NULL;
 static pthread_once_t esdm_tls_openssl_once = PTHREAD_ONCE_INIT;
 
 static int esdm_tls_openssl_bio_fd(BIO *bio)
@@ -138,9 +163,83 @@ static int esdm_tls_openssl_bio_create(BIO *bio)
 	return 1;
 }
 
+/* SCTP: one record per call, through the association, see esdm_tls_sctp.h */
+static int esdm_tls_openssl_sctp_write(BIO *bio, const char *buf, int len)
+{
+	int ret;
+
+	BIO_clear_retry_flags(bio);
+	if (len < 0)
+		return -1;
+
+	/* Queued, never refused for want of room in the socket */
+	ret = esdm_tls_sctp_queue(BIO_get_data(bio), (const uint8_t *)buf,
+				  (size_t)len);
+	if (ret) {
+		errno = -ret;
+		return -1;
+	}
+
+	return len;
+}
+
+static int esdm_tls_openssl_sctp_read(BIO *bio, char *buf, int len)
+{
+	ssize_t n;
+
+	BIO_clear_retry_flags(bio);
+	if (len <= 0)
+		return -1;
+
+	n = esdm_tls_sctp_recv(BIO_get_data(bio), (uint8_t *)buf, (size_t)len);
+	if (n == -EAGAIN) {
+		BIO_set_retry_read(bio);
+		return -1;
+	}
+	/* The end of the association, as the one of a stream */
+	if (n == -ECONNRESET)
+		return 0;
+	if (n < 0) {
+		errno = (int)-n;
+		return -1;
+	}
+
+	return (int)n;
+}
+
+static long esdm_tls_openssl_sctp_ctrl(BIO *bio, int cmd, long num, void *ptr)
+{
+	(void)bio;
+	(void)num;
+	(void)ptr;
+
+	switch (cmd) {
+	case BIO_CTRL_FLUSH:
+		/* esdm_tls.c sends what is queued */
+		return 1;
+	case BIO_CTRL_DGRAM_GET_FALLBACK_MTU:
+	case BIO_CTRL_DGRAM_QUERY_MTU:
+		return ESDM_TLS_SCTP_MTU;
+	default:
+		/*
+		 * Peer addresses, timers, MTU overhead: nothing DTLS needs
+		 * on SCTP
+		 */
+		return 0;
+	}
+}
+
+/* The timer of the DTLS handshake, never to run out - see above */
+static unsigned int esdm_tls_openssl_dtls_timer(SSL *ssl, unsigned int timer_us)
+{
+	(void)ssl;
+	(void)timer_us;
+	return ESDM_TLS_OPENSSL_DTLS_TIMER_US;
+}
+
 static void esdm_tls_openssl_init(void)
 {
-	BIO_METHOD *meth;
+	BIO_METHOD *meth, *sctp_meth;
 	OSSL_LIB_CTX *libctx = OSSL_LIB_CTX_new();
 
 	if (!libctx)
@@ -161,7 +260,21 @@ static void esdm_tls_openssl_init(void)
 		return;
 	}
 
+	sctp_meth = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK,
+				 "esdm_tls_sctp");
+	if (!sctp_meth ||
+	    !BIO_meth_set_write(sctp_meth, esdm_tls_openssl_sctp_write) ||
+	    !BIO_meth_set_read(sctp_meth, esdm_tls_openssl_sctp_read) ||
+	    !BIO_meth_set_ctrl(sctp_meth, esdm_tls_openssl_sctp_ctrl) ||
+	    !BIO_meth_set_create(sctp_meth, esdm_tls_openssl_bio_create)) {
+		BIO_meth_free(sctp_meth);
+		BIO_meth_free(meth);
+		OSSL_LIB_CTX_free(libctx);
+		return;
+	}
+
 	esdm_tls_openssl_bio_meth = meth;
+	esdm_tls_openssl_sctp_meth = sctp_meth;
 	esdm_tls_openssl_libctx = libctx;
 }
 
@@ -552,67 +665,25 @@ void esdm_tls_backend_ctx_free(void *ctx)
 	free(c);
 }
 
-int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
-			     void **ctx)
+/*
+ * The files of one side, the same on either transport: the trust anchors, the
+ * own certificate with its key - which has to chain to them - and the CRLs,
+ * and the verification of the peer - see "Contexts" in esdm_tls.h.
+ */
+static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
+				  const struct esdm_tls_config *cfg)
 {
-	struct esdm_tls_openssl_ctx *oc;
 	char err[ESDM_TLS_TEXT_LEN];
+	SSL_CTX *c = oc->ssl_ctx;
 	unsigned int i;
-	SSL_CTX *c;
-	int ret = -EINVAL;
-
-	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
-	if (!esdm_tls_openssl_libctx)
-		return -ENOMEM;
-
-	oc = calloc(1, sizeof(*oc));
-	if (!oc)
-		return -ENOMEM;
-	oc->crls = sk_X509_CRL_new_null();
-	if (!oc->crls) {
-		free(oc);
-		return -ENOMEM;
-	}
-
-	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL,
-			   server ? TLS_server_method() : TLS_client_method());
-	if (!c) {
-		ret = -ENOMEM;
-		goto err;
-	}
-	oc->ssl_ctx = c;
-
-	/*
-	 * TLS 1.3 exactly, and neither tickets nor a session cache: a
-	 * connection lives as long as it does, with the one handshake it
-	 * started with.
-	 */
-	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_num_tickets(c, 0)) {
-		ret = -ENOMEM;
-		goto err;
-	}
-	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION);
-	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
-
-	/*
-	 * A write the socket only took part of is continued with the rest, from
-	 * wherever the caller keeps it. A server holds many connections, most
-	 * of them idle between the requests: no record buffers for those.
-	 */
-	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
-				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
-				    SSL_MODE_RELEASE_BUFFERS);
-	/* Wipe the plaintext of a record once it is handed out */
-	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
+	int ret;
 
 	if (SSL_CTX_load_verify_file(c, cfg->ca_file) != 1) {
 		esdm_tls_openssl_errstr(err, sizeof(err));
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "TLS: cannot load the trust anchors %s: %s\n",
 			    cfg->ca_file, err);
-		goto err;
+		return -EINVAL;
 	}
 
 	if (cfg->cert_file) {
@@ -622,7 +693,7 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "TLS: cannot load the certificate %s: %s\n",
 				    cfg->cert_file, err);
-			goto err;
+			return -EINVAL;
 		}
 		if (SSL_CTX_use_PrivateKey_file(c, cfg->key_file,
 						SSL_FILETYPE_PEM) != 1) {
@@ -630,7 +701,7 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "TLS: cannot load the key %s: %s\n",
 				    cfg->key_file, err);
-			goto err;
+			return -EINVAL;
 		}
 		if (SSL_CTX_check_private_key(c) != 1) {
 			esdm_tls_openssl_errstr(err, sizeof(err));
@@ -638,21 +709,19 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 				LOGGER_ERR, LOGGER_C_ANY,
 				"TLS: the key %s does not belong to the certificate %s: %s\n",
 				cfg->key_file, cfg->cert_file, err);
-			goto err;
+			return -EINVAL;
 		}
 		ret = esdm_tls_openssl_check_own(c, cfg->cert_file,
 						 cfg->ca_file);
 		if (ret)
-			goto err;
-		ret = -EINVAL;
+			return ret;
 	}
 
 	for (i = 0; i < cfg->crl_files_num; i++) {
 		ret = esdm_tls_openssl_load_crls(oc->crls, cfg->crl_files[i]);
 		if (ret)
-			goto err;
+			return ret;
 	}
-	ret = -EINVAL;
 
 	if (server) {
 		STACK_OF(X509_NAME) *names = SSL_load_client_CA_file_ex(
@@ -672,6 +741,101 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 		SSL_CTX_set_verify(c, SSL_VERIFY_PEER,
 				   esdm_tls_openssl_verify);
 	}
+
+	return 0;
+}
+
+/*
+ * TLS 1.3 exactly on a stream socket, and neither tickets nor a session cache:
+ * a connection lives as long as it does, with the one handshake it started
+ * with.
+ */
+static int esdm_tls_openssl_stream(SSL_CTX *c)
+{
+	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
+	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
+	    !SSL_CTX_set_num_tickets(c, 0))
+		return -ENOMEM;
+	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION);
+	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+
+	/*
+	 * A write the socket only took part of is continued with the rest, from
+	 * wherever the caller keeps it. A server holds many connections, most
+	 * of them idle between the requests: no record buffers for those.
+	 */
+	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
+				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
+				    SSL_MODE_RELEASE_BUFFERS);
+	/* Wipe the plaintext of a record once it is handed out */
+	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
+
+	return 0;
+}
+
+/*
+ * DTLS 1.2 exactly on SCTP, AEAD ciphers only, and neither renegotiation nor
+ * tickets nor a session cache - one handshake, and one key of SCTP-AUTH, per
+ * association. No MTU is queried: the one of RFC 6083 is set per connection.
+ */
+static int esdm_tls_openssl_dtls(SSL_CTX *c)
+{
+	if (!SSL_CTX_set_min_proto_version(c, DTLS1_2_VERSION) ||
+	    !SSL_CTX_set_max_proto_version(c, DTLS1_2_VERSION) ||
+	    !SSL_CTX_set_cipher_list(c, ESDM_TLS_OPENSSL_DTLS_CIPHERS))
+		return -ENOMEM;
+	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION |
+				       SSL_OP_NO_QUERY_MTU);
+	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+
+	/* As above, a record being one write of its own */
+	SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
+	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
+
+	return 0;
+}
+
+int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
+			     void **ctx)
+{
+	struct esdm_tls_openssl_ctx *oc;
+	bool sctp = cfg->transport == ESDM_TLS_TRANSPORT_SCTP;
+	SSL_CTX *c;
+	int ret;
+
+	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
+	if (!esdm_tls_openssl_libctx)
+		return -ENOMEM;
+
+	oc = calloc(1, sizeof(*oc));
+	if (!oc)
+		return -ENOMEM;
+	oc->sctp = sctp;
+	oc->crls = sk_X509_CRL_new_null();
+	if (!oc->crls) {
+		free(oc);
+		return -ENOMEM;
+	}
+
+	if (sctp)
+		c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL,
+				   server ? DTLS_server_method() :
+					    DTLS_client_method());
+	else
+		c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL,
+				   server ? TLS_server_method() :
+					    TLS_client_method());
+	if (!c) {
+		ret = -ENOMEM;
+		goto err;
+	}
+	oc->ssl_ctx = c;
+
+	ret = sctp ? esdm_tls_openssl_dtls(c) : esdm_tls_openssl_stream(c);
+	if (!ret)
+		ret = esdm_tls_openssl_files(oc, server, cfg);
+	if (ret)
+		goto err;
 
 	*ctx = oc;
 	return 0;
@@ -804,6 +968,7 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 }
 
 int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      struct esdm_tls_sctp *sctp,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
@@ -817,6 +982,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 		return -ENOMEM;
 	c->check = check;
 	c->check_arg = arg;
+	c->sctp = sctp;
 
 	c->ssl = SSL_new(oc->ssl_ctx);
 	if (!c->ssl)
@@ -824,12 +990,31 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 	/* For esdm_tls_openssl_verify() */
 	SSL_set_app_data(c->ssl, c);
 
-	bio = BIO_new(esdm_tls_openssl_bio_meth);
-	if (!bio)
-		goto err;
-	BIO_set_data(bio, (void *)(intptr_t)fd);
-	/* The SSL owns the BIO from here on, for reading and writing */
-	SSL_set_bio(c->ssl, bio, bio);
+	if (oc->sctp) {
+		if (!sctp)
+			goto err;
+		bio = BIO_new(esdm_tls_openssl_sctp_meth);
+		if (!bio)
+			goto err;
+		BIO_set_data(bio, sctp);
+		SSL_set_bio(c->ssl, bio, bio);
+
+		/*
+		 * The MTU of RFC 6083, and no retransmission of DTLS - see
+		 * esdm_tls_openssl_dtls()
+		 */
+		SSL_set_options(c->ssl, SSL_OP_NO_QUERY_MTU);
+		if (!DTLS_set_link_mtu(c->ssl, ESDM_TLS_SCTP_MTU))
+			goto err;
+		DTLS_set_timer_cb(c->ssl, esdm_tls_openssl_dtls_timer);
+	} else {
+		bio = BIO_new(esdm_tls_openssl_bio_meth);
+		if (!bio)
+			goto err;
+		BIO_set_data(bio, (void *)(intptr_t)fd);
+		/* The SSL owns the BIO from here on, for reading and writing */
+		SSL_set_bio(c->ssl, bio, bio);
+	}
 
 	if (server) {
 		SSL_set_accept_state(c->ssl);
@@ -918,6 +1103,14 @@ ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
 
 	ERR_clear_error();
 	ret = SSL_read(c->ssl, buf, (int)len);
+
+	/* On SCTP, a record whole: what is left of it is no message of ours */
+	if (c->sctp && ret > 0 && (size_t)ret == len &&
+	    SSL_pending(c->ssl) > 0) {
+		snprintf(c->error, sizeof(c->error),
+			 "a record larger than %zu bytes", len);
+		return -EMSGSIZE;
+	}
 	if (ret > 0)
 		return ret;
 
@@ -959,4 +1152,23 @@ const char *esdm_tls_backend_error(void *conn)
 	struct esdm_tls_openssl_conn *c = conn;
 
 	return c->error;
+}
+
+/*
+ * The exporter of OpenSSL takes the master secret as soon as it is known,
+ * before the handshake is complete - as OpenSSL's own DTLS over SCTP does
+ */
+int esdm_tls_backend_export(void *conn, const uint8_t *label,
+			    size_t label_len, uint8_t *out, size_t out_len)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int ret;
+
+	ERR_clear_error();
+	ret = SSL_export_keying_material(c->ssl, out, out_len,
+					 (const char *)label, label_len, NULL,
+					 0, 0);
+	ERR_clear_error();
+
+	return ret == 1 ? 0 : -EINVAL;
 }

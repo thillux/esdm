@@ -18,16 +18,23 @@
  */
 
 /*
- * Mutually authenticated TLS 1.3 on a connected stream socket - the TLS mode of
- * the EGD protocol between hosts (meson options egd-net and egd-net-tls): the
- * esdm-egd-net-server on the host of an ESDM, and the network mode of
- * libesdm_egd_client used by the esdm-egd-net-relay on a host without one.
+ * Mutually authenticated TLS between hosts, on one of two transports:
  *
- * Unlike the DTLS of esdm_dtls.h, which only keeps the data of a local
- * connection from being read and leaves the trust to SO_PEERCRED, nothing but
- * the TLS tells here who is at the other end. So both sides authenticate with
- * a certificate, verified against the trust anchors each side is configured
- * with:
+ *  - TLS 1.3 on a connected stream socket: the TLS mode of the EGD protocol
+ *    between hosts (meson options egd-net and egd-net-tls) - the
+ *    esdm-egd-net-server on the host of an ESDM, and the network mode of
+ *    libesdm_egd_client used by the esdm-egd-net-relay on a host without one.
+ *
+ *  - DTLS 1.2 on an SCTP association, as RFC 6083 has it: the external
+ *    entropy sources served on the network (meson option es-ext-net) - the
+ *    network mode of the provider server of libesdm_es_ext, and the
+ *    esdm-es-ext-relay on the host of the ESDM. See "DTLS over SCTP" below.
+ *
+ * Unlike the DTLS of esdm_dtls.h on its own, which only keeps the data of a
+ * local connection from being read and leaves the trust to SO_PEERCRED,
+ * nothing but the TLS tells here who is at the other end. So both sides
+ * authenticate with a certificate, verified against the trust anchors each side
+ * is configured with - on either transport, by the same code:
  *
  *  - The server always requires a client certificate. A client that presents
  *    none, or one that does not chain to the trust anchors of the server, is
@@ -43,13 +50,14 @@
  *  - Either side may be given certificate revocation lists, see "Revocation"
  *    below.
  *
- * TLS 1.3 only, no session tickets and no resumption: a connection is
- * long-lived and carries exactly the one handshake it started with.
+ * No session tickets and no resumption, and on DTLS no renegotiation: a
+ * connection is long-lived and carries exactly the one handshake it started
+ * with.
  *
  * The TLS is provided by the TLS stack of the crypto backend the ESDM is built
  * with: OpenSSL, GnuTLS or Botan. The builtin and the leancrypto backend have
- * none, a build with them has no egd-net-tls, and every function here reports
- * -EOPNOTSUPP.
+ * none, a build with them has no egd-net-tls and no es-ext-net, and every
+ * function here reports -EOPNOTSUPP.
  *
  * Contexts
  * --------
@@ -102,6 +110,87 @@
  * esdm_tls_pending(). The caller does all the waiting, which is what lets a
  * client bound every step by its timeout and a server bound its handshakes.
  *
+ * DTLS over SCTP
+ * --------------
+ * The SCTP association is of the one-to-one style - a socket of type
+ * SOCK_STREAM and protocol IPPROTO_SCTP, connected, or accepted from a
+ * listening one -, and RFC 6083 maps DTLS onto it:
+ *
+ *  - Every user message of the association is exactly one DTLS record, every
+ *    DTLS record one user message - SCTP keeps their boundaries, and a record
+ *    is only ever taken whole: a user message is received until SCTP marks
+ *    its end (MSG_EOR). All of them go on stream 0, ordered and reliable, with
+ *    the payload protocol identifier 0.
+ *  - DTLS sees a path MTU of 2^14 and fragments nothing, sends no
+ *    retransmissions of its own and needs no cookie exchange: SCTP delivers
+ *    what is sent, and its own handshake of four messages, cookie included,
+ *    keeps an address that is spoofed from setting up an association.
+ *
+ * The DATA chunks of the association - which carry the records - are
+ * authenticated by SCTP itself, with SCTP-AUTH (RFC 4895): DTLS protects what
+ * a record holds, SCTP-AUTH which records arrive. Without it, a party on the
+ * path - which sees the verification tag of the association - could inject
+ * DATA chunks the receiving SCTP stack takes for the next ones, so that it
+ * discards the real ones as duplicates: records would go missing silently, or
+ * a FORWARD-TSN chunk would skip them. With it, a chunk that does not carry
+ * the HMAC of the key of the association is dropped by the kernel before it
+ * counts, and what is not delivered is sent again. The keys, as RFC 6083
+ * section 4.8 has them:
+ *
+ *	client (esdm-es-ext-relay)          server (provider of libesdm_es_ext)
+ *	  |-- INIT: RANDOM, CHUNKS (DATA, FORWARD-TSN), HMAC-ALGO --------->|
+ *	  |<------------------------------------ INIT ACK: the same, COOKIE |
+ *	  |-- COOKIE ECHO / COOKIE ACK: SCTP-AUTH negotiated -------------->|
+ *	  |   every DATA chunk authenticated, with key 0 - the empty key    |
+ *	  |                                                                 |
+ *	  |== ClientHello ================================== key 0 ========>|
+ *	  |<== ServerHello, Certificate, ServerKeyExchange, CertificateRequest,
+ *	  |<== ServerHelloDone ============================== key 0 =========|
+ *	  |== Certificate, ClientKeyExchange, CertificateVerify == key 0 ===>|
+ *	  |   - all of it acknowledged by SCTP ("sender dry") -             |
+ *	  |   key 1 = DTLS exporter "EXPORTER_DTLS_OVER_SCTP", 64 bytes,    |
+ *	  |   no context - installed, not yet active                        |
+ *	  |== ChangeCipherSpec, Finished ===================== key 0 ======>|
+ *	  |   key 1 active                       key 1 installed - after    |
+ *	  |                                      the master secret, sender  |
+ *	  |                                      dry - and active before:   |
+ *	  |<===================================== ChangeCipherSpec, key 0 ===|
+ *	  |<===================================== Finished,         key 1 ==|
+ *	  |   key 0 deleted                                  key 0 deleted  |
+ *	  |                                                                 |
+ *	  |== application data ================================ key 1 =====>|
+ *	  |<============================================== key 1 ===========|
+ *
+ * The client switches after its Finished and the server before its own, as
+ * OpenSSL's implementation of RFC 6083 does, and as the update of RFC 6083,
+ * draft-ietf-tsvwg-dtls-over-sctp-bis, has it for DTLS 1.2: the server learns
+ * the master secret only from the ClientKeyExchange, and its kernel drops a
+ * client Finished authenticated with a key it does not hold yet - RFC 6083
+ * asks for the switch before the client Finished. Either way, an
+ * implementation of RFC 6083 takes the Finished: it holds both keys then. No
+ * user data travels before the handshake is complete, and so none with key 0.
+ * Renegotiation is off on every TLS stack, so the key is set once per
+ * association.
+ *
+ * SCTP-AUTH is off in Linux by default (sysctl net.sctp.auth_enable). Linux
+ * 5.4 and later turn it on for a socket of their own with SCTP_AUTH_SUPPORTED,
+ * which esdm_tls_sctp_prepare() does before the socket connects or listens; a
+ * kernel before needs the sysctl. A peer that does not authenticate DATA and
+ * FORWARD-TSN chunks is refused: the connection is not set up, see
+ * esdm_tls_alloc() - there is no association without SCTP-AUTH.
+ *
+ * The HMAC is SHA-256, which the update of RFC 6083 requires: it is listed
+ * first, SHA-1 after it as RFC 4895 demands - a peer listing SHA-1 first gets
+ * SHA-1 from Linux.
+ *
+ * What RFC 6083 asks and the TLS stacks do not all offer: DTLS shall not
+ * detect replays (section 3.3), as SCTP may deliver the records of several
+ * streams, and unordered ones, out of their order. GnuTLS has it turned off;
+ * OpenSSL does so only for its own SCTP BIO, which needs the TLS stack built
+ * with SCTP support, and Botan not at all. On the one ordered stream used here
+ * every record arrives in the order of its sequence number, and the window of
+ * the replay detection never discards one.
+ *
  * Randomness: the TLS stacks take their random numbers from the operating
  * system. The OpenSSL backend uses a library context of its own with the
  * default provider, so that a RAND provider configured by the application -
@@ -141,8 +230,34 @@ extern "C" {
 /* Size of the stamp of the files of a configuration, see esdm_tls_stamp() */
 #define ESDM_TLS_STAMP_LEN 32
 
+/*
+ * The exporter label RFC 6083 derives the SCTP-AUTH key with, without a
+ * terminating NUL - see "DTLS over SCTP" above
+ */
+#define ESDM_TLS_SCTP_EXPORTER_LABEL "EXPORTER_DTLS_OVER_SCTP"
+
+/* Size of the SCTP-AUTH key RFC 6083 derives */
+#define ESDM_TLS_SCTP_KEY_LEN 64
+
+/*
+ * The largest record a connection on SCTP sends: what esdm_tls_send() takes
+ * at a time - the path MTU of DTLS on SCTP, 2^14, less what a record of an
+ * AEAD cipher adds, 37 bytes at most, rounded down
+ */
+#define ESDM_TLS_SCTP_RECORD_MAX 16320
+
 struct esdm_tls_ctx;
 struct esdm_tls;
+
+/**
+ * @brief The transport of a context, see the top of this header
+ */
+enum esdm_tls_transport {
+	/* TLS 1.3 on a connected stream socket */
+	ESDM_TLS_TRANSPORT_STREAM = 0,
+	/* DTLS 1.2 on an SCTP association, RFC 6083 */
+	ESDM_TLS_TRANSPORT_SCTP = 1,
+};
 
 /**
  * @brief The files of one side
@@ -168,9 +283,11 @@ struct esdm_tls_config {
 	bool crl_check_all;
 	/* A CRL past its nextUpdate only causes a warning */
 	bool crl_allow_expired;
+	/* ESDM_TLS_TRANSPORT_STREAM, the default, or ESDM_TLS_TRANSPORT_SCTP */
+	enum esdm_tls_transport transport;
 };
 
-#ifdef ESDM_EGD_NET_TLS
+#ifdef ESDM_TLS_AUTH
 
 /**
  * @brief Set up the TLS of one side
@@ -216,8 +333,11 @@ void esdm_tls_ctx_crl_report(struct esdm_tls_ctx *ctx, bool all);
  *
  * @param [in] ctx The context of the side. The connection takes a reference
  *		   of its own.
- * @param [in] fd The connected, non-blocking stream socket. It stays owned by
- *		  the caller and must stay open until esdm_tls_free().
+ * @param [in] fd The connected, non-blocking socket of the transport of
+ *		  @ctx: a stream socket, or an SCTP socket of the one-to-one
+ *		  style set up with esdm_tls_sctp_prepare() before it connected
+ *		  or listened. It stays owned by the caller and must stay open
+ *		  until esdm_tls_free().
  * @param [in] server_name A client's expectation of the server's name: a DNS
  *			   name, or an IPv4 or IPv6 address literal. Mandatory
  *			   for a client - a client that does not check the name
@@ -225,7 +345,13 @@ void esdm_tls_ctx_crl_report(struct esdm_tls_ctx *ctx, bool all);
  *			   vouch for. Ignored by a server.
  * @param [out] tls The TLS of the connection
  *
- * @return 0 on success, a negative errno otherwise
+ * On SCTP, the association has to have SCTP-AUTH for its DATA and
+ * FORWARD-TSN chunks, both ways - see "DTLS over SCTP" above.
+ *
+ * @return 0 on success, a negative errno otherwise: -EPROTONOSUPPORT for an
+ *	   association on SCTP whose peer does not authenticate its chunks
+ *	   with SCTP-AUTH, -EINVAL for one whose socket was not set up for it
+ *	   - both logged
  */
 int esdm_tls_alloc(struct esdm_tls_ctx *ctx, int fd, const char *server_name,
 		   struct esdm_tls **tls);
@@ -258,6 +384,9 @@ int esdm_tls_handshake(struct esdm_tls *tls);
  *
  * After -EAGAIN, the next call has to offer the same data again.
  *
+ * On SCTP, @len bytes are one record, of at most ESDM_TLS_SCTP_RECORD_MAX
+ * bytes - all of them are taken, or none.
+ *
  * @return the number of bytes taken, which may be fewer than @len, -EAGAIN if
  *	   none could be taken right now (see esdm_tls_want()), -ECONNRESET if
  *	   the peer is gone, another negative errno on a failure of the TLS.
@@ -278,6 +407,9 @@ int esdm_tls_flush(struct esdm_tls *tls);
 
 /**
  * @brief Receive data
+ *
+ * On SCTP, the data of one record, all of it - a record larger than @len is
+ * -EMSGSIZE.
  *
  * @return the number of bytes received, at most @len, 0 once the peer closed
  *	   the connection with a closing alert, -EAGAIN if no data is there yet
@@ -306,7 +438,8 @@ bool esdm_tls_pending(struct esdm_tls *tls);
  * @brief Tell the peer that no more data follows, best effort
  *
  * The closing alert is sent if the socket takes it right away; nothing is
- * waited for.
+ * waited for. On SCTP, it is sent only if SCTP has nothing unacknowledged
+ * left to send, as RFC 6083 section 4.9 has it - not at all otherwise.
  */
 void esdm_tls_close_notify(struct esdm_tls *tls);
 
@@ -387,11 +520,27 @@ void esdm_tls_stamp(const struct esdm_tls_config *cfg,
 		    uint8_t stamp[ESDM_TLS_STAMP_LEN]);
 
 /**
+ * @brief Set an SCTP socket up for DTLS over SCTP
+ *
+ * To be called before the socket connects or listens - a socket handed over
+ * by socket activation listens already, and takes the setting for the
+ * associations set up after the call only. SCTP-AUTH on for the socket,
+ * authentication required for the DATA and FORWARD-TSN chunks the peer sends,
+ * HMAC SHA-256 first; the partial delivery of SCTP for no record, and no delay
+ * of small messages - see "DTLS over SCTP" above.
+ *
+ * @return 0, or a negative errno - logged, with what the kernel lacks: -EACCES
+ *	   if SCTP-AUTH is off for the socket, which a kernel before Linux 5.4
+ *	   needs the sysctl net.sctp.auth_enable for
+ */
+int esdm_tls_sctp_prepare(int fd);
+
+/**
  * @brief Name of the TLS stack, for logging
  */
 const char *esdm_tls_stack(void);
 
-#else /* ESDM_EGD_NET_TLS */
+#else /* ESDM_TLS_AUTH */
 
 static inline const char *esdm_tls_stack(void)
 {
@@ -542,7 +691,13 @@ static inline void esdm_tls_stamp(const struct esdm_tls_config *cfg,
 	memset(stamp, 0, ESDM_TLS_STAMP_LEN);
 }
 
-#endif /* ESDM_EGD_NET_TLS */
+static inline int esdm_tls_sctp_prepare(int fd)
+{
+	(void)fd;
+	return -EOPNOTSUPP;
+}
+
+#endif /* ESDM_TLS_AUTH */
 
 /**
  * @brief Print a fingerprint as lower case hex digits, NUL terminated

@@ -18,7 +18,10 @@
  */
 
 /*
- * TLS of esdm_tls_backend.h by Botan, for crypto_backend=botan.
+ * TLS of esdm_tls_backend.h by Botan, for crypto_backend=botan: TLS 1.3 on a
+ * stream socket, DTLS 1.2 on SCTP - with the same files, the same
+ * verification and the same revocation policy, see Esdm_Tls_Credentials and
+ * tls_verify_cert_chain().
  *
  * A Botan TLS channel does no I/O of its own: what it has to send it hands to
  * tls_emit_data(), which is collected here and pushed to the socket by
@@ -26,7 +29,19 @@
  * the socket to become writable, see esdm_tls_backend_flush(). What the socket
  * has is fed to the channel with received_data(), and the application data of
  * a record comes back through tls_record_received(), which collects it here
- * until esdm_tls_backend_recv() hands it out.
+ * until esdm_tls_backend_recv() hands it out. On SCTP, what is emitted goes to
+ * the association of esdm_tls_sctp.h, which sends each record as a user
+ * message of its own, and every user message received is fed whole; the
+ * records received are kept apart, one per esdm_tls_backend_recv().
+ *
+ * The key of SCTP-AUTH is exported in the middle of the handshake - see
+ * esdm_tls_sctp.h -, which key_material_export() of a channel does not do: it
+ * takes a channel that is active. The key is computed here as Botan computes
+ * it, with the PRF of the cipher suite over the master secret - handed out by
+ * tls_ssl_key_log_data() as soon as it is derived - and the random values of
+ * the hellos, as RFC 5705 has it. Once the handshake is complete, the key is
+ * compared with what key_material_export() makes of it: the connection fails
+ * if they differ.
  *
  * The certificate chain of the peer is verified here, in
  * tls_verify_cert_chain(), rather than by Botan's default: that one checks the
@@ -42,6 +57,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -55,11 +71,14 @@
 
 #include <botan/certstor.h>
 #include <botan/data_src.h>
+#include <botan/kdf.h>
 #include <botan/pkcs8.h>
 #include <botan/system_rng.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_client.h>
+#include <botan/tls_ciphersuite.h>
 #include <botan/tls_exceptn.h>
+#include <botan/tls_messages.h>
 #include <botan/tls_policy.h>
 #include <botan/tls_server.h>
 #include <botan/tls_session.h>
@@ -81,10 +100,16 @@
 namespace
 {
 
-/* TLS 1.3 exactly, no resumption, and a server that requires a certificate */
+/*
+ * TLS 1.3 exactly on a stream socket, DTLS 1.2 exactly on SCTP - there with
+ * ECDHE and AEAD ciphers only, the MTU of RFC 6083 and no cookie exchange,
+ * which SCTP has its own of. No resumption nor renegotiation, and a server that
+ * requires a certificate.
+ */
 class Esdm_Tls_Policy final : public Botan::TLS::Policy {
     public:
-	explicit Esdm_Tls_Policy(bool server) : m_server(server)
+	Esdm_Tls_Policy(bool server, bool sctp)
+		: m_server(server), m_sctp(sctp)
 	{
 	}
 
@@ -95,12 +120,33 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 
 	bool allow_tls13() const override
 	{
-		return true;
+		return !m_sctp;
 	}
 
 	bool allow_dtls12() const override
 	{
-		return false;
+		return m_sctp;
+	}
+
+	std::vector<std::string> allowed_ciphers() const override
+	{
+		if (!m_sctp)
+			return Botan::TLS::Policy::allowed_ciphers();
+		return { "AES-256/GCM", "ChaCha20Poly1305", "AES-128/GCM" };
+	}
+
+	std::vector<std::string> allowed_macs() const override
+	{
+		if (!m_sctp)
+			return Botan::TLS::Policy::allowed_macs();
+		return { "AEAD" };
+	}
+
+	std::vector<std::string> allowed_key_exchange_methods() const override
+	{
+		if (!m_sctp)
+			return Botan::TLS::Policy::allowed_key_exchange_methods();
+		return { "ECDH" };
 	}
 
 	bool require_client_certificate_authentication() const override
@@ -108,13 +154,45 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 		return m_server;
 	}
 
+	bool allow_client_initiated_renegotiation() const override
+	{
+		return false;
+	}
+
+	bool allow_server_initiated_renegotiation() const override
+	{
+		return false;
+	}
+
 	size_t new_session_tickets_upon_handshake_success() const override
 	{
 		return 0;
 	}
 
+	size_t dtls_default_mtu() const override
+	{
+		return ESDM_TLS_SCTP_MTU;
+	}
+
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 13, 0)
+	bool dtls_server_require_cookie_exchange() const override
+	{
+		return false;
+	}
+#endif
+
+	/*
+	 * The master secret for the key of SCTP-AUTH, which is all the key log
+	 * is used for - nothing is logged, see the file header
+	 */
+	bool allow_ssl_key_log_file() const override
+	{
+		return m_sctp;
+	}
+
     private:
 	bool m_server;
+	bool m_sctp;
 };
 
 /* The PEM blocks of @text labeled @label, each with its markers */
@@ -288,6 +366,7 @@ class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
 
 struct Esdm_Tls_Ctx {
 	bool server;
+	bool sctp;
 	std::shared_ptr<Botan::RandomNumberGenerator> rng;
 	std::shared_ptr<Esdm_Tls_Credentials> creds;
 	std::shared_ptr<const Esdm_Tls_Policy> policy;
@@ -361,9 +440,10 @@ static Botan::TLS::Alert::Type esdm_tls_botan_verdict_alert(
 /* The connection as the channel sees it */
 class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
     public:
-	Esdm_Tls_Callbacks(int fd, bool server, const char *server_name,
+	Esdm_Tls_Callbacks(int fd, struct esdm_tls_sctp *sctp, bool server,
+			   const char *server_name,
 			   esdm_tls_backend_check check, void *check_arg)
-		: m_fd(fd), m_server(server),
+		: m_fd(fd), m_sctp(sctp), m_server(server),
 		  m_server_name(server_name ? server_name : ""),
 		  m_check(check), m_check_arg(check_arg)
 	{
@@ -374,18 +454,110 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	{
 		memset_secure(m_in.data(), 0, m_in.size());
 		memset_secure(m_out.data(), 0, m_out.size());
+		for (auto &rec : m_records)
+			memset_secure(rec.data(), 0, rec.size());
 	}
 
 	void tls_emit_data(std::span<const uint8_t> data) override
 	{
-		m_out.insert(m_out.end(), data.begin(), data.end());
+		if (!m_sctp) {
+			m_out.insert(m_out.end(), data.begin(), data.end());
+			return;
+		}
+
+		/* Told to the caller once the channel returns */
+		int ret = esdm_tls_sctp_queue(m_sctp, data.data(),
+					      data.size());
+		if (ret && !m_queue_error)
+			m_queue_error = ret;
 	}
 
 	void tls_record_received(uint64_t seq_no,
 				 std::span<const uint8_t> data) override
 	{
 		(void)seq_no;
-		m_in.insert(m_in.end(), data.begin(), data.end());
+		if (m_sctp)
+			m_records.emplace_back(data.begin(), data.end());
+		else
+			m_in.insert(m_in.end(), data.begin(), data.end());
+	}
+
+	/* The master secret, for the key of SCTP-AUTH - see the file header */
+	void tls_ssl_key_log_data(std::string_view label,
+				  std::span<const uint8_t> client_random,
+				  std::span<const uint8_t> secret) const override
+	{
+		if (!m_sctp || label != "CLIENT_RANDOM")
+			return;
+		m_master.assign(secret.begin(), secret.end());
+		m_client_random.assign(client_random.begin(),
+				       client_random.end());
+	}
+
+	/*
+	 * The random value of the server and the cipher suite, for the same.
+	 * The random value is not public: it is taken from the encoding of the
+	 * message, where it follows the version (RFC 5246 section 7.4.1.3).
+	 */
+	void tls_inspect_handshake_msg(
+		const Botan::TLS::Handshake_Message &message) override
+	{
+		const auto *hello =
+			dynamic_cast<const Botan::TLS::Server_Hello *>(&message);
+
+		if (!m_sctp)
+			return;
+
+		/*
+		 * A Certificate of DTLS 1.2 with no certificate in it - three
+		 * bytes of an empty list - is the client's, which a server
+		 * refuses with an alert of a handshake failure: a refused
+		 * certificate all the same, see esdm_tls_botan_alert_error()
+		 */
+		if (m_server &&
+		    message.type() == Botan::TLS::Handshake_Type::Certificate &&
+		    message.serialize().size() <= 3)
+			m_peer_no_cert = true;
+
+		if (!hello)
+			return;
+
+		std::vector<uint8_t> body = hello->serialize();
+		if (body.size() < 2 + 32)
+			return;
+		m_server_random.assign(body.begin() + 2, body.begin() + 2 + 32);
+		m_ciphersuite = hello->ciphersuite();
+	}
+
+	/*
+	 * The exporter of RFC 5705 without a context, as key_material_export()
+	 * computes it: the PRF of the cipher suite over the master secret, the
+	 * label and the random values of the client and the server.
+	 */
+	int export_key(std::string_view label, uint8_t *out,
+		       size_t len) const
+	{
+		if (m_master.empty() || m_client_random.empty() ||
+		    m_server_random.empty())
+			return -EAGAIN;
+
+		auto suite = Botan::TLS::Ciphersuite::by_id(m_ciphersuite);
+		if (!suite)
+			return -EINVAL;
+		auto prf = Botan::KDF::create_or_throw("TLS-12-PRF(" +
+						       suite->prf_algo() + ")");
+
+		std::vector<uint8_t> salt(m_client_random);
+		salt.insert(salt.end(), m_server_random.begin(),
+			    m_server_random.end());
+
+		Botan::secure_vector<uint8_t> key = prf->derive_key(
+			len, m_master, salt,
+			std::span<const uint8_t>(
+				reinterpret_cast<const uint8_t *>(label.data()),
+				label.size()));
+		std::memcpy(out, key.data(), len);
+		return 0;
 	}
 
 	void tls_alert(Botan::TLS::Alert alert) override
@@ -548,6 +720,10 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	}
 
 	int m_fd;
+	struct esdm_tls_sctp *m_sctp;
+	int m_queue_error = 0;
+	/* SCTP: the client presented no certificate */
+	bool m_peer_no_cert = false;
 	bool m_server;
 	std::string m_server_name;
 	esdm_tls_backend_check m_check;
@@ -557,6 +733,13 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	size_t m_out_off = 0;
 	std::vector<uint8_t> m_in;
 	size_t m_in_off = 0;
+
+	/* SCTP: the records received, and what the key of SCTP-AUTH takes */
+	std::deque<std::vector<uint8_t> > m_records;
+	mutable Botan::secure_vector<uint8_t> m_master;
+	mutable std::vector<uint8_t> m_client_random;
+	std::vector<uint8_t> m_server_random;
+	uint16_t m_ciphersuite = 0;
 
 	bool m_peer_closed = false;
 	bool m_eof = false;
@@ -578,8 +761,100 @@ struct Esdm_Tls_Conn {
 /* A fatal alert of the peer, or one that ended the channel here */
 static int esdm_tls_botan_alert_error(Esdm_Tls_Conn *c)
 {
+	/* No certificate is a handshake failure to DTLS 1.2, see above */
+	if (c->callbacks->m_peer_no_cert)
+		return -EACCES;
 	return esdm_tls_botan_cert_alert(c->callbacks->m_alert) ? -EACCES :
 								  -EPROTO;
+}
+
+/*
+ * The channel took what it was fed: the exception it threw, if any, is the
+ * end of the connection, see esdm_tls_botan_feed().
+ *
+ * @return 0, or a negative errno
+ */
+static int esdm_tls_botan_received(Esdm_Tls_Conn *c, const uint8_t *buf,
+				   size_t len)
+{
+	auto &cb = *c->callbacks;
+
+	/*
+	 * The channel sends the alert of what it throws, and is dead then -
+	 * for good: every later call fails the same way.
+	 */
+	try {
+		c->channel->received_data(std::span<const uint8_t>(buf, len));
+	} catch (const Botan::TLS::TLS_Exception &e) {
+		if (cb.m_error.empty())
+			cb.m_error = e.what();
+		cb.m_fatal = true;
+		cb.m_alert = e.type();
+		return esdm_tls_botan_alert_error(c);
+	} catch (const std::bad_alloc &) {
+		cb.m_fatal = true;
+		cb.m_alert = Botan::TLS::Alert::InternalError;
+		cb.set_error("out of memory");
+		return -ENOMEM;
+	} catch (const std::exception &e) {
+		cb.m_fatal = true;
+		cb.m_alert = Botan::TLS::Alert::DecodeError;
+		if (cb.m_error.empty())
+			cb.set_error(e.what());
+		return -EPROTO;
+	}
+
+	if (cb.m_fatal)
+		return esdm_tls_botan_alert_error(c);
+	if (cb.m_queue_error)
+		return cb.m_queue_error;
+	return 0;
+}
+
+/*
+ * SCTP: feed the channel the user messages of the association, each whole,
+ * until there are none more or the channel has a record of application data.
+ *
+ * @return as esdm_tls_botan_feed()
+ */
+static int esdm_tls_botan_feed_sctp(Esdm_Tls_Conn *c)
+{
+	auto &cb = *c->callbacks;
+	/* On the heap: a client may run on a thread with a small stack */
+	std::vector<uint8_t> buf(ESDM_TLS_SCTP_MSG_MAX + 1);
+	bool got = false;
+	int ret = 0;
+
+	while (cb.m_records.empty() && !cb.m_peer_closed) {
+		ssize_t n = esdm_tls_sctp_recv(cb.m_sctp, buf.data(),
+					       buf.size());
+
+		if (n == -EAGAIN) {
+			ret = got ? 0 : -EAGAIN;
+			break;
+		}
+		if (n < 0) {
+			if (n == -ECONNRESET) {
+				cb.m_eof = true;
+				if (cb.m_error.empty())
+					cb.m_error =
+						"connection closed by the peer without a closing alert";
+			} else {
+				cb.set_error(std::strerror((int)-n));
+			}
+			ret = (int)n;
+			break;
+		}
+
+		got = true;
+		ret = esdm_tls_botan_received(c, buf.data(),
+					      static_cast<size_t>(n));
+		if (ret)
+			break;
+	}
+
+	memset_secure(buf.data(), 0, buf.size());
+	return ret;
 }
 
 /*
@@ -688,9 +963,12 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 		auto c = std::make_unique<Esdm_Tls_Ctx>();
 
 		c->server = server;
+		c->sctp = cfg->transport == ESDM_TLS_TRANSPORT_SCTP;
 		c->rng = std::make_shared<Botan::System_RNG>();
+		/* The files, the same on either transport */
 		c->creds = std::make_shared<Esdm_Tls_Credentials>(server, cfg);
-		c->policy = std::make_shared<const Esdm_Tls_Policy>(server);
+		c->policy = std::make_shared<const Esdm_Tls_Policy>(server,
+								     c->sctp);
 		c->sessions =
 			std::make_shared<Botan::TLS::Session_Manager_Noop>();
 
@@ -848,22 +1126,26 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 }
 
 int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      struct esdm_tls_sctp *sctp,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
 {
 	auto *c = static_cast<Esdm_Tls_Ctx *>(ctx);
 
+	if (c->sctp != (sctp != nullptr))
+		return -EINVAL;
+
 	try {
 		auto d = std::make_unique<Esdm_Tls_Conn>();
 		unsigned char addr[sizeof(struct in6_addr)];
 
 		d->callbacks = std::make_shared<Esdm_Tls_Callbacks>(
-			fd, server, server_name, check, arg);
+			fd, sctp, server, server_name, check, arg);
 		if (server) {
 			d->channel = std::make_unique<Botan::TLS::Server>(
 				d->callbacks, c->sessions, c->creds, c->policy,
-				c->rng);
+				c->rng, c->sctp);
 		} else {
 			/*
 			 * An address literal is no server name to indicate -
@@ -880,8 +1162,13 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 				literal ? Botan::TLS::Server_Information() :
 					  Botan::TLS::Server_Information(
 						  server_name),
-				Botan::TLS::Protocol_Version::TLS_V13);
+				c->sctp ? Botan::TLS::Protocol_Version::DTLS_V12 :
+					  Botan::TLS::Protocol_Version::TLS_V13);
 		}
+
+		/* The ClientHello, queued */
+		if (d->callbacks->m_queue_error)
+			return d->callbacks->m_queue_error;
 
 		*conn = d.release();
 		return 0;
@@ -904,7 +1191,8 @@ int esdm_tls_backend_handshake(void *conn, short *want)
 		int ret;
 
 		for (;;) {
-			ret = cb.flush();
+			/* On SCTP, esdm_tls.c sends the queue */
+			ret = cb.m_sctp ? cb.m_queue_error : cb.flush();
 			if (ret == -EAGAIN) {
 				*want = POLLOUT;
 				return -EAGAIN;
@@ -928,7 +1216,8 @@ int esdm_tls_backend_handshake(void *conn, short *want)
 				return -ECONNRESET;
 			}
 
-			ret = esdm_tls_botan_feed(c);
+			ret = cb.m_sctp ? esdm_tls_botan_feed_sctp(c) :
+					  esdm_tls_botan_feed(c);
 			if (ret == -EAGAIN) {
 				if (cb.out_pending())
 					continue;
@@ -954,6 +1243,18 @@ ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
 	try {
 		auto &cb = *c->callbacks;
 		int ret;
+
+		/* One record, queued on SCTP - see esdm_tls_sctp.h */
+		if (cb.m_sctp) {
+			if (cb.m_fatal)
+				return esdm_tls_botan_alert_error(c);
+			if (!c->channel->is_active())
+				return -ECONNRESET;
+			c->channel->send(std::span<const uint8_t>(buf, len));
+			if (cb.m_queue_error)
+				return cb.m_queue_error;
+			return static_cast<ssize_t>(len);
+		}
 
 		/* Taking more while the socket is full would buffer it here */
 		ret = cb.flush();
@@ -988,6 +1289,11 @@ ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
 int esdm_tls_backend_flush(void *conn, short *want)
 {
 	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
+
+	/* On SCTP, esdm_tls.c sends the queue */
+	if (c->callbacks->m_sctp)
+		return 0;
+
 	/* Throws nothing */
 	int ret = c->callbacks->flush();
 
@@ -1004,6 +1310,42 @@ ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
 	try {
 		auto &cb = *c->callbacks;
 		size_t n;
+
+		/* SCTP: one record, whole */
+		if (cb.m_sctp) {
+			if (cb.m_records.empty()) {
+				int ret;
+
+				if (cb.m_fatal)
+					return esdm_tls_botan_alert_error(c);
+				if (cb.m_peer_closed)
+					return 0;
+
+				ret = esdm_tls_botan_feed_sctp(c);
+				if (cb.m_records.empty()) {
+					if (cb.m_peer_closed && !cb.m_fatal)
+						return 0;
+					if (ret == -EAGAIN || !ret) {
+						*want = POLLIN;
+						return -EAGAIN;
+					}
+					return ret;
+				}
+			}
+
+			std::vector<uint8_t> rec =
+				std::move(cb.m_records.front());
+
+			cb.m_records.pop_front();
+			if (rec.size() > len) {
+				memset_secure(rec.data(), 0, rec.size());
+				cb.set_error("a record larger than the buffer");
+				return -EMSGSIZE;
+			}
+			std::memcpy(buf, rec.data(), rec.size());
+			memset_secure(rec.data(), 0, rec.size());
+			return static_cast<ssize_t>(rec.size());
+		}
 
 		if (cb.m_in_off >= cb.m_in.size()) {
 			int ret;
@@ -1052,6 +1394,8 @@ bool esdm_tls_backend_pending(void *conn)
 {
 	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
 
+	if (c->callbacks->m_sctp)
+		return !c->callbacks->m_records.empty();
 	return c->callbacks->m_in_off < c->callbacks->m_in.size();
 }
 
@@ -1062,7 +1406,9 @@ void esdm_tls_backend_close_notify(void *conn)
 	try {
 		if (c->channel->is_active())
 			c->channel->close();
-		c->callbacks->flush();
+		/* On SCTP, esdm_tls.c sends the queue */
+		if (!c->callbacks->m_sctp)
+			c->callbacks->flush();
 	} catch (...) {
 	}
 }
@@ -1079,6 +1425,45 @@ const char *esdm_tls_backend_error(void *conn)
 	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
 
 	return c->callbacks->m_error.c_str();
+}
+
+/*
+ * The key of SCTP-AUTH: exported by the channel once it is active, computed
+ * from the key log as the channel would before - see the file header.
+ * esdm_tls_sctp.c asks for it again once the handshake is complete, and
+ * compares.
+ */
+int esdm_tls_backend_export(void *conn, const uint8_t *label,
+			    size_t label_len, uint8_t *out, size_t out_len)
+{
+	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
+
+	try {
+		std::string_view l(reinterpret_cast<const char *>(label),
+				   label_len);
+		int ret;
+
+		if (c->channel->is_active()) {
+			Botan::SymmetricKey key =
+				c->channel->key_material_export(l, "", out_len);
+
+			if (key.size() != out_len)
+				return -EINVAL;
+			std::memcpy(out, key.begin(), out_len);
+			return 0;
+		}
+
+		ret = c->callbacks->export_key(l, out, out_len);
+		if (ret)
+			c->callbacks->set_error(
+				"the master secret is not known to the key log");
+		return ret;
+	} catch (const std::exception &e) {
+		c->callbacks->set_error(e.what());
+		return -EINVAL;
+	} catch (...) {
+		return -EINVAL;
+	}
 }
 
 } /* extern "C" */

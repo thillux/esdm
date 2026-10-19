@@ -84,6 +84,39 @@ bool esdm_dtls_backend_pending(void *conn);
 /* Name of the cipher suite in use */
 const char *esdm_dtls_backend_cipher(void *conn);
 
+/*
+ * The records of a connection that are not the ones of the backend above: the
+ * DTLS with certificates of esdm_tls.h, see esdm_dtls_tls.c. Its functions are
+ * those of the backend, and:
+ *
+ *  - want: what a step that returned -EAGAIN waits for, POLLIN or POLLOUT
+ *  - flush: send what a connection holds of the records sent - 0, -EAGAIN,
+ *    or a negative errno
+ *  - free: release the connection
+ */
+struct esdm_dtls_ops {
+	int (*handshake)(void *conn);
+	int (*send)(void *conn, const uint8_t *buf, size_t len);
+	ssize_t (*recv)(void *conn, uint8_t *buf, size_t len);
+	bool (*pending)(void *conn);
+	const char *(*cipher)(void *conn);
+	short (*want)(void *conn);
+	int (*flush)(void *conn);
+	void (*free)(void *conn);
+};
+
+/*
+ * A connection of the records of @ops on @conn, which it takes over.
+ *
+ * @return 0, or -ENOMEM - @conn is released then
+ */
+int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
+		      size_t max_msg, struct esdm_dtls **dtls);
+
+/* The connection of @dtls if its records are those of @ops, NULL otherwise */
+void *esdm_dtls_ops_conn(struct esdm_dtls *dtls,
+			 const struct esdm_dtls_ops *ops);
+
 #ifdef __cplusplus
 }
 #endif

@@ -353,6 +353,35 @@ if egd_net
 	subdirs += [ 'frontends/egd-net' ]
 endif
 
+# The external entropy sources on the network - see es-ext/esdm_es_ext.h and
+# "DTLS over SCTP" in common/esdm_tls.h. Mutually authenticated DTLS on SCTP
+# only, by the TLS stack of the crypto backend; the TLS layer goes into the
+# static common library, as for egd-net.
+es_ext_net = get_option('es-ext-net').enabled()
+es_ext_net_deps = []
+if es_ext_net
+	if host_machine.system() != 'linux'
+		error('es-ext-net needs the SCTP of Linux - set -Des-ext-net=disabled')
+	endif
+	if get_option('esdm-es-ext').disabled()
+		error('es-ext-net serves the providers of libesdm_es_ext on the network - enable esdm-es-ext as well')
+	endif
+	if get_option('crypto_backend') == 'openssl'
+		es_ext_net_deps = [ openssl_dep ]
+	elif get_option('crypto_backend') == 'gnutls'
+		es_ext_net_deps = [ gnutls_dep ]
+	elif get_option('crypto_backend') == 'botan'
+		es_ext_net_deps = [ botan_dep ]
+	else
+		error('es-ext-net needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none')
+	endif
+endif
+dependencies_client += es_ext_net_deps
+dependencies_server += es_ext_net_deps
+
+# The TLS layer with certificates, common/esdm_tls.h, for either of the two
+tls_auth = egd_net_tls or es_ext_net
+
 if get_option('openssl-rand-provider').enabled()
 	subdirs += [ 'frontends/openssl-provider' ]
 endif
@@ -434,6 +463,11 @@ endif
 if egd_net
 testdirs += [
 	'tests/egd-net',
+]
+endif
+if es_ext_net
+testdirs += [
+	'tests/es-ext-net',
 ]
 endif
 foreach n : testdirs
