@@ -54,17 +54,21 @@
  *		  ES_EXT_TEST_RATE_NONE for none
  * @status_buf: Room for a status of the environment, see below
  *
- * The delays and the counters are atomic: a test changes and reads them while
- * the plugin runs in the thread of a provider it started.
+ * What a test changes or reads while the plugin runs in the thread of a
+ * provider it started is atomic: what the callbacks do, the delays, the
+ * counters and what the callbacks were asked for - a status the test hands
+ * over at @status_text is written before the pointer is stored. The rest is
+ * set before the provider starts: @init_ret, @name and @entropy_rate, which
+ * the init takes, and @status_buf, which the init fills from the environment.
  */
 struct esdm_es_ext_test_control {
-	uint32_t claim_bits;
+	_Atomic uint32_t claim_bits;
 	int init_ret;
-	int get_ret;
-	int selftest_ret;
-	int status_ret;
-	const char *status_text;
-	int status_unterminated;
+	_Atomic int get_ret;
+	_Atomic int selftest_ret;
+	_Atomic int status_ret;
+	const char *_Atomic status_text;
+	_Atomic int status_unterminated;
 	_Atomic unsigned int get_delay_ms;
 	_Atomic unsigned int status_delay_ms;
 	char name[64];
@@ -77,8 +81,8 @@ struct esdm_es_ext_test_control {
 	_Atomic unsigned int selftest_calls;
 	_Atomic unsigned int status_calls;
 	_Atomic unsigned int rate_calls;
-	size_t last_buflen;
-	size_t last_status_buflen;
+	_Atomic size_t last_buflen;
+	_Atomic size_t last_status_buflen;
 };
 
 /*

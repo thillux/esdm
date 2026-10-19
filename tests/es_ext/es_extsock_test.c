@@ -426,26 +426,60 @@ static bool test_busy(void)
 	return false;
 }
 
-static void test_wait_retry(void)
+/* The milliseconds since @start, of the monotonic clock */
+static int64_t test_ms_since(const struct timespec *start)
 {
-	const struct timespec ts = { .tv_sec =
-					     ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC,
-				     .tv_nsec = 100000000 };
+	struct timespec now;
 
-	nanosleep(&ts, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (int64_t)(now.tv_sec - start->tv_sec) * 1000 +
+	       (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+/* Sleep until the clock of the source passed @deadline, nanoseconds */
+static void test_wait_until(uint64_t deadline)
+{
+	uint64_t now = esdm_es_extsock_now(), left;
+	struct timespec ts;
+
+	if (now > deadline)
+		return;
+	/* And a millisecond more, past the deadline for sure */
+	left = deadline - now + 1000000;
+	ts.tv_sec = (time_t)(left / ESDM_ES_EXTSOCK_NSEC_PER_SEC);
+	ts.tv_nsec = (long)(left % ESDM_ES_EXTSOCK_NSEC_PER_SEC);
+	while (nanosleep(&ts, &ts) && errno == EINTR)
+		;
 }
 
 /*
- * Wait out the backoff of a provider that did not answer STATUS, which began
- * up to a retry interval ago - in whole seconds of the monotonic clock
+ * Wait until the source connects again: until the end of the retry interval
+ * it recorded when it gave up on the provider - not for a retry interval from
+ * now, part of which a loaded machine may have spent already, nor one that a
+ * clock of whole seconds made up to a second shorter
+ */
+static void test_wait_retry(void)
+{
+	uint64_t at;
+
+	mutex_lock(&extsock[0].mutex);
+	at = extsock[0].retry_at;
+	mutex_unlock(&extsock[0].mutex);
+	test_wait_until(at);
+}
+
+/*
+ * Wait out the backoff of a provider that did not answer STATUS - until the
+ * end of it the source recorded
  */
 static void test_wait_backoff(void)
 {
-	const struct timespec ts = { .tv_sec =
-					     ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC,
-				     .tv_nsec = 100000000 };
+	uint64_t until;
 
-	nanosleep(&ts, NULL);
+	mutex_lock(&extsock[0].mutex);
+	until = extsock[0].status_backoff_until;
+	mutex_unlock(&extsock[0].mutex);
+	test_wait_until(until);
 }
 
 static void test_unconfigured(void)
@@ -809,58 +843,88 @@ static void *test_get_thread(void *arg)
  * that hangs does: the recent status of the provider is shown, one that is due
  * is not asked for but left out, and the rest of the state and the entropy
  * available are as they were before the request.
+ *
+ * What is looked at during the request has to be looked at within the
+ * timeout: a round that a loaded machine made take longer tells nothing, and
+ * is done again. A state waiting for the request takes longer in every round.
  */
 static void test_status_busy(void)
 {
 	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	struct json_object *state, *provider;
-	unsigned int requests, i;
+	bool held = false, kept = false, asked = true, connected = false,
+	     active = false, busy = false;
+	uint32_t level = 0, poolsize = 0;
+	unsigned int requests = 0, round;
+	char kept_state[1024] = "", busy_state[1024] = "";
 	pthread_t evil, getter;
-	bool busy;
 
 	atomic_store(&test_evil_stop, false);
 	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
 	atomic_store(&test_evil_status, TEST_EVIL_STATUS_JSON);
 	CHECK_EQ(test_evil_start(&evil), 0);
 	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
-	CHECK_EQ(test_get(bits, NULL), 8);
 
-	provider = test_provider(&state);
-	CHECK(provider != NULL, "the status of the provider is not taken");
-	json_object_put(state);
-	requests = atomic_load(&test_evil_status_requests);
+	for (round = 0; round < 5 && !busy; round++) {
+		struct timespec start;
 
-	atomic_store(&test_evil_mode, TEST_EVIL_SILENT);
-	CHECK_EQ(pthread_create(&getter, NULL, test_get_thread, NULL), 0);
-	for (i = 0; i < 1000 && !test_busy(); i++)
-		nanosleep(&ts, NULL);
-	CHECK(test_busy(), "the request does not hold the source");
+		test_wait_retry();
+		CHECK_EQ(test_get(bits, NULL), 8);
+		provider = test_provider(&state);
+		CHECK(provider != NULL,
+		      "the status of the provider is not taken");
+		json_object_put(state);
+		requests = atomic_load(&test_evil_status_requests);
 
-	provider = test_provider_kept(&state);
-	CHECK(provider && es_state_int(provider, "evil", 0) == 1,
-	      "the recent status is gone during a request: %s",
-	      es_state_print(state));
-	json_object_put(state);
-	provider = test_provider(&state);
-	CHECK(!provider, "the status was asked for during a request");
-	CHECK(es_state_str_has(state, "status", "connected (uid"),
-	      "the state of the connection is gone during a request: %s",
-	      es_state_print(state));
-	json_object_put(state);
-	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
-	CHECK_EQ(ES->max_entropy(), test_level(256, esdm_security_strength()));
-	CHECK(ES->active(), "the source is not active during a request");
-	busy = test_busy();
-	pthread_join(getter, NULL);
+		atomic_store(&test_evil_mode, TEST_EVIL_SILENT);
+		CHECK_EQ(pthread_create(&getter, NULL, test_get_thread, NULL),
+			 0);
+		clock_gettime(CLOCK_MONOTONIC, &start);
+		while (test_ms_since(&start) < 5000 && !test_busy())
+			nanosleep(&ts, NULL);
+		held = test_busy();
+
+		provider = test_provider_kept(&state);
+		kept = provider && es_state_int(provider, "evil", 0) == 1;
+		snprintf(kept_state, sizeof(kept_state), "%s",
+			 es_state_print(state));
+		json_object_put(state);
+		provider = test_provider(&state);
+		asked = provider != NULL;
+		connected = es_state_str_has(state, "status", "connected (uid");
+		snprintf(busy_state, sizeof(busy_state), "%s",
+			 es_state_print(state));
+		json_object_put(state);
+		level = ES->curr_entropy(bits);
+		poolsize = ES->max_entropy();
+		active = ES->active();
+		busy = test_busy();
+		pthread_join(getter, NULL);
+		atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+		if (held && !busy)
+			printf("round %u: the request was over before the state was looked at, once more\n",
+			       round);
+	}
+
+	CHECK(held, "the request does not hold the source");
 	CHECK(busy, "the state waited for the request");
+	CHECK(kept, "the recent status is gone during a request: %s",
+	      kept_state);
+	CHECK(!asked, "the status was asked for during a request");
+	CHECK(connected,
+	      "the state of the connection is gone during a request: %s",
+	      busy_state);
+	CHECK_EQ(level, test_level(256, bits));
+	CHECK_EQ(poolsize, test_level(256, esdm_security_strength()));
+	CHECK(active, "the source is not active during a request");
 	CHECK_EQ(atomic_load(&test_evil_status_requests), requests);
 
 	/* The request unanswered, the provider is connected to again */
 	CHECK(test_state_has("status", "not connected"),
 	      "an unanswered request kept the connection");
 	CHECK_EQ(ES->curr_entropy(bits), 0);
-	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	CHECK_EQ(test_get(bits, NULL), 0);
 	test_wait_retry();
 	CHECK_EQ(test_get(bits, NULL), 8);
 
@@ -1089,6 +1153,57 @@ static void test_late_provider(void)
 	CHECK_EQ(ES->monitor_es(), 0);
 	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
 	CHECK_EQ(ES->curr_entropy(bits), test_level(256, bits));
+}
+
+/*
+ * A provider given up on is not connected to again before a whole retry
+ * interval is over, wherever in its second the clock was: given up on just
+ * before the clock turned a second, it was connected to again just after
+ * while the source kept its deadlines in whole seconds.
+ */
+static void test_retry_interval(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
+	struct timespec now, dropped;
+	pthread_t evil;
+	long wait_ms;
+	int64_t ms;
+
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	CHECK_EQ(test_evil_start(&evil), 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+
+	/* The request times out 50 ms before the clock turns a second */
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wait_ms = 1000 - ESDM_EXT_SOCKET_TIMEOUT_MS - 50 -
+		  now.tv_nsec / 1000000;
+	if (wait_ms < 0)
+		wait_ms += 1000;
+	test_wait_until(esdm_es_extsock_now() + (uint64_t)wait_ms * 1000000);
+	atomic_store(&test_evil_mode, TEST_EVIL_SILENT);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	clock_gettime(CLOCK_MONOTONIC, &dropped);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+
+	while (!test_get(bits, NULL) && test_ms_since(&dropped) < 5000)
+		nanosleep(&ts, NULL);
+	ms = test_ms_since(&dropped);
+	CHECK(ms >= ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC * 1000 - 20 &&
+		      ms < 5000,
+	      "connected to again %ld ms after the provider was given up on",
+	      (long)ms);
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	CHECK_EQ(ES->init(), 0);
 }
 
 static void test_protocol_breaches(void)
@@ -1645,6 +1760,7 @@ int main(void)
 	test_status_busy();
 	test_names();
 	test_rates();
+	test_retry_interval();
 	test_protocol_breaches();
 
 	if (test_server)

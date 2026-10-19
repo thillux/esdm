@@ -166,10 +166,10 @@ struct esdm_es_extsock {
 
 	/*
 	 * Earliest time to connect again, and to probe a provider whose
-	 * request failed, monotonic seconds
+	 * request failed, monotonic nanoseconds - see esdm_es_extsock_now()
 	 */
-	time_t retry_at;
-	time_t probe_at;
+	uint64_t retry_at;
+	uint64_t probe_at;
 
 	/* Connected once since the source was set up - the first one is logged */
 	bool was_connected;
@@ -191,9 +191,9 @@ struct esdm_es_extsock {
 
 	/*
 	 * The provider did not answer STATUS in time, and is not asked for its
-	 * status before this time, monotonic seconds
+	 * status before this time, monotonic nanoseconds
 	 */
-	time_t status_backoff_until;
+	uint64_t status_backoff_until;
 
 	/*
 	 * What is read of the source without the mutex, which a request holds
@@ -381,13 +381,28 @@ static void esdm_es_extsock_disconnect_locked(struct esdm_es_extsock *sock)
 	sock->fd = -1;
 }
 
-static time_t esdm_es_extsock_now(void)
+#define ESDM_ES_EXTSOCK_NSEC_PER_SEC 1000000000ULL
+
+/*
+ * The monotonic clock in nanoseconds, which the deadlines of the source are
+ * kept in: in whole seconds, a retry interval of n seconds was anything from
+ * n - 1 to n seconds, depending on where in its second the clock was.
+ */
+static uint64_t esdm_es_extsock_now(void)
 {
 	struct timespec now;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &now))
 		return 0;
-	return now.tv_sec;
+	return (uint64_t)now.tv_sec * ESDM_ES_EXTSOCK_NSEC_PER_SEC +
+	       (uint64_t)now.tv_nsec;
+}
+
+/* @sec seconds from now, monotonic nanoseconds */
+static uint64_t esdm_es_extsock_after(unsigned int sec)
+{
+	return esdm_es_extsock_now() +
+	       (uint64_t)sec * ESDM_ES_EXTSOCK_NSEC_PER_SEC;
 }
 
 /*
@@ -400,7 +415,7 @@ static void esdm_es_extsock_drop_locked(struct esdm_es_extsock *sock)
 {
 	esdm_es_extsock_disconnect_locked(sock);
 	sock->retry_at =
-		esdm_es_extsock_now() + ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+		esdm_es_extsock_after(ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
 }
 
 /* Log @msg unless it was the last thing logged about the connection */
@@ -794,8 +809,6 @@ static bool esdm_es_extsock_closed_locked(struct esdm_es_extsock *sock)
  */
 static bool esdm_es_extsock_ensure_locked(struct esdm_es_extsock *sock)
 {
-	time_t now;
-
 	if (sock->fd >= 0) {
 		if (!esdm_es_extsock_closed_locked(sock))
 			return true;
@@ -809,12 +822,13 @@ static bool esdm_es_extsock_ensure_locked(struct esdm_es_extsock *sock)
 	if (!esdm_es_extsock_configured_locked(sock))
 		return false;
 
-	now = esdm_es_extsock_now();
-	if (now < sock->retry_at)
+	if (esdm_es_extsock_now() < sock->retry_at)
 		return false;
 
+	/* The retry interval counts from the end of the attempt */
 	if (esdm_es_extsock_connect_locked(sock)) {
-		sock->retry_at = now + ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+		sock->retry_at = esdm_es_extsock_after(
+			ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
 		return false;
 	}
 
@@ -951,8 +965,8 @@ static int esdm_es_extsock_reconnect_locked(struct esdm_es_extsock *sock)
 	int ret = esdm_es_extsock_connect_locked(sock);
 
 	if (ret)
-		sock->retry_at = esdm_es_extsock_now() +
-				 ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+		sock->retry_at = esdm_es_extsock_after(
+			ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
 	else
 		sock->retry_at = 0;
 	return ret;
@@ -1135,7 +1149,6 @@ static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 	const uint8_t *data;
 	uint32_t claimed;
 	int32_t status;
-	time_t now;
 	ssize_t n;
 
 	mutex_lock(&sock->mutex);
@@ -1143,10 +1156,10 @@ static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 	if (!esdm_es_extsock_ensure_locked(sock) || !sock->read_failed)
 		goto out;
 
-	now = esdm_es_extsock_now();
-	if (now < sock->probe_at)
+	if (esdm_es_extsock_now() < sock->probe_at)
 		goto out;
-	sock->probe_at = now + ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC;
+	sock->probe_at =
+		esdm_es_extsock_after(ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
 
 	n = esdm_es_extsock_transact_locked(sock, ESDM_ES_EXT_PROTO_GET_ENTROPY,
 					    ESDM_DRNG_SECURITY_STRENGTH_BYTES,
@@ -1198,7 +1211,6 @@ esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA];
 	struct json_object *obj = NULL;
-	time_t now = esdm_es_extsock_now();
 	bool retried = false, sent;
 	const char *text;
 	size_t textlen;
@@ -1206,7 +1218,7 @@ esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 	ssize_t n;
 
 	if (sock->fd < 0 || sock->status_refused ||
-	    now < sock->status_backoff_until)
+	    esdm_es_extsock_now() < sock->status_backoff_until)
 		return NULL;
 
 again:
@@ -1235,8 +1247,8 @@ again:
 		goto out;
 	}
 	if (n == -ETIMEDOUT) {
-		sock->status_backoff_until =
-			now + ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC;
+		sock->status_backoff_until = esdm_es_extsock_after(
+			ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
 			"External ES provider%s: no answer to STATUS in time, disconnected - not asked for its status for %u seconds\n",
@@ -1297,7 +1309,9 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 	const char *rate_source;
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
 	struct json_object *provider;
-	time_t now = esdm_es_extsock_now();
+	/* The status cache counts in seconds */
+	time_t now =
+		(time_t)(esdm_es_extsock_now() / ESDM_ES_EXTSOCK_NSEC_PER_SEC);
 	int64_t peer_uid;
 	bool due;
 

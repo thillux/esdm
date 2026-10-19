@@ -164,21 +164,24 @@ static int es_ext_test_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 				   uint32_t *entropy_bits)
 {
 	struct esdm_es_ext_test_control *ctl = ctx;
+	unsigned int calls = ++ctl->get_calls, delay = ctl->get_delay_ms;
+	uint32_t claim;
+	int ret;
 
-	ctl->get_calls++;
 	ctl->last_buflen = buflen;
 
-	if (ctl->get_delay_ms)
-		es_ext_test_sleep(ctl->get_delay_ms);
+	if (delay)
+		es_ext_test_sleep(delay);
 
 	/* Filled in any case, so that a test sees whether the data is wiped */
-	memset(buf, (int)(ctl->get_calls & 0xff), buflen);
+	memset(buf, (int)(calls & 0xff), buflen);
 
-	if (ctl->get_ret)
-		return ctl->get_ret;
+	ret = ctl->get_ret;
+	if (ret)
+		return ret;
 
-	*entropy_bits = ctl->claim_bits == UINT32_MAX ? (uint32_t)buflen * 8 :
-							ctl->claim_bits;
+	claim = ctl->claim_bits;
+	*entropy_bits = claim == UINT32_MAX ? (uint32_t)buflen * 8 : claim;
 	return 0;
 }
 
@@ -203,25 +206,27 @@ static uint32_t es_ext_test_entropy_rate(void *ctx)
 static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 {
 	struct esdm_es_ext_test_control *ctl = ctx;
-	int len;
+	unsigned int delay = ctl->status_delay_ms;
+	const char *text;
+	int len, ret;
 
 	ctl->status_calls++;
 	ctl->last_status_buflen = buflen;
 
-	if (ctl->status_delay_ms)
-		es_ext_test_sleep(ctl->status_delay_ms);
+	if (delay)
+		es_ext_test_sleep(delay);
 
 	if (ctl->status_unterminated) {
 		memset(buf, '{', buflen);
 		return 0;
 	}
 
-	if (ctl->status_ret)
-		return ctl->status_ret;
+	ret = ctl->status_ret;
+	if (ret)
+		return ret;
 
-	len = snprintf(buf, buflen, "%s",
-		       ctl->status_text ? ctl->status_text :
-					  ES_EXT_TEST_STATUS);
+	text = ctl->status_text;
+	len = snprintf(buf, buflen, "%s", text ? text : ES_EXT_TEST_STATUS);
 	return len >= 0 && (size_t)len < buflen ? 0 : -EMSGSIZE;
 }
 #endif /* ES_EXT_TEST_PLUGIN_BARE */
