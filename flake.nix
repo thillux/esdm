@@ -1325,6 +1325,23 @@
                   client.succeed("${opensslTls}")
                   server.succeed("journalctl -u esdm-egd-net-server.service | grep -q 'serving the EGD protocol'")
 
+              with subtest("Reloaded by systemctl reload"):
+                  # ExecReload of the units, which NixOS runs without a
+                  # /bin/kill
+                  server.succeed("systemctl reload esdm-egd-net-server.service")
+                  server.wait_until_succeeds(
+                      "journalctl -u esdm-egd-net-server.service | grep -q 'reloading the TLS files'", 30
+                  )
+                  loaded = int(client.succeed(
+                      "journalctl -u esdm-egd-net-relay.service | grep -c 'TLS files of .* load' || true"
+                  ).strip() or 0)
+                  client.succeed("systemctl reload esdm-egd-net-relay.service")
+                  client.wait_until_succeeds(
+                      "test $(journalctl -u esdm-egd-net-relay.service | grep -c 'TLS files of .* load') "
+                      f"-gt {loaded}", 30
+                  )
+                  client.succeed("${opensslTls}")
+
               with subtest("Rotation and revocation"):
                   # The relay takes up the certificate to be revoked for its
                   # next upstream connection, held open by a consumer
@@ -1795,6 +1812,15 @@
 
               relay = "esdm-es-ext-relay.service"
               provider = "esdm-es-ext-serve-net.service"
+
+              with subtest("Reloaded by systemctl reload"):
+                  # ExecReload of the units, which NixOS runs without a
+                  # /bin/kill
+                  for m, unit in ((esdm, relay), (source, provider)):
+                      reloaded = count(m, unit, "reloading the TLS files")
+                      m.succeed(f"systemctl reload {unit}")
+                      logs_again(m, unit, "reloading the TLS files", reloaded)
+                  credited("after the reloads")
 
               with subtest("Rotation"):
                   # The relay takes up a renewed client certificate for its

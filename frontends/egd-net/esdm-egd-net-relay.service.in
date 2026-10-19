@@ -34,7 +34,9 @@ LoadCredential=cert:/etc/esdm/egd-net/client.crt
 LoadCredential=key:/etc/esdm/egd-net/client.key
 LoadCredential=ca:/etc/esdm/egd-net/ca.crt
 ExecStart=@PATH@/esdm-egd-net-relay --syslog $ESDM_EGD_NET_RELAY_ARGS
-ExecReload=/bin/kill -HUP $MAINPID
+# The kill of the shell: not every system has /bin/kill - NixOS has nothing
+# but /bin/sh in /bin
+ExecReload=/bin/sh -c 'kill -HUP "$MAINPID"'
 DynamicUser=yes
 # Two descriptors per local consumer: its own, and its upstream connection
 LimitNOFILE=4096

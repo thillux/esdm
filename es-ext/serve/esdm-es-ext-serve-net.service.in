@@ -42,7 +42,9 @@ LoadCredential=cert:/etc/esdm/es-ext-net/server.crt
 LoadCredential=key:/etc/esdm/es-ext-net/server.key
 LoadCredential=ca:/etc/esdm/es-ext-net/ca.crt
 ExecStart=@PATH@/esdm-es-ext-serve $ESDM_ES_EXT_SERVE_NET_ARGS
-ExecReload=/bin/kill -HUP $MAINPID
+# The kill of the shell: not every system has /bin/kill - NixOS has nothing
+# but /bin/sh in /bin
+ExecReload=/bin/sh -c 'kill -HUP "$MAINPID"'
 DynamicUser=yes
 Restart=on-failure
 RestartSec=5s

@@ -60,7 +60,9 @@ LoadCredential=cert:/etc/esdm/es-ext-net/client.crt
 LoadCredential=key:/etc/esdm/es-ext-net/client.key
 LoadCredential=ca:/etc/esdm/es-ext-net/ca.crt
 ExecStart=@PATH@/esdm-es-ext-relay --socket /run/esdm-es-ext-relay/esdm-es-ext-relay.socket $ESDM_ES_EXT_RELAY_ARGS
-ExecReload=/bin/kill -HUP $MAINPID
+# The kill of the shell: not every system has /bin/kill - NixOS has nothing
+# but /bin/sh in /bin
+ExecReload=/bin/sh -c 'kill -HUP "$MAINPID"'
 User=esdm-es-ext-relay
 Group=esdm-es-ext-relay
 # The socket goes into a directory of the relay's own, which the ESDM, running
