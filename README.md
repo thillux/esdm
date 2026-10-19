@@ -84,7 +84,8 @@ The following dependencies are required:
   installed or obtain the sources from the
   [Protobuf-C Github website](https://github.com/protobuf-c/protobuf-c).
 
-* json-c: The ESDM library renders its JSON status documents with it.
+* json-c 0.14 or later: The ESDM library renders its JSON status documents
+  with it.
 
 The following dependencies are required provided the respective functionality
 is enabled during compile time:

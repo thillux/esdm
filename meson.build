@@ -145,8 +145,11 @@ endif
 
 dependencies = [ dependency('libprotobuf-c'), dependency('threads') ]
 
-# Rendering of the JSON status document and its parsing in the test suite
-json_c_dep = dependency('json-c', required: true)
+# Rendering of the JSON status document and its parsing in the test suite.
+# The parsing of the status of an external entropy source needs
+# json_tokener_get_parse_end(), which came with 0.14 - as did the
+# JSON_TOKENER_VALIDATE_UTF8 flag of the tokener.
+json_c_dep = dependency('json-c', version: '>= 0.14', required: true)
 
 pkgconfig = import('pkgconfig')
 
