@@ -411,7 +411,7 @@
   ),
   [SP800-90B health tests in the eBPF program in FIPS 140, SP800-90C and NTG.1 mode],
   [Conditioning: per-source XDRBG-256 pool in the esdm-server],
-  [Uncredited by default – measurement tools in addon/es_ebpf_testing],
+  [Uncredited by default – measurement tools in tests/es_ebpf_testing],
 ), extra: fig(image(figdir + "ebpf-processing.svg", width: 420pt,
   height: 250pt, fit: "contain"), 382pt, 150pt, 404pt, 250pt))
 

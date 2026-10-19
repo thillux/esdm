@@ -1104,7 +1104,7 @@ is applied to the 64 bits of each delta and capped at $1 \/ "OSR"$ bits per
 event with the oversampling rate of the meson options `es_sched_ebpf_osr` and
 `es_irq_ebpf_osr` (1 per default), which also parameterizes the cut-off values
 of the health tests. The rates are to be determined with the measurement
-tooling in `addon/es_ebpf_testing` before crediting the sources. When the
+tooling in `tests/es_ebpf_testing` before crediting the sources. When the
 sources are unloaded, every collected raw sample is zeroized.]
 
 == Auxiliary Entropy Pool - ESDM-external Entropy Sources <sec:aux>
@@ -1862,14 +1862,14 @@ security is considered to be limited.
     module parameter `boot_sched_perf=1` for the first 1,024 events.
 
 #par(first-line-indent: 0pt)[The helper tool `esdm-getrawentropy`
-(`addon/test`, meson option `validation-helpers`) is provided to read the
+(`tests/validation-helpers`, meson option `validation-helpers`) is provided to read the
 files and format the data for post-processing, `esdm-extractlsb` extracts the
 least significant bits of the time stamps for the SP800-90B tools. No data is
 collected while the debugfs is locked down by the kernel lockdown mode.]
 
 For the eBPF entropy sources, the collector `esdm-ebpf-collect` together with
 the scripts `analyze_non_iid.sh` and `analyze_restart.sh` in
-`addon/es_ebpf_testing` (meson option `es_ebpf_testing`) obtains the raw time
+`tests/es_ebpf_testing` (meson option `es_ebpf_testing`) obtains the raw time
 deltas and performs the SP800-90B assessment including the restart test. The
 collector refuses to run in FIPS mode, and the ESDM server itself never records
 raw data.

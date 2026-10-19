@@ -46,7 +46,7 @@ es_irq_ebpf): no kernel patches required, in-program SP800-90B health tests,
 zeroization of every collected raw sample when the sources are unloaded - the
 in-program collection buffers and the ring buffer holding the events included -
 raw entropy measurement tooling including the SP800-90B restart test in
-addon/es_ebpf_testing
+tests/es_ebpf_testing
 
 * Centralize asynchronous buffer management to collect entropy from slow entropy sources
 
@@ -80,6 +80,13 @@ addon/es_ebpf_testing
 esdm/drng and esdm/status
 
 * The kernel modules moved from addon/linux_esdm_es and addon/linux_esdm_cdev to kernel/esdm_es and kernel/esdm_cdev and are built from the source tree, sharing code with the ESDM instead of carrying copies: the IOCTL interface of /dev/esdm_es (kernel/shared/esdm_es_ioctl.h) with the interrupt and scheduler entropy sources, the cutoffs of the SP800-90B health tests (kernel/shared/esdm_health_cutoffs.h) with the eBPF entropy sources, the XDRBG-256 with the auxiliary pools, and the EGD protocol (service-egd/esdm_egd_protocol.h) of esdm_cdev with the EGD interface
+
+* The test tooling moved from addon to tests, named after the meson options
+building it: the validation helpers esdm-getrawentropy and esdm-extractlsb
+from addon/test to tests/validation-helpers, the raw entropy measurement
+tooling of the eBPF entropy sources (esdm-ebpf-collect and its analysis
+scripts) from addon/es_ebpf_testing to tests/es_ebpf_testing. The installed
+tools are unchanged.
 
 * The design document and the presentation are Typst sources with their figures
 as draw.io, PlantUML and Typst plot sources (doc/typst, nix build .#esdm-doc),

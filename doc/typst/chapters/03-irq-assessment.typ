@@ -24,7 +24,7 @@ source - the timing of interrupts - on a stock kernel, but processes it
 differently: it is not covered by the analysis of this chapter and is
 uncredited by default (`es_irq_ebpf_entropy_rate` is 0) until its entropy rate
 is determined for the deployment environment with the measurement tooling of
-addon/es\_ebpf\_testing.
+tests/es\_ebpf\_testing.
 
 The entropy sources of the auxiliary pool, the Jitter RNG and the CPU-based
 entropy source are all not related to the interrupt entropy source. Thus, the
@@ -895,7 +895,7 @@ for a discussion of the narrowest internal width and the output block size.
 === SP800-90B Section 3.2.4 Requirement 1 <sec:90b-324-1>
 
 Test tools for measuring raw entropy are provided with the ESDM source code:
-`esdm-getrawentropy` and `esdm-extractlsb` in addon/test, and the kernel
+`esdm-getrawentropy` and `esdm-extractlsb` in tests/validation-helpers, and the kernel
 module testing support in kernel/esdm\_es. These tools can be used by
 everybody without further knowledge of the ESDM.
 
@@ -908,7 +908,7 @@ is obtained.
 === SP800-90B Section 3.2.4 Requirement 3 <sec:90b-324-3>
 
 The provided tools for gathering raw entropy contains exact steps how to
-perform the tests (addon/test/README.md and the man pages
+perform the tests (tests/validation-helpers/README.md and the man pages
 `esdm-getrawentropy(8)` and `esdm-extractlsb(8)`). These steps do not require
 any knowledge of the noise source.
 
@@ -1184,7 +1184,7 @@ own SP800-90B analysis since the document we discuss here covers all other
 aspects of the SP800-90B analysis.]
 
 The tool set provided as part of the ESDM code distribution provides the
-measurements and validation tools (addon/test, built with the meson option
+measurements and validation tools (tests/validation-helpers, built with the meson option
 `validation-helpers`). For the eBPF-based entropy sources, the corresponding
 procedure, including the restart test, is documented in
-addon/es\_ebpf\_testing/README.md.
+tests/es\_ebpf\_testing/README.md.

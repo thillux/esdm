@@ -109,7 +109,7 @@ I am looking for test data from all kinds of systems. The less common a system
 is the more I am interested in the data to verify that the basic entropy
 estimate underlying the ESDM is correct. If you want to provide support,
 please generate data using the ESDM test tool set specifically the test as
-documented in addon/test (section @sec:90b-reuse).
+documented in tests/validation-helpers (section @sec:90b-reuse).
 
 The effect of the application of the GCD can be clearly demonstrated with the
 Intel Atom Z530 listed in the above table. The table shows the measurement of

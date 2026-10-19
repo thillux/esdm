@@ -241,7 +241,7 @@ non-zero entropy rate.
 
 The default entropy rate of both sources is 0 (uncredited): determine the
 appropriate rate for a deployment environment with the measurement tooling
-in `addon/es_ebpf_testing/` before crediting the sources, see its
+in `tests/es_ebpf_testing/` before crediting the sources, see its
 `README.md`.
 
 ### External Entropy Sources

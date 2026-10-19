@@ -333,7 +333,7 @@ The following compile-time settings must be observed:
 - Credit the eBPF scheduler or interrupt entropy source with
   `es_sched_ebpf_entropy_rate` or `es_irq_ebpf_entropy_rate` only with an
   entropy rate determined for the target system with the measurement tools in
-  addon/es\_ebpf\_testing (section @sec:ebpf).
+  tests/es\_ebpf\_testing (section @sec:ebpf).
 
 - The ESDM must be compiled with the meson configuration option of
   `es_cpu_entropy_rate=0` or unset the option `es_cpu` unless the CPU-based

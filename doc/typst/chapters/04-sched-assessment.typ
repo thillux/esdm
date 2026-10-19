@@ -20,7 +20,7 @@ yet. Both are therefore credited with no entropy by default:
 
 - The eBPF-based scheduler entropy source (`es_sched_ebpf`, section
   @sec:ebpf) is disabled by default, and its entropy rate
-  `es_sched_ebpf_entropy_rate` is 0. addon/es\_ebpf\_testing provides the
+  `es_sched_ebpf_entropy_rate` is 0. tests/es\_ebpf\_testing provides the
   measurement tooling for it: `esdm-ebpf-collect` records the time
   differences of successive scheduling events of one CPU,
   `analyze_non_iid.sh` performs the SP800-90B assessment of them and

@@ -336,7 +336,7 @@
         # analysis scripts drive the NIST SP800-90B non-IID estimator over them.
         # This tests the measurement tooling, NOT a validation grade assessment
         # - a claim must be measured on the deployment environment, which a qemu
-        # VM is not (see addon/es_ebpf_testing/README.md), so nothing is
+        # VM is not (see tests/es_ebpf_testing/README.md), so nothing is
         # asserted about the magnitude. Single kernel on purpose: the estimator
         # dominates the run time and nothing here is kernel specific.
         mkEbpfRawCheck =
@@ -352,7 +352,7 @@
             # The example scripts live next to the collector and are what this
             # check drives - the pipeline is only worth testing as the tooling
             # a user would actually run.
-            tools = lib.cleanSource ./addon/es_ebpf_testing;
+            tools = lib.cleanSource ./tests/es_ebpf_testing;
 
             # Deltas to collect from the one CPU this assesses - the CPUs are
             # separate noise sources, so a collection is never split across
