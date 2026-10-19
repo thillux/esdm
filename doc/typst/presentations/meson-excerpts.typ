@@ -2,7 +2,7 @@
 // of the slides, copied verbatim (tabs expanded to 8 columns).
 // Taken from the file; refresh them together with the options.
 
-// meson_options.txt lines 768-778
+// meson_options.txt lines 825-835
 #let meson-sp80090c = (
   "# Option for: ESDM_OVERSAMPLE_ENTROPY_SOURCES",
   "option('sp80090c', type: 'boolean', value: false,",
@@ -17,7 +17,7 @@
   "''')",
 )
 
-// meson_options.txt lines 780-805
+// meson_options.txt lines 837-863
 #let meson-ntg1 = (
   "# Option for: ESDM_AIS2031_NTG1_SEEDING_STRATEGY",
   "option('ais2031_ntg1', type: 'boolean', value: false,",
@@ -39,15 +39,16 @@
   "(option 'es_jent_ntg1' together with jitterentropy 3.7.0",
   "or later). Such a jitter RNG is NTG.1 conformant on its",
   "own and therefore seeds a DRNG without a second entropy",
-  "source; 240 bits of entropy from it are then sufficient.",
-  "",
-  "Compliance with German AIS 20/31 from 2011 is always",
-  "present when using /dev/random with the flag O_SYNC or",
-  "getrandom(2) with GRND_RANDOM.",
-  "",
+  "source once it delivered at least 240 bits of entropy and",
+  "the entropy sources together the 256 bits (384 bits with",
+  "the entropy source oversampling) the initial seeding",
+  "requires in any case. 240 bits from the jitter RNG are",
+  "not sufficient by themselves: unless other entropy sources",
+  "make up the difference, it has to deliver the full 256",
+  "bits (384 bits) itself.",
 )
 
-// meson_options.txt lines 827-844
+// meson_options.txt lines 890-907
 #let meson-drg4 = (
   "option('ais2031_drg4', type: 'boolean', value: false,",
   "       description:'''German AIS 20/31 3.0 (2024) DRG.4 reseeding limits.",
@@ -69,7 +70,7 @@
   "''')",
 )
 
-// meson_options.txt lines 846-862
+// meson_options.txt lines 909-925
 #let meson-threads = (
   "# Option for: THREADING_MAX_WORKER_THREADS",
   "option('threading_max_worker_threads', type: 'integer', min: 1, value: 64,",
@@ -90,7 +91,7 @@
   "The value must not be lower than 1.",
 )
 
-// meson_options.txt lines 957-989
+// meson_options.txt lines 1026-1058
 #let meson-backend = (
   "option('crypto_backend', type: 'combo', value: 'builtin',",
   "       choices: ['builtin',",

@@ -131,16 +131,20 @@ is present.
 When enabling the compile time option of `ais2031_ntg1`, the ESDM server
 operates NTG.1 compliant to AIS 20/31 (2024, version 3.0) right away when using
 the interfaces that are documented to block until sufficient initial entropy
-is present. Two entropy sources have to deliver 240 bits of entropy each before
-a DRNG is considered fully seeded.
+is present. On top of the 256 bits of entropy the initial seeding of a DRNG
+needs in any case - 384 bits with the SP800-90C oversampling of an `sp80090c`,
+`fips140` or `ais2031_drg3` build - two entropy sources have to deliver 240 bits
+of entropy each before a DRNG is considered fully seeded.
 
 If the jitter RNG is operated in its own NTG.1 mode - the compile time option
 `es_jent_ntg1` together with jitterentropy 3.7.0 or later providing secure
 memory - then it is an NTG.1 conformant RNG by itself. In that case a second
 entropy source adds nothing to the NTG.1 property and the ESDM server seeds
-from the jitter RNG alone, once it delivered its 240 bits of entropy. The
-requirement is bound to the jitter RNG: another entropy source delivering the
-same amount of entropy does not replace it.
+from the jitter RNG without one, once it delivered at least 240 bits of entropy
+and the entropy sources together the 256 (384) bits of the initial seeding:
+unless other entropy sources make up the difference, the jitter RNG has to
+deliver all of them itself. The requirement is bound to the jitter RNG: another
+entropy source delivering the same amount of entropy does not replace it.
 
 The compile time option of `ais2031_drg4` is independent of it and caps the
 request size based reseeding limits to the values required by DRG.4.10 of the

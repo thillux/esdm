@@ -236,8 +236,8 @@
   [Compile time option], (
     [Function only enabled with compile option “ais2031_ntg1”],
   ),
-  [Initial DRNG seeding: two entropy sources \ must deliver 240 bits of entropy each], (
-    [Or a Jitter RNG in its own NTG.1 mode alone],
+  [Initial DRNG seeding: on top of the 256 bits \ (384 with oversampling), two entropy sources \ must deliver 240 bits of entropy each], (
+    [Or a Jitter RNG in its own NTG.1 mode alone, \ delivering the full seed unless others add to it],
   ),
   [All ES data concatenated into seed buffer],
   [Runtime debug mode: display of all \ processing steps],
@@ -246,7 +246,7 @@
     [DRG.3 / DRG.4: options ais2031_drg3 / ais2031_drg4],
   ),
   [Can be used in parallel with seeding strategy II],
-), extra: meson-view(495.2pt, 125.3pt, 288.7pt, 268pt, 288.7pt / 650,
+), extra: meson-view(495.2pt, 125.3pt, 288.7pt, 268pt, 288.7pt / 680,
   meson-ntg1))
 
 // ---------------------------------------------------------------- slide 13
