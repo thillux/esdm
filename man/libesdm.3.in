@@ -121,11 +121,17 @@ document of
 .BR esdm_status_json ()
 printed with a line "Label: value" per member and a section, indented one
 space deeper, per object \- one per entropy source and DRNG instance.
+Returns 0 on success and
+.B \-EMSGSIZE
+if the report does not fit into the buffer; what fits is left in it,
+NUL\-terminated.
 .TP
 .BI "int esdm_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document. Both return 0 on success and
+The same information as a JSON document. Returns 0 on success and
 .B \-EMSGSIZE
-if the report does not fit into the buffer; what fits is left in it.
+if the document does not fit into the buffer. A document is never cut short:
+a consumer could not tell half a JSON document from a whole one, so the buffer
+then holds the empty string.
 .TP
 .BI "void esdm_status_machine(struct esdm_status_st *" status ");"
 The same information in a structure meant for programmatic use.
@@ -138,7 +144,9 @@ as a JSON document. Returns 0 on success,
 if the node has no DRNG instance, which tells a caller walking the nodes
 from 0 upwards that it reached the end, and
 .B \-EMSGSIZE
-if the document does not fit into the buffer.
+if the document does not fit into the buffer, which then holds the empty
+string as for
+.BR esdm_status_json ().
 .TP
 .BI "int esdm_status_drng_pr_json(char *" buf ", size_t " buflen ");"
 The same for the DRNG instance serving prediction resistance requests.
