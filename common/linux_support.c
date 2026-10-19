@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -57,7 +58,7 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	siginfo_t info;
 	unsigned int i;
 	pid_t pid;
-	int errsv, status;
+	int errsv, status, nsfd;
 
 	sigemptyset(&fwd_set);
 	for (i = 0; i < nr_fwd_signals; i++)
@@ -174,6 +175,19 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 				    strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	/*
+	 * A child of the supervisor would be placed in the namespace of the
+	 * daemon, which ended with it: the kernel refuses every fork from now
+	 * on with ENOMEM - also one made at the exit, as LeakSanitizer forks
+	 * to check for leaks, which then fails the supervisor. Its children
+	 * go into its own namespace again. Best effort, nothing else forks.
+	 */
+	nsfd = open("/proc/self/ns/pid", O_RDONLY | O_CLOEXEC);
+	if (nsfd >= 0) {
+		(void)setns(nsfd, CLONE_NEWPID);
+		close(nsfd);
 	}
 
 	/*
