@@ -82,6 +82,41 @@ jobs:
               opts: >-
                 -Dcrypto_backend=openssl
                 -Des_ext_lib_num=4 -Des_ext_socket_num=4
+          # What speaks to the network or to a token, by the TLS stacks of
+          # OpenSSL and GnuTLS: the opportunistic DTLS, the EGD protocol over
+          # the network with its TLS mode, the external entropy sources on
+          # the network and esdm-es-pkcs11 - none of the jobs above builds
+          # them. The minimized Botan has no TLS. One runner suffices here
+          # as well.
+          - runner: ubuntu-24.04
+            backend:
+              name: openssl-net
+              opts: >-
+                -Dcrypto_backend=openssl
+                -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+                -Des_pkcs11=enabled
+          - runner: ubuntu-24.04
+            backend:
+              name: gnutls-net
+              opts: >-
+                -Dcrypto_backend=gnutls
+                -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+                -Des_pkcs11=enabled
+          # es-ext-net on its own: the TLS layer it shares with egd-net,
+          # without egd-net and without the DTLS of the local connections
+          - runner: ubuntu-24.04
+            backend:
+              name: openssl-es-ext-net
+              opts: -Dcrypto_backend=openssl -Des-ext-net=enabled
+          # egd-net with the backends without a TLS stack: plain TCP only
+          - runner: ubuntu-24.04
+            backend:
+              name: builtin-egd-net
+              opts: -Dcrypto_backend=builtin -Degd-net=enabled
+          - runner: ubuntu-24.04
+            backend:
+              name: leancrypto-egd-net
+              opts: -Dcrypto_backend=leancrypto -Degd-net=enabled
 
     steps:
     - uses: actions/checkout@v4
@@ -95,6 +130,23 @@ jobs:
         sudo apt-get install -y meson ninja-build pkg-config \
                                 libprotobuf-c-dev libfuse3-dev libssl-dev \
                                 libjson-c-dev nettle-dev
+
+    # esdm-es-pkcs11 links libp11; its tests create their tokens with the
+    # softhsm2-util of SoftHSM and load the module next to it, and skip the
+    # token part without.
+    - name: Install the PKCS#11 dependencies
+      if: contains(matrix.backend.opts, '-Des_pkcs11=enabled')
+      run: sudo apt-get install -y libp11-dev softhsm2
+
+    # The tests of es-ext-net skip on a kernel without SCTP. The module may
+    # only come with the extra modules of the runner's kernel.
+    - name: Load SCTP
+      if: contains(matrix.backend.opts, '-Des-ext-net=enabled')
+      run: |
+        sudo modprobe sctp \
+          || { sudo apt-get install -y "linux-modules-extra-$(uname -r)" \
+               && sudo modprobe sctp; } \
+          || echo "::notice::no SCTP on this runner - the es-ext-net tests skip"
 
     - name: Install Jitter RNG
       run: |
@@ -136,8 +188,9 @@ jobs:
         make -j"$(nproc)"
         make install
 
-    # Both botan jobs can miss and race to save the same key; a losing save
-    # must not fail the build.
+    # Both botan jobs can miss and race to save the same key - as can the two
+    # leancrypto and the two gnutls jobs below; a losing save must not fail
+    # the build.
     - name: Save Botan
       if: startsWith(matrix.backend.name, 'botan') && steps.botan-cache.outputs.cache-hit != 'true'
       continue-on-error: true
@@ -147,7 +200,7 @@ jobs:
         key: ${{ matrix.runner }}-botan-${{ env.BOTAN_VERSION }}-r${{ env.BOTAN_BUILD_REV }}
 
     - name: Restore leancrypto
-      if: matrix.backend.name == 'leancrypto'
+      if: startsWith(matrix.backend.name, 'leancrypto')
       id: leancrypto-cache
       uses: actions/cache/restore@v4
       with:
@@ -155,7 +208,7 @@ jobs:
         key: ${{ matrix.runner }}-leancrypto-${{ env.LEANCRYPTO_VERSION }}-r${{ env.LEANCRYPTO_BUILD_REV }}
 
     - name: Build leancrypto
-      if: matrix.backend.name == 'leancrypto' && steps.leancrypto-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'leancrypto') && steps.leancrypto-cache.outputs.cache-hit != 'true'
       run: |
         wget -O leancrypto.tar.gz https://github.com/smuellerDD/leancrypto/archive/refs/tags/v${LEANCRYPTO_VERSION}.tar.gz
         tar xfz leancrypto.tar.gz
@@ -173,7 +226,7 @@ jobs:
         ninja -C build install
 
     - name: Save leancrypto
-      if: matrix.backend.name == 'leancrypto' && steps.leancrypto-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'leancrypto') && steps.leancrypto-cache.outputs.cache-hit != 'true'
       continue-on-error: true
       uses: actions/cache/save@v4
       with:
@@ -181,7 +234,7 @@ jobs:
         key: ${{ matrix.runner }}-leancrypto-${{ env.LEANCRYPTO_VERSION }}-r${{ env.LEANCRYPTO_BUILD_REV }}
 
     - name: Restore GnuTLS
-      if: matrix.backend.name == 'gnutls'
+      if: startsWith(matrix.backend.name, 'gnutls')
       id: gnutls-cache
       uses: actions/cache/restore@v4
       with:
@@ -189,7 +242,7 @@ jobs:
         key: ${{ matrix.runner }}-gnutls-${{ env.GNUTLS_VERSION }}-fips-r${{ env.GNUTLS_BUILD_REV }}
 
     - name: Build GnuTLS with FIPS140 mode
-      if: matrix.backend.name == 'gnutls' && steps.gnutls-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'gnutls') && steps.gnutls-cache.outputs.cache-hit != 'true'
       run: |
         sudo apt-get install -y libgmp-dev
         wget -O gnutls.tar.xz "https://www.gnupg.org/ftp/gcrypt/gnutls/v${GNUTLS_VERSION%.*}/gnutls-${GNUTLS_VERSION}.tar.xz"
@@ -228,7 +281,7 @@ jobs:
           || { echo "::error::built GnuTLS does not export drbg_aes_* - FIPS140 mode not active"; exit 1; }
 
     - name: Save GnuTLS
-      if: matrix.backend.name == 'gnutls' && steps.gnutls-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'gnutls') && steps.gnutls-cache.outputs.cache-hit != 'true'
       continue-on-error: true
       uses: actions/cache/save@v4
       with:
@@ -236,12 +289,12 @@ jobs:
         key: ${{ matrix.runner }}-gnutls-${{ env.GNUTLS_VERSION }}-fips-r${{ env.GNUTLS_BUILD_REV }}
 
     - name: Export source-built dependencies
-      if: startsWith(matrix.backend.name, 'botan') || matrix.backend.name == 'leancrypto' || matrix.backend.name == 'gnutls'
+      if: startsWith(matrix.backend.name, 'botan') || startsWith(matrix.backend.name, 'leancrypto') || startsWith(matrix.backend.name, 'gnutls')
       run: |
         case "${{ matrix.backend.name }}" in
           botan*)      prefix="${BOTAN_PREFIX}"      ; pc=botan-3   ;;
-          leancrypto)  prefix="${LEANCRYPTO_PREFIX}" ; pc=leancrypto ;;
-          gnutls)      prefix="${GNUTLS_PREFIX}"     ; pc=gnutls    ;;
+          leancrypto*) prefix="${LEANCRYPTO_PREFIX}" ; pc=leancrypto ;;
+          gnutls*)     prefix="${GNUTLS_PREFIX}"     ; pc=gnutls    ;;
         esac
 
         # Discover the pkgconfig/library directories instead of assuming lib
