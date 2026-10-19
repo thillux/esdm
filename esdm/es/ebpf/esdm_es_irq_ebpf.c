@@ -314,9 +314,26 @@ static void esdm_irq_ebpf_reset(void)
 
 static void esdm_irq_ebpf_es_state(struct json_object *obj)
 {
-	json_object_object_add(
-		obj, "available_entropy",
-		json_object_new_int64(esdm_irq_ebpf_entropylevel(0)));
+	uint64_t health_failures;
+	uint32_t ent;
+	bool loaded, health_enabled, perm_failure;
+
+	/*
+	 * One snapshot under the lock the monitor and the extraction update the
+	 * health state under: the failure count is 64 bits wide, which a read
+	 * racing with the update may tear on a 32 bit machine. Taken as a
+	 * reader, as the entropy level read always did.
+	 */
+	mutex_reader_lock(&irq_ebpf_mutex);
+	ent = esdm_ebpf_avail_entropy(&esdm_irq_ebpf_es);
+	loaded = esdm_irq_ebpf_es.loaded;
+	health_enabled = esdm_irq_ebpf_es.health_enabled;
+	health_failures = esdm_irq_ebpf_es.health_failures;
+	perm_failure = esdm_irq_ebpf_es.perm_failure;
+	mutex_reader_unlock(&irq_ebpf_mutex);
+
+	json_object_object_add(obj, "available_entropy",
+			       json_object_new_int64(ent));
 	json_object_object_add(
 		obj, "entropy_rate_per_256_data_bits",
 		json_object_new_int64(esdm_config_es_irq_ebpf_entropy_rate()));
@@ -325,18 +342,13 @@ static void esdm_irq_ebpf_es_state(struct json_object *obj)
 		json_object_new_int64(esdm_ebpf_osr(&esdm_irq_ebpf_es)));
 	json_object_object_add(
 		obj, "standards_compliance",
-		json_object_new_string(
-			esdm_irq_ebpf_es.health_enabled ? "SP800-90B" : ""));
-	json_object_object_add(
-		obj, "ebpf_programs_loaded",
-		json_object_new_boolean(esdm_irq_ebpf_es.loaded));
-	json_object_object_add(
-		obj, "health_test_failures",
-		json_object_new_int64(
-			(int64_t)esdm_irq_ebpf_es.health_failures));
-	json_object_object_add(
-		obj, "permanent_failure",
-		json_object_new_boolean(esdm_irq_ebpf_es.perm_failure));
+		json_object_new_string(health_enabled ? "SP800-90B" : ""));
+	json_object_object_add(obj, "ebpf_programs_loaded",
+			       json_object_new_boolean(loaded));
+	json_object_object_add(obj, "health_test_failures",
+			       json_object_new_int64((int64_t)health_failures));
+	json_object_object_add(obj, "permanent_failure",
+			       json_object_new_boolean(perm_failure));
 }
 
 static bool esdm_irq_ebpf_active(void)
@@ -350,19 +362,27 @@ static bool esdm_irq_ebpf_active(void)
  */
 static int esdm_irq_ebpf_selftest(void)
 {
-	if (!esdm_irq_ebpf_es.loaded) {
+	bool loaded, health_enabled, perm_failure;
+
+	mutex_reader_lock(&irq_ebpf_mutex);
+	loaded = esdm_irq_ebpf_es.loaded;
+	health_enabled = esdm_irq_ebpf_es.health_enabled;
+	perm_failure = esdm_irq_ebpf_es.perm_failure;
+	mutex_reader_unlock(&irq_ebpf_mutex);
+
+	if (!loaded) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "IRQEBPF ES: not loaded - nothing to test\n");
 		return 0;
 	}
 
-	if (!esdm_irq_ebpf_es.health_enabled) {
+	if (!health_enabled) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "IRQEBPF ES: SP800-90B health tests not enabled\n");
 		return 0;
 	}
 
-	if (esdm_irq_ebpf_es.perm_failure) {
+	if (perm_failure) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"IRQEBPF ES: SP800-90B health tests in permanent failure\n");
