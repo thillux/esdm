@@ -1470,6 +1470,9 @@
                       "setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin "
                       "${check} ioctl-unpriv"
                   )
+                  # As root, as meson test runs it there: the check gives up
+                  # CAP_SYS_ADMIN itself
+                  machine.succeed("${check} ioctl-unpriv")
 
               with subtest("writers whose data does not come keep nobody waiting"):
                   machine.succeed("timeout 60 ${check} stalled-writers")
