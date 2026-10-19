@@ -120,6 +120,10 @@ static DEFINE_MUTEX_W_UNLOCKED(esdm_es_mgr_monitor_lock);
 /* Wait queue to wait until the ESDM is not initialized. */
 static DECLARE_WAIT_QUEUE(esdm_monitor_wait);
 
+/* The external sources of each kind, one entry per instance */
+#define ESDM_ES_MGR_EXTLIB(i) &esdm_es_extlib[i],
+#define ESDM_ES_MGR_EXTSOCK(i) &esdm_es_extsock[i],
+
 /*
  * The entries must be in the same order as defined by enum esdm_internal_es and
  * enum esdm_external_es
@@ -159,8 +163,8 @@ struct esdm_es_cb *esdm_es[] = {
 	&esdm_es_jent_kernel,
 #endif
 #ifdef ESDM_ES_EXT
-	&esdm_es_extlib[0],
-	&esdm_es_extsock[0],
+	ESDM_EXT_LIB_INSTANCES(ESDM_ES_MGR_EXTLIB)
+	ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_MGR_EXTSOCK)
 #endif
 	&esdm_es_aux
 };

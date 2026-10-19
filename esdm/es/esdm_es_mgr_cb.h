@@ -74,8 +74,18 @@ enum esdm_external_es {
 	esdm_ext_es_jent_kernel, /* Linux jitterentropy in kernel */
 #endif
 #ifdef ESDM_ES_EXT
-	esdm_ext_es_extlib, /* External ES: plugin library */
-	esdm_ext_es_extsock, /* External ES: provider socket */
+	/*
+	 * External ES: ESDM_EXT_LIB_NUM plugin libraries, then
+	 * ESDM_EXT_SOCKET_NUM provider sockets. A range of entries each, from
+	 * the first to the last - empty for a kind without instances, whose last
+	 * is the one before its first then.
+	 */
+	esdm_ext_es_extlib_first,
+	esdm_ext_es_extlib_last =
+		esdm_ext_es_extlib_first + ESDM_EXT_LIB_NUM - 1,
+	esdm_ext_es_extsock_first,
+	esdm_ext_es_extsock_last =
+		esdm_ext_es_extsock_first + ESDM_EXT_SOCKET_NUM - 1,
 #endif
 	esdm_ext_es_aux, /* MUST BE LAST ES! */
 	esdm_ext_es_last /* MUST be the last entry */

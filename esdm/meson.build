@@ -82,8 +82,14 @@ endif
 
 if get_option('es_ext').enabled()
 	dependencies_esdm_lib += dl_dep
-	esdm_src += files('es/esdm_es_extlib.c', 'es/esdm_es_extsock.c',
-			  'es/esdm_es_ext_status.c')
+	esdm_src += files('es/esdm_es_ext_status.c')
+	# A kind without instances is left out, see es_ext_lib_num
+	if es_ext_lib_num > 0
+		esdm_src += files('es/esdm_es_extlib.c')
+	endif
+	if es_ext_socket_num > 0
+		esdm_src += files('es/esdm_es_extsock.c')
+	endif
 endif
 
 if get_option('es_jent_kernel').enabled()

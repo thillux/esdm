@@ -706,6 +706,41 @@ socket (es_ext_socket_path, or esdm-server --es_ext_socket).
 
 Compiled in, an external entropy source does nothing until a plugin library or
 a provider socket is configured.
+
+How many sources of each kind the ESDM has is set by es_ext_lib_num and
+es_ext_socket_num.
+''')
+
+option('es_ext_lib_num', type: 'integer', min: 0, max: 16, value: 1,
+       description: '''Number of external entropy source plugin libraries.
+
+The ESDM has this many plugin library sources, each an entropy source of its
+own with its own plugin library, entropy rate and state: loaded with esdm-server
+--es_ext_lib, which configures the next one each time it is given, or with the
+meson options es_ext_lib_path and es_ext_lib_entropy_rate, whose i-th entry
+configures the i-th source. 0 leaves the kind out.
+
+With one source, it is called ExternalLib in the ESDM status; with several,
+they are ExternalLib0, ExternalLib1 and so on.
+
+Setting this option and es_ext_socket_num both to 0 while es_ext is enabled is
+an error.
+''')
+
+option('es_ext_socket_num', type: 'integer', min: 0, max: 16, value: 1,
+       description: '''Number of external entropy source provider sockets.
+
+The ESDM has this many provider socket sources, each an entropy source of its
+own with its own socket, entropy rate, accepted user and connection: set with
+esdm-server --es_ext_socket, which configures the next one each time it is
+given, or with the meson options es_ext_socket_path,
+es_ext_socket_entropy_rate and es_ext_socket_peer_uid, whose i-th entry
+configures the i-th source. Each source is served by a provider of its own,
+e.g. one esdm-es-ext-serve per source on a socket of its own. 0 leaves the kind
+out.
+
+With one source, it is called ExternalSocket in the ESDM status; with several,
+they are ExternalSocket0, ExternalSocket1 and so on.
 ''')
 
 option('es_ext_lib_path', type: 'string', value: '',

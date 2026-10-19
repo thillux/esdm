@@ -88,8 +88,8 @@ if get_option('esdm-es-ext').enabled()
 		include_directories: include_dirs_es_ext_test,
 	)
 	# The external entropy sources as the esdm-server takes them on its
-	# command line. Skipped (77) unless run as root.
-	if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
+	# command line, a source of each kind. Skipped (77) unless run as root.
+	if get_option('es_ext').enabled() and get_option('esdm-server').enabled() and es_ext_lib_num > 0 and es_ext_socket_num > 0
 		es_ext_server_test = executable('es_ext_server_test',
 			'es_ext_server_test.c',
 			include_directories: [ include_dirs_client,
@@ -117,7 +117,8 @@ if get_option('esdm-es-ext').enabled()
 		suite: 'es_ext', timeout: 60)
 endif
 
-if get_option('es_ext').enabled()
+# The sources of a kind are compiled into its tests, which test the first one
+if get_option('es_ext').enabled() and es_ext_lib_num > 0
 	# The source is compiled into the test - see the file header.
 	es_extlib_test = executable('es_extlib_test',
 		[ esdm_ipc_ns, 'es_extlib_test.c' ],
@@ -143,7 +144,9 @@ if get_option('es_ext').enabled()
 		args: [ es_ext_test_plugin.full_path() ],
 		depends: [ es_ext_test_plugin ],
 		suite: 'es_ext', timeout: 60)
+endif
 
+if get_option('es_ext').enabled() and es_ext_socket_num > 0
 	# The socket source is compiled into the test - see the file header -
 	# against the provider server of the library serving the test plugin.
 	if get_option('esdm-es-ext').enabled()

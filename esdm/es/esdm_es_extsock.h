@@ -26,7 +26,20 @@
 #include "esdm_es_mgr_cb.h"
 #include "visibility.h"
 
-#ifdef ESDM_ES_EXT
+/*
+ * The provider socket sources: ESDM_EXT_SOCKET_NUM of them (meson option
+ * es_ext_socket_num), each an entry of the ES table of its own, from
+ * esdm_ext_es_extsock_first to esdm_ext_es_extsock_last. Its name in the ES
+ * table, and in the ESDM status, carries the index of the source - unless the
+ * source is the only one, which is ExternalSocket, as it ever was.
+ */
+#if ESDM_EXT_SOCKET_NUM > 1
+#define ESDM_ES_EXTSOCK_NAME(i) "ExternalSocket" #i
+#else
+#define ESDM_ES_EXTSOCK_NAME(i) "ExternalSocket"
+#endif
+
+#if ESDM_EXT_SOCKET_NUM > 0
 
 /*
  * A provider not connected, or lost, is connected to again on demand, at most
@@ -55,15 +68,6 @@
 #ifndef ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC
 #define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 60
 #endif
-
-/*
- * The provider socket sources: ESDM_EXT_SOCKET_NUM of them, each an entry of
- * the ES table of its own. ESDM_EXT_SOCKET_INSTANCES(X) expands X(i) for each
- * index i.
- */
-#define ESDM_EXT_SOCKET_NUM 1
-#define ESDM_EXT_SOCKET_INSTANCES(X) X(0)
-#define ESDM_ES_EXTSOCK_NAME(i) "ExternalSocket"
 
 extern struct esdm_es_cb esdm_es_extsock[ESDM_EXT_SOCKET_NUM];
 
@@ -102,20 +106,27 @@ int esdm_es_ext_socket_set_path(const char *path);
 DSO_PUBLIC
 int esdm_es_ext_socket_set_peer_uid(long uid);
 
-#else /* ESDM_ES_EXT */
+#else /* ESDM_EXT_SOCKET_NUM */
+
+/* No such source: -ENOENT without external sources, -EINVAL without this kind */
+#ifdef ESDM_ES_EXT
+#define ESDM_ES_EXTSOCK_NONE -EINVAL
+#else
+#define ESDM_ES_EXTSOCK_NONE -ENOENT
+#endif
 
 static inline int esdm_es_ext_socket_set_path(const char *path)
 {
 	(void)path;
-	return -ENOENT;
+	return ESDM_ES_EXTSOCK_NONE;
 }
 
 static inline int esdm_es_ext_socket_set_peer_uid(long uid)
 {
 	(void)uid;
-	return -ENOENT;
+	return ESDM_ES_EXTSOCK_NONE;
 }
 
-#endif /* ESDM_ES_EXT */
+#endif /* ESDM_EXT_SOCKET_NUM */
 
 #endif /* _ESDM_ES_EXTSOCK_H */

@@ -87,6 +87,14 @@
  * instance it belongs to to the functions below - see ESDM_ES_EXTSOCK_CB.
  */
 struct esdm_es_extsock {
+	/*
+	 * How the log messages name the source: by its name in the ES table if
+	 * it is one of several of its kind, not at all otherwise - and what
+	 * they call it for its status
+	 */
+	const char *tag;
+	const char *who;
+
 	/* Held for every request to the provider, see above */
 	mutex_t mutex;
 
@@ -178,8 +186,16 @@ struct esdm_es_extsock {
 	struct esdm_es_ext_status_cache status;
 };
 
+#if ESDM_EXT_SOCKET_NUM > 1
+#define ESDM_ES_EXTSOCK_TAG(i) " " ESDM_ES_EXTSOCK_NAME(i)
+#else
+#define ESDM_ES_EXTSOCK_TAG(i) ""
+#endif
+
 #define ESDM_ES_EXTSOCK_INSTANCE(i)                                            \
 	[i] = {                                                                \
+		.tag = ESDM_ES_EXTSOCK_TAG(i),                                 \
+		.who = "provider" ESDM_ES_EXTSOCK_TAG(i),                      \
 		.mutex = MUTEX_UNLOCKED,                                       \
 		.peer_uid = ESDM_EXT_SOCKET_PEER_UID,                          \
 		.fd = -1,                                                      \
@@ -308,8 +324,8 @@ static void esdm_es_extsock_log_once(struct esdm_es_extsock *sock, int what,
 	if (sock->last_logged == what)
 		return;
 	sock->last_logged = what;
-	esdm_logger(level, LOGGER_C_ES, "External ES provider %s: %s\n", path,
-		    msg);
+	esdm_logger(level, LOGGER_C_ES, "External ES provider%s %s: %s\n",
+		    sock->tag, path, msg);
 }
 
 /*
@@ -528,8 +544,8 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 	esdm_logger(
 		sock->was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
 		LOGGER_C_ES,
-		"External ES provider %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
-		path, (unsigned int)sock->connected_uid,
+		"External ES provider%s %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
+		sock->tag, path, (unsigned int)sock->connected_uid,
 		esdm_es_extsock_encrypted_locked(sock) ? "DTLS" : "unencrypted",
 		esdm_config_es_ext_socket_entropy_rate());
 	sock->was_connected = true;
@@ -576,7 +592,8 @@ static bool esdm_es_extsock_ensure_locked(struct esdm_es_extsock *sock)
 			return true;
 		esdm_logger(
 			LOGGER_VERBOSE, LOGGER_C_ES,
-			"External ES provider: connection closed by the provider, connecting again\n");
+			"External ES provider%s: connection closed by the provider, connecting again\n",
+			sock->tag);
 		esdm_es_extsock_disconnect_locked(sock);
 		sock->retry_at = 0;
 	}
@@ -856,15 +873,16 @@ static void esdm_es_extsock_get(struct esdm_es_extsock *sock,
 						    sock, requested_bits));
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-		    "obtained %u bits of entropy from external ES provider\n",
-		    eb_es->e_bits);
+		    "obtained %u bits of entropy from external ES provider%s\n",
+		    eb_es->e_bits, sock->tag);
 	goto out;
 
 fail:
 	if (!sock->read_failed)
-		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
-			    "External ES provider: no entropy delivered: %s\n",
-			    why);
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider%s: no entropy delivered: %s\n",
+			sock->tag, why);
 	sock->read_failed = true;
 
 out:
@@ -914,7 +932,8 @@ static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 	if (!status) {
 		sock->read_failed = false;
 		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
-			    "External ES provider: delivering again\n");
+			    "External ES provider%s: delivering again\n",
+			    sock->tag);
 	}
 
 out:
@@ -967,8 +986,8 @@ again:
 		retried = true;
 		esdm_logger(
 			LOGGER_VERBOSE, LOGGER_C_ES,
-			"External ES provider: connection gone (%s), connecting again\n",
-			strerror((int)-n));
+			"External ES provider%s: connection gone (%s), connecting again\n",
+			sock->tag, strerror((int)-n));
 		if (esdm_es_extsock_reconnect_locked(sock))
 			goto out;
 		goto again;
@@ -976,7 +995,8 @@ again:
 	if (n == -ECONNRESET) {
 		esdm_logger(
 			LOGGER_VERBOSE, LOGGER_C_ES,
-			"External ES provider: STATUS refused, connecting again\n");
+			"External ES provider%s: STATUS refused, connecting again\n",
+			sock->tag);
 		(void)esdm_es_extsock_reconnect_locked(sock);
 		sock->status_refused = true;
 		goto out;
@@ -986,21 +1006,22 @@ again:
 			now + ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC;
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"External ES provider: no answer to STATUS in time, disconnected - not asked for its status for %u seconds\n",
-			ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
+			"External ES provider%s: no answer to STATUS in time, disconnected - not asked for its status for %u seconds\n",
+			sock->tag, ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
 		goto out;
 	}
 	/* An answer larger than any: disconnected as for any other request */
 	if (n == -EPROTO || n == -EMSGSIZE) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"External ES provider: invalid answer to STATUS, disconnected\n");
+			"External ES provider%s: invalid answer to STATUS, disconnected\n",
+			sock->tag);
 		goto out;
 	}
 	if (n < 0) {
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
-			    "External ES provider: no answer to STATUS: %s\n",
-			    strerror((int)-n));
+			    "External ES provider%s: no answer to STATUS: %s\n",
+			    sock->tag, strerror((int)-n));
 		goto out;
 	}
 
@@ -1011,19 +1032,20 @@ again:
 		esdm_es_extsock_drop_locked(sock);
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"External ES provider: invalid answer to STATUS, disconnected\n");
+			"External ES provider%s: invalid answer to STATUS, disconnected\n",
+			sock->tag);
 		goto out;
 	}
 
 	if (status) {
 		if (status != -EOPNOTSUPP)
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-				    "External ES provider: no status: %s\n",
-				    strerror(-status));
+				    "External ES provider%s: no status: %s\n",
+				    sock->tag, strerror(-status));
 		goto out;
 	}
 
-	obj = esdm_es_ext_status_parse(text, textlen, "provider",
+	obj = esdm_es_ext_status_parse(text, textlen, sock->who,
 				       &sock->status_warned);
 
 out:
@@ -1124,7 +1146,8 @@ static int esdm_es_extsock_selftest_locked(struct esdm_es_extsock *sock)
 		/* No verdict on the noise source, but no working connection */
 		esdm_es_extsock_drop_locked(sock);
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-			    "External ES provider: self test not answered\n");
+			    "External ES provider%s: self test not answered\n",
+			    sock->tag);
 		sock->read_failed = true;
 		return -EFAULT;
 	}
@@ -1133,8 +1156,8 @@ static int esdm_es_extsock_selftest_locked(struct esdm_es_extsock *sock)
 
 	if (status) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
-			    "External ES provider: self test failed: %s\n",
-			    strerror(-status));
+			    "External ES provider%s: self test failed: %s\n",
+			    sock->tag, strerror(-status));
 		sock->selftest_failed = true;
 		return -EFAULT;
 	}
@@ -1156,7 +1179,8 @@ static int esdm_es_extsock_selftest(struct esdm_es_extsock *sock)
 	if (!esdm_es_extsock_ensure_locked(sock)) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
-			"External ES provider: not connected - nothing to test\n");
+			"External ES provider%s: not connected - nothing to test\n",
+			sock->tag);
 		goto out;
 	}
 

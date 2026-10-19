@@ -250,6 +250,30 @@ else
 endif
 
 conf_data.set('ESDM_ES_EXT', get_option('es_ext').enabled())
+
+# The external entropy sources of each kind: their number, and the X-macro
+# ESDM_EXT_*_INSTANCES(X) expanding X(i) for each of their indices i, from which
+# the code generates what each instance needs - see esdm_es_extlib.c
+es_ext_lib_num = 0
+es_ext_socket_num = 0
+if get_option('es_ext').enabled()
+	es_ext_lib_num = get_option('es_ext_lib_num')
+	es_ext_socket_num = get_option('es_ext_socket_num')
+	if es_ext_lib_num + es_ext_socket_num == 0
+		error('es_ext is enabled, but es_ext_lib_num and es_ext_socket_num are both 0 - give one of them a number of sources, or disable es_ext')
+	endif
+endif
+foreach es_ext_kind : [ [ 'LIB', es_ext_lib_num ],
+			[ 'SOCKET', es_ext_socket_num ] ]
+	es_ext_instances = []
+	foreach i : range(es_ext_kind[1])
+		es_ext_instances += 'X(@0@)'.format(i)
+	endforeach
+	conf_data.set('ESDM_EXT_' + es_ext_kind[0] + '_NUM', es_ext_kind[1])
+	conf_data.set('ESDM_EXT_' + es_ext_kind[0] + '_INSTANCES(X)',
+		      ' '.join(es_ext_instances))
+endforeach
+
 conf_data.set_quoted('ESDM_EXT_LIB_PATH', get_option('es_ext_lib_path'))
 conf_data.set('ESDM_EXT_LIB_ENTROPY_RATE',
 	      get_option('es_ext_lib_entropy_rate'))

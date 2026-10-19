@@ -26,7 +26,20 @@
 #include "esdm_es_mgr_cb.h"
 #include "visibility.h"
 
-#ifdef ESDM_ES_EXT
+/*
+ * The plugin library sources: ESDM_EXT_LIB_NUM of them (meson option
+ * es_ext_lib_num), each an entry of the ES table of its own, from
+ * esdm_ext_es_extlib_first to esdm_ext_es_extlib_last. Its name in the ES
+ * table, and in the ESDM status, carries the index of the source - unless the
+ * source is the only one, which is ExternalLib, as it ever was.
+ */
+#if ESDM_EXT_LIB_NUM > 1
+#define ESDM_ES_EXTLIB_NAME(i) "ExternalLib" #i
+#else
+#define ESDM_ES_EXTLIB_NAME(i) "ExternalLib"
+#endif
+
+#if ESDM_EXT_LIB_NUM > 0
 
 /*
  * A plugin whose request failed is asked by the ES monitor again, at most once
@@ -35,14 +48,6 @@
 #ifndef ESDM_EXT_LIB_PROBE_INTERVAL_SEC
 #define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 5
 #endif
-
-/*
- * The plugin library sources: ESDM_EXT_LIB_NUM of them, each an entry of the
- * ES table of its own. ESDM_EXT_LIB_INSTANCES(X) expands X(i) for each index i.
- */
-#define ESDM_EXT_LIB_NUM 1
-#define ESDM_EXT_LIB_INSTANCES(X) X(0)
-#define ESDM_ES_EXTLIB_NAME(i) "ExternalLib"
 
 extern struct esdm_es_cb esdm_es_extlib[ESDM_EXT_LIB_NUM];
 
@@ -70,14 +75,19 @@ extern struct esdm_es_cb esdm_es_extlib[ESDM_EXT_LIB_NUM];
 DSO_PUBLIC
 int esdm_es_ext_lib_set_path(const char *path);
 
-#else /* ESDM_ES_EXT */
+#else /* ESDM_EXT_LIB_NUM */
 
+/* No such source: -ENOENT without external sources, -EINVAL without this kind */
 static inline int esdm_es_ext_lib_set_path(const char *path)
 {
 	(void)path;
+#ifdef ESDM_ES_EXT
+	return -EINVAL;
+#else
 	return -ENOENT;
+#endif
 }
 
-#endif /* ESDM_ES_EXT */
+#endif /* ESDM_EXT_LIB_NUM */
 
 #endif /* _ESDM_ES_EXTLIB_H */

@@ -74,6 +74,14 @@
  * instance it belongs to to the functions below - see ESDM_ES_EXTLIB_CB.
  */
 struct esdm_es_extlib {
+	/*
+	 * How the log messages name the source: by its name in the ES table if
+	 * it is one of several of its kind, not at all otherwise - and what
+	 * they call it for its status
+	 */
+	const char *tag;
+	const char *who;
+
 	/* Held for every request to the plugin, see above */
 	mutex_t mutex;
 
@@ -90,6 +98,9 @@ struct esdm_es_extlib {
 	void *ctx;
 	/* The path it was loaded from */
 	char loaded_path[PATH_MAX];
+
+	/* The plugin as claimed for this source, under extlib_claim_mutex */
+	const struct esdm_es_ext_plugin *claimed;
 
 	/*
 	 * The last request to the plugin failed, or its last self test did.
@@ -134,8 +145,16 @@ struct esdm_es_extlib {
 	struct esdm_es_ext_status_cache status;
 };
 
+#if ESDM_EXT_LIB_NUM > 1
+#define ESDM_ES_EXTLIB_TAG(i) " " ESDM_ES_EXTLIB_NAME(i)
+#else
+#define ESDM_ES_EXTLIB_TAG(i) ""
+#endif
+
 #define ESDM_ES_EXTLIB_INSTANCE(i)                                             \
 	[i] = {                                                                \
+		.tag = ESDM_ES_EXTLIB_TAG(i),                                  \
+		.who = "plugin" ESDM_ES_EXTLIB_TAG(i),                         \
 		.mutex = MUTEX_UNLOCKED,                                       \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
 		.state_name = "(none)",                                        \
@@ -146,6 +165,48 @@ struct esdm_es_extlib {
 static struct esdm_es_extlib extlib[ESDM_EXT_LIB_NUM] = {
 	ESDM_EXT_LIB_INSTANCES(ESDM_ES_EXTLIB_INSTANCE)
 };
+
+/*
+ * A plugin library serves one source. Its callbacks are never called
+ * concurrently, as the plugin API promises - which two sources would break,
+ * each calling it under its own lock - and a library loaded again is the one
+ * already loaded, its state and all, see dlopen(3). Guards the plugin each
+ * source claimed; taken under the mutex of a source, never the other way round.
+ */
+static DEFINE_MUTEX_UNLOCKED(extlib_claim_mutex);
+
+/* The name of @lib in the ES table */
+static const char *esdm_es_extlib_name(const struct esdm_es_extlib *lib)
+{
+	return esdm_es_extlib[lib - extlib].name;
+}
+
+/*
+ * Claim @p for @lib, NULL for none. Caller must hold the mutex of @lib (write
+ * lock).
+ *
+ * @return NULL if claimed, the source using the plugin otherwise
+ */
+static const struct esdm_es_extlib *
+esdm_es_extlib_claim_locked(struct esdm_es_extlib *lib,
+			    const struct esdm_es_ext_plugin *p)
+{
+	const struct esdm_es_extlib *other = NULL;
+	unsigned int i;
+
+	mutex_lock(&extlib_claim_mutex);
+	for (i = 0; p && i < ESDM_EXT_LIB_NUM; i++) {
+		if (&extlib[i] != lib && extlib[i].claimed == p) {
+			other = &extlib[i];
+			break;
+		}
+	}
+	if (!other)
+		lib->claimed = p;
+	mutex_unlock(&extlib_claim_mutex);
+
+	return other;
+}
 
 /* Caller must hold the mutex of @lib. */
 static const char *esdm_es_extlib_path_locked(const struct esdm_es_extlib *lib)
@@ -215,6 +276,7 @@ static void esdm_es_extlib_unload_locked(struct esdm_es_extlib *lib)
 	if (lib->dl)
 		dlclose(lib->dl);
 	lib->dl = NULL;
+	(void)esdm_es_extlib_claim_locked(lib, NULL);
 
 	lib->loaded_path[0] = '\0';
 	lib->read_failed = false;
@@ -241,8 +303,8 @@ static int esdm_es_extlib_init_plugin_locked(struct esdm_es_extlib *lib,
 		if (ret) {
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
-				"External ES plugin: initialization of %s failed: %s\n",
-				p->name ? p->name : "the plugin",
+				"External ES plugin%s: initialization of %s failed: %s\n",
+				lib->tag, p->name ? p->name : "the plugin",
 				strerror(-ret));
 			return ret;
 		}
@@ -268,6 +330,7 @@ static int esdm_es_extlib_init_plugin_locked(struct esdm_es_extlib *lib,
 static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 {
 	const char *path = esdm_es_extlib_path_locked(lib);
+	const struct esdm_es_extlib *other;
 	const struct esdm_es_ext_plugin *p;
 	void *dl;
 	int ret;
@@ -299,16 +362,17 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	if (!dl) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling external ES plugin: cannot load %s: %s\n",
-			path, dlerror());
+			"Disabling external ES plugin%s: cannot load %s: %s\n",
+			lib->tag, path, dlerror());
 		return -ENOENT;
 	}
 
 	p = dlsym(dl, ESDM_ES_EXT_PLUGIN_SYMBOL);
 	if (!p) {
-		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
-			    "Disabling external ES plugin: %s exports no %s\n",
-			    path, ESDM_ES_EXT_PLUGIN_SYMBOL);
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"Disabling external ES plugin%s: %s exports no %s\n",
+			lib->tag, path, ESDM_ES_EXT_PLUGIN_SYMBOL);
 		dlclose(dl);
 		return -ENOEXEC;
 	}
@@ -316,10 +380,20 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	if (esdm_es_ext_plugin_check(p)) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling external ES plugin: %s is of version %u, versions 1 to %u with a get_entropy callback are supported\n",
-			path, p->version, ESDM_ES_EXT_PLUGIN_VERSION);
+			"Disabling external ES plugin%s: %s is of version %u, versions 1 to %u with a get_entropy callback are supported\n",
+			lib->tag, path, p->version, ESDM_ES_EXT_PLUGIN_VERSION);
 		dlclose(dl);
 		return -EPROTO;
+	}
+
+	other = esdm_es_extlib_claim_locked(lib, p);
+	if (other) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"Disabling external ES plugin%s: %s is loaded by %s already, and a plugin library serves one source\n",
+			lib->tag, path, esdm_es_extlib_name(other));
+		dlclose(dl);
+		return -EBUSY;
 	}
 
 	lib->dl = dl;
@@ -334,8 +408,8 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	/* Its claims are not assessed by the ESDM, which is worth a line */
 	esdm_logger(
 		LOGGER_STATUS, LOGGER_C_ES,
-		"External ES plugin %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
-		p->name ? p->name : "(unnamed)", path,
+		"External ES plugin%s: %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
+		lib->tag, p->name ? p->name : "(unnamed)", path,
 		esdm_config_es_ext_lib_entropy_rate());
 
 	return 0;
@@ -418,8 +492,8 @@ static void esdm_es_extlib_get(struct esdm_es_extlib *lib,
 		if (!lib->read_failed)
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
-				"External ES plugin: no entropy delivered: %s\n",
-				strerror(-ret));
+				"External ES plugin%s: no entropy delivered: %s\n",
+				lib->tag, strerror(-ret));
 		lib->read_failed = true;
 		goto out;
 	}
@@ -429,8 +503,8 @@ static void esdm_es_extlib_get(struct esdm_es_extlib *lib,
 						    lib, requested_bits));
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-		    "obtained %u bits of entropy from external ES plugin\n",
-		    eb_es->e_bits);
+		    "obtained %u bits of entropy from external ES plugin%s\n",
+		    eb_es->e_bits, lib->tag);
 
 out:
 	esdm_es_extlib_unlock(lib);
@@ -460,7 +534,8 @@ static int esdm_es_extlib_monitor(struct esdm_es_extlib *lib)
 				    &claimed)) {
 		lib->read_failed = false;
 		esdm_logger(LOGGER_STATUS, LOGGER_C_ES,
-			    "External ES plugin: delivering again\n");
+			    "External ES plugin%s: delivering again\n",
+			    lib->tag);
 	}
 
 out:
@@ -488,12 +563,12 @@ esdm_es_extlib_status_locked(struct esdm_es_extlib *lib)
 	if (len < 0) {
 		if (len != -EOPNOTSUPP)
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-				    "External ES plugin: no status: %s\n",
-				    strerror((int)-len));
+				    "External ES plugin%s: no status: %s\n",
+				    lib->tag, strerror((int)-len));
 		return NULL;
 	}
 
-	return esdm_es_ext_status_parse(text, (size_t)len, "plugin",
+	return esdm_es_ext_status_parse(text, (size_t)len, lib->who,
 					&lib->status_warned);
 }
 
@@ -566,7 +641,8 @@ static int esdm_es_extlib_selftest_locked(struct esdm_es_extlib *lib)
 	if (!lib->plugin) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
-			"External ES plugin: none loaded - nothing to test\n");
+			"External ES plugin%s: none loaded - nothing to test\n",
+			lib->tag);
 		return 0;
 	}
 
@@ -577,8 +653,8 @@ static int esdm_es_extlib_selftest_locked(struct esdm_es_extlib *lib)
 		if (ret) {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ES,
-				"External ES plugin: self test failed: %d\n",
-				ret);
+				"External ES plugin%s: self test failed: %d\n",
+				lib->tag, ret);
 			lib->selftest_failed = true;
 			return -EFAULT;
 		}
