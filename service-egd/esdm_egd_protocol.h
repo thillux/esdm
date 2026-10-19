@@ -79,7 +79,11 @@
  *				   /dev/urandom (esdm_get_random_bytes()). The
  *				   ESDM hands out nothing before it is
  *				   operational, so the answer is empty then;
- *				   otherwise only an error answers short.
+ *				   otherwise it is short when the DRNG serving
+ *				   it reached the most it may generate without
+ *				   a full reseed on the way - in a build for
+ *				   SP800-90C every 2^17 bits -, or on an
+ *				   error.
  * 0xe3 get state		-> one byte holding the number of fields that
  *				   follow, each a 4 byte number, see
  *				   ESDM_EGD_STATE_*. A client takes the fields

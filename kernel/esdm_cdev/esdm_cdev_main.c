@@ -270,10 +270,14 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 						  ESDM_CDEV_NOT_OPERATIONAL);
 
 		/*
-		 * Nothing from the ESDM but an answer short of all: the
-		 * unseeded read is only short on an error.
+		 * Nothing at all from the ESDM for the unseeded read, which it
+		 * answers empty before it is operational: the kernel's RNG
+		 * serves, as the read does not wait. An answer short of all is
+		 * no failure: the DRNG serving it reached the most it may
+		 * generate without a full reseed on the way - in a build for
+		 * SP800-90C every 16 KiB -, and the rest is asked for again.
 		 */
-		if (urandom && !pr && got >= 0 && (size_t)got < len)
+		if (urandom && !pr && !got)
 			got = -EIO;
 
 		if (got < 0) {
