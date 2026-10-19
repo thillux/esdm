@@ -32,7 +32,7 @@ Log to syslog instead of standard output and standard error.
 .SS Status
 .TP
 .BR \-s ", " \-\-status
-Print the status of the ESDM and all of its entropy sources.
+Print the status of the ESDM and all of its entropy sources to standard output.
 .TP
 .B \-\-status\-json
 Print the same information as a JSON document \- the one the text of
@@ -259,7 +259,9 @@ or write the HMAC to standard output for
 An existing file is not overwritten.
 .SH EXIT STATUS
 .B esdm\-tool
-exits with status 0 on success. The query options
+exits with status 0 on success. A status option whose status cannot be
+fetched ends it with status 1, as a failed request of the other options does.
+The query options
 .RB ( \-\-is\-fully\-seeded ,
 .BR \-\-is\-running ,
 .BR \-\-wait\-until\-seeded )

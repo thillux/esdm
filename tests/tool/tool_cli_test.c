@@ -260,13 +260,13 @@ static void test_without_server(void)
 		{ { "--get-seed", NULL }, "Unable to fetch seed", EXIT_FAILURE },
 		{ { "-w", "1", NULL }, "Waiting another round", EXIT_FAILURE },
 		/*
-		 * The status commands report the failure but exit successfully:
-		 * they have no result to withhold. Only the message is checked
-		 * here, the status is what it is.
+		 * The status commands fail as well: a script asking for the
+		 * status must not take the missing document for an empty one.
 		 */
-		{ { "-s", NULL }, "Fetching ESDM status failed", -1 },
-		{ { "--status-json", NULL }, "Fetching ESDM status failed", -1 },
-		{ { "-J", NULL }, "jitterentropy status failed", -1 },
+		{ { "-s", NULL }, "Fetching ESDM status failed", EXIT_FAILURE },
+		{ { "--status-json", NULL }, "Fetching ESDM status failed",
+		  EXIT_FAILURE },
+		{ { "-J", NULL }, "jitterentropy status failed", EXIT_FAILURE },
 		{ { "--benchmark-mode", "pr", NULL },
 		  "Failed to get bytes from ESDM", EXIT_FAILURE },
 	};
@@ -300,10 +300,9 @@ static void test_without_server(void)
 	for (i = 0; i < n; i++) {
 		int rc = test_run_wait(&runs[i]);
 
-		if (cases[i].status != -1)
-			CHECK(rc == cases[i].status,
-			      "%s without a server: got status %d, expected %d",
-			      cases[i].opts[0], rc, cases[i].status);
+		CHECK(rc == cases[i].status,
+		      "%s without a server: got status %d, expected %d",
+		      cases[i].opts[0], rc, cases[i].status);
 		CHECK(strstr(runs[i].err, cases[i].says) != NULL,
 		      "%s without a server did not report \"%s\" (output: %.300s)",
 		      cases[i].opts[0], cases[i].says, runs[i].err);

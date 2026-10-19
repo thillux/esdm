@@ -289,7 +289,12 @@ static void handle_usage(void)
 #endif
 }
 
-static void handle_status(void)
+/*
+ * The status documents are written to stdout unadorned, as they came. Not
+ * through esdm_logger(): its record holds 4096 bytes and cuts off the rest, and
+ * it goes to stderr or syslog, where a consumer of the document does not look.
+ */
+static int handle_status(void)
 {
 	char status_buffer[ESDM_RPC_MAX_DATA];
 	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
@@ -298,13 +303,14 @@ static void handle_status(void)
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM status failed!\n");
-	} else {
-		esdm_logger(LOGGER_STATUS, LOGGER_C_TOOL, "Status --\n%s",
-			    status_buffer);
+		return EXIT_FAILURE;
 	}
+
+	printf("%s", status_buffer);
+	return EXIT_SUCCESS;
 }
 
-static void handle_status_json(void)
+static int handle_status_json(void)
 {
 	char status_buffer[ESDM_RPC_MAX_DATA];
 	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
@@ -314,13 +320,12 @@ static void handle_status_json(void)
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM status failed!\n");
-	} else {
-		/*
-		 * Written to stdout unadorned so that the document can be piped
-		 * into a JSON consumer.
-		 */
-		printf("%s", status_buffer);
+		return EXIT_FAILURE;
 	}
+
+	/* So that the document can be piped into a JSON consumer */
+	printf("%s", status_buffer);
+	return EXIT_SUCCESS;
 }
 
 /*
@@ -433,7 +438,7 @@ out:
 	return ret ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-static void handle_jent_status(void)
+static int handle_jent_status(void)
 {
 	char status_buffer[ESDM_RPC_MAX_DATA];
 	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
@@ -443,9 +448,11 @@ static void handle_jent_status(void)
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM jitterentropy status failed!\n");
-	} else {
-		printf("%s", status_buffer);
+		return EXIT_FAILURE;
 	}
+
+	printf("%s", status_buffer);
+	return EXIT_SUCCESS;
 }
 
 static int handle_is_fully_seeded(void)
@@ -1729,14 +1736,14 @@ int main(int argc, char **argv)
 		return_val = EXIT_FAILURE;
 #endif
 	} else if (status) {
-		handle_status();
+		return_val = handle_status();
 	} else if (status_json) {
-		handle_status_json();
+		return_val = handle_status_json();
 	} else if (drng_status) {
 		return_val = handle_drng_status(
 			drng_status_target, drng_status_node, drng_status_raw);
 	} else if (jent_status) {
-		handle_jent_status();
+		return_val = handle_jent_status();
 	} else if (is_fully_seeded) {
 		return_val = handle_is_fully_seeded();
 	} else if (get_random) {

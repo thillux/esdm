@@ -280,7 +280,18 @@ static void test_status(void)
 	struct test_run r;
 	int rc;
 
-	check_says(status, "Status --");
+	/*
+	 * The status text goes to stdout as it came, all of it: its last
+	 * section is there, which a log record of 4096 bytes cut off.
+	 */
+	announce(status);
+	rc = test_run(&r, status, NULL);
+	CHECK(rc == EXIT_SUCCESS, "-s failed with status %d (output: %.300s)",
+	      rc, test_run_said(&r));
+	CHECK(strstr(r.out, "ESDM library version") != NULL,
+	      "-s did not print the status (output: %.300s)", r.out);
+	CHECK(strstr(r.out, "Self test interval in seconds") != NULL,
+	      "-s printed the status cut short (%zu bytes)", r.outlen);
 
 	/*
 	 * The JSON document goes to stdout on its own so it can be piped into
@@ -354,8 +365,19 @@ static void test_status(void)
 		      rc);
 	}
 
-	/* Present or not, the jitterentropy status must not fail the tool */
-	check_ok(jent);
+	/*
+	 * The jitterentropy status where the Jitter RNG is there, a failure
+	 * said as such where it is not - never an empty success.
+	 */
+	announce(jent);
+	rc = test_run(&r, jent, NULL);
+	if (rc == EXIT_SUCCESS)
+		CHECK(r.outlen > 0, "-J succeeded without printing a status");
+	else
+		CHECK(rc == EXIT_FAILURE &&
+			      strstr(r.err, "jitterentropy status failed"),
+		      "-J ended with status %d (output: %.300s)", rc,
+		      test_run_said(&r));
 
 	/* The logging switches change where output goes, not whether it works */
 	check_ok(syslog);
