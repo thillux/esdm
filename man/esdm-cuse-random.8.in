@@ -88,7 +88,8 @@ for
 .BR esdm\-cuse\-urandom .
 .TP
 .BR \-v ", " \-\-verbosity= \fINUM\fR
-Logging verbosity level.
+Logging verbosity level. Errors and warnings are logged at any level; the
+default is 3, 4 adds verbose messages, and 5 and above more debugging output.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 Unprivileged user to switch to once the device exists. Defaults to

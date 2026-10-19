@@ -869,7 +869,16 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	esdm_logger_set_verbosity(verbosity);
+	/*
+	 * The -v count is the verbosity level, but errors and warnings are
+	 * logged in any case: without -v, the count would be LOGGER_NONE, and
+	 * the daemon would fail without saying why. The -vvv of the shipped
+	 * unit has always meant warnings, and keeps meaning that.
+	 */
+	esdm_logger_set_verbosity(
+		verbosity > LOGGER_WARN ?
+			(enum esdm_logger_verbosity)verbosity :
+			LOGGER_WARN);
 
 	/*
 	 * Evaluate the socket activation environment while we still are the

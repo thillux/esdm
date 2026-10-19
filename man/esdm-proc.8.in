@@ -69,7 +69,9 @@ other than the one running the daemon requires the FUSE option
 Print a usage summary and exit.
 .TP
 .BR \-v ", " \-\-verbosity= \fINUM\fR
-Logging verbosity level.
+Logging verbosity level. Errors and warnings are logged at any level, the
+default included; 4 adds verbose messages, and 5 and above more debugging
+output.
 .TP
 .B \-\-relabel
 Perform automatic SELinux relabeling of the served files, so that they carry

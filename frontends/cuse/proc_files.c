@@ -836,7 +836,8 @@ static void show_help(const char *progname)
 {
 	printf("usage: %s [options] <mountpoint>\n\n", progname);
 	printf("File-system specific options:\n"
-	       "    --verbosity=<u>     Verbosity level\n"
+	       "    --verbosity=<u>     Verbosity level (minimum: 3, errors and\n"
+	       "                        warnings)\n"
 	       "    --relabel           Perform automatic SELinux relabeling\n"
 	       "    --syslog            Log via syslog\n"
 	       "\n");
@@ -907,7 +908,14 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	esdm_logger_set_verbosity(esdm_proc_options.verbosity);
+	/*
+	 * Errors and warnings are logged at every level, the default of 0
+	 * included - a lower one would have the daemon fail without saying why.
+	 */
+	esdm_logger_set_verbosity(
+		esdm_proc_options.verbosity > LOGGER_WARN ?
+			(enum esdm_logger_verbosity)esdm_proc_options.verbosity :
+			LOGGER_WARN);
 
 	if (esdm_proc_options.syslog) {
 		esdm_logger_enable_syslog("esdm-proc");

@@ -43,7 +43,10 @@ Print a usage summary and exit.
 Seconds between two seeding operations. A non\-numeric argument is rejected.
 .TP
 .BR \-v ", " \-\-verbosity
-Increase the logging verbosity. May be given repeatedly.
+Increase the logging verbosity. May be given repeatedly, the count being the
+verbosity level. Errors and warnings are logged at any level, the default
+included; \-vvvv adds verbose messages, and each further \-v more debugging
+output.
 .TP
 .BR \-s ", " \-\-syslog
 Log to syslog instead of standard output and standard error.

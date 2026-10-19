@@ -56,8 +56,10 @@ Print a usage summary and exit.
 Print the version of the ESDM library the daemon was built against and exit.
 .TP
 .BR \-v ", " \-\-verbose
-Increase the logging verbosity. May be given repeatedly. Any use of this
-option implies
+Increase the logging verbosity. May be given repeatedly, the count being the
+verbosity level. Errors and warnings are logged at any level, the default
+included; \-vvvv adds verbose messages, and each further \-v more debugging
+output. Any use of this option implies
 .BR \-\-foreground .
 .TP
 .BR \-p ", " \-\-pid " \fIFILE\fR"

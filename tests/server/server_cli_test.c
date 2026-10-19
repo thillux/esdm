@@ -251,6 +251,30 @@ static void test_pid_file_option(void)
 }
 
 /*
+ * The daemon reports what makes it fail without being asked to be verbose: no
+ * -v used to be the level of no output at all, and the daemon then ended with
+ * nothing but its exit status. A PID file that cannot be created is the first
+ * failure past the privilege check, so this needs root, and the daemon ends
+ * there, before it set up anything.
+ */
+static void test_errors_without_verbose(void)
+{
+	const char *const opts[] = { "-f", "--pid", "/nonexistent/esdm.pid",
+				     NULL };
+	struct test_run r;
+
+	if (geteuid()) {
+		printf("not running as root - skipping the error report check\n");
+		return;
+	}
+
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "Cannot open pid file") != NULL,
+	      "the failure was not reported without -v (output: %.300s)",
+	      r.err);
+}
+
+/*
  * The PKCS#11 provider module named on the command line. A build without the
  * PKCS#11 entropy source refuses the option rather than ignoring it, as the
  * module asked for would not be used. The module is only loaded by
@@ -440,6 +464,7 @@ int main(int argc, char *argv[])
 	test_options_accepted();
 	test_syslog();
 	test_pid_file_option();
+	test_errors_without_verbose();
 	test_pkcs11_module_option();
 	test_es_ext_lib_options();
 	test_es_ext_socket_options();

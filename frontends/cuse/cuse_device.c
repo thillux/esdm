@@ -1769,7 +1769,8 @@ static const char *usage =
 	"    --maj=MAJ|-M MAJ        device major number\n"
 	"    --min=MIN|-m MIN        device minor number\n"
 	"    --name=NAME|-n NAME     device name (default: esdm or uesdm)\n"
-	"    --verbosity=NUM|-v NUM  verbosity level\n"
+	"    --verbosity=NUM|-v NUM  verbosity level (default and minimum: 3,\n"
+	"                            errors and warnings)\n"
 	"    --username=USER|-u USER unprivileged user name (default: \"nobody\")\n"
 	"    --pid_namespace         fork the daemon into an isolating PID namespace\n"
 	"                            (refuses the privileged ioctls to every caller)\n"
@@ -1896,7 +1897,7 @@ int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct esdm_cuse_param param = { 0, 0, NULL, NULL, 1, 0, 0, 0, 0, 0 };
+	struct esdm_cuse_param param = { .verbosity = LOGGER_WARN };
 	char dev_name[128] = "DEVNAME=";
 	char devname[20];
 	const char *dev_info_argv[] = { dev_name };
@@ -1911,7 +1912,12 @@ int main_common(const char *_devname, const char *target, const char *semname,
 		goto out;
 	}
 
-	esdm_logger_set_verbosity(param.verbosity);
+	/*
+	 * Errors and warnings are logged at every level - a lower one would
+	 * have the daemon fail without saying why.
+	 */
+	esdm_logger_set_verbosity((enum esdm_logger_verbosity)max_uint32(
+		param.verbosity, LOGGER_WARN));
 
 	if (param.syslog) {
 		esdm_logger_enable_syslog("esdm-cuse");

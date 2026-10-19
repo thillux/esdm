@@ -447,14 +447,16 @@ int main(int argc, char **argv)
 	}
 
 	/*
-	 * Only lower the threshold, never raise it: without -v the count is 0,
-	 * which as a level means LOGGER_NONE - quieter than the logger's default
-	 * of LOGGER_STATUS and quiet enough to swallow the LOGGER_ERR
-	 * diagnostics below, leaving the daemon to fail without any output.
-	 * This matches how esdm-server and esdm-tool treat their -v counts.
+	 * The -v count is the verbosity level, but errors and warnings are
+	 * logged in any case: without -v the count is 0, which as a level means
+	 * LOGGER_NONE, and the logger's default of LOGGER_STATUS swallows the
+	 * LOGGER_ERR diagnostics below as well - the daemon would fail without
+	 * any output. The -vvv of the shipped unit has always meant warnings.
+	 * This matches how esdm-server treats its -v count.
 	 */
-	if (verbosity)
-		esdm_logger_set_verbosity((enum esdm_logger_verbosity)verbosity);
+	esdm_logger_set_verbosity(verbosity > LOGGER_WARN ?
+					  (enum esdm_logger_verbosity)verbosity :
+					  LOGGER_WARN);
 
 	if (help) {
 		usage();
@@ -463,7 +465,6 @@ int main(int argc, char **argv)
 	}
 
 	if (geteuid()) {
-		esdm_logger_inc_verbosity();
 		esdm_logger(LOGGER_ERR, LOGGER_C_SEEDER,
 			    "Program must start as root!\n");
 		tool_ret = EXIT_FAILURE;
@@ -474,7 +475,6 @@ int main(int argc, char **argv)
 
 	notify_fd = eventfd(0, EFD_CLOEXEC);
 	if (notify_fd < 0) {
-		esdm_logger_inc_verbosity();
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_SEEDER,
 			"Unable to create event fd for termination notification!\n");
