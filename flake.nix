@@ -1104,6 +1104,278 @@
             '';
           };
 
+        # The EGD protocol over the network, between two hosts: "server" runs
+        # the ESDM and the esdm-egd-net-server in front of it, "client" has no
+        # ESDM and serves its EGD socket with the esdm-egd-net-relay. GnuPG -
+        # with the EGD-only libgcrypt of mkEgdCheck - and OpenSSL with the EGD
+        # provider draw from the relay, unaware of the network behind it.
+        #
+        # Phases: TLS through the shipped units; rotation of the relay's client
+        # certificate, revocation of an established connection by a CRL taken
+        # up while the server runs, rotation of the server certificate and a
+        # broken rotation that has to leave the service up; plain TCP with a
+        # second server and relay, and the refusals of a plain mode not asked
+        # for explicitly.
+        mkEgdNetCheck =
+          let
+            esdm = self.packages.${system}.esdm;
+            egdSocket = "/run/esdm-egd.socket";
+            port = 7378;
+
+            # The test PKI of the tree, issued for the name of the server
+            pki = pkgs.runCommand "esdm-egd-net-vm-pki" {
+              nativeBuildInputs = [
+                pkgs.openssl
+                pkgs.gawk
+              ];
+              ESDM_PKI_SERVER_SAN = "DNS:server";
+            } "bash ${./tests/egd-net/pki/gen.sh} $out";
+
+            libgcryptEgd = pkgs.libgcrypt.overrideAttrs (old: {
+              configureFlags = old.configureFlags ++ [
+                "--enable-random=egd"
+                "--with-egd-socket=${egdSocket}"
+              ];
+              doCheck = false;
+            });
+            gnupgEgd = (pkgs.gnupg.override { libgcrypt = libgcryptEgd; }).overrideAttrs (_: {
+              doCheck = false;
+            });
+            gpg = "GNUPGHOME=/root/gnupg-egd ${gnupgEgd}/bin/gpg --batch --no-tty";
+
+            # OpenSSL pinned to the EGD provider on the socket @sock
+            egdConf =
+              sock:
+              pkgs.writeText "openssl-esdm-egd.cnf" ''
+                openssl_conf = openssl_init
+
+                [openssl_init]
+                providers = provider_sect
+                random = random_sect
+
+                [provider_sect]
+                esdm = esdm_sect
+                default = default_sect
+
+                [default_sect]
+                activate = 1
+
+                [esdm_sect]
+                activate = 1
+                module = ${esdm}/lib/libesdm-egd-provider.so
+                egd_socket = ${sock}
+
+                [random_sect]
+                random = CTR-DRBG
+                properties = provider=esdm-egd
+                seed = SEED-SRC
+                seed_properties = provider=esdm-egd
+              '';
+            opensslTls = "OPENSSL_CONF=${egdConf egdSocket} openssl rand -out /dev/null 32";
+            opensslPlain = "OPENSSL_CONF=${egdConf "/run/egd-plain/egd.sock"} openssl rand -out /dev/null 32";
+
+            # A consumer holding its connection to the relay, asking for the
+            # entropy count - answered by the server - every half second
+            holdScript = pkgs.writeText "egd-hold.py" ''
+              import socket, sys, time
+              s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              s.connect(sys.argv[1])
+              while True:
+                  s.sendall(b"\x00")
+                  answer = b""
+                  while len(answer) < 4:
+                      chunk = s.recv(4 - len(answer))
+                      if not chunk:
+                          print("closed", flush=True)
+                          sys.exit(1)
+                      answer += chunk
+                  print("ok", flush=True)
+                  time.sleep(0.5)
+            '';
+
+            # Files the daemons take up while they run: plain paths, readable
+            # by their dynamic users, rather than the credentials of the units
+            dir = "/var/lib/egd-net-test";
+          in
+          pkgs.testers.nixosTest {
+            name = "EGD protocol over the network, TLS and plain TCP";
+
+            nodes.server =
+              { ... }:
+              {
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                # The credentials of the shipped unit, which the daemon is
+                # given plain paths of instead - see above
+                environment.etc."esdm/egd-net/server.crt".source = "${pki}/server.crt";
+                environment.etc."esdm/egd-net/server.key".source = "${pki}/server.key";
+                environment.etc."esdm/egd-net/ca.crt".source = "${pki}/ca.crt";
+                environment.etc."esdm/egd-net-server.env".text = ''
+                  ESDM_EGD_NET_SERVER_ARGS="-v --cert ${dir}/server.crt --key ${dir}/server.key --ca ${dir}/ca.crt --crl ${dir}/crl.pem --reload_interval 2 --allow 192.168.1.0/24 --allow 2001:db8:1::/64"
+                '';
+
+                networking.firewall.allowedTCPPorts = [
+                  port
+                  (port + 1)
+                ];
+                environment.systemPackages = [ esdm ];
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            nodes.client =
+              { ... }:
+              {
+                # No ESDM here: the units of the package, the relay's only
+                systemd.packages = [ esdm ];
+
+                environment.etc."esdm/egd-net/client.crt".source = "${pki}/client1.crt";
+                environment.etc."esdm/egd-net/client.key".source = "${pki}/client1.key";
+                environment.etc."esdm/egd-net/ca.crt".source = "${pki}/ca.crt";
+                environment.etc."esdm/egd-net-relay.env".text = ''
+                  ESDM_EGD_NET_RELAY_ARGS="-v --connect server --cert ${dir}/client.crt --key ${dir}/client.key --ca ${dir}/ca.crt --crl ${dir}/ca.crl"
+                '';
+
+                environment.systemPackages = [
+                  esdm
+                  gnupgEgd
+                  pkgs.openssl.bin
+                  pkgs.python3
+                ];
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              def install(machine, src, dst):
+                  # A rotation: written next to the file, renamed into place
+                  machine.succeed(f"cp {src} {dst}.new && chmod 0644 {dst}.new && mv -f {dst}.new {dst}")
+
+              start_all()
+
+              server.wait_for_unit("esdm-server.service")
+              server.succeed("esdm-tool --wait-until-seeded 60")
+              server.succeed("install -d -m 0755 ${dir}")
+              install(server, "${pki}/server.crt", "${dir}/server.crt")
+              install(server, "${pki}/server.key", "${dir}/server.key")
+              install(server, "${pki}/ca.crt", "${dir}/ca.crt")
+              install(server, "${pki}/int-empty.crl", "${dir}/crl.pem")
+              server.succeed("systemctl start esdm-egd-net-server.socket")
+              server.wait_for_open_port(${toString port})
+
+              client.wait_for_unit("multi-user.target")
+              client.fail("systemctl is-active esdm-server.service")
+              client.succeed("install -d -m 0755 ${dir}")
+              install(client, "${pki}/client1.crt", "${dir}/client.crt")
+              install(client, "${pki}/client1.key", "${dir}/client.key")
+              install(client, "${pki}/ca.crt", "${dir}/ca.crt")
+              install(client, "${pki}/ca.crl", "${dir}/ca.crl")
+              client.succeed("systemctl start esdm-egd-net-relay.socket")
+              client.wait_for_unit("esdm-egd-net-relay.socket")
+              client.succeed("test -S ${egdSocket}")
+
+              with subtest("TLS: GnuPG and OpenSSL draw from the relay"):
+                  client.succeed("ldd ${gnupgEgd}/bin/gpg | grep -q '${libgcryptEgd.lib}'")
+                  client.succeed("mkdir -p /root/gnupg-egd && chmod 700 /root/gnupg-egd")
+                  out = client.succeed("${gpg} --gen-random 2 32 | wc -c").strip()
+                  assert out == "32", f"gpg --gen-random returned {out} bytes"
+                  first = client.succeed("${gpg} --gen-random 2 32 | base64 -w0").strip()
+                  second = client.succeed("${gpg} --gen-random 2 32 | base64 -w0").strip()
+                  assert first != second, "gpg returned identical random data twice"
+                  out = client.succeed("${gpg} --gen-random 2 4096 | wc -c").strip()
+                  assert out == "4096", f"gpg --gen-random returned {out} bytes"
+                  client.succeed(
+                      '${gpg} --pinentry-mode loopback --passphrase "" '
+                      '--quick-generate-key "ESDM EGD net test <egd@example.com>" '
+                      'default default never'
+                  )
+                  client.succeed("${opensslTls}")
+                  server.succeed("journalctl -u esdm-egd-net-server.service | grep -q 'serving the EGD protocol'")
+
+              with subtest("Rotation and revocation"):
+                  # The relay takes up the certificate to be revoked for its
+                  # next upstream connection, held open by a consumer
+                  install(client, "${pki}/client-revoked.key", "${dir}/client.key")
+                  install(client, "${pki}/client-revoked.crt", "${dir}/client.crt")
+                  client.succeed("${opensslTls}")
+                  client.succeed("python3 ${holdScript} ${egdSocket} > /tmp/hold.log 2>&1 &")
+                  client.wait_until_succeeds("grep -q ok /tmp/hold.log", 30)
+
+                  # The CRL revoking it is taken up by the server, which
+                  # closes the established connection
+                  install(server, "${pki}/int.crl", "${dir}/crl.pem")
+                  server.wait_until_succeeds(
+                      "journalctl -u esdm-egd-net-server.service | grep -q 'closing the connection of .*revoked'", 30
+                  )
+                  client.wait_until_succeeds("grep -q closed /tmp/hold.log", 30)
+                  client.fail("${opensslTls}")
+
+                  # A good certificate again
+                  install(client, "${pki}/client2.key", "${dir}/client.key")
+                  install(client, "${pki}/client2.crt", "${dir}/client.crt")
+                  client.succeed("${opensslTls}")
+
+                  # A renewed server certificate, taken up by itself
+                  install(server, "${pki}/server-renewed.key", "${dir}/server.key")
+                  install(server, "${pki}/server-renewed.crt", "${dir}/server.crt")
+                  server.wait_until_succeeds(
+                      "test $(journalctl -u esdm-egd-net-server.service | grep -c 'loaded the TLS files') -ge 2", 30
+                  )
+                  client.succeed("${opensslTls}")
+
+                  # A broken rotation leaves the service up
+                  install(server, "${pki}/server.key", "${dir}/server.key")
+                  server.wait_until_succeeds(
+                      "journalctl -u esdm-egd-net-server.service | grep -q 'do not load'", 30
+                  )
+                  client.succeed("${opensslTls}")
+                  client.succeed("${gpg} --gen-random 2 32 > /dev/null")
+
+              with subtest("Plain TCP"):
+                  # Never without asking: no credentials and no --plain, or
+                  # --plain with TLS options, is refused
+                  server.fail("esdm-egd-net-server --listen :${toString (port + 2)}")
+                  server.fail("esdm-egd-net-server --plain --cert ${dir}/server.crt --listen :${toString (port + 2)}")
+                  client.fail("esdm-egd-net-relay --connect server:${toString (port + 1)} --socket /tmp/x.sock")
+
+                  server.succeed(
+                      "systemd-run --unit=egd-net-plain --property=DynamicUser=yes "
+                      "${esdm}/bin/esdm-egd-net-server -v --plain --listen :${toString (port + 1)} "
+                      "--allow 192.168.1.0/24 --allow 2001:db8:1::/64"
+                  )
+                  server.wait_for_open_port(${toString (port + 1)})
+                  server.succeed("journalctl -u egd-net-plain.service | grep -q 'neither encrypted nor authenticated'")
+                  client.succeed(
+                      "systemd-run --unit=egd-relay-plain --property=DynamicUser=yes "
+                      "--property=RuntimeDirectory=egd-plain --property=RuntimeDirectoryMode=0755 "
+                      "${esdm}/bin/esdm-egd-net-relay -v --plain --connect server:${toString (port + 1)} "
+                      "--socket /run/egd-plain/egd.sock"
+                  )
+                  client.wait_until_succeeds("test -S /run/egd-plain/egd.sock", 30)
+                  client.succeed("${opensslPlain}")
+                  client.succeed("${opensslPlain}")
+
+                  # The source not allowed is refused by the server
+                  server.succeed("systemctl stop egd-net-plain.service")
+                  server.succeed(
+                      "systemd-run --unit=egd-net-plain2 --property=DynamicUser=yes "
+                      "${esdm}/bin/esdm-egd-net-server -v --plain --listen :${toString (port + 1)} "
+                      "--allow 10.0.0.0/8"
+                  )
+                  server.wait_for_open_port(${toString (port + 1)})
+                  client.fail("${opensslPlain}")
+                  server.succeed("journalctl -u egd-net-plain2.service | grep -q 'which is not allowed'")
+            '';
+          };
+
         # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
         # /proc/esdm served by the ESDM over its EGD socket. On the stock
         # rolling kernel - the module needs no kernel patches - and once only,
@@ -1751,6 +2023,9 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # Nor the EGD protocol over the network - see mkEgdNetCheck.
+            egd_net = mkEgdNetCheck;
 
             # The character device module, on the rolling kernel - see
             # mkEsdmCdevCheck.
@@ -2429,6 +2704,9 @@
                     "-Des_pkcs11=enabled"
                     # The vhost-user back-end of a virtio entropy device
                     "-Dvhost-user-rng=enabled"
+                    # The EGD protocol over the network, its TLS mode by
+                    # Botan as well
+                    "-Degd-net=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
@@ -2826,6 +3104,10 @@
                     "-Dais2031_drg4=false"
                     # Compiles in the test hooks the suite needs.
                     "-Dtestmode=enabled"
+                    # Plain TCP only - the builtin backend has no TLS stack,
+                    # which the auto_features=enabled of nixpkgs would ask for
+                    "-Degd-net=enabled"
+                    "-Degd-net-tls=disabled"
                   ];
                 doCheck = true;
                 meta = prev.meta // {
@@ -2839,11 +3121,15 @@
             pname = "esdm-i686-openssl";
             buildInputs = prev.buildInputs ++ [ pkgs.pkgsi686Linux.openssl ];
             mesonFlags =
-              (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
+              (builtins.filter (
+                x: !lib.hasInfix "crypto_backend" x && x != "-Degd-net-tls=disabled"
+              ) prev.mesonFlags)
               ++ [
                 "-Dcrypto_backend=openssl"
-                # The DTLS by OpenSSL, which the builtin backend has not
+                # The DTLS and the TLS of egd-net by OpenSSL, which the
+                # builtin backend has not
                 "-Ddtls=enabled"
+                "-Degd-net-tls=enabled"
               ];
             meta = prev.meta // {
               description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
