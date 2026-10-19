@@ -33,9 +33,10 @@ struct esdm_rnd_clear_pool_buf {
 	int ret;
 };
 
-static void esdm_rpcc_rnd_clear_pool_cb(const RetResponse *response,
+static void esdm_rpcc_rnd_clear_pool_cb(const ProtobufCMessage *message,
 					void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct esdm_rnd_clear_pool_buf *buffer =
 		(struct esdm_rnd_clear_pool_buf *)closure_data;
 
@@ -55,8 +56,9 @@ int esdm_rpcc_rnd_clear_pool_int(void *int_data)
 
 	buffer.ret = -ETIMEDOUT;
 
-	priv_access__rpc_rnd_clear_pool(&rpc_conn->service, &msg,
-					esdm_rpcc_rnd_clear_pool_cb, &buffer);
+	priv_access__rpc_rnd_clear_pool(
+		&rpc_conn->service, &msg,
+		(RetResponse_Closure)esdm_rpcc_rnd_clear_pool_cb, &buffer);
 	/*
 	 * The callback only runs once a response was received - without one
 	 * buffer.ret still holds the placeholder set above, which would

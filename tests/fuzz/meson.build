@@ -26,14 +26,6 @@ if not have_libfuzzer
 	message('No libFuzzer in this compiler - the fuzz harnesses are built with the replay driver only')
 endif
 
-# protobuf-c calls a closure of a generic type through the type of the message
-# it carries, which the indirect call check of clang 17+ reports on every call.
-# Turn that one check off where the compiler knows the option.
-fuzz_c_args = [ ]
-if fuzz_cc.has_argument('-fno-sanitize=function')
-	fuzz_c_args += [ '-fno-sanitize=function' ]
-endif
-
 fuzz_targets = [
 	# The requests the server takes off its two sockets, served by the whole
 	# server built from its sources - the fuzzer is guided by what the ESDM
@@ -255,7 +247,6 @@ rpc_stress_test = executable(
 		  server_rpc_src, egd_server_src, files('rpc_stress.c') ],
 		include_directories: include_dirs_server,
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
 	)
 
 test('RPC request path under concurrent load', rpc_stress_test, timeout: 300)
@@ -269,7 +260,6 @@ rpc_server_test = executable(
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
 	)
 
 test('RPC server failure answers', rpc_server_test)
@@ -283,7 +273,6 @@ rpc_server_conn_test = executable(
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
 	)
 
 test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
@@ -301,7 +290,6 @@ rpc_dtls_test = executable(
 		include_directories: [ include_dirs_server, include_dirs_client,
 				       include_directories('../common') ],
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
 	)
 
 test('RPC connections with DTLS', rpc_dtls_test,
@@ -342,7 +330,6 @@ rpc_server_pr_budget_test = executable(
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
 	)
 
 test('RPC server budget of prediction resistance and seeds',
@@ -350,7 +337,7 @@ test('RPC server budget of prediction resistance and seeds',
 	timeout: 120)
 
 foreach fuzz_target : fuzz_targets
-	target_c_args = fuzz_c_args + fuzz_target.get('c_args', [ ])
+	target_c_args = fuzz_target.get('c_args', [ ])
 
 	fuzz_replay = executable(
 			fuzz_target['name'] + '_fuzz_replay',

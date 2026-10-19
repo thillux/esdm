@@ -34,9 +34,11 @@ struct esdm_write_wakeup_thresh_buf {
 	unsigned int wakeup;
 };
 
-static void esdm_rpcc_get_write_wakeup_thresh_cb(
-	const ValResponse *response, void *closure_data)
+static void
+esdm_rpcc_get_write_wakeup_thresh_cb(const ProtobufCMessage *message,
+				     void *closure_data)
 {
+	const ValResponse *response = (const ValResponse *)message;
 	struct esdm_write_wakeup_thresh_buf *buffer =
 		(struct esdm_write_wakeup_thresh_buf *)closure_data;
 
@@ -66,7 +68,8 @@ int esdm_rpcc_get_write_wakeup_thresh_int(unsigned int *write_wakeup_thresh,
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
 	unpriv_access__rpc_get_write_wakeup_thresh(
-		&rpc_conn->service, &msg, esdm_rpcc_get_write_wakeup_thresh_cb,
+		&rpc_conn->service, &msg,
+		(ValResponse_Closure)esdm_rpcc_get_write_wakeup_thresh_cb,
 		&buffer);
 
 	/*

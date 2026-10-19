@@ -36,10 +36,10 @@ void esdm_rpc_rnd_clear_pool(PrivAccess_Service *service,
 
 	if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		esdm_pool_set_entropy(0);
 		response.ret = 0;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	}
 }

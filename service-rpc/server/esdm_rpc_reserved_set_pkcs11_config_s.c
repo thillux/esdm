@@ -43,5 +43,5 @@ void esdm_rpc_reserved_set_pkcs11_config(PrivAccess_Service *service,
 	(void)request;
 
 	response.ret = -EOPNOTSUPP;
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 }

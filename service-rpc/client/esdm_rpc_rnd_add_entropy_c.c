@@ -33,9 +33,10 @@ struct esdm_rnd_add_entropy_buf {
 	int ret;
 };
 
-static void esdm_rpcc_rnd_add_entropy_cb(const RetResponse *response,
+static void esdm_rpcc_rnd_add_entropy_cb(const ProtobufCMessage *message,
 					 void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct esdm_rnd_add_entropy_buf *buffer =
 		(struct esdm_rnd_add_entropy_buf *)closure_data;
 
@@ -62,8 +63,9 @@ int esdm_rpcc_rnd_add_entropy_int(const uint8_t *entropy_buf,
 	msg.randval.len = entropy_buf_len;
 	msg.entcnt = entropy_cnt;
 
-	priv_access__rpc_rnd_add_entropy(&rpc_conn->service, &msg,
-					 esdm_rpcc_rnd_add_entropy_cb, &buffer);
+	priv_access__rpc_rnd_add_entropy(
+		&rpc_conn->service, &msg,
+		(RetResponse_Closure)esdm_rpcc_rnd_add_entropy_cb, &buffer);
 	/*
 	 * The callback only runs once a response was received - without one
 	 * buffer.ret still holds the placeholder set above, which would

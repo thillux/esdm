@@ -34,9 +34,10 @@ struct esdm_selftest_buf {
 	struct esdm_rpcc_selftest_result result;
 };
 
-static void esdm_rpcc_selftest_cb(const SelftestResponse *response,
+static void esdm_rpcc_selftest_cb(const ProtobufCMessage *message,
 				  void *closure_data)
 {
+	const SelftestResponse *response = (const SelftestResponse *)message;
 	struct esdm_selftest_buf *buffer =
 		(struct esdm_selftest_buf *)closure_data;
 
@@ -74,8 +75,9 @@ int esdm_rpcc_selftest_int(struct esdm_rpcc_selftest_result *result,
 
 	CKINT(esdm_rpcc_get_priv_service(&rpc_conn, int_data));
 
-	priv_access__rpc_selftest(&rpc_conn->service, &msg,
-				  esdm_rpcc_selftest_cb, &buffer);
+	priv_access__rpc_selftest(
+		&rpc_conn->service, &msg,
+		(SelftestResponse_Closure)esdm_rpcc_selftest_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

@@ -191,14 +191,15 @@ away with.
 Two things about such a build are worth knowing before a finding is blamed on
 the code:
 
-* The harnesses are compiled with `-fno-sanitize=function` where the compiler
-  knows the option. protobuf-c hands a call to a closure of a generic type and
-  the generated code calls it through the type of the message it carries, which
-  is its RPC design rather than anything this tree writes; clang 17 and newer
-  check indirect calls against the callee's type and report every one of them.
-  Left on, the first one fails the seed replays under `meson test`, which halts
-  on the first finding, and a fuzzing run buries a real report under thousands
-  of these.
+* clang 17 and newer check an indirect call against the type of the function
+  called (`-fsanitize=function`, part of `undefined`). protobuf-c calls the
+  closure of an RPC as a `ProtobufCClosure`, whatever type the generated code
+  declares it with for the message it carries, so the closures of the RPC
+  client and server are functions of that type, and the server calls the one
+  it is handed as such - see the response callbacks in `service-rpc/client`
+  and the methods in `service-rpc/server`. A report of this check is a
+  closure written with another type, a defect of this tree; the harnesses are
+  built with the check on.
 * The rest of the test suite is not built that way and several of its binaries
   compile the same sources they also link, which the address sanitizer reports
   as ODR violations at startup. `ASAN_OPTIONS=detect_odr_violation=0` runs them

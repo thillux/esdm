@@ -43,7 +43,7 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 
 	if (request == NULL) {
 		response.ret = -EINVAL;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		/*
 		 * Serve a larger request in part rather than refuse it. Its
@@ -71,7 +71,7 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 			response.randval.data = rndval;
 			response.randval.len = (size_t)response.ret;
 		}
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 
 		/*
 		 * Only the first len bytes can ever hold generated secret data

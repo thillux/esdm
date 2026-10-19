@@ -337,8 +337,11 @@ struct test_reserved_answer {
 	int ret;
 };
 
-static void test_reserved_cb(const RetResponse *response, void *closure_data)
+/* Of the type protobuf-c calls a closure with, see service-rpc/client */
+static void test_reserved_cb(const ProtobufCMessage *message,
+			     void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct test_reserved_answer *answer = closure_data;
 
 	if (!response)
@@ -383,16 +386,18 @@ static void test_reserved_pkcs11_slot(void)
 	if (!rpc_conn)
 		return;
 
-	priv_access__rpc_reserved_set_pkcs11_config(&rpc_conn->service, &msg,
-						    test_reserved_cb, &answer);
+	priv_access__rpc_reserved_set_pkcs11_config(
+		&rpc_conn->service, &msg, (RetResponse_Closure)test_reserved_cb,
+		&answer);
 	CHECK(answer.answered, "the reserved call was not answered");
 	CHECK_EQ(answer.ret, -EOPNOTSUPP);
 
 	answer.answered = false;
 	msg.base.n_unknown_fields = sizeof(fields) / sizeof(fields[0]);
 	msg.base.unknown_fields = fields;
-	priv_access__rpc_reserved_set_pkcs11_config(&rpc_conn->service, &msg,
-						    test_reserved_cb, &answer);
+	priv_access__rpc_reserved_set_pkcs11_config(
+		&rpc_conn->service, &msg, (RetResponse_Closure)test_reserved_cb,
+		&answer);
 	CHECK(answer.answered,
 	      "the reserved call with the fields of the old one was not answered");
 	CHECK_EQ(answer.ret, -EOPNOTSUPP);

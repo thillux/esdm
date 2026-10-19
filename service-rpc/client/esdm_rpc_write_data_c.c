@@ -33,9 +33,10 @@ struct esdm_write_data_buf {
 	int ret;
 };
 
-static void esdm_rpcc_write_data_cb(const RetResponse *response,
+static void esdm_rpcc_write_data_cb(const ProtobufCMessage *message,
 				    void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct esdm_write_data_buf *buffer =
 		(struct esdm_write_data_buf *)closure_data;
 
@@ -63,8 +64,9 @@ int esdm_rpcc_write_data_int(const uint8_t *data_buf, size_t data_buf_len,
 		msg.data.data = (uint8_t *)data_buf;
 		msg.data.len = todo;
 
-		unpriv_access__rpc_write_data(&rpc_conn->service, &msg,
-					      esdm_rpcc_write_data_cb, &buffer);
+		unpriv_access__rpc_write_data(
+			&rpc_conn->service, &msg,
+			(RetResponse_Closure)esdm_rpcc_write_data_cb, &buffer);
 
 		/*
 		 * The callback only runs once a response was received. When the

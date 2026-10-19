@@ -34,9 +34,10 @@ struct esdm_get_ent_lvl_buf {
 	unsigned int entlvl;
 };
 
-static void esdm_rpcc_get_ent_lvl_cb(const ValResponse *response,
+static void esdm_rpcc_get_ent_lvl_cb(const ProtobufCMessage *message,
 				     void *closure_data)
 {
+	const ValResponse *response = (const ValResponse *)message;
 	struct esdm_get_ent_lvl_buf *buffer =
 		(struct esdm_get_ent_lvl_buf *)closure_data;
 
@@ -64,8 +65,9 @@ int esdm_rpcc_get_ent_lvl_int(unsigned int *entlvl, void *int_data)
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	unpriv_access__rpc_get_ent_lvl(&rpc_conn->service, &msg,
-				       esdm_rpcc_get_ent_lvl_cb, &buffer);
+	unpriv_access__rpc_get_ent_lvl(
+		&rpc_conn->service, &msg,
+		(ValResponse_Closure)esdm_rpcc_get_ent_lvl_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

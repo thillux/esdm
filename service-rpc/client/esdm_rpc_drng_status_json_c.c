@@ -34,9 +34,10 @@ struct esdm_get_drng_status_json_buf {
 	size_t buflen;
 };
 
-static void esdm_rpcc_drng_status_json_cb(const StatusResponse *response,
+static void esdm_rpcc_drng_status_json_cb(const ProtobufCMessage *message,
 					  void *closure_data)
 {
+	const StatusResponse *response = (const StatusResponse *)message;
 	struct esdm_get_drng_status_json_buf *buffer =
 		(struct esdm_get_drng_status_json_buf *)closure_data;
 
@@ -86,9 +87,9 @@ static int esdm_rpcc_drng_status_json_one(uint32_t node, bool pr, char *buf,
 	msg.maxlen = ESDM_RPC_MAX_DATA;
 	msg.node = node;
 	msg.prediction_resistance = pr;
-	unpriv_access__rpc_drng_status_json(&rpc_conn->service, &msg,
-					    esdm_rpcc_drng_status_json_cb,
-					    &buffer);
+	unpriv_access__rpc_drng_status_json(
+		&rpc_conn->service, &msg,
+		(StatusResponse_Closure)esdm_rpcc_drng_status_json_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

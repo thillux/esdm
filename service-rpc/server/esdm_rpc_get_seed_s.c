@@ -41,7 +41,7 @@ void esdm_rpc_get_seed(UnprivAccess_Service *service,
 
 	if (request == NULL || request->len > sizeof(rndval)) {
 		response.ret = -(int32_t)sizeof(rndval);
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		memset(rndval, 0, min_size(sizeof(rndval), request->len));
 
@@ -76,7 +76,7 @@ void esdm_rpc_get_seed(UnprivAccess_Service *service,
 			response.randval.len = sizeof(uint64_t);
 		}
 
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 
 		/*
 		 * esdm_get_seed() never writes beyond the request->len byte

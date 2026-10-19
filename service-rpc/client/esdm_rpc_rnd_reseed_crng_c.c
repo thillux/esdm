@@ -33,9 +33,10 @@ struct esdm_rnd_reseed_crng_buf {
 	int ret;
 };
 
-static void esdm_rpcc_rnd_reseed_crng_cb(const RetResponse *response,
+static void esdm_rpcc_rnd_reseed_crng_cb(const ProtobufCMessage *message,
 					 void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct esdm_rnd_reseed_crng_buf *buffer =
 		(struct esdm_rnd_reseed_crng_buf *)closure_data;
 
@@ -55,8 +56,9 @@ int esdm_rpcc_rnd_reseed_crng_int(void *int_data)
 
 	buffer.ret = -ETIMEDOUT;
 
-	priv_access__rpc_rnd_reseed_crng(&rpc_conn->service, &msg,
-					 esdm_rpcc_rnd_reseed_crng_cb, &buffer);
+	priv_access__rpc_rnd_reseed_crng(
+		&rpc_conn->service, &msg,
+		(RetResponse_Closure)esdm_rpcc_rnd_reseed_crng_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

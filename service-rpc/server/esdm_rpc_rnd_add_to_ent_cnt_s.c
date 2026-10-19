@@ -34,15 +34,15 @@ void esdm_rpc_rnd_add_to_ent_cnt(PrivAccess_Service *service,
 
 	if (request == NULL) {
 		response.ret = -EFAULT;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		/* Capped at the size of the pool, as the EGD interface does */
 		esdm_pool_add_entropy(request->entcnt);
 
 		response.ret = 0;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	}
 }

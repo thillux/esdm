@@ -40,9 +40,10 @@ struct esdm_get_seed_buf {
 	size_t copied;
 };
 
-static void esdm_rpcc_get_seed_cb(const RandValResponse *response,
+static void esdm_rpcc_get_seed_cb(const ProtobufCMessage *message,
 				  void *closure_data)
 {
+	const RandValResponse *response = (const RandValResponse *)message;
 	struct esdm_get_seed_buf *buffer =
 		(struct esdm_get_seed_buf *)closure_data;
 
@@ -115,8 +116,10 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 		buffer.ret = -ETIMEDOUT;
 		buffer.copied = 0;
 
-		unpriv_access__rpc_get_seed(&rpc_conn->service, &msg,
-					    esdm_rpcc_get_seed_cb, &buffer);
+		unpriv_access__rpc_get_seed(
+			&rpc_conn->service, &msg,
+			(RandValResponse_Closure)esdm_rpcc_get_seed_cb,
+			&buffer);
 
 		/*
 		 * The callback only runs once a response was received. When the

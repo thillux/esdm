@@ -34,9 +34,10 @@ struct esdm_poolsize_buf {
 	unsigned int poolsize;
 };
 
-static void esdm_rpcc_get_poolsize_cb(const ValResponse *response,
+static void esdm_rpcc_get_poolsize_cb(const ProtobufCMessage *message,
 				      void *closure_data)
 {
+	const ValResponse *response = (const ValResponse *)message;
 	struct esdm_poolsize_buf *buffer =
 		(struct esdm_poolsize_buf *)closure_data;
 
@@ -64,8 +65,9 @@ int esdm_rpcc_get_poolsize_int(unsigned int *poolsize, void *int_data)
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	unpriv_access__rpc_get_poolsize(&rpc_conn->service, &msg,
-					esdm_rpcc_get_poolsize_cb, &buffer);
+	unpriv_access__rpc_get_poolsize(
+		&rpc_conn->service, &msg,
+		(ValResponse_Closure)esdm_rpcc_get_poolsize_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

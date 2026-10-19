@@ -38,10 +38,10 @@ struct esdm_get_random_bytes_pr_buf {
 	size_t buflen;
 };
 
-static void
-esdm_rpcc_get_random_bytes_pr_cb(const RandValResponse *response,
-				 void *closure_data)
+static void esdm_rpcc_get_random_bytes_pr_cb(const ProtobufCMessage *message,
+					     void *closure_data)
 {
+	const RandValResponse *response = (const RandValResponse *)message;
 	struct esdm_get_random_bytes_pr_buf *buffer =
 		(struct esdm_get_random_bytes_pr_buf *)closure_data;
 
@@ -95,7 +95,9 @@ static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
 
 		unpriv_access__rpc_get_random_bytes_pr(
 			&rpc_conn->service, &msg,
-			esdm_rpcc_get_random_bytes_pr_cb, &buffer);
+			(RandValResponse_Closure)
+				esdm_rpcc_get_random_bytes_pr_cb,
+			&buffer);
 
 		/*
 		 * The callback only runs once a response was received. When the

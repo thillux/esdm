@@ -32,5 +32,5 @@ void esdm_rpc_is_fully_seeded(UnprivAccess_Service *service,
 
 	response.fully_seeded = esdm_state_fully_seeded();
 	response.ret = 0;
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 }

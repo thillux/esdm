@@ -47,7 +47,7 @@ void esdm_rpc_selftest(PrivAccess_Service *service, const EmptyRequest *request,
 
 	if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 		return;
 	}
 
@@ -67,5 +67,5 @@ void esdm_rpc_selftest(PrivAccess_Service *service, const EmptyRequest *request,
 	response.es_sources = esdm_selftest_es_sources();
 	response.es_failures = esdm_selftest_es_failures();
 
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 }
