@@ -387,6 +387,7 @@ testdirs = [
 	'tests/server-signal-helper',
 	'tests/aux-client',
 	'tests/tool',
+	'tests/vhost-user-rng',
 	]
 if get_option('fuzzing').enabled()
 testdirs += [
