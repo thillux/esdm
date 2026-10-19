@@ -34,7 +34,10 @@
  *   connects to it (esdm-server --es_ext_socket PATH, meson option
  *   es_ext_socket_path). esdm-es-ext-serve(8) does so for a plugin library, so
  *   the same plugin can run either way. The protocol is documented below for
- *   providers written without the library.
+ *   providers written without the library. A provider may run on another host
+ *   as well, served on SCTP with mutually authenticated DTLS and read by the
+ *   ESDM through the esdm-es-ext-relay of its own host (meson option
+ *   es-ext-net) - see "Network" below.
  *
  * Either way, the ESDM credits a block with the entropy the source claims for
  * it, but at most with what its configured entropy rate allows, and with
@@ -282,11 +285,14 @@ struct esdm_es_ext_plugin {
  * that does not fit into the length next to the fields of the server - and
  * "server" what the server knows itself: its "version", the "plugin_api"
  * version of its plugin, the "name" and "entropy_rate" it declares in its
- * answer to INFO (null for none), whether the "dtls" of the connection asking
- * is on, the "clients" connected and the "client_slots" there are, the
- * "requests" served, the "selftest" verdict of the plugin ("passed", "failed"
- * or "none" before the first one) and its "uptime_seconds". A provider written
- * without the library answers with an object of its own making. The ESDM asks for it when its own status is asked for, at most
+ * answer to INFO (null for none), the "transport" it serves on ("unix", or
+ * "sctp" on the network, see "Network" below), whether the "dtls" of the
+ * connection asking is on, on the network the "peer" asking - the SHA-256 of
+ * its certificate -, the "clients" connected and the "client_slots" there
+ * are, the "requests" served, the "selftest" verdict of the plugin ("passed",
+ * "failed" or "none" before the first one) and its "uptime_seconds". A
+ * provider written without the library answers with an object of its own
+ * making. The ESDM asks for it when its own status is asked for, at most
  * every 5 seconds - showing the last one in between - and not while a request
  * is in progress, going without it then. A provider older than STATUS closes
  * the connection on it: the ESDM connects again at once, and reports no status
@@ -354,6 +360,58 @@ struct esdm_es_ext_plugin {
  * trusts the provider for are the credentials of the process on the other end
  * of the Unix domain socket. The DTLS keeps the data from being read off the
  * channel by whoever can observe it.
+ *
+ * Network: a provider on another host (meson option es-ext-net) is served on
+ * SCTP by the provider server of libesdm_es_ext, see
+ * esdm_es_ext_server_alloc_net(). The ESDM does not speak to it itself - it
+ * left the network namespace of the host when it started: the
+ * esdm-es-ext-relay of its host serves a local provider socket, which the
+ * ESDM reads as any other, and forwards each request on SCTP:
+ *
+ *	host of the ESDM                                  host of the provider
+ *	+--------------+ SOCK_SEQPACKET +-------------+        +--------------+
+ *	| esdm-server  |--------------->| esdm-es-ext-| SCTP   | esdm-es-ext- |
+ *	| ExternalSock.| Unix socket,   | relay       |------->| serve,       |
+ *	| checks the   | STARTDTLS and  | client cert,| DTLS   | esdm-es-     |
+ *	| uid of the   | opportunistic  | checks the  | with   | pkcs11, ...  |
+ *	| relay        | DTLS as above  | server name | certi- | checks the   |
+ *	+--------------+                +-------------+ ficates| client cert  |
+ *	                                                       +--------------+
+ *
+ * On SCTP, every message is DTLS from the first one on, as RFC 6083 maps DTLS
+ * onto SCTP: no STARTDTLS, no message in the clear, and a STARTDTLS inside the
+ * DTLS is a request that breaks the protocol. The DTLS is DTLS 1.2, both sides
+ * authenticate with a certificate, and the client checks the name of the
+ * server - see "DTLS over SCTP" in common/esdm_tls.h. The SCTP association
+ * authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH (RFC 4895), the
+ * key of which comes from the DTLS session:
+ *
+ *	relay (DTLS client)                              provider (DTLS server)
+ *	  |-- INIT, with SCTP-AUTH required for DATA and FORWARD-TSN ------>|
+ *	  |<---------- INIT ACK, the same - or no association: refused -----|
+ *	  |   key 0, the empty key, active on both sides                    |
+ *	  |                                                                 |
+ *	  |== DTLS 1.2 handshake, every record one SCTP message, key 0 ====>|
+ *	  |<===== ... certificates both ways, CertificateRequest ... =======|
+ *	  |== ..., ClientKeyExchange, CertificateVerify, key 0 ============>|
+ *	  |   all acknowledged; key 1 = exporter "EXPORTER_DTLS_OVER_SCTP"  |
+ *	  |== ChangeCipherSpec, Finished, key 0 ===========================>|
+ *	  |   key 1 active                       all acknowledged; key 1    |
+ *	  |                                      installed and, after its   |
+ *	  |<================================ ChangeCipherSpec, key 0 ========|
+ *	  |                                      ChangeCipherSpec, active   |
+ *	  |<=========================================== Finished, key 1 =====|
+ *	  |   key 0 deleted                                  key 0 deleted  |
+ *	  |                                                                 |
+ *	  |== INFO, SELFTEST, GET_ENTROPY, STATUS, one by one, key 1 ======>|
+ *	  |<======================================= the answers, key 1 =====|
+ *
+ * The messages inside the DTLS are those of the Unix domain socket, each
+ * carried by records with the byte in front, as above. The relay forwards the
+ * requests of the ESDM one to one and answers STARTDTLS itself; what it
+ * forwards back is checked as the ESDM checks it. The answer to STATUS tells
+ * "sctp" as the "transport" of the server, and as its "peer" the SHA-256 of
+ * the certificate of the client asking - the relay's.
  ******************************************************************************/
 
 #define ESDM_ES_EXT_PROTO_MAGIC 0x58455345 /* "ESEX" in memory */
@@ -497,6 +555,163 @@ void esdm_es_ext_server_stop(struct esdm_es_ext_server *server);
  * @param [in] server The server, may be NULL
  */
 void esdm_es_ext_server_free(struct esdm_es_ext_server *server);
+
+/******************************************************************************
+ * Provider server on the network - libesdm_es_ext, meson option es-ext-net
+ *
+ * The provider server serves its plugin to the ESDM of another host as well:
+ * on SCTP, with DTLS 1.2 whose client and server both authenticate with a
+ * certificate, as RFC 6083 maps DTLS onto SCTP - see "Network" in the socket
+ * protocol above. The ESDM reaches it through the esdm-es-ext-relay of its
+ * own host, see esdm-es-ext-relay(8).
+ *
+ * The listener faces the network and anybody may connect to it, so the
+ * connections are bounded: in all, in their handshake - in all and per source
+ * address -, per client (the SHA-256 of its certificate), and in time - the
+ * handshake, and the silence between two requests. A source may be limited to
+ * the networks of an allowlist. The TLS files are taken up again on
+ * esdm_es_ext_server_reload() and when they change: a rotation that does not
+ * load keeps the files loaded before, and a CRL taken up closes the
+ * connections of the clients it revokes.
+ ******************************************************************************/
+
+/** CA certificates of the client's chain need a CRL as well */
+#define ESDM_ES_EXT_NET_CRL_CHECK_ALL (1U << 0)
+/** A CRL past its nextUpdate only causes a warning */
+#define ESDM_ES_EXT_NET_CRL_ALLOW_EXPIRED (1U << 1)
+
+/** Most CRL files, listening sockets, and networks of the allowlist */
+#define ESDM_ES_EXT_NET_MAX_CRL 16
+#define ESDM_ES_EXT_NET_MAX_LISTEN 16
+#define ESDM_ES_EXT_NET_MAX_ALLOW 64
+
+/**
+ * @brief Configuration of a provider server on the network
+ *
+ * Fields are only ever appended. The library takes the ones @size covers and
+ * the defaults for the rest, so a program built against an older header keeps
+ * working with a newer library. Initialize it with
+ * esdm_es_ext_server_net_config_init(), and set what differs.
+ */
+struct esdm_es_ext_server_net_config {
+	/** sizeof(struct esdm_es_ext_server_net_config) of the caller */
+	size_t size;
+
+	/**
+	 * Where to listen, NULL-terminated: "HOST:PORT", "[IPv6]:PORT", or
+	 * ":PORT" and "PORT" for any address. The host is resolved, and every
+	 * address of it listened on. NULL for none.
+	 */
+	const char *const *listen;
+	/**
+	 * Listening sockets handed over - by socket activation, say: SCTP of
+	 * the one-to-one style, SOCK_STREAM and IPPROTO_SCTP. The server takes
+	 * them over. Associations set up before the server set the socket up
+	 * for SCTP-AUTH have none, and are refused.
+	 */
+	const int *listen_fds;
+	unsigned int listen_fds_num;
+
+	/**
+	 * Certificate of the server, PEM, optionally followed by the
+	 * intermediate certificates of its chain
+	 */
+	const char *cert_file;
+	/** Its private key, PEM, unencrypted PKCS#8 */
+	const char *key_file;
+	/**
+	 * Trust anchors, PEM: the certificate of a client must chain to one of
+	 * them, and the server's own as well
+	 */
+	const char *ca_file;
+	/**
+	 * CRLs, PEM, each file may hold several, NULL-terminated, at most
+	 * ESDM_ES_EXT_NET_MAX_CRL - NULL for none. With CRLs, the certificate
+	 * of a client needs a CRL of its issuer that does not list it.
+	 */
+	const char *const *crl_files;
+	/** ESDM_ES_EXT_NET_CRL_* */
+	unsigned int crl_flags;
+	/**
+	 * Check the files for a change this often, in seconds; 0 for never -
+	 * esdm_es_ext_server_reload() takes them up all the same. Default 60.
+	 */
+	unsigned int reload_interval;
+
+	/**
+	 * Serve only clients of these networks, NULL-terminated:
+	 * "192.0.2.0/24", "2001:db8::/32", or an address alone. NULL for any.
+	 */
+	const char *const *allow;
+
+	/** Connections in all, default 64 */
+	unsigned int max_connections;
+	/** Connections in their handshake, default 16 */
+	unsigned int max_handshakes;
+	/**
+	 * Connections in their handshake per source address - per /64 for
+	 * IPv6 -, default 4
+	 */
+	unsigned int max_handshakes_per_source;
+	/** Connections per client certificate, default 4 */
+	unsigned int max_per_client;
+	/** Seconds a connection has for its handshake, default 10 */
+	unsigned int handshake_timeout;
+	/**
+	 * Seconds of silence after which a connection is closed, 0 for never;
+	 * default 600
+	 */
+	unsigned int idle_timeout;
+};
+
+/**
+ * @brief The defaults of a configuration of a provider server on the network
+ *
+ * @param [out] cfg The configuration, with @size set and everything else at
+ *		    its default - no listeners and no files
+ */
+void esdm_es_ext_server_net_config_init(
+	struct esdm_es_ext_server_net_config *cfg);
+
+/**
+ * @brief Serve an external entropy source on the network
+ *
+ * As esdm_es_ext_server_alloc(), on the SCTP sockets of @cfg with the DTLS
+ * with certificates of the network - see above. The TLS files are loaded
+ * here, the listeners bound, and the @init callback of @plugin called: a
+ * daemon dropping its privileges does so afterwards. esdm_es_ext_server_run()
+ * serves, esdm_es_ext_server_stop() and esdm_es_ext_server_free() as for a
+ * server on a Unix domain socket. A server on the network allows no uid -
+ * the certificate of a client tells who it is - and offers no other DTLS.
+ *
+ * @param [in] plugin The entropy source to serve, see esdm_es_ext_server_alloc()
+ * @param [in] cfg The configuration; nothing of it is referenced after the
+ *		   call returned
+ * @param [out] server The server, to be released with
+ *		       esdm_es_ext_server_free()
+ *
+ * @return 0 on success, a negative errno otherwise: -EINVAL for a
+ *	   configuration that does not parse, a TLS file that does not load -
+ *	   both logged -, -EOPNOTSUPP in a library built without es-ext-net,
+ *	   -EPROTONOSUPPORT if the kernel has no SCTP
+ */
+int esdm_es_ext_server_alloc_net(const struct esdm_es_ext_plugin *plugin,
+				 const struct esdm_es_ext_server_net_config *cfg,
+				 struct esdm_es_ext_server **server);
+
+/**
+ * @brief Take up the TLS files of a server on the network at once
+ *
+ * esdm_es_ext_server_run() builds a new context of the files - and only if
+ * that succeeds, makes new connections with it and closes the established
+ * ones its CRLs revoke. May be called from another thread and from a signal
+ * handler - on SIGHUP, say.
+ *
+ * @param [in] server The server
+ *
+ * @return 0, -EINVAL for a server not on the network
+ */
+int esdm_es_ext_server_reload(struct esdm_es_ext_server *server);
 
 /******************************************************************************
  * Plugin loader - libesdm_es_ext

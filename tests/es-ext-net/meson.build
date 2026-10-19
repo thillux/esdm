@@ -20,3 +20,24 @@ es_ext_net_dtls_test = executable(
 
 test('DTLS over SCTP', es_ext_net_dtls_test, timeout: 120,
 	suite: 'es-ext-net')
+
+include_dirs_es_ext_net_test = [ include_dirs_server, include_dirs_es_ext ]
+
+# The network mode of the provider server, as esdm-es-ext-serve has it,
+# serving the test plugin: its bounds, allowlist, timeouts and rotation. Needs
+# no privileges.
+es_ext_net_server_test = executable(
+		'es_ext_net_server_test',
+		[ 'server_test.c' ],
+		c_args: es_ext_net_test_args,
+		include_directories: include_dirs_es_ext_net_test,
+		dependencies: [ dependency('threads'), json_c_dep ] +
+			      es_ext_net_deps,
+		link_with: esdm_common_static_lib
+	)
+
+test('External ES provider on the network', es_ext_net_server_test,
+	args: [ esdm_es_ext_serve.full_path(),
+		es_ext_test_plugin.full_path() ],
+	depends: [ esdm_es_ext_serve, es_ext_test_plugin ],
+	timeout: 300, suite: 'es-ext-net')

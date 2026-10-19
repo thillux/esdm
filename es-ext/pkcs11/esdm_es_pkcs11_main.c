@@ -26,6 +26,10 @@
  * The PIN is configuration of this daemon, read from a file or a systemd
  * credential: never from the command line, where every user of the machine
  * reads it in /proc, and never from the build.
+ *
+ * With --listen, or sockets of socket activation, the token is served on the
+ * network instead, to the esdm-es-ext-relay of the host of an ESDM - see
+ * esdm_es_ext_net_cli.h.
  */
 
 #define _GNU_SOURCE
@@ -45,6 +49,7 @@
 
 #include "config.h"
 #include "esdm_es_ext.h"
+#include "esdm_es_ext_net_cli.h"
 #include "esdm_es_ext_proto.h"
 #include "esdm_es_pkcs11.h"
 #include "esdm_logger.h"
@@ -76,6 +81,9 @@
 
 static struct esdm_es_ext_server *pkcs11_server;
 
+/* Serving on the network, where SIGHUP takes the TLS files up again */
+static bool pkcs11_net;
+
 /*
  * The signals ending the daemon, taken by a thread of its own with sigwait(2)
  * rather than by a handler - see esdm-es-ext-serve on why.
@@ -87,8 +95,14 @@ static void *pkcs11_signals(void *arg)
 	int sig;
 
 	(void)arg;
-	if (!sigwait(&pkcs11_signal_set, &sig))
+	while (!sigwait(&pkcs11_signal_set, &sig)) {
+		if (sig == SIGHUP && pkcs11_net) {
+			esdm_es_ext_server_reload(pkcs11_server);
+			continue;
+		}
 		esdm_es_ext_server_stop(pkcs11_server);
+		break;
+	}
 	return NULL;
 }
 
@@ -282,6 +296,7 @@ static void usage(void)
 		"\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t-h --help\tThis help information\n");
 	fprintf(stderr, "\t   --version\tPrint version\n");
+	es_ext_net_cli_usage(stderr);
 }
 
 int main(int argc, char *argv[])
@@ -300,8 +315,11 @@ int main(int argc, char *argv[])
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
+		ES_EXT_NET_CLI_OPTIONS,
 		{ NULL, 0, NULL, 0 }
 	};
+	struct es_ext_net_cli net;
+	bool unix_option = false;
 	struct esdm_es_pkcs11_config config = {
 		.module_path = ESDM_PKCS11_MODULE_PATH,
 		.token_label = ESDM_PKCS11_TOKEN_LABEL,
@@ -314,7 +332,7 @@ int main(int argc, char *argv[])
 	bool credential_given = false;
 	pthread_t signal_thread;
 	uid_t client_uids[ESDM_ES_PKCS11_MAX_CLIENT_UIDS];
-	unsigned int client_uids_num = 0, i;
+	unsigned int client_uids_num = 0, i, verbose = 0;
 	mode_t mode = 0666;
 	bool dtls = true;
 	int c, ret;
@@ -324,6 +342,8 @@ int main(int argc, char *argv[])
 	sigaddset(&pkcs11_signal_set, SIGINT);
 	sigaddset(&pkcs11_signal_set, SIGHUP);
 	pthread_sigmask(SIG_BLOCK, &pkcs11_signal_set, NULL);
+
+	es_ext_net_cli_init(&net);
 
 	while ((c = getopt_long(argc, argv, "M:t:p:s:m:u:vh", opts, NULL)) !=
 	       -1) {
@@ -343,8 +363,10 @@ int main(int argc, char *argv[])
 			break;
 		case 's':
 			socket_path = optarg;
+			unix_option = true;
 			break;
 		case 'm': {
+			unix_option = true;
 			unsigned long val;
 			char *end;
 
@@ -363,6 +385,7 @@ int main(int argc, char *argv[])
 		case 'u': {
 			uid_t uid = pkcs11_parse_uid(optarg);
 
+			unix_option = true;
 			if (uid == (uid_t)-1) {
 				fprintf(stderr,
 					"--client_uid takes a uid or a user name, not \"%s\"\n",
@@ -379,6 +402,7 @@ int main(int argc, char *argv[])
 			break;
 		}
 		case 'D':
+			unix_option = true;
 			dtls = false;
 			break;
 		case 'R': {
@@ -408,7 +432,7 @@ int main(int argc, char *argv[])
 			name = optarg;
 			break;
 		case 'v':
-			esdm_logger_inc_verbosity();
+			verbose++;
 			break;
 		case 'V':
 			printf("esdm-es-pkcs11 %s\n", ESDM_ES_PKCS11_VERSION);
@@ -417,9 +441,29 @@ int main(int argc, char *argv[])
 			usage();
 			return 0;
 		default:
-			usage();
+			ret = es_ext_net_cli_option(&net, c, optarg);
+			if (ret > 0)
+				break;
+			if (!ret)
+				usage();
+			es_ext_net_cli_free(&net);
 			return 1;
 		}
+	}
+
+	pkcs11_net = es_ext_net_cli_wanted(&net);
+	es_ext_net_cli_verbosity(pkcs11_net, verbose);
+	if (pkcs11_net && unix_option) {
+		fprintf(stderr,
+			"--socket, --mode, --client_uid and --no_dtls are for a Unix domain socket - not for --listen\n");
+		es_ext_net_cli_free(&net);
+		return 1;
+	}
+	if (!pkcs11_net && net.option) {
+		fprintf(stderr,
+			"The options of the network take --listen, or sockets of socket activation\n");
+		es_ext_net_cli_free(&net);
+		return 1;
 	}
 
 	if (optind != argc) {
@@ -452,6 +496,21 @@ int main(int argc, char *argv[])
 
 	/* The source takes the PIN over */
 	esdm_es_pkcs11_configure(&config);
+
+	if (pkcs11_net) {
+		/*
+		 * The token is looked for with the privileges the daemon was
+		 * started with - in the init of the source -, served without
+		 */
+		if (es_ext_net_cli_server(&net, &esdm_es_pkcs11_plugin,
+					  &pkcs11_server) ||
+		    es_ext_net_cli_drop_privileges(&net)) {
+			esdm_es_ext_server_free(pkcs11_server);
+			es_ext_net_cli_free(&net);
+			return 1;
+		}
+		goto served;
+	}
 
 	ret = esdm_es_ext_server_alloc(&esdm_es_pkcs11_plugin, socket_path,
 				       mode, &pkcs11_server);
@@ -486,6 +545,7 @@ int main(int argc, char *argv[])
 	if (!dtls)
 		esdm_es_ext_server_set_dtls(pkcs11_server, 0);
 
+served:
 	/* Checked above already */
 	if (name)
 		(void)esdm_es_ext_server_set_name(pkcs11_server, name);
@@ -504,7 +564,8 @@ int main(int argc, char *argv[])
 	esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
 		    "Serving %s, PKCS#11 module %s, on %s\n",
 		    name ? name : esdm_es_pkcs11_plugin.name,
-		    config.module_path, socket_path);
+		    config.module_path,
+		    pkcs11_net ? "the network" : socket_path);
 
 	/*
 	 * The socket accepts connections, and the token was looked for: a
@@ -526,6 +587,7 @@ int main(int argc, char *argv[])
 
 	/* Logs out of the token and wipes the PIN */
 	esdm_es_ext_server_free(pkcs11_server);
+	es_ext_net_cli_free(&net);
 
 	return ret ? 1 : 0;
 }

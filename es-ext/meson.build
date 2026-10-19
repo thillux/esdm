@@ -2,7 +2,8 @@
 # plugin API of esdm_es_ext.h, the provider server serving a plugin on a Unix
 # domain socket, and the loader for plugin libraries. Its only dependencies
 # beyond libc are the ESDM logger, the socket creation of the server, and
-# json-c for the status the server answers with.
+# json-c for the status the server answers with - and with es-ext-net, the TLS
+# stack of the crypto backend for the network mode of the server.
 es_ext_lib_src = files([
 	'esdm_es_ext_plugin.c',
 	'esdm_es_ext_server.c',
@@ -23,7 +24,8 @@ endif
 esdm_es_ext_lib = both_libraries('esdm_es_ext',
 	[ es_ext_lib_src ],
 	include_directories: include_dirs_es_ext,
-	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps,
+	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps +
+		      es_ext_net_deps,
 	link_with: esdm_common_static_lib,
 	version: meson.project_version(),
 	soversion: version_array[0],
@@ -38,14 +40,25 @@ include_user_files += files([
 	'esdm_es_ext.h'
 ])
 
+# The network mode on the command line of the daemons below, and the drop of
+# their privileges - see net/esdm_es_ext_net_cli.h
+es_ext_net_cli_src = files([ 'net/esdm_es_ext_net_cli.c' ])
+if es_ext_net
+	es_ext_net_cli_src += files([ '../service-rpc/server/privileges.c' ])
+endif
+include_dirs_es_ext_daemons = [ include_dirs_es_ext,
+				include_directories('net',
+						    '../service-rpc/server') ]
+
 # A provider for any plugin library: what esdm-server --es_ext_lib loads into
 # the daemon, served in a process of its own - see esdm-es-ext-serve(8).
 esdm_es_ext_serve = executable('esdm-es-ext-serve',
-	[ 'serve/esdm_es_ext_serve.c' ],
+	[ 'serve/esdm_es_ext_serve.c' ] + es_ext_net_cli_src,
 	c_args: [ '-DESDM_ES_EXT_SERVE_VERSION="' + meson.project_version() + '"' ],
-	include_directories: include_dirs_es_ext,
+	include_directories: include_dirs_es_ext_daemons,
 	link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
-	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps,
+	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps +
+		      es_ext_net_deps,
 	install: true
 	)
 
@@ -54,12 +67,14 @@ esdm_es_ext_serve = executable('esdm-es-ext-serve',
 # esdm-es-pkcs11(8). It is the only part of the ESDM that needs libp11.
 if get_option('es_pkcs11').enabled()
 	esdm_es_pkcs11 = executable('esdm-es-pkcs11',
-		[ 'pkcs11/esdm_es_pkcs11.c', 'pkcs11/esdm_es_pkcs11_main.c' ],
+		[ 'pkcs11/esdm_es_pkcs11.c', 'pkcs11/esdm_es_pkcs11_main.c' ] +
+			es_ext_net_cli_src,
 		c_args: [ '-DESDM_ES_PKCS11_VERSION="' + meson.project_version() + '"' ],
-		include_directories: include_dirs_es_ext,
+		include_directories: include_dirs_es_ext_daemons,
 		link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
 		dependencies: [ dependency('threads'), dl_dep, json_c_dep,
-				dependency('libp11', required: true) ] + dtls_deps,
+				dependency('libp11', required: true) ] +
+			      dtls_deps + es_ext_net_deps,
 		install: true
 		)
 
