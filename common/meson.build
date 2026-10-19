@@ -308,30 +308,69 @@ endforeach
 # for fewer, the others getting none; a rate or a uid for each source, or one
 # for all of them.
 foreach es_ext_opt : [
-		[ 'es_ext_lib_path', es_ext_lib_num, 'ESDM_EXT_LIB_PATH_' ],
+		[ 'es_ext_lib_path', es_ext_lib_num, 'ESDM_EXT_LIB_PATH_',
+		  'es_ext_lib_num' ],
 		[ 'es_ext_lib_entropy_rate', es_ext_lib_num,
-		  'ESDM_EXT_LIB_ENTROPY_RATE_' ],
+		  'ESDM_EXT_LIB_ENTROPY_RATE_', 'es_ext_lib_num' ],
 		[ 'es_ext_socket_path', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_PATH_' ],
+		  'ESDM_EXT_SOCKET_PATH_', 'es_ext_socket_num' ],
 		[ 'es_ext_socket_entropy_rate', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_ENTROPY_RATE_' ],
+		  'ESDM_EXT_SOCKET_ENTROPY_RATE_', 'es_ext_socket_num' ],
 		[ 'es_ext_socket_peer_uid', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_PEER_UID_' ] ]
+		  'ESDM_EXT_SOCKET_PEER_UID_', 'es_ext_socket_num' ] ]
 	es_ext_name = es_ext_opt[0]
 	es_ext_num = es_ext_opt[1]
-	es_ext_vals = get_option(es_ext_name)
+	es_ext_is_path = es_ext_name.endswith('_path')
+	es_ext_is_uid = es_ext_name.endswith('_uid')
+
+	# Every value is checked, whether a source of the build takes it or
+	# not: a rate is a number from 0 to 256 or auto, a uid one from 0 to
+	# 4294967294 or -1. What is left is the value without white space
+	# around it.
+	es_ext_vals = []
+	foreach es_ext_raw : get_option(es_ext_name)
+		es_ext_val = es_ext_raw.strip()
+		es_ext_vals += es_ext_val
+		if es_ext_is_path or \
+		   (es_ext_is_uid and es_ext_val == '-1') or \
+		   (not es_ext_is_uid and es_ext_val == 'auto')
+			continue
+		endif
+
+		es_ext_int = -2
+		if es_ext_val != '' and es_ext_val.strip('0123456789') == ''
+			# Nothing but digits
+			es_ext_int = es_ext_val.to_int()
+		endif
+		if es_ext_is_uid and (es_ext_int < 0 or es_ext_int > 4294967294)
+			error('@0@ takes uids from 0 to 4294967294, or -1, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		elif not es_ext_is_uid and (es_ext_int < 0 or es_ext_int > 256)
+			error('@0@ takes entropy rates from 0 to 256 or auto, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		endif
+	endforeach
+
 	if es_ext_num == 0
+		# No source of the kind is built: say so, unless it is the default
+		es_ext_default = es_ext_is_uid ? [ '-1' ] : []
+		if get_option(es_ext_name) != es_ext_default
+			warning('@0@ is ignored, as @1@'.format(es_ext_name,
+				get_option('es_ext').enabled() ?
+					es_ext_opt[3] + ' is 0' :
+					'es_ext is disabled'))
+		endif
 		continue
 	endif
 
-	if es_ext_name.endswith('_path')
+	if es_ext_is_path
 		if es_ext_vals.length() > es_ext_num
 			error('@0@ names @1@ paths, for @2@ sources of its kind'.format(
 			      es_ext_name, es_ext_vals.length(), es_ext_num))
 		endif
 	elif es_ext_vals.length() <= 1
 		# None configured for any source of the kind, or one for all
-		es_ext_one = es_ext_name.endswith('_uid') ? '-1' : 'auto'
+		es_ext_one = es_ext_is_uid ? '-1' : 'auto'
 		if es_ext_vals.length() == 1
 			es_ext_one = es_ext_vals[0]
 		endif
@@ -346,34 +385,18 @@ foreach es_ext_opt : [
 	endif
 
 	foreach i : range(es_ext_num)
-		es_ext_val = i < es_ext_vals.length() ? es_ext_vals[i].strip() : ''
-		if es_ext_name.endswith('_path')
-			conf_data.set_quoted(es_ext_opt[2] + i.to_string(),
-					     es_ext_val)
-			continue
-		endif
-
-		if es_ext_name.endswith('_uid') and es_ext_val == '-1'
-			es_ext_int = -1
-		elif es_ext_val != '' and es_ext_val.strip('0123456789') == ''
-			# Nothing but digits
-			es_ext_int = es_ext_val.to_int()
-		elif es_ext_name.endswith('_rate') and es_ext_val == 'auto'
+		es_ext_define = es_ext_opt[2] + i.to_string()
+		es_ext_val = i < es_ext_vals.length() ? es_ext_vals[i] : ''
+		if es_ext_is_path
+			conf_data.set_quoted(es_ext_define, es_ext_val)
+		elif es_ext_val == 'auto'
 			# No rate configured: the one the source declares
-			conf_data.set(es_ext_opt[2] + i.to_string(),
-				      'ESDM_ES_EXT_ENTROPY_RATE_AUTO')
-			continue
+			conf_data.set(es_ext_define, 'ESDM_ES_EXT_ENTROPY_RATE_AUTO')
+		elif es_ext_val == '-1'
+			conf_data.set(es_ext_define, -1)
 		else
-			es_ext_int = -2
+			conf_data.set(es_ext_define, es_ext_val.to_int())
 		endif
-		if es_ext_name.endswith('_uid') and (es_ext_int < -1 or es_ext_int > 4294967294)
-			error('@0@ takes uids from 0 to 4294967294, or -1, not "@1@"'.format(
-			      es_ext_name, es_ext_val))
-		elif not es_ext_name.endswith('_uid') and (es_ext_int < 0 or es_ext_int > 256)
-			error('@0@ takes entropy rates from 0 to 256 or auto, not "@1@"'.format(
-			      es_ext_name, es_ext_val))
-		endif
-		conf_data.set(es_ext_opt[2] + i.to_string(), es_ext_int)
 	endforeach
 endforeach
 conf_data.set('ESDM_DTLS', get_option('dtls').enabled())

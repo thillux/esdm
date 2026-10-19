@@ -689,7 +689,8 @@ Compiled in, an external entropy source does nothing until a plugin library or
 a provider socket is configured.
 
 How many sources of each kind the ESDM has is set by es_ext_lib_num and
-es_ext_socket_num.
+es_ext_socket_num. Disabled, or with no source of a kind, the options of the
+sources are still checked, and ignored with a warning when they are set.
 ''')
 
 option('es_ext_lib_num', type: 'integer', min: 0, max: 16, value: 1,
