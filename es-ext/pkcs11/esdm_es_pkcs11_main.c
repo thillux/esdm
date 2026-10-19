@@ -612,7 +612,8 @@ served:
 
 	ret = esdm_es_ext_server_run(pkcs11_server);
 	if (ret)
-		fprintf(stderr, "Serving %s failed: %s\n", socket_path,
+		fprintf(stderr, "Serving %s failed: %s\n",
+			pkcs11_net ? "the network" : socket_path,
 			strerror(-ret));
 
 	(void)systemd_notify_stopping();
