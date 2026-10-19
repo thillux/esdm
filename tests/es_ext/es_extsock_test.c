@@ -33,8 +33,9 @@
  *   closed while it was idle, to make room for another client, is made again
  *   at once, the request about to be sent not lost on it.
  * - A provider failing its self test is credited with nothing until a self
- *   test passes, whatever it delivers meanwhile. Its first self test runs
- *   on the first connection to it, before it is credited.
+ *   test passes, whatever it delivers meanwhile. A self test runs on every
+ *   new connection to it, before it is credited - on the first one, and on
+ *   one to a provider restarted.
  * - A provider answering what the protocol does not allow - a wrong magic,
  *   more data than asked for, more entropy than the data holds - or not
  *   answering at all is disconnected and credited with nothing, and none of
@@ -1206,6 +1207,62 @@ static void test_retry_interval(void)
 	CHECK_EQ(ES->init(), 0);
 }
 
+/*
+ * A provider restarted is another process, its noise source set up anew: it is
+ * tested on the new connection before it is credited, whether the source
+ * finds the connection closed by the restart or connects to the provider back
+ * after the retry interval - rather than credited until the next self test
+ * pass of the ESDM, up to ten minutes later.
+ */
+static void test_restarted_selftest(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	unsigned int selftest_calls;
+
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+
+	/* Restarted while the connection was idle, failing its self test */
+	test_server_stop();
+	ctl->selftest_ret = -ENODEV;
+	selftest_calls = ctl->selftest_calls;
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+	CHECK(test_state_has("status", "failing its self test"),
+	      "a restarted provider was not tested on the new connection");
+	CHECK_EQ(ES->curr_entropy(bits), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+
+	/* Until a self test passes */
+	ctl->selftest_ret = 0;
+	CHECK_EQ(ES->selftest(), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+
+	/* Gone for a while, and back failing its self test */
+	test_server_stop();
+	CHECK_EQ(test_get(bits, NULL), 0);
+	ctl->selftest_ret = -ENODEV;
+	selftest_calls = ctl->selftest_calls;
+	CHECK_EQ(test_server_start(), 0);
+	test_wait_retry();
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+	CHECK(test_state_has("status", "failing its self test"),
+	      "a provider back was not tested on the new connection");
+
+	/* Restarted again, passing it: credited at once */
+	test_server_stop();
+	ctl->selftest_ret = 0;
+	selftest_calls = ctl->selftest_calls;
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+
+	/* A connection kept is not tested again */
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK_EQ(ctl->selftest_calls, selftest_calls + 1);
+}
+
 static void test_protocol_breaches(void)
 {
 	static const int modes[] = { TEST_EVIL_MAGIC, TEST_EVIL_TOO_LONG,
@@ -1754,6 +1811,7 @@ int main(void)
 	test_peer_check();
 	test_reconnect();
 	test_late_provider();
+	test_restarted_selftest();
 	test_eavesdrop(true);
 	test_eavesdrop(false);
 	test_old_provider();

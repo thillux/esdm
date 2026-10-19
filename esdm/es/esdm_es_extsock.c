@@ -51,9 +51,12 @@
  * provider that fails is credited with nothing until it delivers again, on a
  * seeding that asks it or on a probe of the ES monitor; one failing its self
  * test is credited with nothing until a self test passes. Nor is a provider
- * credited before its first self test since the source was set up: the self
- * test pass of the ESDM runs before its first seeding, and a provider that was
- * not connected then is tested on the first connection to it.
+ * credited before a self test on the connection to it: every new connection
+ * runs one before the provider is asked for data. The provider at the other end
+ * may be another process than the one tested before - one restarted, with its
+ * noise source set up anew, or one that was not there at the self test pass
+ * the ESDM runs before its first seeding - and the next self test pass of the
+ * ESDM may be up to ten minutes away.
  */
 
 #define _GNU_SOURCE
@@ -158,9 +161,10 @@ struct esdm_es_extsock {
 	bool selftest_failed;
 
 	/*
-	 * No self test of the provider was answered since the source was set
-	 * up, and the provider is credited with nothing until one was: the next
-	 * connection runs one first. Under the same lock as the failures.
+	 * No self test of the provider was answered on the connection to it,
+	 * and the provider is credited with nothing until one was: set by
+	 * every new connection, which runs one first. Under the same lock as
+	 * the failures.
 	 */
 	bool selftest_due;
 
@@ -487,6 +491,8 @@ static int esdm_es_extsock_open_locked(struct esdm_es_extsock *sock)
 	sock->connected_uid = cred.uid;
 	/* A provider restarted may be one that knows STATUS now */
 	sock->status_refused = false;
+	/* ... and one whose noise source fails now: it is tested first */
+	sock->selftest_due = true;
 	return 0;
 
 err:
@@ -774,7 +780,7 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 		rate, source);
 	sock->was_connected = true;
 
-	/* A provider not tested yet is tested before it is asked for anything */
+	/* Tested on the new connection, before it is asked for data */
 	if (sock->selftest_due) {
 		(void)esdm_es_extsock_selftest_locked(sock);
 		if (sock->fd < 0)

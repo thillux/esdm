@@ -123,8 +123,9 @@ returns the context handed to the others,
 .I selftest
 checks the source without consuming the data it delivers. It runs before the
 ESDM credits the source for the first time \- at start up before the ESDM
-seeds its DRNGs, for a provider that is not there then on the first connection
-to it \- and on the interval of the ESDM self tests.
+seeds its DRNGs \-, on every new connection of the ESDM to a provider \- one
+that was not there at start up, or one restarted \- before the provider is
+credited, and on the interval of the ESDM self tests.
 .PP
 .I status_json
 writes the status of the source \- whatever helps whoever looks at the ESDM

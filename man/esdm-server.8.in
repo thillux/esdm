@@ -302,8 +302,9 @@ it delivers again, which the daemon finds out on its own. The same entropy credi
 applies as for a plugin, with the rate of
 .BR \-\-es_ext_socket_entropy_rate ,
 else the one the provider declares, else 0;
-a provider that is not there at start up has its first self test on the first
-connection to it.
+every new connection to a provider \- one that is not there at start up, one
+restarted \- begins with a self test of it, and the provider is credited with
+nothing before that passed.
 .PP
 A plugin or a provider may declare the entropy rate of its data (the
 .I entropy_rate
