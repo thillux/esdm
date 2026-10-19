@@ -312,11 +312,18 @@ struct Esdm_Dtls_Conn {
  */
 static int esdm_dtls_botan_feed(Esdm_Dtls_Conn *c)
 {
-	/* On the heap, see esdm_dtls.c */
-	std::vector<uint8_t> buf(ESDM_DTLS_LINK_MTU + 512);
+	/*
+	 * On the heap, see esdm_dtls.c - and left uninitialized: it receives
+	 * the records as they are on the wire, which are of no secrecy, so there
+	 * is nothing to wipe afterwards either. Zeroing 17 KiB for every call,
+	 * also for one that finds the socket empty, was a share of every
+	 * request.
+	 */
+	const size_t buflen = ESDM_DTLS_LINK_MTU + 512;
+	std::unique_ptr<uint8_t[]> buf(new uint8_t[buflen]);
 
 	for (;;) {
-		ssize_t n = recv(c->callbacks->m_fd, buf.data(), buf.size(),
+		ssize_t n = recv(c->callbacks->m_fd, buf.get(), buflen,
 				 MSG_DONTWAIT);
 
 		if (n < 0) {
@@ -329,7 +336,7 @@ static int esdm_dtls_botan_feed(Esdm_Dtls_Conn *c)
 			return -ECONNRESET;
 
 		c->channel->received_data(std::span<const uint8_t>(
-			buf.data(), static_cast<size_t>(n)));
+			buf.get(), static_cast<size_t>(n)));
 		if (c->callbacks->m_closed || c->channel->is_closed())
 			return -ECONNRESET;
 		if (!c->callbacks->m_records.empty())

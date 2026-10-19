@@ -536,6 +536,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC client: a read larger than one answer carries asks for no more than the server serves from its first request on, rather than learning that by a request refused for its size on every call - a round trip saved per call, one in three for a read of 64 KiB
 
+* DTLS: a message wipes what it took of the record buffers instead of all of them, and the buffer of the records received is not zeroed for every receive - 16 to 33 KiB of memset on either side per message, also for every look at an empty socket
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

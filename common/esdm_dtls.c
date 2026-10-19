@@ -382,6 +382,8 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 {
 	const size_t recsize = ESDM_DTLS_PART_SIZE + 1;
 	const uint8_t *p = buf;
+	/* The bytes of rec the parts were copied to */
+	size_t used = 0;
 	uint8_t *rec;
 	int ret = 0;
 
@@ -400,6 +402,8 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 		rec[0] = len > part ? ESDM_DTLS_MORE : ESDM_DTLS_LAST;
 		if (part)
 			memcpy(rec + 1, p, part);
+		if (part + 1 > used)
+			used = part + 1;
 		ret = esdm_dtls_rec_send(dtls, rec, part + 1);
 		p += part;
 		len -= part;
@@ -409,7 +413,12 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 		ret = dtls->ops->flush(dtls->backend);
 	esdm_dtls_leave();
 
-	memset_secure(rec, 0, recsize);
+	/*
+	 * Only what the parts were copied to - nothing else of the buffer ever
+	 * held a byte of the message. Most messages are a few dozen bytes, and
+	 * the 16 KiB wiped for each of them were a share of every request.
+	 */
+	memset_secure(rec, 0, used);
 	free(rec);
 	return ret;
 }
@@ -419,7 +428,8 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 {
 	uint8_t *rec;
 	ssize_t n, ret;
-	size_t part, limit;
+	/* The bytes of rec the records were received into */
+	size_t part, limit, filled = 0;
 
 	if (!dtls || !buf)
 		return -EINVAL;
@@ -440,6 +450,8 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 			ret = n;
 			goto out;
 		}
+		if ((size_t)n > filled)
+			filled = (size_t)n;
 		/* Empty, or longer than a part can be: no record of ours */
 		if (n < 1 || (size_t)n > ESDM_DTLS_PART_SIZE + 1 ||
 		    (rec[0] != ESDM_DTLS_MORE && rec[0] != ESDM_DTLS_LAST)) {
@@ -481,7 +493,12 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 
 out:
 	esdm_dtls_leave();
-	memset_secure(rec, 0, ESDM_DTLS_RECORD_BUF);
+	/*
+	 * Only what a record was received into: a backend writes a record of
+	 * the size it returns, and nothing when it fails - and a caller waiting
+	 * for its answer looks for it, and finds nothing, often.
+	 */
+	memset_secure(rec, 0, filled);
 	free(rec);
 	if (ret < 0 && ret != -EAGAIN)
 		esdm_dtls_drop_partial(dtls);
