@@ -1,0 +1,317 @@
+.TH ESDM\-ES\-PKCS11 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-es\-pkcs11 \- serve the random number generator of a PKCS#11 token to the ESDM
+.SH SYNOPSIS
+.B esdm\-es\-pkcs11
+.RB [ \-\-module
+.IR PATH ]
+.RB [ \-\-token_label
+.IR LABEL ]
+.RB [ \-\-pin_file
+.IR PATH " | "
+.B \-\-pin_credential
+.IR NAME ]
+.RB [ \-\-socket
+.IR PATH ]
+.RB [ \-\-client_uid
+.IR USER ]...
+.RB [ \-\-entropy_rate
+.IR BITS ]
+.RB [ \-v ]
+.SH DESCRIPTION
+.B esdm\-es\-pkcs11
+is the PKCS#11 entropy source of the ESDM: it reads the random number
+generator of a PKCS#11 token \- a smartcard, a USB token, an HSM, or SoftHSM
+\- with
+.B C_GenerateRandom
+through libp11, and serves it as an external entropy source on a UNIX domain
+socket, which the ESDM reads through one of its provider socket sources
+.RB ( "esdm\-server \-\-es_ext_socket" ,
+see
+.BR esdm\-server (8)
+and
+.BR libesdm_es_ext (3)).
+The ESDM itself needs nothing that knows of PKCS#11: the PKCS#11 module \-
+code of the token vendor \- runs in this process, with the privileges the
+token needs rather than with those of the ESDM, and the PIN is a secret of
+this process alone.
+.PP
+The daemon loads the PKCS#11 module and takes the first slot holding an
+initialized token with a random number generator \- with
+.BR \-\-token_label ,
+the first one whose token carries that label. It logs in as the user
+(CKU_USER) only if a PIN is configured and the token asks for a login; most
+tokens hand out random numbers without one.
+.PP
+Every failed login uses up one of the PIN retries of a token, after which the
+token locks its PIN. A PIN the token refuses is therefore wiped from memory
+and never tried again \- neither when the token is looked for again nor when
+the module is loaded anew \- until the daemon is started again with another
+PIN; the token is used without a login meanwhile, as far as it allows. Nor is
+a PIN tried on a token that reports its user PIN locked. The status tells
+either.
+.PP
+A token that is not there \- not inserted yet, pulled, or lost to a failed
+.B C_GenerateRandom
+\- is looked for again on the next request of the ESDM, at most every 5
+seconds. When the slots of the module hold no usable token, the module is
+loaded anew, as some modules \- SoftHSM among them \- only see a token added
+after they were loaded once they are loaded again. A module that cannot be
+loaded at all is tried again the same way: the daemon serves in any case, and
+the ESDM credits it with nothing while it has no token.
+.PP
+Whenever a token is bound, it is tested: two reads that have to differ. A
+token that repeats its output is credited with nothing until a later test
+passes \- one of the self tests the ESDM asks for, or the one of the token
+bound anew. While no token is bound, requests for data fail and
+the ESDM credits the source with nothing; a self test passes, as there is
+nothing to test.
+.PP
+The daemon serves until it receives
+.BR SIGTERM ,
+.B SIGINT
+or
+.BR SIGHUP ,
+then logs out of the token, wipes the PIN, removes the socket and exits with
+status 0. A configuration it cannot run with \- no module, an invalid option,
+a PIN that cannot be read \- ends it at start up with exit status 1.
+.SH THE PIN
+The PIN is never given on the command line, where every user of the machine
+reads it, nor at build time. It is the first line of a file:
+.IP \(bu 2
+the file of
+.BR \-\-pin_file ,
+or
+.IP \(bu 2
+a systemd credential, read from
+.IR $CREDENTIALS_DIRECTORY :
+the one named with
+.BR \-\-pin_credential ,
+or else
+.B pkcs11\-pin
+if the daemon has it \- see
+.B LoadCredential=
+and
+.B LoadCredentialEncrypted=
+in
+.BR systemd.exec (5).
+.PP
+The line break ending the line is not part of the PIN. A file that is empty,
+holds more than one line or more than 256 bytes, or is no regular file is
+refused, and a PIN file open to every user is warned about.
+Without either, no PIN is used. The daemon keeps itself out of core dumps and
+out of the reach of
+.BR ptrace (2)
+of other processes of its user, as its memory holds the PIN.
+.SH NAME AND ENTROPY RATE
+The daemon declares the name of the source and its entropy rate to the ESDM
+(INFO request of the protocol, see
+.BR libesdm_es_ext (3)):
+.TP
+name
+.B PKCS#11
+followed by the token label of
+.B \-\-token_label
+if one is given and both make a valid name of up to 32 bytes \-
+.B "PKCS#11 my\-token"
+\- else
+.BR PKCS#11 ,
+or the name of
+.BR \-\-name .
+The ESDM shows the source under this name in its status and its log, with its
+instance name (ExternalSocket, ExternalSocket1, ...) next to it, which tells
+several daemons apart.
+.TP
+entropy rate
+the one of
+.BR \-\-entropy_rate ,
+by default the one of the build (meson option
+.BR es_pkcs11_entropy_rate ,
+128 bits per 256 bits of data unless configured otherwise). The ESDM credits
+the source at this rate unless a rate is configured for the source in the ESDM
+.RB ( "esdm\-server \-\-es_ext_socket_entropy_rate" ),
+which takes precedence.
+.SH STATUS
+The daemon answers the STATUS request of the ESDM, which shows the answer as
+the
+.B provider
+member of the source in its own status, with the fields of the provider server
+of
+.BR libesdm_es_ext (3)
+\- see
+.BR esdm\-es\-ext\-serve (8)
+\- in
+.B server
+and those of the PKCS#11 source in
+.BR plugin :
+.TP
+.B module
+the PKCS#11 module, shortened to its file name if the path is too long for the
+status;
+.TP
+.B token_label
+the token label of
+.BR \-\-token_label ,
+null if none is configured;
+.TP
+.B token
+the label of the token in use, null while there is none;
+.TP
+.B slot
+the PKCS#11 slot ID of the token in use, null while there is none;
+.TP
+.B token_present
+whether a token is in use;
+.TP
+.B logged_in
+whether the daemon is logged in to it;
+.TP
+.B pin
+.B none
+without a PIN,
+.B set
+with one,
+.B refused
+once the token refused it,
+.B locked
+if the token reported its user PIN locked \- the PIN is wiped then;
+.TP
+.B repetition_test
+the verdict of the last test of the output of the token:
+.BR passed ,
+.B failed
+or
+.B none
+before the first one;
+.TP
+.B last_error
+why no token is in use, or why the last request failed \- null once a token
+is in use and delivers.
+.PP
+A token label and the module path go into the status as UTF-8 without control
+characters, whatever bytes they hold: a byte that is not, and a control
+character, are shown as a '?' each.
+.SH OPTIONS
+.TP
+.BR \-M ", " \-\-module " \fIPATH\fR"
+The PKCS#11 module to load, e.g.
+.I /usr/lib/softhsm/libsofthsm2.so
+or
+.IR /usr/lib/opensc\-pkcs11.so .
+By default the one of the build (meson option
+.BR es_pkcs11_module_path );
+required if the build names none.
+.TP
+.BR \-t ", " \-\-token_label " \fILABEL\fR"
+Use the token of the label
+.IR LABEL .
+By default the one of the build (meson option
+.BR es_pkcs11_token_label ),
+or else the first token with a random number generator.
+.TP
+.BR \-p ", " \-\-pin_file " \fIPATH\fR"
+Read the user PIN from the first line of the file
+.IR PATH ,
+see
+.BR "THE PIN" .
+.TP
+.BI \-\-pin_credential " NAME"
+Read the user PIN from the systemd credential
+.IR NAME ,
+which has to be there. Without this option, the credential
+.B pkcs11\-pin
+is read if the daemon has it.
+.B \-\-pin_file
+takes precedence.
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR"
+The socket to serve on, by default
+.IR /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket .
+A socket left at the path by an earlier instance is replaced, any other file is
+not.
+.TP
+.BR \-m ", " \-\-mode " \fIMODE\fR"
+Access mode of the socket, octal. The default is 0666: the ESDM connects with
+its privileges dropped, and the daemon serves only the clients of
+.BR \-\-client_uid .
+.TP
+.BR \-u ", " \-\-client_uid " \fIUSER\fR"
+Serve clients running as
+.I USER
+\- a uid or a user name \- next to root. May be given up to 8 times; the
+default is
+.BR nobody ,
+the user the ESDM runs as unless told otherwise
+.RB ( "esdm\-server \-\-username" ).
+Any other client is disconnected at once, so that it can neither take the
+client slots the ESDM needs nor drain the token.
+.TP
+.BI \-\-entropy_rate " BITS"
+Declare
+.I BITS
+of entropy per 256 bits of data, 0 to 256, see
+.BR "NAME AND ENTROPY RATE" .
+.TP
+.BI \-\-name " NAME"
+Declare
+.I NAME
+as the name of the source: 1 to 32 bytes of UTF-8 without control characters.
+.TP
+.B \-\-no_dtls
+Do not offer DTLS to the clients. A build with DTLS (meson option
+.BR dtls )
+offers it by default, see
+.BR libesdm_es_ext (3).
+.TP
+.BR \-v ", " \-\-verbose
+Verbose logging; repeat for more.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.SH THE ESDM
+The ESDM reads the daemon through one of its provider socket sources: the
+build has
+.B es_ext_socket_num
+of them (meson option, 1 by default), each configured with the n\-th
+occurrence of the options below. A build with another provider \- an
+.BR esdm\-es\-ext\-serve (8)
+\- next to the PKCS#11 daemon needs one more, as does a second token served by
+a second daemon.
+.TP
+.BI "esdm\-server \-\-es_ext_socket " PATH
+the socket of the daemon;
+.TP
+.BI "esdm\-server \-\-es_ext_socket_uid " USER
+the user the daemon runs as: the ESDM accepts a provider running as root or as
+this user only, and trusts it with the entropy rate it declares;
+.TP
+.BI "esdm\-server \-\-es_ext_socket_entropy_rate " BITS
+optionally, a rate that takes precedence over the one the daemon declares.
+.PP
+The ESDM connects to the daemon at its start and again whenever the connection
+is lost, at most every 5 seconds \- by a seeding, or by its monitor: it need
+not be started after the daemon, and a daemon restarted is read again on its
+own. Started before the ESDM, the daemon is read already for the initial
+seeding.
+.SH EXAMPLE
+A SoftHSM token, the PIN in a file only root can read, the daemon running as
+the user
+.BR esdm\-es\-pkcs11 :
+.PP
+.nf
+esdm\-es\-pkcs11 \-\-module /usr/lib/softhsm/libsofthsm2.so \\
+	\-\-token_label my\-token \-\-pin_file /etc/esdm/pkcs11\-pin \\
+	\-\-socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
+	\-\-es_ext_socket_uid esdm\-es\-pkcs11
+.fi
+.SH SEE ALSO
+.BR esdm\-server (8),
+.BR esdm\-es\-ext\-serve (8),
+.BR libesdm_es_ext (3),
+.BR systemd.exec (5)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

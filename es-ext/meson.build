@@ -48,3 +48,18 @@ esdm_es_ext_serve = executable('esdm-es-ext-serve',
 	dependencies: [ dependency('threads'), dl_dep, json_c_dep ] + dtls_deps,
 	install: true
 	)
+
+# The PKCS#11 entropy source: a provider of its own, serving the random number
+# generator of a PKCS#11 token with the provider server above - see
+# esdm-es-pkcs11(8). It is the only part of the ESDM that needs libp11.
+if get_option('es_pkcs11').enabled()
+	esdm_es_pkcs11 = executable('esdm-es-pkcs11',
+		[ 'pkcs11/esdm_es_pkcs11.c', 'pkcs11/esdm_es_pkcs11_main.c' ],
+		c_args: [ '-DESDM_ES_PKCS11_VERSION="' + meson.project_version() + '"' ],
+		include_directories: include_dirs_es_ext,
+		link_with: [ esdm_es_ext_lib.get_static_lib(), esdm_common_static_lib ],
+		dependencies: [ dependency('threads'), dl_dep, json_c_dep,
+				dependency('libp11', required: true) ] + dtls_deps,
+		install: true
+		)
+endif

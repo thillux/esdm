@@ -45,6 +45,10 @@ if get_option('esdm-es-ext').enabled()
 	man_pages += [ 'libesdm_es_ext.3', 'esdm-es-ext-serve.8' ]
 endif
 
+if get_option('es_pkcs11').enabled()
+	man_pages += [ 'esdm-es-pkcs11.8' ]
+endif
+
 if get_option('openssl-rand-provider').enabled()
 	man_pages += [ 'esdm-openssl-provider.7' ]
 endif

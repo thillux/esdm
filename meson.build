@@ -335,6 +335,12 @@ if get_option('esdm-es-ext').enabled()
 	subdirs += [ 'es-ext' ]
 endif
 
+# The PKCS#11 entropy source is a provider served by the library of the
+# external entropy sources - see es-ext/meson.build
+if get_option('es_pkcs11').enabled() and get_option('esdm-es-ext').disabled()
+	error('es_pkcs11 builds esdm-es-pkcs11, a provider served by libesdm_es_ext - enable esdm-es-ext as well')
+endif
+
 if get_option('esdm-tool').enabled()
 	subdirs += [ 'frontends/tool' ]
 endif
