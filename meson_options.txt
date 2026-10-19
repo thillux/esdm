@@ -990,6 +990,12 @@ option('systemd', type: 'feature', value: 'enabled',
 
        ESDM services will notify systemd about beeing ready and use provided FDs
        for their sockets (socket activation).
+
+       Without it, the units of the services wait for no readiness notification,
+       and the socket units of esdm-server and the units of
+       esdm-vhost-user-rng, which rely on socket activation, are not installed.
+       The daemons of egd-net and es-ext-net take the sockets of systemd
+       either way.
        ''')
 
 ################################################################################

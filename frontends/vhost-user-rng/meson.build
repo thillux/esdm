@@ -39,11 +39,22 @@ esdm_vhost_user_rng = executable(
 vhost_user_rng_conf_data = configuration_data()
 vhost_user_rng_conf_data.set('PATH', get_option('prefix') / get_option('bindir'))
 vhost_user_rng_conf_data.set('SOCKET_GROUP', get_option('vhost-user-rng-socket-group'))
+# Ready once it listens, which it tells systemd where it can
+vhost_user_rng_conf_data.set('SERVICE_TYPE', get_option('systemd').enabled() ?
+					     'Type=notify\nNotifyAccess=main' :
+					     'Type=exec')
 
+# The units are socket activated, and the daemon only takes the socket of
+# systemd with the systemd support - without it, the service would start
+# without a socket and fail. Not installed then: the daemon is started with
+# --socket or --fd instead, see esdm-vhost-user-rng(8).
 foreach unit : [ 'esdm-vhost-user-rng@.socket', 'esdm-vhost-user-rng@.service' ]
-	install_data(configure_file(
+	unit_file = configure_file(
 			input : unit + '.in',
 			output : unit,
-			configuration : vhost_user_rng_conf_data),
-		     install_dir: get_option('prefix') / 'lib/systemd/system')
+			configuration : vhost_user_rng_conf_data)
+	if get_option('systemd').enabled()
+		install_data(unit_file,
+			     install_dir: get_option('prefix') / 'lib/systemd/system')
+	endif
 endforeach

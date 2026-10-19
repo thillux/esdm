@@ -23,8 +23,7 @@ Wants=esdm-server.service
 After=esdm-server.service
 
 [Service]
-Type=notify
-NotifyAccess=main
+@SERVICE_TYPE@
 Environment=ESDM_VHOST_USER_RNG_OPTS=
 ExecStart=@PATH@/esdm-vhost-user-rng --syslog $ESDM_VHOST_USER_RNG_OPTS
 Restart=on-failure

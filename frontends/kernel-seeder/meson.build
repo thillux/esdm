@@ -10,6 +10,11 @@ esdm_kernel_seeder = executable(
 
 kernel_seeder_conf_data = configuration_data()
 kernel_seeder_conf_data.set('PATH', get_option('prefix') + '/' + get_option('bindir'))
+# Ready once it seeded the kernel for the first time, which it tells systemd
+# where it can - without the systemd support, a Type=notify unit would wait
+# for a notification that never comes, and fail
+kernel_seeder_conf_data.set('SERVICE_TYPE',
+	get_option('systemd').enabled() ? 'Type=notify' : 'Type=exec')
 esdm_kernel_seeder_service = configure_file(
 	input : 'esdm-kernel-seeder.service.in',
 	output : 'esdm-kernel-seeder.service',
