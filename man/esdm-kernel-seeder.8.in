@@ -63,7 +63,10 @@ Log to syslog instead of standard output and standard error.
 Draw the data from the prediction\-resistance generator of the ESDM, and force
 a reseed of the kernel CRNG right after every insertion. This mode is selected
 automatically when the ESDM was built for the AIS 20/31 NTG.1 seeding
-strategy.
+strategy (meson option
+.BR ais2031_ntg1 )
+or with the jitter RNG in its own NTG.1 mode
+.RB ( es_jent_ntg1 ).
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP
