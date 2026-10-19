@@ -59,7 +59,9 @@ int esdm_cdev_egd_status(bool json, char **report, size_t *len);
 /*
  * One of the privileged commands changing the entropy accounting or the
  * DRNGs, with its argument @arg if @has_arg. Returns the status the ESDM
- * answered with, or a negative errno when it could not be asked. Only to be
+ * answered with, or a negative errno when it could not be asked. Once sent,
+ * the command is carried out by the ESDM, so it is never restarted: its answer
+ * is waited for despite signals, -EINTR only for a fatal one. Only to be
  * invoked on behalf of a caller holding CAP_SYS_ADMIN.
  */
 int esdm_cdev_egd_priv(u8 cmd, bool has_arg, u32 arg);

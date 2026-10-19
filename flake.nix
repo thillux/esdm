@@ -1103,6 +1103,11 @@
                   machine.succeed("${check} addentropy /tmp/fake-egd.log")
                   real_egd()
 
+              with subtest("RNDADDTOENTCNT is not carried out twice for a signal"):
+                  fake_egd("notop")
+                  machine.succeed("${check} addtoentcnt-signal /tmp/fake-egd.log")
+                  real_egd()
+
               with subtest("unloading once the reader is gone"):
                   machine.succeed(
                       "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"

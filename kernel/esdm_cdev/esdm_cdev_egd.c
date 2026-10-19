@@ -27,7 +27,8 @@
  *
  * Once connected, the requests are carried out in the context of the caller:
  * sending and receiving on a connected socket involves no path lookup, and the
- * caller's signals interrupt the waits.
+ * caller's signals interrupt the waits - except the one for the answer of a
+ * command that changes something in the ESDM, see esdm_cdev_recv_committed().
  *
  * Connections
  * -----------
@@ -412,10 +413,64 @@ static bool esdm_cdev_interrupted(int ret)
 }
 
 /*
+ * Receive exactly @len bytes of the answer to a command the ESDM carries out
+ * once it has it, also when nobody waits for the answer any more - the
+ * commands changing its entropy accounting or its DRNGs. A caller interrupted
+ * now would have the command restarted, and carried out twice. So the answer
+ * is waited for despite signals, bounded by the timeout as every wait; only a
+ * fatal signal ends the wait, after which nothing is restarted. The socket's
+ * waits end at any signal, so with one pending, the answer is polled for.
+ */
+static int esdm_cdev_recv_committed(struct socket *sock, void *buf, size_t len)
+{
+	unsigned long end = jiffies + READ_ONCE(sock->sk->sk_rcvtimeo);
+
+	while (len) {
+		struct kvec iov = { .iov_base = buf, .iov_len = len };
+		struct msghdr msg = { .msg_flags = 0 };
+		bool polling = signal_pending(current);
+		int ret;
+
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
+		ret = kernel_recvmsg(sock, &msg, &iov, 1, len,
+				     polling ? MSG_DONTWAIT : MSG_WAITALL);
+
+		if (!ret)
+			return -ECONNRESET;
+		if (polling && ret == -EAGAIN) {
+			if (time_after(jiffies, end))
+				return -ETIMEDOUT;
+			schedule_timeout_uninterruptible(1);
+			continue;
+		}
+		/* A signal came while waiting */
+		if (esdm_cdev_interrupted(ret))
+			continue;
+		if (ret == -EAGAIN)
+			return -ETIMEDOUT;
+		if (ret < 0)
+			return ret;
+		if ((size_t)ret > len)
+			return -EIO;
+
+		buf += ret;
+		len -= (size_t)ret;
+	}
+
+	return 0;
+}
+
+/*
  * Carry out one request with @op on a connection: connected, with the
  * timeouts set, and locked. A request that failed before anything of it went
  * out - a connection the ESDM closed while it was idle, as on its restart - is
  * tried once more on a fresh connection.
+ *
+ * @changes: the request changes something in the ESDM, which carries it out
+ * once it has it. One that went out is therefore not restarted, nor tried
+ * again, whatever happens to its answer.
  *
  * Returns 0, -ERESTARTSYS when the caller was interrupted, -ENOTCONN when the
  * ESDM cannot be reached, -ETIMEDOUT when no connection was free in time, or
@@ -423,7 +478,7 @@ static bool esdm_cdev_interrupted(int ret)
  */
 static int esdm_cdev_invoke(int (*op)(struct socket *sock, void *arg,
 				      bool *sent),
-			    void *arg)
+			    void *arg, bool changes)
 {
 	struct esdm_cdev_conn *conn = esdm_cdev_conn_get();
 	unsigned int attempt;
@@ -446,6 +501,16 @@ static int esdm_cdev_invoke(int (*op)(struct socket *sock, void *arg,
 		ret = op(conn->sock, arg, &sent);
 		if (!ret) {
 			conn->backoff_ms = 0;
+			break;
+		}
+
+		/* Gone out: its error, or -EINTR for a fatal signal */
+		if (changes && sent) {
+			bool intr = esdm_cdev_interrupted(ret);
+
+			esdm_cdev_conn_drop(conn, !intr);
+			if (intr)
+				ret = -EINTR;
 			break;
 		}
 
@@ -541,7 +606,7 @@ int esdm_cdev_egd_read(u8 cmd, u8 *buf, size_t len)
 	if (!len)
 		return 0;
 
-	ret = esdm_cdev_invoke(esdm_cdev_read_op, &op);
+	ret = esdm_cdev_invoke(esdm_cdev_read_op, &op, false);
 
 	return ret ? ret : (int)op.got;
 }
@@ -645,7 +710,7 @@ ssize_t esdm_cdev_egd_insert_user(const char __user *ubuf, size_t len)
 			break;
 		}
 
-		ret = esdm_cdev_invoke(esdm_cdev_insert_op, &op);
+		ret = esdm_cdev_invoke(esdm_cdev_insert_op, &op, false);
 		memzero_explicit(op.cmd, op.len);
 		if (ret)
 			break;
@@ -709,7 +774,7 @@ static int esdm_cdev_state_op(struct socket *sock, void *arg, bool *sent)
 
 int esdm_cdev_egd_get_state(struct esdm_cdev_state *state)
 {
-	return esdm_cdev_invoke(esdm_cdev_state_op, state);
+	return esdm_cdev_invoke(esdm_cdev_state_op, state, false);
 }
 
 struct esdm_cdev_status_op {
@@ -762,7 +827,7 @@ int esdm_cdev_egd_status(bool json, char **report, size_t *len)
 	struct esdm_cdev_status_op op = { .json = json };
 	int ret;
 
-	ret = esdm_cdev_invoke(esdm_cdev_status_op, &op);
+	ret = esdm_cdev_invoke(esdm_cdev_status_op, &op, false);
 	if (ret)
 		return ret;
 
@@ -792,7 +857,7 @@ static int esdm_cdev_priv_op(struct socket *sock, void *arg, bool *sent)
 	if (ret)
 		return ret;
 
-	ret = esdm_cdev_recv(sock, val, sizeof(val));
+	ret = esdm_cdev_recv_committed(sock, val, sizeof(val));
 	if (ret)
 		return ret;
 
@@ -815,7 +880,7 @@ int esdm_cdev_egd_priv(u8 cmd, bool has_arg, u32 arg)
 	};
 	int ret;
 
-	ret = esdm_cdev_invoke(esdm_cdev_priv_op, &op);
+	ret = esdm_cdev_invoke(esdm_cdev_priv_op, &op, true);
 
 	return ret ? ret : op.status;
 }

@@ -549,6 +549,29 @@ def cmd_addentropy(args):
     print("addentropy ok")
 
 
+def cmd_addtoentcnt_signal(args):
+    # Against a notop fake-egd, which answers 0xe6 after a second: a signal
+    # while the module waits for that answer must not have the ioctl
+    # restarted, with the command carried out once more
+    import signal
+    log = args[0]
+    signal.signal(signal.SIGALRM, lambda *a: None)
+    # SA_RESTART: the kernel restarts what returns ERESTARTSYS
+    signal.siginterrupt(signal.SIGALRM, False)
+    fd = os.open("/dev/esdm_random", os.O_RDWR)
+    try:
+        before = len(fake_log(log))
+        signal.setitimer(signal.ITIMER_REAL, 0.3)
+        fcntl.ioctl(fd, RNDADDTOENTCNT, struct.pack("i", 64))
+    finally:
+        os.close(fd)
+    credits = [e for e in fake_log(log)[before:] if e[0] == "e6"]
+    print(f"RNDADDTOENTCNT with a signal: {credits}")
+    if credits != [["e6", "64"]]:
+        fail(f"RNDADDTOENTCNT carried out {len(credits)} times")
+    print("addtoentcnt-signal ok")
+
+
 def cmd_backoff(args):
     # Against a mute fake-egd: every read waits for the timeout once its
     # connection is made, after that the reconnects back off up to 2 s
@@ -584,6 +607,7 @@ CMDS = {
     "fake-egd": cmd_fake_egd,
     "backoff": cmd_backoff,
     "addentropy": cmd_addentropy,
+    "addtoentcnt-signal": cmd_addtoentcnt_signal,
 }
 
 if __name__ == "__main__":
