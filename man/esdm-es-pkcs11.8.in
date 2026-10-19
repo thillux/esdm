@@ -18,6 +18,21 @@ esdm\-es\-pkcs11 \- serve the random number generator of a PKCS#11 token to the 
 .RB [ \-\-entropy_rate
 .IR BITS ]
 .RB [ \-v ]
+.br
+.B esdm\-es\-pkcs11
+.RB [ \-\-module
+.IR PATH ]
+.RB [ \-\-token_label
+.IR LABEL ]
+.B \-\-listen
+.I [HOST]:PORT
+.RB [ \-\-cert
+.IR FILE ]
+.RB [ \-\-key
+.IR FILE ]
+.RB [ \-\-ca
+.IR FILE ]
+.RI [ OPTIONS ]
 .SH DESCRIPTION
 .B esdm\-es\-pkcs11
 is the PKCS#11 entropy source of the ESDM: it reads the random number
@@ -67,13 +82,24 @@ bound anew. While no token is bound, requests for data fail and
 the ESDM credits the source with nothing; a self test passes, as there is
 nothing to test.
 .PP
+With
+.B \-\-listen
+or sockets handed over by socket activation, the daemon serves the token to
+the ESDM of other hosts instead, on SCTP with DTLS and certificates, through
+their
+.BR esdm\-es\-ext\-relay (8)
+\- see
+.BR NETWORK .
+.PP
 The daemon serves until it receives
 .BR SIGTERM ,
 .B SIGINT
-or
+or \- on a UNIX domain socket \-
 .BR SIGHUP ,
 then logs out of the token, wipes the PIN, removes the socket and exits with
-status 0. A configuration it cannot run with \- no module, an invalid option,
+status 0. On the network,
+.B SIGHUP
+reloads the TLS files. A configuration it cannot run with \- no module, an invalid option,
 a PIN that cannot be read \- ends it at start up with exit status 1.
 .SH THE PIN
 The PIN is never given on the command line, where every user of the machine
@@ -263,14 +289,86 @@ Do not offer DTLS to the clients. A build with DTLS (meson option
 offers it by default, see
 .BR libesdm_es_ext (3).
 .TP
+.BI \-\-listen " [HOST]:PORT"
+Serve on the network, see
+.BR NETWORK .
+The further options of the network \-
+.BR \-\-cert ,
+.BR \-\-key ,
+.BR \-\-ca ,
+.BR \-\-crl ,
+.BR \-\-crl_check_all ,
+.BR \-\-crl_allow_expired ,
+.BR \-\-reload_interval ,
+.BR \-\-allow ,
+.BR \-\-max_connections ,
+.BR \-\-max_handshakes ,
+.BR \-\-max_handshakes_per_source ,
+.BR \-\-max_per_client ,
+.BR \-\-handshake_timeout ,
+.BR \-\-idle_timeout ,
+.B \-\-username
+and
+.B \-\-groupname
+\- are those of
+.BR esdm\-es\-ext\-serve (8).
+.TP
 .BR \-v ", " \-\-verbose
-Verbose logging; repeat for more.
+Verbose logging; repeat for more. On the network, warnings and errors are
+logged without it, as by the other daemons on the network.
 .TP
 .BR \-h ", " \-\-help
 Print the usage.
 .TP
 .B \-\-version
 Print the version.
+.SH NETWORK
+A token on one host serves the ESDM of others: with
+.BR \-\-listen ,
+the daemon serves it on SCTP, with DTLS 1.2 and certificates on both sides and
+SCTP-AUTH, exactly as
+.BR esdm\-es\-ext\-serve (8)
+serves a plugin \- see
+.B NETWORK
+there, for the transport, the bounds of the connections, the rotation of the
+TLS files and the CRLs. The ESDM of the other host reads it through its
+.BR esdm\-es\-ext\-relay (8).
+.BR \-\-socket ,
+.BR \-\-mode ,
+.B \-\-client_uid
+and
+.B \-\-no_dtls
+are refused on the network; the certificate of a client tells who it is. The
+STATUS tells
+.B sctp
+as the
+.B transport
+of the server, and the SHA-256 of the client's certificate as its
+.BR peer .
+.PP
+The shipped unit serves the local ESDM, without a network
+.RB ( PrivateNetwork=yes ).
+To serve on the network instead, override its command line and grant it the
+network in a drop-in, e.g.
+.IR /etc/systemd/system/esdm\-es\-pkcs11.service.d/net.conf :
+.PP
+.nf
+[Service]
+ExecStart=
+ExecStart=/usr/bin/esdm\-es\-pkcs11 \-\-listen :@ES_EXT_NET_PORT@ $ESDM_ES_PKCS11_OPTIONS
+PrivateNetwork=no
+IPAddressDeny=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LoadCredential=cert:/etc/esdm/es\-ext\-net/server.crt
+LoadCredential=key:/etc/esdm/es\-ext\-net/server.key
+LoadCredential=ca:/etc/esdm/es\-ext\-net/ca.crt
+.fi
+.PP
+and drop
+.B \-\-es_ext_socket
+of the daemon from the local ESDM. The daemon runs as
+.B esdm\-es\-pkcs11
+there already, and drops no privileges.
 .SH THE ESDM
 The ESDM reads the daemon through one of its provider socket sources: the
 build has
@@ -382,6 +480,7 @@ esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \\
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-es\-ext\-serve (8),
+.BR esdm\-es\-ext\-relay (8),
 .BR libesdm_es_ext (3),
 .BR systemd.exec (5),
 .BR systemd\-creds (1)

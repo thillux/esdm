@@ -3,6 +3,7 @@
 man_conf_data = configuration_data()
 man_conf_data.set('VERSION', meson.project_version())
 man_conf_data.set('EGD_NET_PORT', get_option('egd-net-port'))
+man_conf_data.set('ES_EXT_NET_PORT', get_option('es-ext-net-port'))
 man_conf_data.set('EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
 man_conf_data.set('EGD_TLS_MODULE', get_option('prefix') / get_option('libdir') /
 				    'esdm' / 'esdm-egd-tls.so')
@@ -63,6 +64,10 @@ endif
 
 if get_option('egd-net').enabled()
 	man_pages += [ 'esdm-egd-net-server.8', 'esdm-egd-net-relay.8' ]
+endif
+
+if es_ext_net
+	man_pages += [ 'esdm-es-ext-relay.8' ]
 endif
 
 # Raw entropy measurement tooling - only built for validation, so only

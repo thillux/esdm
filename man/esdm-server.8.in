@@ -1,4 +1,4 @@
-.TH ESDM\-SERVER 8 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
+.TH ESDM\-SERVER 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 esdm\-server \- Entropy Source and DRNG Manager daemon
 .SH SYNOPSIS
@@ -367,6 +367,34 @@ adds the options in its environment variable
 .B ESDM_SERVER_OPTIONS
 to its command line, which a drop\-in sets \- see
 .BR esdm\-es\-pkcs11 (8).
+.SS Sources on other hosts
+The daemon reaches no network: it has left the network namespace of the host
+when it reads a provider. A provider on another host \- an
+.BR esdm\-es\-ext\-serve (8)
+or
+.BR esdm\-es\-pkcs11 (8)
+serving on SCTP with DTLS and certificates \- is read through the
+.BR esdm\-es\-ext\-relay (8)
+of this host (meson option
+.BR es\-ext\-net ),
+which serves a local provider socket and forwards each request. To the daemon,
+the relay is a provider like any other, accepted by the user it runs as; the
+name, the rate and the status are those of the remote provider:
+.PP
+.nf
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket \\
+	\-\-es_ext_socket_uid esdm\-es\-ext\-relay
+.fi
+.PP
+Accepting the user of the relay is trusting the rate every provider declares
+that holds a certificate the relay accepts \- see
+.B TRUST
+in
+.BR esdm\-es\-ext\-relay (8)
+\- unless the rate of the source is configured with
+.BR \-\-es_ext_socket_entropy_rate .
+A remote provider that is not reachable is a source that is not connected,
+credited with nothing until it is.
 .SH ENCRYPTION
 A daemon built with DTLS (meson option
 .BR dtls )
@@ -578,6 +606,7 @@ requested interfaces.
 .BR esdm\-tool (1),
 .BR esdm\-es\-ext\-serve (8),
 .BR esdm\-es\-pkcs11 (8),
+.BR esdm\-es\-ext\-relay (8),
 .BR esdm\-cuse\-random (8),
 .BR esdm\-cuse\-urandom (8),
 .BR esdm\-proc (8),

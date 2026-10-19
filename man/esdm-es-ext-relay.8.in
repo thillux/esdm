@@ -1,0 +1,340 @@
+.TH ESDM\-ES\-EXT\-RELAY 8 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
+.SH NAME
+esdm\-es\-ext\-relay \- read an external entropy source on another host
+.SH SYNOPSIS
+.B esdm\-es\-ext\-relay
+.B \-\-connect
+.I HOST[:PORT]
+.RB [ \-\-cert
+.IR FILE ]
+.RB [ \-\-key
+.IR FILE ]
+.RB [ \-\-ca
+.IR FILE ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B esdm\-es\-ext\-relay
+serves the ESDM of its host an external entropy source of another host: a
+provider served on the network by
+.BR esdm\-es\-ext\-serve (8)
+or
+.BR esdm\-es\-pkcs11 (8)
+\- see
+.B NETWORK
+in
+.BR esdm\-es\-ext\-serve (8).
+The
+.BR esdm\-server (8)
+does not reach the network itself \- it leaves the network namespace of its
+host as it starts, and parses no certificate. The relay serves it a local
+provider socket instead, which the ESDM reads through one of its provider
+socket sources as any other provider
+.RB ( "esdm\-server \-\-es_ext_socket" ),
+and forwards each request over SCTP with DTLS and certificates:
+.PP
+.nf
+	esdm\-server \-\-\-unix socket\-\-\-> esdm\-es\-ext\-relay
+		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> esdm\-es\-ext\-serve
+.fi
+.PP
+The requests of the ESDM \- INFO, SELFTEST, GET_ENTROPY and STATUS, see
+.BR libesdm_es_ext (3)
+\- are forwarded one to one, and the answers of the provider passed back
+unchanged: the ESDM shows the source under the name the remote provider
+declares, credits it at the rate the remote provider declares \- unless one is
+configured for the source \- and shows the status of the remote provider, whose
+server tells
+.B sctp
+as its
+.BR transport .
+The relay answers STARTDTLS itself: the local socket has its own opportunistic
+DTLS, as any provider socket, and the network its own DTLS with certificates.
+Every answer is checked as the ESDM checks it before it is passed back; one
+that breaks the protocol ends the connection.
+.PP
+Every local connection has an upstream connection of its own, made when the
+ESDM asks INFO \- which it asks first on every connection, and which the relay
+requires first: the name and the rate the ESDM credits a connection with are
+the ones the remote provider declared on it, so a provider restarted with
+another declaration is taken at its new one with the next connection.
+.PP
+The remote provider being unreachable, or lost, is told to the ESDM rather than
+hidden from it:
+.IP \(bu 2
+INFO, with the provider not reachable \- not resolvable, not answering, failing
+the handshake \- is answered with the errno, and the local connection closed.
+The ESDM shows the source as not connected and tries again after its retry
+interval, at most every 5 seconds. A warning is logged once, until the provider
+is reachable again.
+.IP \(bu 2
+An upstream connection lost while idle \- the provider was restarted, or closed
+it as idle \- closes the local one: the ESDM connects again at once with its
+next request, and so does the relay.
+.IP \(bu 2
+A request whose upstream connection fails or times out is answered with the
+errno, and the local connection closed after it.
+.PP
+Nothing waits long: every step upstream \- the connection with its handshake,
+or one request \- is bounded by
+.BR \-\-timeout_ms ,
+less than the 2 seconds the ESDM gives a request. A provider slower than that
+is one the ESDM does without.
+.SH TRUST
+The ESDM accepts a provider by the user it runs as
+.RB ( "esdm\-server \-\-es_ext_socket_uid" ),
+and trusts it with the rate it declares. For the relay, the user stands for
+what the relay accepts upstream: every holder of a certificate that chains to
+the trust anchors of
+.BR \-\-ca ,
+is issued for the name of the provider and is not revoked by the CRLs of
+.B \-\-crl
+can declare a rate the ESDM credits. Give the relay trust anchors that issue
+providers only \- a CA of their own \- or configure the rate of the source in
+the ESDM
+.RB ( "esdm\-server \-\-es_ext_socket_entropy_rate" ),
+which takes precedence over the declared one.
+.PP
+The remote side can do nothing a local provider could not: the answers are
+checked as the ESDM checks them, the claimed entropy of a block bounded by its
+size, the status by the size of a provider status, and the requests are the
+ESDM's alone. Another local client is served only when it runs as root or as a
+user of
+.B \-\-client_uid
+\- see
+.BR esdm\-es\-ext\-serve (8)
+on the slots of a provider.
+.PP
+The ESDM sees the relay as the user it ran as when it created its socket. Run
+it as a user of its own \- as the shipped unit does \- rather than as root,
+which the ESDM accepts without being told.
+.SH TRANSPORT
+SCTP, one-to-one style, over IPv4 or IPv6, to port @ES_EXT_NET_PORT@ unless
+told otherwise; with DTLS 1.2 as RFC 6083 maps it onto SCTP, and SCTP-AUTH \-
+see
+.B NETWORK
+in
+.BR esdm\-es\-ext\-serve (8).
+The relay is the DTLS client: it presents its certificate, and verifies that
+of the provider against the trust anchors of
+.BR \-\-ca ,
+that it is issued for the name of the provider \- the host of
+.B \-\-connect
+or
+.BR \-\-server_name ,
+a DNS name or an IP address \- and, if it has an extended key usage, for TLS
+server authentication. With
+.BR \-\-crl ,
+the provider's chain is checked against the CRLs as the
+.BR esdm\-egd\-net\-server (8)
+checks its clients', see
+.B REVOCATION
+there: fail closed, as part of the verification of the TLS stack.
+.PP
+A provider whose association does not authenticate its DATA chunks with
+SCTP-AUTH is refused before the handshake. The kernel needs SCTP (module
+.BR sctp );
+a kernel before Linux 5.4 also needs the sysctl
+.BR net.sctp.auth_enable=1 ,
+without which the relay logs an error naming it and fails the connections.
+.SH OPTIONS
+.TP
+.BR \-C ", " \-\-connect " \fIHOST[:PORT]\fR"
+The provider: a name or an address, an IPv6 address in brackets, as in
+.BR [2001:db8::1]:@ES_EXT_NET_PORT@ .
+The port defaults to @ES_EXT_NET_PORT@. The name is resolved at every
+connection, and its addresses are tried in turn. Required.
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR"
+The local provider socket, which
+.B esdm\-server \-\-es_ext_socket
+names. A socket left behind by an earlier relay is replaced, one served by a
+running process is not. The default is
+.IR /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket .
+.TP
+.BR \-m ", " \-\-mode " \fIMODE\fR"
+Access mode of the socket, octal. The default is 0666: the ESDM connects as
+.B nobody
+once it dropped its privileges, and other users are not served anyway.
+.TP
+.BR \-u ", " \-\-client_uid " \fIUSER\fR"
+Serve local clients running as
+.I USER
+\- a uid or a user name \- next to root. May be given up to 8 times; the
+default is
+.BR nobody ,
+the user the ESDM runs as unless told otherwise
+.RB ( "esdm\-server \-\-username" ).
+.TP
+.B \-\-no_dtls
+Do not offer DTLS on the local socket. The DTLS upstream is not affected.
+.TP
+.BI \-\-cert " FILE"
+Certificate of the relay, PEM, optionally followed by the intermediate
+certificates of its chain. It has to chain to the trust anchors of
+.B \-\-ca
+as well: the relay and the providers are issued in one trust domain.
+.TP
+.BI \-\-key " FILE"
+Its private key, PEM, unencrypted, PKCS#8.
+.TP
+.BI \-\-ca " FILE"
+Trust anchors the provider's certificate has to chain to, PEM.
+.TP
+.BI \-\-server_name " NAME"
+Name the provider's certificate has to be issued for, when it is not the host
+of
+.BR \-\-connect .
+.TP
+.BI \-\-crl " FILE"
+CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
+only, no delta CRLs nor ones with an issuing distribution point.
+.TP
+.B \-\-crl_check_all
+Require CRLs of the CA certificates of the provider's chain as well.
+.TP
+.B \-\-crl_allow_expired
+Use a CRL past its nextUpdate with a warning, rather than refusing the
+provider.
+.TP
+.BI \-\-reload_interval " SEC"
+Check the TLS files for a change this often, and take them up when they
+changed. 0 checks them on
+.B SIGHUP
+only. The default is 60. See
+.BR ROTATION .
+.TP
+.BI \-\-timeout_ms " MS"
+Bound of a step upstream: making a connection with its handshake, or one
+request. The default is 1500, which leaves the relay time to answer the ESDM
+with an errno within the 2 seconds it gives a request.
+.TP
+.BI \-\-max_connections " N"
+Local connections at a time, each with an upstream connection of its own. The
+default is 4, as many as a provider serves of one certificate by default
+.RB ( \-\-max_per_client );
+the ESDM holds one. With all of them taken, the client idle the longest is
+disconnected to make room for a new one \- one running as root only for one
+running as root, as the ESDM connects as root at start up.
+.TP
+.BI \-\-username " USER"
+User to switch to after the socket is bound and the TLS files are loaded, when
+started as root. The default is
+.BR nobody .
+The TLS files are read as that user when they are taken up later. The ESDM
+sees the relay as root then, see
+.BR TRUST .
+.TP
+.BI \-\-groupname " GROUP"
+Supplementary group to switch to. The default is none.
+.TP
+.BR \-v ", " \-\-verbose
+More verbose logging, may be repeated. With debug logging, the relay logs the
+subject and the fingerprint of the provider of every upstream connection.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the version.
+.PP
+A file named without a slash is a credential of the service: it is taken from
+.BR $CREDENTIALS_DIRECTORY ,
+where systemd places what
+.B LoadCredential=
+names. Without
+.BR \-\-cert ,
+.B \-\-key
+and
+.BR \-\-ca ,
+the credentials
+.BR cert ,
+.B key
+and
+.B ca
+are used \- what the shipped unit loads.
+.SH ROTATION
+The relay takes up renewed TLS files without a restart: on
+.BR SIGHUP ,
+and when one of the files changes, which it checks every
+.B \-\-reload_interval
+seconds by the path, device, inode, size and modification time of each file.
+Only files that load completely \- the key belongs to the certificate, the
+certificate chains to the trust anchors, the CRLs parse \- replace the ones in
+use; otherwise the error is logged and the relay goes on with what was loaded
+before. New upstream connections are made with the new files; established
+ones keep theirs. After every reload, the relay checks the providers of its
+upstream connections against the new CRLs, and closes the connections of a
+provider revoked; every 30 seconds, it closes those of a provider whose
+certificate expired. Either closes the local connection as well, and the ESDM
+connects again.
+.PP
+The credentials of
+.B LoadCredential=
+are copies made when the service starts; a rotation without a restart needs
+the paths of the files, readable by the user of the service. The CRLs are
+downloaded as described in
+.B CRL UPDATES
+of
+.BR esdm\-egd\-net\-server (8).
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload the TLS files at once.
+.TP
+.BR SIGTERM ", " SIGINT
+Close the connections, remove the socket and exit with status 0.
+.SH SYSTEMD
+.B esdm\-es\-ext\-relay.service
+runs the relay as the system user
+.B esdm\-es\-ext\-relay
+(sysusers.d), serves
+.IR /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket ,
+loads the TLS files as credentials from
+.I /etc/esdm/es\-ext\-net/client.crt ,
+.I client.key
+and
+.IR ca.crt ,
+and takes its options, the provider among them, from
+.B ESDM_ES_EXT_RELAY_ARGS
+of
+.IR /etc/esdm/es\-ext\-relay.env .
+It is ordered before
+.BR esdm\-server.service ,
+and after nothing of the network: the ESDM does without the source until the
+provider is reachable. The ESDM is told about it with a drop-in:
+.PP
+.nf
+# /etc/esdm/es\-ext\-relay.env
+ESDM_ES_EXT_RELAY_ARGS="\-\-connect source.example"
+
+# /etc/systemd/system/esdm\-server.service.d/es\-ext\-relay.conf
+[Service]
+Environment="ESDM_SERVER_OPTIONS=\-\-es_ext_socket /run/esdm\-es\-ext\-relay/esdm\-es\-ext\-relay.socket \-\-es_ext_socket_uid esdm\-es\-ext\-relay"
+
+systemctl enable \-\-now esdm\-es\-ext\-relay.service
+.fi
+.SH EXAMPLES
+.nf
+esdm\-es\-ext\-relay \-\-connect source.example \\
+	\-\-cert /etc/esdm/es\-ext\-net/client.crt \\
+	\-\-key /etc/esdm/es\-ext\-net/client.key \\
+	\-\-ca /etc/esdm/es\-ext\-net/ca.crt \\
+	\-\-socket /run/esdm\-es\-ext\-relay.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-ext\-relay.socket \\
+	\-\-es_ext_socket_uid esdm\-es\-ext\-relay
+.fi
+.PP
+Two remote sources, for an ESDM with two provider socket sources: one relay
+per provider, each on a socket of its own.
+.SH EXIT STATUS
+0 after
+.BR SIGTERM ,
+1 when the options, the TLS files or the socket do not allow it to start.
+.SH SEE ALSO
+.BR esdm\-es\-ext\-serve (8),
+.BR esdm\-es\-pkcs11 (8),
+.BR libesdm_es_ext (3),
+.BR esdm\-server (8),
+.BR esdm\-egd\-net\-server (8)
+.SH AUTHOR
+Markus Theil <theil.markus@gmail.com>

@@ -1,4 +1,4 @@
-.TH LIBESDM_ES_EXT 3 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_ES_EXT 3 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_es_ext \- external entropy sources for the ESDM
 .SH SYNOPSIS
@@ -285,6 +285,66 @@ Close the connections, remove the socket file \- the one created, not one
 another instance put there meanwhile \- and call the
 .I fini
 callback of the plugin.
+.SS Provider server on the network
+A library built with the meson option
+.B es\-ext\-net
+serves a plugin to the ESDM of other hosts as well, on SCTP with DTLS and
+certificates \- see
+.B Network
+below. The other functions of the provider server apply to such a server as
+well, but
+.BR esdm_es_ext_server_allow_uid (),
+which returns
+.B \-EINVAL
+\- a client is known by its certificate \- and
+.BR esdm_es_ext_server_set_dtls (),
+which cannot switch the DTLS of the network off.
+.TP
+.BI "void esdm_es_ext_server_net_config_init(struct esdm_es_ext_server_net_config *" cfg );
+Set
+.I cfg
+to the defaults: no listeners and no TLS files, the TLS files checked for a
+change every 60 seconds, every client address allowed, up to 64 connections in
+all, 16 in their handshake and 4 of them per source address \- per /64 for
+IPv6 \-, 4 per client certificate, 10 seconds for a handshake and 600 seconds
+of silence. The struct carries its
+.IR size :
+fields are only ever appended, and the library takes the defaults for those a
+caller built against an older header does not know.
+.TP
+.BI "int esdm_es_ext_server_alloc_net(const struct esdm_es_ext_plugin *" plugin ", const struct esdm_es_ext_server_net_config *" cfg ", struct esdm_es_ext_server **" server );
+As
+.BR esdm_es_ext_server_alloc (),
+on the SCTP sockets of
+.IR cfg :
+the addresses of
+.I listen
+\- "HOST:PORT", "[IPv6]:PORT", ":PORT" \- and the listening sockets of
+.I listen_fds
+handed over, SCTP of the one-to-one style. Loads the certificate, key, trust
+anchors and CRLs of
+.IR cfg ,
+binds the listeners and calls the
+.I init
+callback of the plugin: a daemon drops its privileges afterwards. Returns
+.B \-EINVAL
+for a configuration that does not parse or TLS files that do not load \- both
+logged \-,
+.B \-EPROTONOSUPPORT
+without SCTP in the kernel, and
+.B \-EOPNOTSUPP
+in a library built without
+.BR es\-ext\-net .
+.TP
+.BI "int esdm_es_ext_server_reload(struct esdm_es_ext_server *" server );
+Have
+.BR esdm_es_ext_server_run ()
+take up the TLS files at once \- when they load completely, else the ones
+loaded before stay in service \- and close the connections of the clients the
+new CRLs revoke. Callable from another thread and from a signal handler.
+Returns
+.B \-EINVAL
+for a server on a UNIX domain socket.
 .SS Plugin loader
 .TP
 .BI "int esdm_es_ext_plugin_load(const char *" path ", struct esdm_es_ext_plugin_handle **" handle ", const struct esdm_es_ext_plugin **" plugin );
@@ -383,9 +443,17 @@ the
 .B name
 and the
 .B entropy_rate
-it declares in its answer to INFO,
+it declares in its answer to INFO, its
+.B transport
+\-
+.B unix
+or
+.B sctp
+\-,
 .B dtls
-of the connection asking, the
+of the connection asking and, on the network, the
+.B peer
+asking, the
 .B clients
 connected and the
 .B client_slots
@@ -469,6 +537,29 @@ The DTLS is opportunistic and unauthenticated: the provider presents an
 ephemeral self-signed certificate that is not verified. What the ESDM trusts
 the provider for remains the credentials of the process on the other end of
 the socket; the DTLS keeps the data from being read off the channel.
+.SS Network
+A provider on another host is read through the
+.BR esdm\-es\-ext\-relay (8)
+of the ESDM's host, which forwards the requests of the ESDM one to one. On
+the network, the messages travel over SCTP of the one-to-one style, with DTLS
+1.2 as RFC 6083 maps it onto SCTP: every DTLS record is one SCTP message on
+stream 0, and every message is DTLS from the first one on \- no STARTDTLS, no
+message in the clear, and a STARTDTLS inside the DTLS is a request that breaks
+the protocol. Inside, the requests and responses are the ones above, carried
+by records with the byte in front. Both sides authenticate with a certificate,
+and the relay checks the name of the provider. The association authenticates
+its DATA and FORWARD-TSN chunks with SCTP-AUTH (RFC 4895), the key of which is
+exported from the DTLS session \- see
+.B NETWORK
+in
+.BR esdm\-es\-ext\-serve (8).
+The STATUS of the server tells
+.B sctp
+as its
+.BR transport ,
+and as its
+.B peer
+the SHA-256 of the certificate of the client asking.
 .SH EXAMPLE
 A plugin library, built with
 .B cc \-shared \-fPIC
@@ -503,6 +594,7 @@ const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-es\-ext\-serve (8),
+.BR esdm\-es\-ext\-relay (8),
 .BR libesdm (3)
 .SH AUTHOR
 Markus Theil <theil.markus@gmail.com>
