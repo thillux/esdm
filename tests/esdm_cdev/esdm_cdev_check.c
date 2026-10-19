@@ -753,6 +753,9 @@ static void cmd_ioctl_priv(int argc, char *argv[])
 		bits = -1;
 		if (rnd_ioctl(fd, RNDADDTOENTCNT, &bits) != EINVAL)
 			fail("%s: negative RNDADDTOENTCNT not refused", dev);
+		if (rnd_add_entropy(fd, -1, 1, "x", 1) != EINVAL)
+			fail("%s: negative RNDADDENTROPY count not refused",
+			     dev);
 		if (rnd_add_entropy(fd, 8, -1, NULL, 0) != EINVAL)
 			fail("%s: negative RNDADDENTROPY size not refused with EINVAL",
 			     dev);
@@ -1919,21 +1922,71 @@ static void fake_log_print(const struct fake_log_entry *e)
 }
 
 /*
+ * Fails the check when the fake EGD at @path logged anything but connections
+ * from its entry @before on
+ */
+static void fake_log_nothing_since(const char *path, size_t before,
+				   const char *what)
+{
+	struct fake_log_entry *entries;
+	size_t n, i;
+
+	entries = fake_log(path, &n);
+	for (i = before; i < n; i++) {
+		if (fake_log_is(&entries[i], "connect", NULL))
+			continue;
+		printf("%s:", what);
+		fake_log_print(&entries[i]);
+		printf("\n");
+		fail("%s sent something to the ESDM", what);
+	}
+	free(entries);
+}
+
+/*
  * addentropy <log>: against a notop fake-egd - RNDADDENTROPY inserts all of
  * the data without entropy, and credits it after that in one go, with no more
- * than the data has bits.
+ * than the data has bits. A negative entropy count or size is refused, a size
+ * of 0 taken, without anything sent to the ESDM.
  */
 static void cmd_addentropy(int argc, char *argv[])
 {
 	static const struct {
 		int bits, size, credit;
 	} cases[] = { { 256, 1000, 256 }, { 4096, 4, 32 }, { 0, 300, 0 } };
+	static const struct {
+		int bits, size, err;
+	} refused[] = { { -1, 16, EINVAL },
+			{ INT32_MIN, 16, EINVAL },
+			{ 64, -1, EINVAL },
+			{ 64, INT32_MIN, EINVAL },
+			{ 64, 0, 0 } };
 	const char *path = argv[0];
 	int fd = open_or_fail(CDEV_RANDOM, O_RDWR);
 	uint8_t data[1000];
 	size_t c;
 
 	(void)argc;
+
+	for (c = 0; c < ARRAY_SIZE(refused); c++) {
+		char what[64];
+		size_t before;
+		int err;
+
+		snprintf(what, sizeof(what),
+			 "RNDADDENTROPY of %d bits on %d bytes",
+			 refused[c].bits, refused[c].size);
+		free(fake_log(path, &before));
+		get_random(data, 16);
+		err = rnd_add_entropy(fd, refused[c].bits, refused[c].size,
+				      data, 16);
+		if (err != refused[c].err)
+			fail("%s: errno %d, want %d", what, err,
+			     refused[c].err);
+		fake_log_nothing_since(path, before, what);
+		printf("%s: %s, nothing sent\n", what,
+		       err ? strerror(err) : "taken");
+	}
 
 	for (c = 0; c < ARRAY_SIZE(cases); c++) {
 		struct fake_log_entry *entries, *last = NULL;
@@ -1985,6 +2038,82 @@ static void cmd_addentropy(int argc, char *argv[])
 
 	close(fd);
 	printf("addentropy ok\n");
+}
+
+/*
+ * write-notop <log>: against a notop fake-egd - write() of either device,
+ * by root, inserts all of the data without entropy. The module is root
+ * towards the ESDM, which honours the entropy claim of a root peer, so a
+ * claim it sent would be credited.
+ */
+static void cmd_write_notop(int argc, char *argv[])
+{
+	static const size_t sizes[] = { 1, 255, 256, 1000, 300 * 1024 };
+	const char *path = argv[0];
+	uint8_t *data = xmalloc(300 * 1024);
+	unsigned int d;
+	size_t i;
+
+	(void)argc;
+
+	for (d = 0; d < CDEV_NUM_DEVS; d++) {
+		const char *dev = cdev_devs[d];
+		int fd = open_or_fail(dev, O_WRONLY);
+
+		for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+			struct fake_log_entry *entries;
+			unsigned long inserted = 0, insertions = 0;
+			size_t before, n, e;
+			ssize_t rc;
+
+			free(fake_log(path, &before));
+			get_random(data, sizes[i]);
+			rc = write(fd, data, sizes[i]);
+			if (rc < 0)
+				fail("%s: write of %zu: %s", dev, sizes[i],
+				     strerror(errno));
+			if ((size_t)rc != sizes[i])
+				fail("%s: write of %zu returned %zd", dev,
+				     sizes[i], rc);
+
+			/*
+			 * The ESDM answered the entropy count behind the
+			 * insertions, after it took them: they are logged.
+			 */
+			entries = fake_log(path, &n);
+			for (e = before; e < n; e++) {
+				const struct fake_log_entry *l = &entries[e];
+
+				if (fake_log_is(l, "connect", NULL))
+					continue;
+				if (strcmp(l->word[0], "write") ||
+				    l->words != 3) {
+					printf("%s: write of %zu:", dev,
+					       sizes[i]);
+					fake_log_print(l);
+					printf("\n");
+					fail("%s: write of %zu sent more than insertions",
+					     dev, sizes[i]);
+				}
+				if (strcmp(l->word[1], "0"))
+					fail("%s: write of %zu inserted with %s bits of entropy",
+					     dev, sizes[i], l->word[1]);
+				inserted += strtoul(l->word[2], NULL, 10);
+				insertions++;
+			}
+			free(entries);
+
+			if (inserted != sizes[i])
+				fail("%s: write of %zu inserted %lu bytes", dev,
+				     sizes[i], inserted);
+			printf("%s: write of %zu: %lu insertions without entropy\n",
+			       dev, sizes[i], insertions);
+		}
+		close(fd);
+	}
+
+	free(data);
+	printf("write-notop ok\n");
 }
 
 static volatile sig_atomic_t alarm_came;
@@ -2049,10 +2178,31 @@ static void cmd_addtoentcnt_signal(int argc, char *argv[])
 }
 
 /*
+ * poll() of /dev/esdm_random at @fd, at once: writable and not readable, as
+ * random_poll() has the kernel's /dev/random before its RNG is initialized
+ */
+static void poll_writable_only(int fd, const char *when)
+{
+	static const short want = POLLOUT | POLLWRNORM;
+	struct pollfd pfd = {
+		.fd = fd, .events = POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
+	};
+	int ret = poll(&pfd, 1, 0);
+
+	if (ret < 0)
+		fail("poll %s: %s", when, strerror(errno));
+	if (pfd.revents != want)
+		fail("poll %s: mask %#x, want %#x - writable, not readable",
+		     when, (unsigned int)(unsigned short)pfd.revents,
+		     (unsigned int)want);
+}
+
+/*
  * poll-notop: against a notop fake-egd - poll() of /dev/esdm_random reports
  * it readable only when a read with O_NONBLOCK gets data: not after the
  * kernel's RNG served /dev/esdm_urandom, nor at all, as an ESDM that is not
- * operational serves /dev/esdm_random nothing.
+ * operational serves /dev/esdm_random nothing. Writable it is, before and
+ * after.
  */
 static void cmd_poll_notop(int argc, char *argv[])
 {
@@ -2067,7 +2217,8 @@ static void cmd_poll_notop(int argc, char *argv[])
 
 	read_exact_or_fail(CDEV_URANDOM, data, sizeof(data), 0);
 
-	fd = open_or_fail(CDEV_RANDOM, O_RDONLY | O_NONBLOCK);
+	fd = open_or_fail(CDEV_RANDOM, O_RDWR | O_NONBLOCK);
+	poll_writable_only(fd, "before the reads");
 	end = now() + 3;
 	while (now() < end) {
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -2098,10 +2249,166 @@ static void cmd_poll_notop(int argc, char *argv[])
 		fail("an ESDM that is not operational served");
 	if (errno != EAGAIN)
 		fail("read: %s, want EAGAIN", strerror(errno));
+	poll_writable_only(fd, "after the reads");
 	close(fd);
 
-	printf("poll-notop: %u polls, none readable\n", polls);
+	printf("poll-notop: %u polls, none readable, writable throughout\n",
+	       polls);
 	printf("poll-notop ok\n");
+}
+
+static volatile sig_atomic_t sig_restart_came, sig_intr_came;
+
+static void on_sig_restart(int sig)
+{
+	(void)sig;
+	sig_restart_came = 1;
+}
+
+static void on_sig_intr(int sig)
+{
+	(void)sig;
+	sig_intr_came = 1;
+}
+
+/* The signals the thread of read_blocks() sends the reader */
+struct signal_plan {
+	pthread_t reader;
+	/* Seconds after the start, restart_s 0 for none */
+	double restart_s, intr_s;
+};
+
+static void *signal_sender(void *arg)
+{
+	const struct signal_plan *plan = arg;
+	double start = now(), left;
+
+	if (plan->restart_s > 0) {
+		sleep_seconds(plan->restart_s);
+		pthread_kill(plan->reader, SIGUSR1);
+	}
+	left = plan->intr_s - (now() - start);
+	if (left > 0)
+		sleep_seconds(left);
+	pthread_kill(plan->reader, SIGALRM);
+
+	return NULL;
+}
+
+/*
+ * One read() of @dev opened with @flags, while signals come: SIGUSR1 after
+ * @restart_s seconds, unless 0, with SA_RESTART, for which the kernel
+ * restarts the read, and SIGALRM after @intr_s without, which ends it. The
+ * read has to wait for an ESDM that is not operational: until the SIGALRM,
+ * then failing with EINTR and no data - not served by the kernel's RNG, not
+ * ended by the SIGUSR1.
+ */
+static void read_blocks(const char *dev, int flags, const char *what,
+			double restart_s, double intr_s)
+{
+	struct sigaction restart = { .sa_handler = on_sig_restart,
+				     .sa_flags = SA_RESTART };
+	struct sigaction intr = { .sa_handler = on_sig_intr };
+	struct signal_plan plan = { .reader = pthread_self(),
+				    .restart_s = restart_s,
+				    .intr_s = intr_s };
+	uint8_t buf[64], canary[64];
+	pthread_t sender;
+	double start, took;
+	ssize_t rc;
+	int fd, err;
+
+	sigemptyset(&restart.sa_mask);
+	sigemptyset(&intr.sa_mask);
+	if (sigaction(SIGUSR1, &restart, NULL) ||
+	    sigaction(SIGALRM, &intr, NULL))
+		fail("sigaction: %s", strerror(errno));
+	sig_restart_came = 0;
+	sig_intr_came = 0;
+
+	memset(canary, 0xa5, sizeof(canary));
+	memcpy(buf, canary, sizeof(buf));
+	fd = open_or_fail(dev, O_RDONLY | flags);
+
+	start = now();
+	if (pthread_create(&sender, NULL, signal_sender, &plan))
+		fail("cannot start the thread sending the signals");
+	rc = read(fd, buf, sizeof(buf));
+	err = errno;
+	took = now() - start;
+	pthread_join(sender, NULL);
+	close(fd);
+
+	if (rc >= 0)
+		fail("%s: an ESDM that is not operational served %zd bytes after %.2f s",
+		     what, rc, took);
+	if (err != EINTR)
+		fail("%s: read gave %s after %.2f s, want EINTR", what,
+		     strerror(err), took);
+	if (!sig_intr_came || (restart_s > 0 && !sig_restart_came))
+		fail("%s: the signals did not come", what);
+	if (took < intr_s * 0.9)
+		fail("%s: read ended after %.2f s, before the signal without SA_RESTART",
+		     what, took);
+	if (memcmp(buf, canary, sizeof(buf)))
+		fail("%s: a read that failed left data behind", what);
+
+	printf("%s: waited %.2f s for the signal without SA_RESTART%s\n", what,
+	       took, restart_s > 0 ? ", restarted for the one with" : "");
+}
+
+/* A read with O_NONBLOCK and @flags of an ESDM not operational: EAGAIN */
+static void read_eagain(const char *dev, int flags, const char *what)
+{
+	int fd = open_or_fail(dev, O_RDONLY | O_NONBLOCK | flags);
+	uint8_t buf[64];
+	ssize_t rc = read(fd, buf, sizeof(buf));
+	int err = errno;
+
+	close(fd);
+	if (rc >= 0)
+		fail("%s O_NONBLOCK: an ESDM that is not operational served %zd bytes",
+		     what, rc);
+	if (err != EAGAIN)
+		fail("%s O_NONBLOCK: read gave %s, want EAGAIN", what,
+		     strerror(err));
+
+	printf("%s O_NONBLOCK: EAGAIN\n", what);
+}
+
+/*
+ * block-notop: against a notop fake-egd - the reads that wait for the ESDM
+ * to be operational, of /dev/esdm_random and with O_SYNC of either device,
+ * wait for it rather than take the kernel's RNG while the ESDM can be
+ * reached. A signal with SA_RESTART has such a read restarted, waiting on,
+ * one without ends it with EINTR and no data. With O_NONBLOCK, they give
+ * EAGAIN.
+ */
+static void cmd_block_notop(int argc, char *argv[])
+{
+	static const struct {
+		const char *dev;
+		int flags;
+		const char *what;
+	} waiting[] = {
+		{ CDEV_RANDOM, 0, CDEV_RANDOM },
+		{ CDEV_RANDOM, O_SYNC, CDEV_RANDOM " O_SYNC" },
+		{ CDEV_URANDOM, O_SYNC, CDEV_URANDOM " O_SYNC" },
+	};
+	size_t i;
+
+	(void)argc;
+	(void)argv;
+
+	for (i = 0; i < ARRAY_SIZE(waiting); i++) {
+		read_blocks(waiting[i].dev, waiting[i].flags, waiting[i].what,
+			    0, 1);
+		read_blocks(waiting[i].dev, waiting[i].flags, waiting[i].what,
+			    0.5, 1.5);
+		read_eagain(waiting[i].dev, waiting[i].flags, waiting[i].what);
+	}
+
+	printf("block-notop ok\n");
 }
 
 /*
@@ -2167,9 +2474,11 @@ static const struct check {
 	{ "fake-egd", "<socket> <log> <notop|mute>", 3, 3, 0, cmd_fake_egd },
 	{ "addentropy", "<log>", 1, 1, NEED_MODULE | NEED_CAP_SYS_ADMIN,
 	  cmd_addentropy },
+	{ "write-notop", "<log>", 1, 1, NEED_MODULE, cmd_write_notop },
 	{ "addtoentcnt-signal", "<log>", 1, 1, NEED_MODULE | NEED_CAP_SYS_ADMIN,
 	  cmd_addtoentcnt_signal },
 	{ "poll-notop", "", 0, 0, NEED_MODULE, cmd_poll_notop },
+	{ "block-notop", "", 0, 0, NEED_MODULE, cmd_block_notop },
 	{ "backoff", "<log> <seconds>", 2, 2, NEED_MODULE, cmd_backoff },
 };
 

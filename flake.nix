@@ -2061,9 +2061,10 @@
                   machine.succeed("${check} backoff /tmp/fake-egd.log 8")
                   real_egd()
 
-              with subtest("RNDADDENTROPY credits once all of the data is in"):
+              with subtest("RNDADDENTROPY credits once all of the data is in, writes never"):
                   fake_egd("notop")
                   machine.succeed("${check} addentropy /tmp/fake-egd.log")
+                  machine.succeed("${check} write-notop /tmp/fake-egd.log")
                   real_egd()
 
               with subtest("RNDADDTOENTCNT is not carried out twice for a signal"):
@@ -2076,6 +2077,11 @@
                   # The watcher, kicked at load, learned the state
                   machine.sleep(1)
                   machine.succeed("${check} poll-notop")
+                  real_egd()
+
+              with subtest("reads waiting for an ESDM not operational wait, until a signal"):
+                  fake_egd("notop")
+                  machine.succeed("timeout 60 ${check} block-notop")
                   real_egd()
 
               with subtest("unloading once the reader is gone"):

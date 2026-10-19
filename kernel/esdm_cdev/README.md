@@ -225,8 +225,11 @@ during reads, an ESDM that does not answer, an ESDM that is gone, loading the
 module without an ESDM and unloading it. The fake EGD server of
 `esdm-cdev-check fake-egd` stands in for what the ESDM cannot be made to do:
 never answering, for the backoff; logging what the module sends, for the credit
-of `RNDADDENTROPY` and `RNDADDTOENTCNT` interrupted by a signal; not being
-operational, for `poll()`:
+of writes, of `RNDADDENTROPY` - none for the arguments it refuses - and of
+`RNDADDTOENTCNT` interrupted by a signal; not being operational, for `poll()`
+and for the reads that wait for the ESDM, which have to wait for it rather than
+take the kernel's RNG, until a signal ends them with `EINTR` or has them
+restarted:
 
     nix build .#checks.x86_64-linux.esdm_cdev
 
