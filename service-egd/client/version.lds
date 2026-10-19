@@ -14,6 +14,10 @@
  * Do not remove a symbol from LIBESDM_EGD_CLIENT_1.0 or rename the node
  * without bumping the library soversion. New API is added in a new node
  * (LIBESDM_EGD_CLIENT_1.1 { ... } LIBESDM_EGD_CLIENT_1.0;).
+ *
+ * LIBESDM_EGD_CLIENT_1.1 adds the network modes and the ESDM commands beyond
+ * the reads. esdm_egd_client_alloc_net() exists in every build - it reports
+ * -EOPNOTSUPP in one without the network modes.
  */
 
 LIBESDM_EGD_CLIENT_1.0 {
@@ -33,3 +37,12 @@ LIBESDM_EGD_CLIENT_1.0 {
 	local:
 		*;
 };
+
+LIBESDM_EGD_CLIENT_1.1 {
+	global:
+		esdm_egd_client_alloc_net;
+		esdm_egd_client_get_random_unseeded;
+		esdm_egd_client_get_state;
+		esdm_egd_client_status;
+		esdm_egd_client_status_json;
+} LIBESDM_EGD_CLIENT_1.0;

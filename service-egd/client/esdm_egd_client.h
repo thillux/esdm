@@ -53,8 +53,15 @@ extern "C" {
  *
  *  - A descriptor inherited across fork() refers to the parent's connection,
  *    which two processes interleaving commands would desynchronize. A fork
- *    handler closes every inherited connection in the child; should the fork
- *    bypass it - a direct clone(2) - the client notices at its next use.
+ *    handler closes every inherited connection in the child - leaking the
+ *    state of an inherited TLS connection, which a parent thread may have
+ *    been using -; should the fork bypass it - a direct clone(2) - the client
+ *    notices at its next use.
+ *
+ *  - A network connection the server closed - one idle for long - shows as the
+ *    end of its stream only, into which a write still succeeds. One that has
+ *    anything to read before a request is replaced: an insertion, which is
+ *    not answered, would otherwise be lost.
  *
  * Compared to the RPC client this needs nothing but a single Unix domain stream
  * socket, which makes it reachable from places the RPC interface is not, such
@@ -87,6 +94,40 @@ extern "C" {
  * the consumer is being refused further connections. A sandboxed consumer
  * whose connection is closed nevertheless - that way, or by a restart of the
  * daemon - is killed by its sandbox on the reconnect.
+ *
+ * Network modes
+ * -------------
+ * A client allocated with esdm_egd_client_alloc_net() speaks the same protocol
+ * over TCP to an esdm-egd-net-server, which serves the EGD protocol of the
+ * ESDM on its host to the network - see esdm-egd-net-server(8). Everything
+ * above holds there as well: one connection per client, the serialized
+ * operations, the reconnect and retry, the fork handling. The server treats
+ * every client of the network as unprivileged.
+ *
+ *  - Plain TCP carries the protocol as it is, unencrypted and unauthenticated.
+ *    It is meant for networks whose transport is protected underneath, by
+ *    IPsec or WireGuard, say. Once connected, it keeps the syscall discipline
+ *    above - read(2), write(2), poll(2) and the rest - so a sandboxed process
+ *    may use it the way it uses the Unix domain socket, connected before it
+ *    enters its sandbox. Mind that the server closes a connection idle for
+ *    its idle timeout, which such a process cannot recover from.
+ *
+ *  - TLS mode is TLS 1.3 with mutual authentication by certificates, see
+ *    struct esdm_egd_client_net_config. It does not keep the syscall
+ *    discipline: the TLS stack sends and receives with send(2) and recv(2)
+ *    and may use whatever else it needs. A sandboxed process uses the
+ *    esdm-egd-net-relay through its local Unix domain socket instead, see
+ *    esdm-egd-net-relay(8). The TLS is that of the crypto backend the ESDM is
+ *    built with - OpenSSL, GnuTLS or Botan -, which the library does not
+ *    link: the first client in TLS mode loads it with a module of the
+ *    library, esdm-egd-tls.so in the ESDM directory of the libraries. A
+ *    process that never allocates such a client has no TLS stack loaded,
+ *    which a sandboxed process needs - a TLS stack makes syscalls of its own
+ *    when it is loaded and unloaded.
+ *
+ * The network modes exist in a build with the egd-net option, the TLS mode in
+ * one with a TLS stack as well (egd-net-tls); without, the allocation reports
+ * -EOPNOTSUPP.
  */
 struct esdm_egd_client;
 
@@ -120,6 +161,106 @@ int esdm_egd_client_alloc(struct esdm_egd_client **client,
 			  const char *socket_path, unsigned int timeout_ms);
 
 /**
+ * @brief Network mode of a client, see struct esdm_egd_client_net_config
+ */
+enum esdm_egd_client_net_mode {
+	/** TLS 1.3 with mutual authentication */
+	ESDM_EGD_CLIENT_NET_TLS = 1,
+	/**
+	 * Plain TCP - unencrypted and unauthenticated, for networks protected
+	 * underneath only
+	 */
+	ESDM_EGD_CLIENT_NET_PLAIN = 2,
+};
+
+/** CA certificates of the server's chain need a CRL as well */
+#define ESDM_EGD_CLIENT_NET_CRL_CHECK_ALL (1U << 0)
+/** A CRL past its nextUpdate only causes a warning */
+#define ESDM_EGD_CLIENT_NET_CRL_ALLOW_EXPIRED (1U << 1)
+
+/** Most CRL files of a configuration */
+#define ESDM_EGD_CLIENT_NET_MAX_CRL 16
+
+/**
+ * @brief Configuration of a client of an esdm-egd-net-server
+ *
+ * Fields are only ever appended. The library takes the ones @size covers and
+ * zero for the rest, so a program built against an older header keeps working
+ * with a newer library. Initialize the whole structure with zeros and set
+ * @size to its sizeof.
+ *
+ * The files are read when the client is allocated. Each later connection
+ * checks them for a change - their inode, size and modification time, so that
+ * a file replaced by renaming another one into its place counts, as does a
+ * symbolic link switched to another directory - and takes up what changed. A
+ * change that does not load completely is logged, and the connections go on
+ * with what was loaded before: a broken rotation does not take the client
+ * down. All clients of a process with the same files share what they loaded.
+ */
+struct esdm_egd_client_net_config {
+	/** sizeof(struct esdm_egd_client_net_config) of the caller */
+	size_t size;
+	/** ESDM_EGD_CLIENT_NET_TLS or ESDM_EGD_CLIENT_NET_PLAIN */
+	enum esdm_egd_client_net_mode mode;
+	/**
+	 * The server: "host:port", "[IPv6 address]:port", or the same without
+	 * the port for the port the ESDM was built with (meson option
+	 * egd-net-port). The host is resolved with getaddrinfo(3) at every
+	 * connection, and its addresses are tried in turn.
+	 */
+	const char *address;
+	/** As the @timeout_ms of esdm_egd_client_alloc(). */
+	unsigned int timeout_ms;
+
+	/* TLS mode only - plain TCP refuses every one of them */
+
+	/**
+	 * Certificate of the client, PEM, optionally followed by the
+	 * intermediate certificates of its chain
+	 */
+	const char *cert_file;
+	/** Its private key, PEM, unencrypted PKCS#8 */
+	const char *key_file;
+	/**
+	 * Trust anchors, PEM: the server's chain must lead to one of them, and
+	 * the client's own certificate must as well
+	 */
+	const char *ca_file;
+	/**
+	 * Name the server's certificate has to be issued for - a DNS name, or
+	 * an IPv4 or IPv6 address. NULL takes the host of @address.
+	 */
+	const char *server_name;
+	/**
+	 * CRLs, PEM, each file may hold several, NULL-terminated, at most
+	 * ESDM_EGD_CLIENT_NET_MAX_CRL - NULL for none. With CRLs, the server's
+	 * certificate needs a CRL of its issuer that does not list it; see
+	 * esdm-egd-net-relay(8) for exactly what is checked.
+	 */
+	const char *const *crl_files;
+	/** ESDM_EGD_CLIENT_NET_CRL_* */
+	unsigned int crl_flags;
+};
+
+/**
+ * @brief Allocate a client of an esdm-egd-net-server and connect it
+ *
+ * As esdm_egd_client_alloc(), over the network: failing to connect is no
+ * allocation failure, the operations retry. A configuration that is wrong -
+ * an address that does not parse, a TLS file that does not load - is one.
+ *
+ * @param [out] client Allocated client, to be released with
+ *		       esdm_egd_client_free()
+ * @param [in] cfg The configuration; nothing of it is referenced after the
+ *		   call returned
+ *
+ * @return 0 on success, -EOPNOTSUPP in a build without the network mode asked
+ *	   for, -EINVAL for a configuration that is wrong, < 0 on other errors
+ */
+int esdm_egd_client_alloc_net(struct esdm_egd_client **client,
+			      const struct esdm_egd_client_net_config *cfg);
+
+/**
  * @brief Close the connection and release the client
  *
  * @param [in] client Client to release, may be NULL
@@ -131,7 +272,8 @@ void esdm_egd_client_free(struct esdm_egd_client *client);
  *
  * @param [in] client Client to query
  *
- * @return The path, owned by the client
+ * @return The path, owned by the client - for a client of the network the
+ *	   address of the server
  */
 const char *esdm_egd_client_socket_path(const struct esdm_egd_client *client);
 
@@ -206,6 +348,69 @@ int esdm_egd_client_get_random_pr(struct esdm_egd_client *client, uint8_t *buf,
 int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *client,
 					   uint8_t *buf, size_t buflen,
 					   size_t *generated);
+
+/**
+ * @brief Obtain random data without waiting for all DRNGs to be seeded
+ *
+ * The semantics of /dev/urandom: the ESDM answers from its DRNG without
+ * waiting for all of its DRNGs to be fully seeded. Before the ESDM is
+ * operational it hands out nothing, which is no error - @generated is zero
+ * then. The ESDM-specific command this uses is unknown to other EGD daemons.
+ *
+ * @param [in] client Client to use
+ * @param [out] buf Buffer to fill
+ * @param [in] buflen Number of bytes to ask for, at most
+ *		      ESDM_EGD_MAX_TRANSFER
+ * @param [out] generated Number of bytes actually delivered
+ *
+ * @return 0 on success, < 0 on error
+ */
+int esdm_egd_client_get_random_unseeded(struct esdm_egd_client *client,
+					uint8_t *buf, size_t buflen,
+					size_t *generated);
+
+/**
+ * @brief Query the state of the ESDM
+ *
+ * The fields of ESDM_EGD_CMD_ESDM_GET_STATE, indexed by ESDM_EGD_STATE_* of
+ * esdm_egd_protocol.h. A newer ESDM may report more fields than the caller
+ * knows of, an older one fewer.
+ *
+ * @param [in] client Client to use
+ * @param [out] fields Room for @num_fields fields
+ * @param [in,out] num_fields In: the room of @fields. Out: the number of
+ *			      fields the ESDM reported, of which the first
+ *			      ones up to the room were stored.
+ *
+ * @return 0 on success, < 0 on error
+ */
+int esdm_egd_client_get_state(struct esdm_egd_client *client, uint32_t *fields,
+			      unsigned int *num_fields);
+
+/**
+ * @brief Obtain the status report of the ESDM as text
+ *
+ * @param [in] client Client to use
+ * @param [out] buf Buffer for the report, NUL terminated - at most
+ *		    ESDM_EGD_MAX_STATUS bytes plus the NUL
+ * @param [in] buflen Size of @buf
+ *
+ * @return the length of the report on success, 0 if the ESDM had none,
+ *	   -EMSGSIZE if it did not fit - @buf holds as much of it as did -, < 0
+ *	   on other errors
+ */
+int esdm_egd_client_status(struct esdm_egd_client *client, char *buf,
+			   size_t buflen);
+
+/**
+ * @brief Obtain the status report of the ESDM as JSON document
+ *
+ * As esdm_egd_client_status(), but a document that does not fit is not handed
+ * out cut short: @buf is left empty with -EMSGSIZE. 0 means the ESDM had no
+ * document - it did not fit into a transfer, see ESDM_EGD_MAX_STATUS.
+ */
+int esdm_egd_client_status_json(struct esdm_egd_client *client, char *buf,
+				size_t buflen);
 
 /**
  * @brief Query the amount of entropy the ESDM currently holds

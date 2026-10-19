@@ -365,6 +365,10 @@ conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
 conf_data.set('ESDM_EGD_NET', egd_net)
 conf_data.set('ESDM_EGD_NET_TLS', egd_net_tls)
 conf_data.set('ESDM_EGD_NET_PORT', get_option('egd-net-port'))
+# The TLS module of libesdm_egd_client, see esdm_egd_client_tls.h
+conf_data.set_quoted('ESDM_EGD_TLS_MODULE_PATH',
+		     get_option('prefix') / get_option('libdir') / 'esdm' /
+		     'esdm-egd-tls.so')
 
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())
 if get_option('es_jent_kernel_name') == '' or get_option('es_jent_kernel_name').contains('"')
