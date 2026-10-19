@@ -1376,6 +1376,495 @@
             '';
           };
 
+        # External entropy sources on the network, between two hosts: "source"
+        # serves the example plugin of the tree, reading /dev/urandom, on SCTP
+        # with the esdm-es-ext-serve-net units of the OpenSSL build; "esdm"
+        # runs the ESDM (Botan) and reads it through the esdm-es-ext-relay of
+        # its unit. Neither host sets a sysctl for SCTP-AUTH: the daemons
+        # enable it per socket.
+        #
+        # Phases: the source credited at the rate it declares, the status of
+        # the remote provider passed through; the TLS stacks against each
+        # other - the relay of OpenSSL against the provider of GnuTLS, GnuTLS
+        # against Botan - and against OpenSSL's own DTLS over SCTP
+        # (s_client and s_server -sctp, which need net.sctp.auth_enable);
+        # rotation of the relay's and of the provider's certificate, and a
+        # broken rotation that leaves the service up; revocation of the
+        # relay's certificate by a CRL taken up while the provider runs; a
+        # client outside the allowlist refused.
+        mkEsExtNetCheck =
+          let
+            esdm = self.packages.${system}.esdm;
+            port = 7379;
+            relaySocket = "/run/esdm-es-ext-relay/esdm-es-ext-relay.socket";
+
+            # The ESDM with another crypto backend, for its TLS stack
+            esdmWith =
+              backend: inputs:
+              esdm.overrideAttrs (prev: {
+                pname = "esdm-${backend}";
+                buildInputs = prev.buildInputs ++ inputs;
+                mesonFlags =
+                  (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
+                  ++ [ "-Dcrypto_backend=${backend}" ];
+              });
+            # OpenSSL is there already, for the OpenSSL providers
+            esdmOpenssl = esdmWith "openssl" [ ];
+            # The GnuTLS backend needs a GnuTLS built for FIPS 140
+            esdmGnutls = esdmWith "gnutls" [
+              (pkgs.gnutls.overrideAttrs (prev: {
+                configureFlags = prev.configureFlags ++ [ "--enable-fips140-mode" ];
+                doCheck = false;
+              }))
+            ];
+
+            # OpenSSL with its own DTLS over SCTP, to check against
+            opensslSctp = pkgs.openssl.overrideAttrs (prev: {
+              pname = "openssl-sctp";
+              configureFlags = prev.configureFlags ++ [ "enable-sctp" ];
+              buildInputs = (prev.buildInputs or [ ]) ++ [ pkgs.lksctp-tools ];
+              doCheck = false;
+            });
+            openssl = "${opensslSctp.bin}/bin/openssl";
+
+            # The example plugin of the tree, built against the installed
+            # header as a plugin of its own would be, reading a device the
+            # sandbox of the unit has
+            plugin = "${
+              pkgs.runCommandCC "esdm-es-ext-example" { } ''
+                mkdir -p $out/lib
+                $CC -shared -fPIC -fvisibility=hidden -O2 \
+                  -DESDM_ES_EXT_EXAMPLE_DEVICE='"/dev/urandom"' \
+                  -I${esdmOpenssl}/include \
+                  -o $out/lib/esdm_es_ext_example.so \
+                  ${./es-ext/example/esdm_es_ext_example.c}
+              ''
+            }/lib/esdm_es_ext_example.so";
+            pluginName = "example (/dev/urandom)";
+
+            # The test PKI of the tree, the provider issued for "source"
+            pki = pkgs.runCommand "esdm-es-ext-net-vm-pki" {
+              nativeBuildInputs = [
+                pkgs.openssl
+                pkgs.gawk
+              ];
+              ESDM_PKI_SERVER_SAN = "DNS:source";
+            } "bash ${./tests/egd-net/pki/gen.sh} $out";
+
+            # Where the units load their credentials from. Copies rather
+            # than links into the store, so that the test can rotate them,
+            # and given to the daemons by their paths as well, as they take
+            # up a rotation of these while they run, but not of the copies
+            # LoadCredential= makes. Open to all: a test key.
+            dir = "/etc/esdm/es-ext-net";
+            etcFiles = lib.mapAttrs' (
+              dst: src:
+              lib.nameValuePair "esdm/es-ext-net/${dst}" {
+                source = "${pki}/${src}";
+                mode = "0644";
+              }
+            );
+
+            # A client of the provider protocol, as the ESDM speaks it on a
+            # local provider socket: INFO, then GET_ENTROPY of 32 bytes
+            providerClient = pkgs.writeText "es-ext-client.py" ''
+              import json, socket, struct, sys
+
+              MAGIC = 0x58455345
+              GET_ENTROPY, INFO = 1, 5
+
+              def request(s, typ, length):
+                  s.send(struct.pack("<IHHI", MAGIC, 1, typ, length))
+                  answer = s.recv(70000)
+                  magic, _, rtype, status, bits = struct.unpack("<IHHiI", answer[:16])
+                  if magic != MAGIC or rtype != typ:
+                      raise Exception(f"no answer to {typ}: {answer!r}")
+                  return status, bits, answer[16:]
+
+              s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+              s.settimeout(10)
+              s.connect(sys.argv[1])
+              out = {}
+              out["info"], _, data = request(s, INFO, 0)
+              if not out["info"]:
+                  out["rate"] = struct.unpack("<I", data[:4])[0]
+                  out["name"] = data[4:].decode()
+                  out["get_entropy"], out["bits"], data = request(s, GET_ENTROPY, 32)
+                  out["bytes"] = len(data)
+              print(json.dumps(out))
+            '';
+          in
+          pkgs.testers.nixosTest {
+            name = "External entropy sources on the network, DTLS over SCTP";
+
+            nodes.esdm =
+              { ... }:
+              {
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+                boot.kernelModules = [ "sctp" ];
+
+                # The user the relay runs as, which the ESDM accepts. The
+                # package ships it as a sysusers.d file, which a NixOS
+                # without systemd-sysusers does not read.
+                users.users.esdm-es-ext-relay = {
+                  isSystemUser = true;
+                  group = "esdm-es-ext-relay";
+                };
+                users.groups.esdm-es-ext-relay = { };
+
+                # What the unit of the package leaves to the site: the
+                # provider, and the ESDM told about the relay
+                systemd.services.esdm-es-ext-relay.wantedBy = [ "multi-user.target" ];
+                environment.etc =
+                  etcFiles {
+                    "client.crt" = "client1.crt";
+                    "client.key" = "client1.key";
+                    "ca.crt" = "ca.crt";
+                    "ca.crl" = "ca.crl";
+                  }
+                  // {
+                    "esdm/es-ext-relay.env".text = ''
+                      ESDM_ES_EXT_RELAY_ARGS="-vv --connect source --cert ${dir}/client.crt --key ${dir}/client.key --ca ${dir}/ca.crt --crl ${dir}/ca.crl --reload_interval 2"
+                    '';
+                  };
+                systemd.services.esdm-server.environment.ESDM_SERVER_OPTIONS =
+                  "--es_ext_socket ${relaySocket} --es_ext_socket_uid esdm-es-ext-relay";
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.python3
+                ];
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            nodes.source =
+              { ... }:
+              {
+                boot.kernelModules = [ "sctp" ];
+
+                # No ESDM here: the units of the package, the provider's
+                systemd.packages = [ esdmOpenssl ];
+                systemd.services.esdm-es-ext-serve-net.wantedBy = [ "multi-user.target" ];
+                systemd.sockets.esdm-es-ext-serve-net.wantedBy = [ "sockets.target" ];
+                environment.etc =
+                  etcFiles {
+                    "server.crt" = "server.crt";
+                    "server.key" = "server.key";
+                    "ca.crt" = "ca.crt";
+                    "crl.pem" = "int-empty.crl";
+                  }
+                  // {
+                    # The ESDM host only, by its addresses
+                    "esdm/es-ext-serve-net.env".text = ''
+                      ESDM_ES_EXT_SERVE_NET_ARGS="-v --plugin ${plugin} --cert ${dir}/server.crt --key ${dir}/server.key --ca ${dir}/ca.crt --crl ${dir}/crl.pem --reload_interval 2 --allow 192.168.1.1 --allow 2001:db8:1::1"
+                    '';
+                  };
+
+                # SCTP, which a rule for TCP does not pass: the provider of
+                # the units, and the ones of the other TLS stacks
+                networking.firewall.extraCommands = ''
+                  ip46tables -A nixos-fw -p sctp --dport ${toString port}:${toString (port + 2)} -j nixos-fw-accept
+                '';
+
+                environment.systemPackages = [ pkgs.python3 ];
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import hashlib
+              import json
+              import ssl
+              import time
+
+              def install(machine, src, dst):
+                  # A rotation: written next to the file, renamed into place
+                  machine.succeed(f"cp {src} {dst}.new && chmod 0644 {dst}.new && mv -f {dst}.new {dst}")
+
+              def fingerprint(name):
+                  # SHA-256 of the first certificate of the file, as the
+                  # daemons tell it
+                  with open(f"${pki}/{name}") as f:
+                      pem = f.read()
+                  end = "-----END CERTIFICATE-----"
+                  der = ssl.PEM_cert_to_DER_cert(pem[: pem.index(end) + len(end)])
+                  return hashlib.sha256(der).hexdigest()
+
+              # How often @unit logged @text so far, and waiting for it to
+              # log it once more
+              def count(machine, unit, text):
+                  return int(machine.succeed(
+                      f"journalctl -u {unit} | grep -c -- '{text}' || true"
+                  ).strip() or 0)
+
+              def logs_again(machine, unit, text, before, timeout=60):
+                  machine.wait_until_succeeds(
+                      f"test $(journalctl -u {unit} | grep -c -- '{text}') -gt {before}", timeout
+                  )
+
+              def ask(machine, sock):
+                  return json.loads(machine.succeed(f"python3 ${providerClient} {sock}"))
+
+              def source_es():
+                  status = json.loads(esdm.succeed("esdm-tool --status-json"))
+                  for es in status["entropy_sources"]:
+                      if es.get("instance") == "ExternalSocket":
+                          return es
+                  raise Exception(f"no ExternalSocket source in {status}")
+
+              # Connected through the relay, credited, and asked by the
+              # client certificate @peer if given. The provider status is
+              # asked for at most every 5 seconds.
+              def credited(what, peer=None):
+                  es = None
+                  for _ in range(90):
+                      es = source_es()
+                      server = (es.get("provider") or {}).get("server") or {}
+                      if (f"connected (uid {relay_uid}), DTLS" in es["status"]
+                              and "failing" not in es["status"]
+                              and es["available_entropy"] > 0
+                              and server.get("transport") == "sctp"
+                              and (peer is None or server.get("peer") == peer)):
+                          return es
+                      time.sleep(1)
+                  raise Exception(f"{what}: the source on the network is not credited: {es}")
+
+              start_all()
+
+              source.wait_for_unit("esdm-es-ext-serve-net.service")
+              source.succeed("systemctl is-active esdm-es-ext-serve-net.socket")
+              esdm.wait_for_unit("esdm-server.service")
+              esdm.wait_for_unit("esdm-es-ext-relay.service")
+              relay_uid = esdm.succeed("id -u esdm-es-ext-relay").strip()
+
+              # Nothing set for SCTP-AUTH
+              for m in (esdm, source):
+                  m.succeed("test $(cat /proc/sys/net/sctp/auth_enable) = 0")
+
+              # Installed by the package, next to the units
+              esdm.succeed("test -f ${esdm}/lib/sysusers.d/esdm-es-ext-relay.conf")
+              for unit in ("esdm-es-ext-relay.service", "esdm-es-ext-serve-net.service",
+                           "esdm-es-ext-serve-net.socket"):
+                  esdm.succeed(f"test -f ${esdm}/lib/systemd/system/{unit}")
+              esdm.succeed("ls ${esdm}/share/man/man8 | grep -q esdm-es-ext-relay")
+
+              # The relay is ordered before the ESDM, and ready before it
+              # was started
+              ready = int(esdm.succeed(
+                  "systemctl show -P ActiveEnterTimestampMonotonic esdm-es-ext-relay.service"
+              ).strip())
+              started = int(esdm.succeed(
+                  "systemctl show -P InactiveExitTimestampMonotonic esdm-server.service"
+              ).strip())
+              assert 0 < ready <= started, f"relay ready at {ready}, esdm-server started at {started}"
+
+              with subtest("The source on the network, credited"):
+                  es = credited("at start up", fingerprint("client1.crt"))
+                  print(json.dumps(es, indent=2))
+                  assert es["name"] == "${pluginName}", es["name"]
+                  assert es["entropy_rate"] == 32, es["entropy_rate"]
+                  assert es["entropy_rate_source"] == "provider", es["entropy_rate_source"]
+                  assert es["provider"]["server"]["dtls"] is True, es
+                  assert es["provider"]["plugin"]["device"] == "/dev/urandom", es
+
+                  # A reseed reads it: requests served since
+                  requests = es["provider"]["server"]["requests"]
+                  esdm.succeed("esdm-tool --reseed-crng")
+                  time.sleep(6)
+                  es = credited("after a reseed")
+                  assert es["provider"]["server"]["requests"] > requests, es
+                  esdm.succeed("esdm-tool --wait-until-seeded 60")
+
+              with subtest("The TLS stacks against each other"):
+                  # Providers of Botan and GnuTLS next to the one of OpenSSL
+                  for name, pkg, p in (("botan", "${esdm}", ${toString (port + 1)}),
+                                       ("gnutls", "${esdmGnutls}", ${toString (port + 2)})):
+                      source.succeed(
+                          f"systemd-run --unit=serve-{name} --property=DynamicUser=yes "
+                          f"{pkg}/bin/esdm-es-ext-serve -v --plugin ${plugin} --listen :{p} "
+                          "--cert ${dir}/server.crt --key ${dir}/server.key --ca ${dir}/ca.crt "
+                          "--allow 192.168.1.1 --allow 2001:db8:1::1"
+                      )
+                      source.wait_until_succeeds(
+                          f"journalctl -u serve-{name}.service | grep -q 'on the network'", 30
+                      )
+
+                  # Relays of OpenSSL and GnuTLS against them
+                  for name, pkg, p in (("openssl", "${esdmOpenssl}", ${toString (port + 2)}),
+                                       ("gnutls", "${esdmGnutls}", ${toString (port + 1)})):
+                      esdm.succeed(
+                          f"systemd-run --unit=relay-{name} --property=DynamicUser=yes "
+                          f"--property=RuntimeDirectory=relay-{name} --property=RuntimeDirectoryMode=0755 "
+                          f"{pkg}/bin/esdm-es-ext-relay -v --connect source:{p} "
+                          f"--socket /run/relay-{name}/relay.sock "
+                          "--cert ${dir}/client.crt --key ${dir}/client.key --ca ${dir}/ca.crt"
+                      )
+                      esdm.wait_until_succeeds(f"test -S /run/relay-{name}/relay.sock", 30)
+                      out = ask(esdm, f"/run/relay-{name}/relay.sock")
+                      print(name, out)
+                      assert out["info"] == 0 and out["name"] == "${pluginName}", out
+                      assert out["rate"] == 32 and out["get_entropy"] == 0, out
+                      assert out["bytes"] == 32 and out["bits"] == 32, out
+
+              with subtest("Against OpenSSL's own DTLS over SCTP"):
+                  # OpenSSL enables SCTP-AUTH by the sysctl only
+                  esdm.succeed("sysctl -w net.sctp.auth_enable=1")
+
+                  # s_client against the providers of all three TLS stacks,
+                  # asking INFO - the byte in front, as every message has -
+                  # until it is stopped, after the answer
+                  for p in (${toString port}, ${toString (port + 1)}, ${toString (port + 2)}):
+                      out = esdm.succeed(
+                          "{ (printf '\\000ESEX\\001\\000\\005\\000\\000\\000\\000\\000'; sleep 3) | "
+                          f"timeout 15 ${openssl} s_client -sctp -dtls1_2 -connect source:{p} "
+                          "-cert ${dir}/client.crt -key ${dir}/client.key -cert_chain ${dir}/client.crt "
+                          "-CAfile ${dir}/ca.crt -verify_return_error -verify_hostname source "
+                          "-ign_eof 2>&1 || true; } | tr -c '[:print:]\\n' '.'"
+                      )
+                      assert "Verify return code: 0 (ok)" in out, out
+                      assert "${pluginName}" in out, out
+
+                  # s_server, the relays of all three TLS stacks connecting
+                  # to it: it answers nothing, but receives their INFO. Its
+                  # input held open, as it ends with it - by a sleep named by
+                  # its path, which the PATH of a unit does not find.
+                  esdm.succeed(
+                      "systemd-run --unit=s-server sh -c '${pkgs.coreutils}/bin/sleep 3600 | "
+                      "${openssl} s_server -sctp -dtls1_2 -accept 127.0.0.1:7390 "
+                      "-cert ${pki}/server.crt -key ${pki}/server.key -CAfile ${pki}/ca.crt "
+                      "-Verify 2 -verify_return_error > /run/s_server.log 2>&1'"
+                  )
+                  esdm.wait_until_succeeds("grep -q ACCEPT /run/s_server.log", 30)
+                  for i, (name, pkg) in enumerate((("botan", "${esdm}"),
+                                                   ("openssl", "${esdmOpenssl}"),
+                                                   ("gnutls", "${esdmGnutls}"))):
+                      esdm.succeed(
+                          f"systemd-run --unit=relay-native-{name} --property=DynamicUser=yes "
+                          f"--property=RuntimeDirectory=relay-native-{name} "
+                          "--property=RuntimeDirectoryMode=0755 "
+                          f"{pkg}/bin/esdm-es-ext-relay -v --connect 127.0.0.1:7390 "
+                          f"--server_name source --socket /run/relay-native-{name}/relay.sock "
+                          "--cert ${dir}/client.crt --key ${dir}/client.key --ca ${dir}/ca.crt"
+                      )
+                      esdm.wait_until_succeeds(f"test -S /run/relay-native-{name}/relay.sock", 30)
+                      out = ask(esdm, f"/run/relay-native-{name}/relay.sock")
+                      # The relay gives up on the answer in time
+                      if out["info"] != -110:
+                          print(esdm.succeed("cat -v /run/s_server.log"))
+                          print(esdm.succeed(f"journalctl -u relay-native-{name}.service"))
+                      assert out["info"] == -110, out
+                      esdm.wait_until_succeeds(
+                          f"test $(grep -a -c ESEX /run/s_server.log) -ge {i + 1}", 30
+                      )
+                  esdm.succeed("systemctl stop s-server.service")
+                  esdm.succeed("sysctl -w net.sctp.auth_enable=0")
+
+              relay = "esdm-es-ext-relay.service"
+              provider = "esdm-es-ext-serve-net.service"
+
+              with subtest("Rotation"):
+                  # The relay takes up a renewed client certificate for its
+                  # next upstream connection - made once the provider was
+                  # restarted, as the ESDM connects anew
+                  loaded = count(esdm, relay, "loaded the TLS files")
+                  install(esdm, "${pki}/client2.key", "${dir}/client.key")
+                  install(esdm, "${pki}/client2.crt", "${dir}/client.crt")
+                  logs_again(esdm, relay, "loaded the TLS files", loaded)
+                  source.succeed(f"systemctl restart {provider}")
+                  credited("with the renewed client certificate", fingerprint("client2.crt"))
+
+                  # A renewed provider certificate, taken up by the provider
+                  # by itself, for the next connection of the relay
+                  loaded = count(source, provider, "loaded the TLS files")
+                  install(source, "${pki}/server-renewed.key", "${dir}/server.key")
+                  install(source, "${pki}/server-renewed.crt", "${dir}/server.crt")
+                  logs_again(source, provider, "loaded the TLS files", loaded)
+                  renewed = fingerprint("server-renewed.crt")
+                  esdm.succeed(f"systemctl restart {relay}")
+                  esdm.wait_until_succeeds(
+                      f"journalctl -u {relay} | grep -q 'SHA-256 {renewed}'", 60
+                  )
+                  credited("with the renewed provider certificate")
+
+                  # A broken rotation - a key not of the certificate - leaves
+                  # the provider up with what it had
+                  broken = count(source, provider, "do not load")
+                  install(source, "${pki}/server.key", "${dir}/server.key")
+                  logs_again(source, provider, "do not load", broken)
+                  source.succeed(f"systemctl is-active {provider}")
+                  esdm.succeed(f"systemctl restart {relay}")
+                  credited("after a broken rotation of the provider")
+
+                  # Repaired - a provider started with the broken files
+                  # would not start
+                  loaded = count(source, provider, "loaded the TLS files")
+                  install(source, "${pki}/server-renewed.key", "${dir}/server.key")
+                  logs_again(source, provider, "loaded the TLS files", loaded)
+
+              with subtest("Revocation"):
+                  # The certificate to be revoked, taken up by the relay for
+                  # its next upstream connection
+                  loaded = count(esdm, relay, "loaded the TLS files")
+                  install(esdm, "${pki}/client-revoked.key", "${dir}/client.key")
+                  install(esdm, "${pki}/client-revoked.crt", "${dir}/client.crt")
+                  logs_again(esdm, relay, "loaded the TLS files", loaded)
+                  source.succeed(f"systemctl restart {provider}")
+                  credited("with the certificate to be revoked", fingerprint("client-revoked.crt"))
+
+                  # The CRL revoking it, taken up by the provider, closes the
+                  # established connection and refuses the next ones: the
+                  # relay finds the provider unreachable, and the ESDM is
+                  # served nothing
+                  unreachable = count(esdm, relay, "is not reachable")
+                  install(source, "${pki}/int.crl", "${dir}/crl.pem")
+                  source.wait_until_succeeds(
+                      f"journalctl -u {provider} | grep -q 'closing the connection of .*revoked'", 30
+                  )
+                  logs_again(esdm, relay, "is not reachable", unreachable)
+                  esdm.succeed(
+                      f"journalctl -u {relay} | grep -q 'handshake with source failed: .*certificate_revoked'"
+                  )
+                  for _ in range(30):
+                      es = source_es()
+                      if es["status"] == "not connected" or es.get("name") != "${pluginName}":
+                          break
+                      time.sleep(1)
+                  else:
+                      raise Exception(f"the source is served with a revoked certificate: {es}")
+
+                  # A good certificate again
+                  install(esdm, "${pki}/client2.key", "${dir}/client.key")
+                  install(esdm, "${pki}/client2.crt", "${dir}/client.crt")
+                  credited("with a good certificate again", fingerprint("client2.crt"))
+
+              with subtest("A client outside the allowlist"):
+                  # The source host itself, which the provider does not serve
+                  source.succeed(
+                      "systemd-run --unit=relay-outside --property=DynamicUser=yes "
+                      "--property=RuntimeDirectory=relay-outside --property=RuntimeDirectoryMode=0755 "
+                      "${esdm}/bin/esdm-es-ext-relay -v --connect source "
+                      "--socket /run/relay-outside/relay.sock "
+                      "--cert ${pki}/client2.crt --key ${pki}/client2.key --ca ${pki}/ca.crt"
+                  )
+                  source.wait_until_succeeds("test -S /run/relay-outside/relay.sock", 30)
+                  out = ask(source, "/run/relay-outside/relay.sock")
+                  assert out["info"] != 0, out
+                  source.succeed(
+                      "journalctl -u esdm-es-ext-serve-net.service | grep -q 'which is not allowed'"
+                  )
+                  credited("after all")
+            '';
+          };
+
         # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
         # /proc/esdm served by the ESDM over its EGD socket. On the stock
         # rolling kernel - the module needs no kernel patches - and once only,
@@ -2047,6 +2536,10 @@
 
             # Nor the EGD protocol over the network - see mkEgdNetCheck.
             egd_net = mkEgdNetCheck;
+
+            # Nor the external entropy sources on the network - see
+            # mkEsExtNetCheck.
+            es_ext_net = mkEsExtNetCheck;
 
             # The character device module, on the rolling kernel - see
             # mkEsdmCdevCheck.
@@ -2731,6 +3224,10 @@
                     # esdm-cdev-check, the checks of the esdm_cdev kernel
                     # module, which the VM of mkEsdmCdevCheck runs
                     "-Desdm-cdev-check=enabled"
+                    # External entropy sources on the network: the provider
+                    # server on SCTP with DTLS and certificates, and
+                    # esdm-es-ext-relay. See mkEsExtNetCheck.
+                    "-Des-ext-net=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
@@ -3151,9 +3648,12 @@
               ++ [
                 "-Dcrypto_backend=openssl"
                 # The DTLS and the TLS of egd-net by OpenSSL, which the
-                # builtin backend has not
+                # builtin backend has not - and the DTLS over SCTP of the
+                # external entropy sources on the network, whose tests skip
+                # where the kernel of the build host has no SCTP
                 "-Ddtls=enabled"
                 "-Degd-net-tls=enabled"
+                "-Des-ext-net=enabled"
               ];
             meta = prev.meta // {
               description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
