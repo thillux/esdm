@@ -463,7 +463,8 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
  *
  * esdm_rpcc_get_random_bytes_pr waits as long as the server answers that it
  * cannot serve prediction resistant data right now - the ESDM is not
- * operational yet, or another prediction resistant request is in flight. This
+ * operational yet, another prediction resistant request is in flight, or the
+ * entropy sources had nothing to give for the reseed it takes. This
  * variant returns instead, with the data obtained so far, or -EAGAIN if that is
  * none. A request the server accepted still waits for the entropy it collects.
  *

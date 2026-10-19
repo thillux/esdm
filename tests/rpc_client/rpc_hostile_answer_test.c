@@ -9,6 +9,10 @@
  * get_seed with a buffer larger than an answer can carry got the server's
  * refusal with the size it can serve, and returned that as an errno.
  *
+ * A prediction resistant read answered with no data at all - what the ESDM
+ * gives when its entropy sources have nothing right now - failed with EFAULT,
+ * rather than being asked again, or ending a non-blocking read.
+ *
  * A stand-in server in this process gives those answers on the unprivileged
  * socket the client connects to.
  *
@@ -57,6 +61,12 @@ enum test_answer {
 	test_answer_seed_overclaim,
 	/* A seed, unless the request is larger than the server serves */
 	test_answer_seed_limited,
+	/*
+	 * Prediction resistant data: as much as asked for in the next
+	 * test_pr_data answers, then none at all in the next test_pr_empty
+	 * ones, then as much as asked for again
+	 */
+	test_answer_pr_empty,
 };
 
 /* The largest get_seed request the ESDM server serves */
@@ -64,6 +74,11 @@ enum test_answer {
 
 static _Atomic enum test_answer test_answer;
 static atomic_bool test_stop;
+
+/* See test_answer_pr_empty, and how many answers without data were given */
+static atomic_uint test_pr_data;
+static atomic_uint test_pr_empty;
+static atomic_uint test_pr_empty_sent;
 
 static int test_listen_fd = -1;
 
@@ -149,6 +164,26 @@ static bool test_serve(int fd)
 		msglen += test_put_varint(msg + msglen, TEST_LEN);
 		memset(msg + msglen, TEST_FILL, TEST_LEN);
 		msglen += TEST_LEN;
+		break;
+	case test_answer_pr_empty:
+		/* As esdm_rpc_get_random_bytes_pr() answers 0 bytes */
+		if (len && atomic_load(&test_pr_data)) {
+			atomic_fetch_sub(&test_pr_data, 1);
+		} else if (!len || atomic_load(&test_pr_empty)) {
+			if (len) {
+				atomic_fetch_sub(&test_pr_empty, 1);
+				atomic_fetch_add(&test_pr_empty_sent, 1);
+			}
+			msglen += test_put_varint(msg + msglen, 0);
+			break;
+		}
+		if (len > TEST_LEN)
+			len = TEST_LEN;
+		msglen += test_put_varint(msg + msglen, len);
+		msg[msglen++] = 0x12;
+		msglen += test_put_varint(msg + msglen, len);
+		memset(msg + msglen, TEST_FILL, (size_t)len);
+		msglen += (size_t)len;
 		break;
 	}
 
@@ -283,6 +318,42 @@ static int test_run(void)
 	ret |= test_expect("get_seed, buffer larger than an answer",
 			   esdm_rpcc_get_seed(large, sizeof(large),
 					      ESDM_GET_SEED_NONBLOCK),
+			   TEST_LEN);
+
+	/*
+	 * No prediction resistant data now: a non-blocking read is told to
+	 * try again, a blocking one asks again until there is, and one of
+	 * several requests ends with what the requests before got.
+	 */
+	atomic_store(&test_answer, test_answer_pr_empty);
+	atomic_store(&test_pr_empty, 1);
+	ret |= test_expect("get_random_bytes_pr_nonblock, no data now",
+			   esdm_rpcc_get_random_bytes_pr_nonblock(buf,
+								  sizeof(buf)),
+			   -EAGAIN);
+
+	atomic_store(&test_pr_empty, 2);
+	atomic_store(&test_pr_empty_sent, 0);
+	memset(buf, 0, sizeof(buf));
+	ret |= test_expect("get_random_bytes_pr, no data for two requests",
+			   esdm_rpcc_get_random_bytes_pr(buf, sizeof(buf)),
+			   TEST_LEN);
+	ret |= test_expect("get_random_bytes_pr, answers without data",
+			   atomic_load(&test_pr_empty_sent), 2);
+	ret |= test_expect("get_random_bytes_pr, data filled in",
+			   buf[0] == TEST_FILL && buf[TEST_LEN - 1] == TEST_FILL,
+			   1);
+
+	ret |= test_expect("get_random_bytes_pr_nonblock, data now",
+			   esdm_rpcc_get_random_bytes_pr_nonblock(
+				   large, TEST_LEN + 8),
+			   TEST_LEN + 8);
+	/* A request asks for ESDM_RPC_MAX_PR_REQUEST_SIZE bytes at most, 32 */
+	atomic_store(&test_pr_data, 1);
+	atomic_store(&test_pr_empty, 1);
+	ret |= test_expect("get_random_bytes_pr_nonblock, data, then none",
+			   esdm_rpcc_get_random_bytes_pr_nonblock(
+				   large, TEST_LEN + 8),
 			   TEST_LEN);
 
 	return ret;

@@ -51,6 +51,17 @@ static void esdm_rpcc_get_random_bytes_pr_cb(const ProtobufCMessage *message,
 		return;
 	}
 
+	/*
+	 * No data at all is a valid answer of the PR DRNG - see
+	 * esdm_get_random_bytes_pr(): the entropy sources had nothing to give
+	 * right now. It is no failure, but what -EAGAIN says as well: asked
+	 * again after a pause, or the end of a non-blocking call.
+	 */
+	if (!response->ret) {
+		buffer->ret = -EAGAIN;
+		return;
+	}
+
 	if (!response->randval.data || !response->randval.len) {
 		buffer->ret = -EFAULT;
 		return;
