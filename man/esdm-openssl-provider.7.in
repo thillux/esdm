@@ -142,9 +142,14 @@ The ESDM server serves that socket when started with
 .B \-\-egd_socket
 or through the shipped EGD socket units.
 .SH NOTES
-The reported security strength is 256 bits and the maximum request size is 256
-bytes, which is the granularity OpenSSL's own DRBG chain uses as well; larger
-consumer requests are split by OpenSSL.
+The reported security strength is 256 bits. The reported maximum request size
+is unlimited
+.RB ( SIZE_MAX ):
+the providers split a request of any size into the transfers of their protocol
+themselves. OpenSSL would split a request larger than the reported maximum and
+ask for prediction resistance with its first part only; without a limit it
+hands every request over in one piece, and one asking for prediction resistance
+is served from the prediction\-resistance generator in its entirety.
 .PP
 A provider that cannot reach the ESDM fails the request rather than falling
 back to another source \- otherwise pinning OpenSSL to the ESDM would be

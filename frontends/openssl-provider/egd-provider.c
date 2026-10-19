@@ -49,6 +49,7 @@
 #include <openssl/evp.h>
 #include <openssl/params.h>
 #include <openssl/provider.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -442,12 +443,14 @@ static int esdm_egd_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
 		return 1;
 
 	/*
-	 * Larger requests are split into protocol sized transfers internally,
-	 * so this is the same value the RPC based provider reports rather than
-	 * the 255 byte limit of a single EGD transfer.
+	 * No limit: requests of any size are split into protocol sized
+	 * transfers internally, prediction resistant ones included. OpenSSL
+	 * splits a request above this size itself and asks for prediction
+	 * resistance with its first part only, which would serve the rest of a
+	 * prediction resistant request from the ordinary DRNG.
 	 */
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_MAX_REQUEST);
-	if (p != NULL && !OSSL_PARAM_set_size_t(p, 256))
+	if (p != NULL && !OSSL_PARAM_set_size_t(p, SIZE_MAX))
 		return 0;
 
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_STRENGTH);

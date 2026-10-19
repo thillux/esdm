@@ -23,6 +23,7 @@
 #include <openssl/evp.h>
 #include <openssl/params.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -356,8 +357,15 @@ static int esdm_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
 	if (params == NULL)
 		return 1;
 
+	/*
+	 * No limit: the RPC client splits requests of any size into transfers
+	 * the server serves, prediction resistant ones included. OpenSSL splits
+	 * a request above this size itself and asks for prediction resistance
+	 * with its first part only, which would serve the rest of a prediction
+	 * resistant request from the ordinary DRNG.
+	 */
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_MAX_REQUEST);
-	if (p != NULL && !OSSL_PARAM_set_size_t(p, 256))
+	if (p != NULL && !OSSL_PARAM_set_size_t(p, SIZE_MAX))
 		return 0;
 
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_STRENGTH);
