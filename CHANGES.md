@@ -81,7 +81,7 @@ back to the kernel's RNG while the ESDM is not reachable
 C program in place of the Python script of the 1.2.4 development versions:
 meson test runs those that hold next to the ESDM of the machine (suite
 esdm_cdev) where the module is loaded and skips them elsewhere, the build option
-esdm-cdev-check installs the program, and the VM test of the flake runs every
+esdm-cdev-check installs the program with its man page, and the VM test of the flake runs every
 check with it, without Python
 
 * Add esdm-vhost-user-rng (meson option vhost-user-rng, Linux only): the
