@@ -365,10 +365,15 @@ afterwards stays within those permitted calls. Setting `OPENSSL_CONF` on the
 
 The corresponding check is `nix build .#checks.<system>.egd_openssh`.
 
-The one thing such a consumer cannot do is reconnect: a process that has already
-confined itself, or that forks after connecting, cannot open a new connection.
-The client therefore reports a failure there rather than recovering from it,
-whereas an unconfined consumer sees a restarted ESDM transparently.
+The one thing such a consumer cannot do is reconnect, and the client cannot tell
+that it runs confined. When its connection is gone - closed by a restart of the
+ESDM, or by the server running short of connection slots - or when it runs in a
+child forked after connecting, which drops the inherited connection, the next
+request calls `socket` and `connect` to open a new connection, and the seccomp
+filter kills the process for that rather than failing the call. A confined
+consumer therefore has to be connected before it confines itself, and a process
+forking into the sandbox cannot be served at all; an unconfined consumer sees a
+restarted ESDM transparently.
 
 ## Additional Hardening Measures
 
