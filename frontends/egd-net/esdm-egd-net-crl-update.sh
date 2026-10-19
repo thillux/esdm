@@ -5,14 +5,16 @@
 #   esdm-egd-net-crl-update <file> <url>...
 #
 # Fetches the CRL behind each URL - DER, as a CRL distribution point serves it,
-# or PEM -, checks that it parses, and writes all of them in PEM to <file>,
-# atomically: they are written next to it and renamed into its place, so that a
-# daemon reading <file> never sees half of it. The daemons take up the new file
-# by themselves, see --reload_interval of esdm-egd-net-server(8).
+# or PEM, which may hold several -, checks that each CRL parses, and writes all
+# of them in PEM to <file>, atomically: they are written next to it and renamed
+# into its place, so that a daemon reading <file> never sees half of it. The
+# daemons take up the new file by themselves, see --reload_interval of
+# esdm-egd-net-server(8).
 #
-# A URL that cannot be fetched or does not hold a CRL fails the whole update,
-# and <file> stays as it was: a missing CRL would refuse every client it
-# covers, an old one does until its nextUpdate.
+# A URL that cannot be fetched or holds a CRL that does not parse fails the
+# whole update, and <file> stays as it was: a daemon refuses a file with a CRL
+# it cannot load and keeps the CRLs it has, until their nextUpdate passes and
+# they refuse every peer they cover; a missing CRL would refuse them at once.
 #
 # Needs curl(1) and openssl(1). Run by esdm-egd-net-crl-update@.service, see
 # esdm-egd-net-server(8).
@@ -29,7 +31,7 @@ shift
 
 dir="$(dirname -- "$out")"
 tmp="$(mktemp "$dir/.esdm-crl-update.XXXXXX")"
-trap 'rm -f -- "$tmp" "$tmp.one"' EXIT INT TERM
+trap 'rm -f -- "$tmp" "$tmp.one" "$tmp".crl.*' EXIT INT TERM
 
 for url in "$@"; do
 	curl --fail --silent --show-error --location --proto '=http,https' \
@@ -37,8 +39,18 @@ for url in "$@"; do
 		--max-filesize 67108864 --output "$tmp.one" -- "$url"
 
 	if grep -q -- '-----BEGIN X509 CRL-----' "$tmp.one"; then
-		openssl crl -in "$tmp.one" -noout
-		cat -- "$tmp.one" >>"$tmp"
+		# Each CRL of the file on its own - openssl crl reads the first
+		# one only -, written as openssl read it, nothing else of the
+		# file along with it
+		rm -f -- "$tmp".crl.*
+		awk -v base="$tmp.crl." '
+			/-----BEGIN X509 CRL-----/ { n++; out = base n; crl = 1 }
+			crl { print > out }
+			/-----END X509 CRL-----/ { if (crl) close(out); crl = 0 }
+		' "$tmp.one"
+		for one in "$tmp".crl.*; do
+			openssl crl -in "$one" -outform PEM >>"$tmp"
+		done
 	else
 		openssl crl -inform DER -in "$tmp.one" -outform PEM >>"$tmp"
 	fi

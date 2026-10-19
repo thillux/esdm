@@ -52,6 +52,14 @@ egd_net_common_test = executable(
 
 test('EGD network addresses', egd_net_common_test, suite: 'egd-net')
 
+# The download of the CRLs, by a curl of the test that copies files: every CRL
+# of a PEM file checked. Skips (77) without openssl(1).
+test('EGD network CRL download', find_program('sh'),
+	args: [ files('crl_update_test.sh'),
+		files('../../frontends/egd-net/esdm-egd-net-crl-update.sh'),
+		egd_net_pki ],
+	suite: 'egd-net')
+
 # The esdm-egd-net-server, its bounds, its rotation and revocation, plain TCP
 # and the allowlist. Needs no ESDM, and no privileges: the commands it speaks
 # are answered by the daemon itself.
