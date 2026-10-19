@@ -321,6 +321,16 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM aux pool XOF failure', esdm_aux_xof_failure_test)
 
+	esdm_aux_add_entropy_test = executable(
+		'esdm_aux_add_entropy_test',
+		[ esdm_ipc_ns, 'esdm_aux_add_entropy_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM aux pool entropy credit', esdm_aux_add_entropy_test)
+
 	esdm_reseed_per_request_test = executable(
 		'esdm_reseed_per_request_test',
 		[ esdm_ipc_ns, 'esdm_reseed_per_request_test.c' ],

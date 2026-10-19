@@ -234,6 +234,42 @@ static void esdm_pool_set_entropy_pool(struct esdm_pool *pool,
 	atomic_store(&pool->aux_entropy_bits, (int)entropy_bits);
 }
 
+/*
+ * Add @entropy_bits to the entropy count of @pool, which is the raw count
+ * before the discount for the oversampling, see esdm_aux_avail_entropy_pool().
+ * Caller must hold pool->lock.
+ */
+static void esdm_pool_add_entropy_pool(struct esdm_pool *pool,
+				       uint32_t entropy_bits)
+{
+	uint32_t existing = atomic_read_u32(&pool->aux_entropy_bits);
+	uint32_t cap = esdm_get_digestsize();
+
+	/*
+	 * Cap the available entropy to the size of the state of the XDRBG
+	 * compliant to SP800-90B section 3.1.5.1 table 1.
+	 *
+	 * Guard against overflow in the addition.
+	 */
+	if (entropy_bits > cap - min_uint32(existing, cap))
+		entropy_bits = cap;
+	else
+		entropy_bits += existing;
+	esdm_pool_set_entropy_pool(pool, min_uint32(entropy_bits, cap));
+}
+
+/*
+ * Entropy is credited to the data a pool absorbed. A pool whose XDRBG is not
+ * started holds none: nothing was inserted since its (re)initialization, or a
+ * failure of its XDRBG discarded what it held. No extraction drains a count
+ * credited to it either - esdm_aux_get_pool() returns right away - so the
+ * source would report that entropy for good. Caller must hold pool->lock.
+ */
+static bool esdm_pool_creditable(struct esdm_pool *pool)
+{
+	return esdm_xdrbg_started(&pool->xdrbg);
+}
+
 /* Set entropy content in user-space controllable aux pool */
 DSO_PUBLIC
 void esdm_pool_set_entropy(uint32_t entropy_bits)
@@ -247,6 +283,8 @@ void esdm_pool_set_entropy(uint32_t entropy_bits)
 	 * it can nevertheless reset all pools to zero
 	 */
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; i++) {
+		struct esdm_pool *pool = &esdm_pools[i];
+
 		/*
 		 * Hold the pool lock so this absolute set stays consistent with
 		 * the lock-guarded read-modify-write sequences on aux_entropy_bits
@@ -254,12 +292,43 @@ void esdm_pool_set_entropy(uint32_t entropy_bits)
 		 * unlocked atomic_store() could otherwise clobber a concurrent
 		 * xchg/add and corrupt the entropy accounting.
 		 */
-		mutex_w_lock(&esdm_pools[i].lock);
-		esdm_pool_set_entropy_pool(&esdm_pools[i], entropy_bits);
-		mutex_w_unlock(&esdm_pools[i].lock);
+		mutex_w_lock(&pool->lock);
+		esdm_pool_set_entropy_pool(
+			pool, esdm_pool_creditable(pool) ? entropy_bits : 0);
+		mutex_w_unlock(&pool->lock);
 		if (entropy_bits != 0)
 			break;
 	}
+
+	/*
+	 * As the DRNG is newly seeded, maybe the need entropy flag can be
+	 * unset?
+	 */
+	esdm_shm_status_set_need_entropy();
+
+	/* notify others about newly added entropy */
+	esdm_es_add_entropy();
+}
+
+/* Credit entropy to the data in the user-space controllable aux pool */
+DSO_PUBLIC
+void esdm_pool_add_entropy(uint32_t entropy_bits)
+{
+	/* As esdm_pool_set_entropy(), this interface credits the first pool */
+	struct esdm_pool *pool = &esdm_pools[0];
+
+	/* Nothing changes, so nobody is to be notified either */
+	if (!entropy_bits)
+		return;
+
+	/*
+	 * Read and update the count under the pool lock, so that an
+	 * extraction in between does not have its bits credited once more.
+	 */
+	mutex_w_lock(&pool->lock);
+	if (esdm_pool_creditable(pool))
+		esdm_pool_add_entropy_pool(pool, entropy_bits);
+	mutex_w_unlock(&pool->lock);
 
 	/*
 	 * As the DRNG is newly seeded, maybe the need entropy flag can be
@@ -309,23 +378,7 @@ static int esdm_aux_pool_insert_locked(struct esdm_pool *pool,
 			min_uint32(entropy_bits, (uint32_t)(inbuflen << 3));
 
 	CKINT(esdm_xdrbg_insert(&pool->xdrbg, inbuf, inbuflen));
-
-	/*
-	 * Cap the available entropy to the size of the state of the XDRBG
-	 * compliant to SP800-90B section 3.1.5.1 table 1.
-	 *
-	 * Guard against overflow in the addition.
-	 */
-	{
-		uint32_t existing = atomic_read_u32(&pool->aux_entropy_bits);
-		uint32_t cap = esdm_get_digestsize();
-
-		if (entropy_bits > cap - min_uint32(existing, cap))
-			entropy_bits = cap;
-		else
-			entropy_bits += existing;
-		esdm_pool_set_entropy_pool(pool, min_uint32(entropy_bits, cap));
-	}
+	esdm_pool_add_entropy_pool(pool, entropy_bits);
 
 out:
 	if (ret) {

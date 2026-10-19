@@ -347,9 +347,28 @@ uint32_t esdm_get_digestsize(void);
 /**
  * @brief Set the entropy level of the auxiliary pool
  *
+ * A non-zero level is set for the first auxiliary pool, zero for all of them.
+ * A pool that holds no data, as nothing was inserted into it since the ESDM
+ * was (re)initialized, is left at zero.
+ *
  * @param [in] entropy_bits Entropy rate in bits
  */
 void esdm_pool_set_entropy(uint32_t entropy_bits);
+
+/**
+ * @brief Credit entropy to the data in the auxiliary pool
+ *
+ * Adds the entropy to that of the first auxiliary pool, the one
+ * esdm_pool_set_entropy() sets, up to the most a pool holds,
+ * esdm_get_digestsize() - what RNDADDTOENTCNT of the kernel's random devices
+ * does. The bits are added as given: where esdm_get_aux_ent() discounts the
+ * oversampling of the pool, it does so for these as well. A pool that holds
+ * no data, as nothing was inserted into it since the ESDM was
+ * (re)initialized, is credited nothing.
+ *
+ * @param [in] entropy_bits Entropy in bits to add
+ */
+void esdm_pool_add_entropy(uint32_t entropy_bits);
 
 /**
  * @brief Force a reseed of all DRNGs in the ESDM

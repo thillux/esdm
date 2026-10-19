@@ -1466,7 +1466,7 @@ static void test_esdm_priv(void)
 {
 	uint32_t orig[ESDM_EGD_STATE_NUM_FIELDS];
 	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
-	uint32_t wakeup, secs;
+	uint32_t wakeup, secs, credited;
 	uint8_t count = 0;
 	int32_t status = 1;
 	int fd, wstatus;
@@ -1504,10 +1504,23 @@ static void test_esdm_priv(void)
 			    TEST_RESPONSE_MS) == 0 &&
 		      status == 0,
 	      "crediting entropy was not carried out: %d", status);
+	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0,
+	      "the state was not answered");
+	credited = fields[ESDM_EGD_STATE_ENT_CNT];
+
+	/*
+	 * Credits add up. The pool reports them less its oversampling, if it
+	 * applies one, which can take all of the first 64 bits: the second
+	 * credit has to show.
+	 */
+	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, 64, &status,
+			    TEST_RESPONSE_MS) == 0 &&
+		      status == 0,
+	      "crediting entropy once more was not carried out: %d", status);
 	CHECK(test_cmd_state(fd, fields, &count, TEST_RESPONSE_MS) == 0 &&
-		      fields[ESDM_EGD_STATE_ENT_CNT] > 0,
-	      "the pool holds %u bits after crediting 64",
-	      fields[ESDM_EGD_STATE_ENT_CNT]);
+		      fields[ESDM_EGD_STATE_ENT_CNT] > credited,
+	      "the pool holds %u bits after crediting 64 to its %u",
+	      fields[ESDM_EGD_STATE_ENT_CNT], credited);
 
 	/* A credit beyond the pool is capped, not wrapped around */
 	CHECK(test_cmd_priv(fd, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, UINT32_MAX,

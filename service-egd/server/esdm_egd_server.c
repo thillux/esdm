@@ -1171,17 +1171,10 @@ static int esdm_egd_cmd_priv(struct esdm_egd_conn *conn, uint8_t cmd,
 	}
 
 	switch (cmd) {
-	case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT: {
-		uint32_t aux_ent = esdm_get_aux_ent();
-		uint32_t digestsize_bits = esdm_get_digestsize();
-
+	case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
 		/* As the RPC interface: never above the pool's digest size */
-		if (arg > digestsize_bits || aux_ent > digestsize_bits - arg)
-			esdm_pool_set_entropy(digestsize_bits);
-		else
-			esdm_pool_set_entropy(aux_ent + arg);
+		esdm_pool_add_entropy(arg);
 		break;
-	}
 	case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
 		esdm_pool_set_entropy(0);
 		break;
