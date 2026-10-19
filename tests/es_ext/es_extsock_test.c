@@ -205,7 +205,8 @@ static void *test_evil_run(void *arg)
 			uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 			uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN +
 				    ESDM_ES_EXT_PROTO_MAX_RSP_DATA + 8];
-			uint8_t data[ESDM_ES_EXT_PROTO_MAX_DATA + 8];
+			/* A status of the length asked for, too */
+			uint8_t data[ESDM_ES_EXT_PROTO_MAX_RSP_DATA + 8];
 			uint32_t length;
 			uint16_t type;
 			size_t len;
