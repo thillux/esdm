@@ -72,6 +72,14 @@
 
 extern struct esdm_es_cb esdm_es_extsock[ESDM_EXT_SOCKET_NUM];
 
+/*
+ * The entropy rate the provider socket source @idx is credited at, see
+ * esdm_config_es_ext_socket_entropy_rate(): the one configured, else the one
+ * its provider declared on its last connection, else 0. *@source, if not
+ * NULL, tells which: "config", "provider" or "default".
+ */
+uint32_t esdm_es_extsock_entropy_rate(unsigned int idx, const char **source);
+
 /**
  * @brief Select the socket of an external entropy source provider
  *

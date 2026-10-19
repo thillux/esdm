@@ -38,7 +38,7 @@
  * the test puts itself in namespaces of its own.
  *
  * Usage: es_ext_server_test <esdm-server> <esdm-es-ext-serve> <test plugin>
- *			     [<plugin copy> x 4]
+ *			     [<plugin copy> x 8 <rated plugin>]
  */
 
 #define _GNU_SOURCE
@@ -297,25 +297,34 @@ static bool test_json_str_is(struct json_object *obj, const char *key,
 	       !strcmp(json_object_get_string(val), expected);
 }
 
+/* The text of @obj, for a message */
+static const char *test_json_text(struct json_object *obj)
+{
+	return obj ? json_object_to_json_string(obj) : "(none)";
+}
+
 /*
  * Two sources of each kind, configured on the command line, the n-th
  * occurrence of an option for the n-th source: each with its own plugin or
- * provider and rate - the first provider failing its self test, the other
- * sources credited at the rates given.
+ * provider, name and rate - the rate of the plugin or the provider where the
+ * occurrence is auto, the one given otherwise - and the first provider
+ * failing its self test.
  */
 static void test_several(const char *server, const char *serve,
-			 char *const copies[])
+			 char *const copies[], const char *rated)
 {
+	const char *const serve0[] = { "--entropy_rate", "200", NULL };
+	const char *const serve1[] = { "--name", "es-ext-test", NULL };
 	char socket[2][sizeof(test_dir) + 32];
 	char *const server_argv[] = {
 		(char *)server, "-f",
-		"--es_ext_lib", copies[0],
+		"--es_ext_lib", (char *)rated,
 		"--es_ext_lib", copies[1],
+		"--es_ext_lib_entropy_rate", "auto",
 		"--es_ext_lib_entropy_rate", "64",
-		"--es_ext_lib_entropy_rate", "128",
 		"--es_ext_socket", socket[0],
 		"--es_ext_socket", socket[1],
-		"--es_ext_socket_entropy_rate", "256",
+		"--es_ext_socket_entropy_rate", "auto",
 		"--es_ext_socket_entropy_rate", "192",
 		NULL
 	};
@@ -328,12 +337,11 @@ static void test_several(const char *server, const char *serve,
 	for (i = 0; i < 2; i++)
 		snprintf(socket[i], sizeof(socket[i]), "%s/provider%u.socket",
 			 test_dir, i);
-	const char *const name_b[] = { "--name", "Quelle B", NULL };
 
-	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], NULL,
+	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], serve0,
 					"selftest_ret=-19,name=Quelle A");
-	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], name_b,
-					"name=overridden");
+	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], serve1,
+					"rate=96,name=overridden");
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 
@@ -354,42 +362,60 @@ static void test_several(const char *server, const char *serve,
 	root = json_tokener_parse(status);
 	CHECK(root != NULL, "the JSON status is no JSON");
 
-	/* Two plugins of the same name, apart by their instances */
+	/* The rate of the plugin, for auto */
 	es = es_ext_test_status_es(root, "ExternalLib0");
-	CHECK(test_json_str_is(es, "name", "es-ext-test"),
-	      "ExternalLib0 is not shown under the name of its plugin: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	CHECK(test_json_str_is(es, "plugin_library", copies[0]) &&
-		      test_json_int(es, "entropy_rate_per_256_data_bits") == 64,
-	      "ExternalLib0 is not configured as its options say: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	es = es_ext_test_status_es(root, "ExternalLib1");
-	CHECK(test_json_str_is(es, "name", "es-ext-test"),
-	      "ExternalLib1 is not shown under the name of its plugin: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	CHECK(test_json_str_is(es, "plugin_library", copies[1]) &&
+	CHECK(test_json_str_is(es, "name", "es-ext-rated") &&
+		      test_json_str_is(es, "plugin_library", rated),
+	      "ExternalLib0 does not have the plugin of its option: %s",
+	      test_json_text(es));
+	CHECK(test_json_int(es, "entropy_rate") == 128 &&
+		      test_json_str_is(es, "entropy_rate_source", "plugin") &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 128,
-	      "ExternalLib1 is not configured as its options say: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	/* The name of the plugin, and the one of --name */
+	      "ExternalLib0 is not credited at the rate of its plugin: %s",
+	      test_json_text(es));
+
+	/* The rate of the second occurrence */
+	es = es_ext_test_status_es(root, "ExternalLib1");
+	CHECK(test_json_str_is(es, "name", "es-ext-test") &&
+		      test_json_str_is(es, "plugin_library", copies[1]),
+	      "ExternalLib1 does not have the plugin of its option: %s",
+	      test_json_text(es));
+	CHECK(test_json_int(es, "entropy_rate") == 64 &&
+		      test_json_str_is(es, "entropy_rate_source", "config") &&
+		      test_json_int(es, "entropy_rate_per_256_data_bits") == 64,
+	      "ExternalLib1 is not credited at the rate of its option: %s",
+	      test_json_text(es));
+
+	/*
+	 * The name of the plugin, the rate of --entropy_rate of the provider -
+	 * credited with nothing, as it fails its self test
+	 */
 	es = es_ext_test_status_es(root, "ExternalSocket0");
-	CHECK(test_json_str_is(es, "name", "Quelle A"),
-	      "ExternalSocket0 is not shown under the name of its plugin: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	CHECK(test_json_str_is(es, "provider_socket", socket[0]) &&
+	CHECK(test_json_str_is(es, "name", "Quelle A") &&
+		      test_json_str_is(es, "provider_socket", socket[0]),
+	      "ExternalSocket0 does not have the provider of its option: %s",
+	      test_json_text(es));
+	CHECK(test_json_int(es, "entropy_rate") == 200 &&
+		      test_json_str_is(es, "entropy_rate_source", "provider") &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 0 &&
-		      strstr(json_object_to_json_string(es),
-			     "failing its self test"),
-	      "ExternalSocket0 is not configured as its options say: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
+		      strstr(test_json_text(es), "failing its self test"),
+	      "ExternalSocket0 is not as its provider says: %s",
+	      test_json_text(es));
+
+	/*
+	 * The name of --name - the name of a plugin library source as well -
+	 * and the rate of the option, not the one of the plugin
+	 */
 	es = es_ext_test_status_es(root, "ExternalSocket1");
-	CHECK(test_json_str_is(es, "name", "Quelle B"),
-	      "ExternalSocket1 is not shown under the name of --name: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
-	CHECK(test_json_str_is(es, "provider_socket", socket[1]) &&
+	CHECK(test_json_str_is(es, "name", "es-ext-test") &&
+		      test_json_str_is(es, "provider_socket", socket[1]),
+	      "ExternalSocket1 does not have the provider of its option: %s",
+	      test_json_text(es));
+	CHECK(test_json_int(es, "entropy_rate") == 192 &&
+		      test_json_str_is(es, "entropy_rate_source", "config") &&
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 192,
-	      "ExternalSocket1 is not configured as its options say: %s",
-	      es ? json_object_to_json_string(es) : "(none)");
+	      "ExternalSocket1 is not credited at the rate of its option: %s",
+	      test_json_text(es));
 	json_object_put(root);
 
 	/* And the text status names each of them */
@@ -400,9 +426,12 @@ static void test_several(const char *server, const char *serve,
 		      test_es_section(status, "ExternalSocket0") &&
 		      test_es_section(status, "ExternalSocket1"),
 	      "the text status does not name each source");
-	section = test_es_section(status, "ExternalSocket1");
-	CHECK(section && !strncmp(section, " Name: Quelle B\n", 16),
+	section = test_es_section(status, "ExternalSocket0");
+	CHECK(section && !strncmp(section, " Name: Quelle A\n", 16),
 	      "the text status does not show the declared name (%.300s)",
+	      section ? section : "");
+	CHECK(section && strstr(section, " Entropy rate source: provider\n"),
+	      "the text status does not show the source of the rate (%.300s)",
 	      section ? section : "");
 
 	test_terminate(pid);
@@ -421,7 +450,7 @@ int main(int argc, char *argv[])
 	int ret;
 
 	if (argc < 4) {
-		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> [<plugin copy> x 4]\n",
+		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> [<plugin copy> x 8 <rated plugin>]\n",
 		       argv[0]);
 		return 1;
 	}
@@ -460,8 +489,8 @@ int main(int argc, char *argv[])
 	test_socket_provider(argv[1], argv[2], argv[3]);
 #endif
 #if ESDM_EXT_LIB_NUM >= 2 && ESDM_EXT_SOCKET_NUM >= 2
-	if (argc >= 8)
-		test_several(argv[1], argv[2], argv + 4);
+	if (argc >= 13)
+		test_several(argv[1], argv[2], argv + 4, argv[12]);
 	else
 		CHECK(0, "the plugin copies are missing");
 #endif

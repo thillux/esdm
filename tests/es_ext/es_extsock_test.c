@@ -46,6 +46,10 @@
  *   valid, or that of another entropy source, is not taken; a provider that
  *   does not know INFO, or answers what the protocol does not allow, is
  *   connected to again at once without asking and works without a name.
+ * - A source is credited at the rate configured for it, else at the one its
+ *   provider declares in its answer to INFO - capped at 256 - else at 0; the
+ *   rate is asked for anew on every connection. A provider that does not know
+ *   INFO declares none.
  * - The status of the provider is the "provider" member of the state, if it
  *   is a JSON object. It is asked for at most once per interval, and not
  *   while a request is in progress - which neither the ESDM status nor the
@@ -167,7 +171,11 @@ enum test_evil_info {
 };
 
 static atomic_int test_evil_info = TEST_EVIL_INFO_NONE;
+/* The rate of TEST_EVIL_INFO_NAME */
+static atomic_uint test_evil_rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 static atomic_uint test_evil_info_requests = 0;
+/* The last INFO request as it arrived, byte for byte */
+static uint8_t test_evil_info_req[ESDM_ES_EXT_PROTO_REQ_LEN];
 /* The name of TEST_EVIL_INFO_NAME, set while no request is in progress */
 static char test_evil_name[ESDM_ES_EXT_NAME_MAX + 2] = "evil";
 /* A provider not knowing STARTDTLS: it closes the connection on it */
@@ -241,11 +249,13 @@ static void *test_evil_run(void *arg)
 				int mode = atomic_load(&test_evil_info);
 				uint32_t datalen;
 
+				memcpy(test_evil_info_req, req,
+				       sizeof(test_evil_info_req));
 				atomic_fetch_add(&test_evil_info_requests, 1);
 				if (mode == TEST_EVIL_INFO_OLD)
 					break;
 				esdm_es_ext_put_le32(
-					data, ESDM_ES_EXT_PROTO_RATE_NONE);
+					data, atomic_load(&test_evil_rate));
 				datalen = 4 + (uint32_t)strlen(test_evil_name);
 				memcpy(data + 4, test_evil_name,
 				       strlen(test_evil_name));
@@ -1383,6 +1393,10 @@ static void test_names(void)
 	CHECK_EQ(test_get(bits, NULL), 8);
 	CHECK(test_state_has("name", "evil"), "the name is not taken");
 	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
+	/* The request as the protocol has it: type 5, length 0 */
+	CHECK_MEM_EQ(test_evil_info_req,
+		     "ESEX\x01\x00\x05\x00\x00\x00\x00\x00",
+		     sizeof(test_evil_info_req));
 	/* Once per connection */
 	CHECK_EQ(test_get(bits, NULL), 8);
 	CHECK_EQ(atomic_load(&test_evil_info_requests), 1);
@@ -1446,6 +1460,121 @@ static void test_names(void)
 	CHECK_EQ(ES->init(), 0);
 }
 
+/* Is the source credited at @rate, from @source, as the state says? */
+static bool test_rate_is(uint32_t rate, const char *source)
+{
+	struct json_object *state = es_state_get(ES);
+	bool ret = es_state_int(state, "entropy_rate", -1) == rate &&
+		   es_state_str_is(state, "entropy_rate_source", source) &&
+		   esdm_config_es_ext_socket_entropy_rate(0) == rate;
+
+	if (!ret)
+		printf("expected rate %u of the %s: %s\n", rate, source,
+		       es_state_print(state));
+	json_object_put(state);
+	return ret;
+}
+
+/*
+ * The rate of the source: the one configured for it, else the one its provider
+ * declares - asked for on every connection - else 0.
+ */
+static void test_rates(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	pthread_t evil;
+
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+			 0, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+		 0);
+
+	/* The provider of the library: the rate of its plugin, or its own */
+	test_server_stop();
+	ctl->entropy_rate = 64;
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(64, bits));
+	CHECK(test_rate_is(64, "provider"),
+	      "the rate of the plugin of the provider is not taken");
+
+	test_server_stop();
+	ctl->entropy_rate = ES_EXT_TEST_RATE_NONE;
+	CHECK_EQ(esdm_es_ext_server_alloc(&es_ext_test_plugin, test_good, 0600,
+					  &test_server),
+		 0);
+	CHECK_EQ(esdm_es_ext_server_set_entropy_rate(test_server, 257),
+		 -EINVAL);
+	CHECK_EQ(esdm_es_ext_server_set_entropy_rate(test_server, 32), 0);
+	CHECK_EQ(-pthread_create(&test_server_thread, NULL, test_server_run,
+				 test_server),
+		 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), test_level(32, bits));
+	CHECK(test_rate_is(32, "provider"),
+	      "the rate given to the server is not taken");
+
+	/* None declared: 0, the data credited with nothing */
+	test_server_stop();
+	CHECK_EQ(test_server_start(), 0);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK(test_rate_is(0, "default"), "a provider without a rate has one");
+
+	/* A provider of the test, with the rates it declares */
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_NAME);
+	atomic_store(&test_evil_rate, 4);
+	CHECK_EQ(test_evil_start(&evil), 0);
+
+	/* It claims 8 bits a block, credited at the rate it declares */
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 4);
+	CHECK(test_rate_is(4, "provider"), "the declared rate is not taken");
+
+	/* Asked anew on the next connection */
+	atomic_store(&test_evil_rate, 6);
+	CHECK_EQ(test_get(bits, NULL), 4);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 6);
+	CHECK(test_rate_is(6, "provider"),
+	      "the rate of the new connection is not taken");
+
+	/* Beyond 256: capped; one configured takes precedence */
+	atomic_store(&test_evil_rate, 1000);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_rate_is(256, "provider"), "a rate beyond 256 is not capped");
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(0, 2), 0);
+	CHECK_EQ(test_get(bits, NULL), 2);
+	CHECK(test_rate_is(2, "config"), "the rate configured is not taken");
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+			 0, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+		 0);
+
+	/* A provider that does not know INFO declares none */
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_OLD);
+	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_evil), 0);
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK(test_rate_is(0, "default"), "an old provider has a rate");
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(0, 8), 0);
+	CHECK_EQ(test_get(bits, NULL), 8);
+	CHECK(test_rate_is(8, "config"),
+	      "the rate configured for an old provider is not taken");
+
+	atomic_store(&test_evil_stop, true);
+	ES->fini();
+	pthread_join(evil, NULL);
+	close(test_evil_listen);
+	unlink(test_evil);
+	atomic_store(&test_evil_stop, false);
+	atomic_store(&test_evil_connections, 0);
+	atomic_store(&test_evil_info, TEST_EVIL_INFO_NONE);
+	atomic_store(&test_evil_rate, ESDM_ES_EXT_PROTO_RATE_NONE);
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(0, 256), 0);
+	CHECK_EQ(ES->init(), 0);
+}
+
 int main(void)
 {
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
@@ -1481,6 +1610,7 @@ int main(void)
 	test_status_old_provider();
 	test_status_busy();
 	test_names();
+	test_rates();
 	test_protocol_breaches();
 
 	if (test_server)

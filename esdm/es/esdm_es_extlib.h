@@ -51,6 +51,14 @@
 
 extern struct esdm_es_cb esdm_es_extlib[ESDM_EXT_LIB_NUM];
 
+/*
+ * The entropy rate the plugin library source @idx is credited at, see
+ * esdm_config_es_ext_lib_entropy_rate(): the one configured, else the one its
+ * plugin declares, else 256. *@source, if not NULL, tells which: "config",
+ * "plugin" or "default".
+ */
+uint32_t esdm_es_extlib_entropy_rate(unsigned int idx, const char **source);
+
 /**
  * @brief Select the plugin library loaded as external entropy source
  *

@@ -13,6 +13,8 @@ esdm\-es\-ext\-serve \- serve an external entropy source plugin to the ESDM
 .IR USER ]...
 .RB [ \-\-name
 .IR NAME ]
+.RB [ \-\-entropy_rate
+.IR BITS ]
 .RB [ \-v ]
 .SH DESCRIPTION
 .B esdm\-es\-ext\-serve
@@ -54,6 +56,19 @@ The name of the plugin \- or the one given with
 \- is the name the ESDM shows the source under, which it asks the provider for
 on every connection (INFO request, see
 .BR libesdm_es_ext (3)).
+.PP
+The rate the plugin declares with its
+.I entropy_rate
+callback \- or the one given with
+.B \-\-entropy_rate
+\- is the entropy rate the ESDM credits the provider at, unless a rate is
+configured for the source in the ESDM
+.RB ( "esdm\-server \-\-es_ext_socket_entropy_rate" ),
+which takes precedence. Without either, the provider declares none and the ESDM
+credits it at 0 unless configured otherwise. Note that whoever runs a provider
+of a user the ESDM accepts can declare any rate this way: the ESDM operator
+who does not want to trust that configures the rate of the source. The rate
+the plugin declares is logged at start up.
 .PP
 The status the plugin reports of itself, if it has a
 .I status_json
@@ -103,6 +118,13 @@ Declare
 as the name of the source in place of the name of the plugin: 1 to 32 bytes of
 UTF-8 without control characters. A name that is none of that is refused at
 start up, with exit status 1.
+.TP
+.BI \-\-entropy_rate " BITS"
+Declare
+.I BITS
+of entropy per 256 bits of data, 0 to 256, as the rate of the source in place
+of the one of the plugin. Anything else is refused at start up, with exit
+status 1.
 .TP
 .B \-\-no_dtls
 Do not offer DTLS to the clients. A build with DTLS (meson option

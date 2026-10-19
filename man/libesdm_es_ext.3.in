@@ -74,14 +74,18 @@ struct esdm_es_ext_plugin {
 	int (*selftest)(void *ctx);
 	/* Version 2 */
 	int (*status_json)(void *ctx, char *buf, size_t buflen);
+	/* Version 3 */
+	uint32_t (*entropy_rate)(void *ctx);
 };
 .fi
 .PP
 .I version
 is
 .BR ESDM_ES_EXT_PLUGIN_VERSION ,
-2. A plugin of version 1, whose struct ends before
-.IR status_json ,
+3. A plugin of version 1 or 2, whose struct ends before
+.I status_json
+or
+.IR entropy_rate ,
 is loaded all the same.
 .PP
 .I name
@@ -162,14 +166,46 @@ served by a provider instead: the provider server calls all callbacks in its
 own process, with the privileges and in the namespaces it was started with.
 .SS Entropy credit
 The ESDM credits a block with the entropy the source claims for it, but at
-most with what the entropy rate configured for the source allows
+most with what the entropy rate of the source allows: the rate configured for
+the source
 .RB ( es_ext_lib_entropy_rate ,
 .BR es_ext_socket_entropy_rate ,
-or the corresponding
+the corresponding
 .BR esdm\-server (8)
-options). The cap of a plugin library defaults to 256, which takes its claims
-as they are; that of a provider to 0, so that a provider is credited only once
-a rate is configured. A claim beyond the size of the block is a failure: the
+options, or
+.BR esdm_config_es_ext_lib_entropy_rate_set ()
+and
+.BR esdm_config_es_ext_socket_entropy_rate_set ()
+of libesdm), else the rate the source declares itself, else a default \- 256
+for a plugin library, which takes its claims as they are, 0 for a provider, so
+that a provider declaring none is credited only once a rate is configured. The
+status of the source shows the rate as
+.B entropy_rate
+and where it comes from as
+.B entropy_rate_source
+.RB ( config ,
+.BR plugin ,
+.B provider
+or
+.BR default ).
+.PP
+A plugin declares its rate with
+.IR entropy_rate ,
+bits of entropy per 256 bits of data from 0 to
+.B ESDM_ES_EXT_ENTROPY_RATE_MAX
+(256); a rate beyond is taken as 256. It is called once after
+.IR init ,
+so that the plugin can decide from the hardware it found, and only for a plugin
+of version 3 or later. A provider declares its rate in its answer to INFO, see
+below; the provider server of this library declares the one of the
+.I entropy_rate
+of its plugin, or the one set with
+.BR esdm_es_ext_server_set_entropy_rate ().
+A provider is another process, trusted for the user it runs as: accepting that
+user
+.RB ( "esdm\-server \-\-es_ext_socket_uid" )
+means trusting the rate the provider declares as well. An operator who does not
+want that configures the rate of the source, which takes precedence. A claim beyond the size of the block is a failure: the
 block is discarded, and the source is credited with nothing until it delivers
 properly again \- the ESDM asks a failed source again on its own to find out.
 A source is credited with nothing before its first
@@ -214,6 +250,20 @@ Returns
 .B \-EINVAL
 for a name that is not valid; NULL goes back to the name of the plugin. Call
 it before
+.BR esdm_es_ext_server_run ().
+.TP
+.BI "int esdm_es_ext_server_set_entropy_rate(struct esdm_es_ext_server *" server ", uint32_t " rate );
+Declare
+.I rate
+bits of entropy per 256 bits of data, 0 to 256, as the rate of the source in
+the answer to INFO, in place of the one the
+.I entropy_rate
+callback of the plugin returns, which the server declares by default \- none
+for a plugin without it. Returns
+.B \-EINVAL
+for a rate beyond 256;
+.B ESDM_ES_EXT_PROTO_RATE_NONE
+goes back to the rate of the plugin. Call it before
 .BR esdm_es_ext_server_run ().
 .TP
 .BI "int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *" server ", int " enable );
@@ -329,11 +379,15 @@ one. The request has length 0. A provider answers it with status 0, entropy 0
 and the data
 .PP
 .nf
-	u32 entropy_rate	0xffffffff (ESDM_ES_EXT_PROTO_RATE_NONE)
+	u32 entropy_rate	0 to 256, or 0xffffffff for none
 	u8  name[]		0 to 32 bytes
 .fi
 .PP
 \- 4 to 36 bytes \- where
+.I entropy_rate
+is the rate the provider declares for its data, bits of entropy per 256 bits,
+.B ESDM_ES_EXT_PROTO_RATE_NONE
+(0xffffffff) for none, and
 .I name
 is the name of the source without a NUL, no bytes for a provider without a
 name; or with a negative errno, such as
@@ -342,17 +396,22 @@ and no data, which declares nothing. The ESDM shows the source under the name
 as a plugin library under the
 .I name
 of its plugin, and takes it only if it is valid in the same way; a name that is
-not valid is not taken, and the source shown under its instance name. An
-answer of more than 36 bytes, or another answer that breaks the protocol, ends
-the connection as for any request. The provider server of this library
-answers with the
+not valid is not taken, and the source shown under its instance name. It
+credits the provider at the rate unless a rate is configured for the source,
+taking a rate beyond 256 as 256. An answer of more than 36 bytes, or another
+answer that breaks the protocol, ends the connection as for any request. The
+provider server of this library answers with the
 .I name
-of its plugin, or the one set with
-.BR esdm_es_ext_server_set_name ().
+and the
+.I entropy_rate
+of its plugin, or the ones set with
+.BR esdm_es_ext_server_set_name ()
+and
+.BR esdm_es_ext_server_set_entropy_rate ().
 A provider older than INFO closes the connection on it, as on any request it
 does not know: the ESDM connects again at once without asking on the new
-connection, and uses the provider without a name. The name is asked for anew
-on every connection \- a provider restarted may declare another one.
+connection, and uses the provider without a name and a rate. Both are asked
+for anew on every connection \- a provider restarted may declare others.
 .SS DTLS
 An ESDM built with DTLS (meson option
 .BR dtls ,

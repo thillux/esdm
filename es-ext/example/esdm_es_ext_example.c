@@ -22,9 +22,10 @@
  *
  * It reads a character device delivering noise, /dev/hwrng unless
  * ESDM_ES_EXT_EXAMPLE_DEVICE names another one at build time, and claims one
- * bit of entropy per byte read. A real plugin claims what the assessment of its
- * noise source supports. Its status, shown in the ESDM status, names the device
- * and counts the reads.
+ * bit of entropy per byte read - the entropy rate it declares as well, 32 bits
+ * per 256 bits of data. A real plugin claims and declares what the assessment
+ * of its noise source supports. The ESDM shows it under its name, and its
+ * status, which names the device and counts the reads.
  *
  * Build it as a shared library:
  *
@@ -123,6 +124,18 @@ static int example_selftest(void *ctx)
 }
 
 /*
+ * The entropy rate of the source, bits per 256 bits of data, asked for once
+ * after the init: the ESDM credits a block at most at this rate, unless a rate
+ * is configured for the source there. A plugin may decide it from what its
+ * init found - one bit per byte here, as the claims of example_get_entropy().
+ */
+static uint32_t example_entropy_rate(void *ctx)
+{
+	(void)ctx;
+	return 32;
+}
+
+/*
  * One JSON object. The device name is a constant of the build without
  * anything JSON would have to escape.
  */
@@ -147,4 +160,5 @@ const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 	.get_entropy = example_get_entropy,
 	.selftest = example_selftest,
 	.status_json = example_status_json,
+	.entropy_rate = example_entropy_rate,
 };

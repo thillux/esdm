@@ -471,6 +471,50 @@ esdm_es_ext_plugin_has_status(const struct esdm_es_ext_plugin *plugin)
 }
 
 /*
+ * Does @plugin declare an entropy rate? Only a plugin of version 3 or later
+ * has the member at all.
+ */
+static inline bool
+esdm_es_ext_plugin_has_entropy_rate(const struct esdm_es_ext_plugin *plugin)
+{
+	return plugin->version >= 3 && plugin->entropy_rate;
+}
+
+/*
+ * The entropy rate @plugin declares, the way both sides take it: at most
+ * ESDM_ES_EXT_ENTROPY_RATE_MAX, ESDM_ES_EXT_PROTO_RATE_NONE for none. Called
+ * after its init, with its context @ctx.
+ */
+static inline uint32_t
+esdm_es_ext_plugin_entropy_rate(const struct esdm_es_ext_plugin *plugin,
+				void *ctx)
+{
+	uint32_t rate;
+
+	if (!esdm_es_ext_plugin_has_entropy_rate(plugin))
+		return ESDM_ES_EXT_PROTO_RATE_NONE;
+
+	rate = plugin->entropy_rate(ctx);
+	return rate > ESDM_ES_EXT_ENTROPY_RATE_MAX ?
+		       ESDM_ES_EXT_ENTROPY_RATE_MAX :
+		       rate;
+}
+
+/*
+ * The rate a provider declares in its answer to INFO, the way the ESDM takes
+ * it: at most ESDM_ES_EXT_ENTROPY_RATE_MAX, ESDM_ES_EXT_PROTO_RATE_NONE for
+ * none
+ */
+static inline uint32_t esdm_es_ext_proto_rate(uint32_t rate)
+{
+	if (rate == ESDM_ES_EXT_PROTO_RATE_NONE)
+		return rate;
+	return rate > ESDM_ES_EXT_ENTROPY_RATE_MAX ?
+		       ESDM_ES_EXT_ENTROPY_RATE_MAX :
+		       rate;
+}
+
+/*
  * Ask @plugin for its status, the way both sides do: the JSON text, terminated,
  * into @buf of @buflen bytes. A text that is not terminated within the buffer,
  * or empty, counts as a failure. Whether it is JSON is left to the ESDM, which

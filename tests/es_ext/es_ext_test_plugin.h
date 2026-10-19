@@ -29,6 +29,13 @@
 /* The name it declares unless the test sets another one */
 #define ES_EXT_TEST_NAME "es-ext-test"
 
+/* No entropy rate declared */
+#define ES_EXT_TEST_RATE_NONE UINT32_MAX
+
+/* What the plugin of ES_EXT_TEST_PLUGIN_RATED declares */
+#define ES_EXT_TEST_RATED_NAME "es-ext-rated"
+#define ES_EXT_TEST_RATED_RATE 128
+
 /*
  * What the test plugin does, set by the test, and what was asked of it.
  *
@@ -43,6 +50,8 @@
  * @status_delay_ms: status_json takes this long
  * @name: The name the plugin declares, "es-ext-test" unless the test sets
  *	  another one - see the plugin, which may declare none
+ * @entropy_rate: The rate the plugin declares, taken by its init:
+ *		  ES_EXT_TEST_RATE_NONE for none
  *
  * The delays and the counters are atomic: a test changes and reads them while
  * the plugin runs in the thread of a provider it started.
@@ -58,12 +67,14 @@ struct esdm_es_ext_test_control {
 	_Atomic unsigned int get_delay_ms;
 	_Atomic unsigned int status_delay_ms;
 	char name[64];
+	uint32_t entropy_rate;
 
 	_Atomic unsigned int init_calls;
 	_Atomic unsigned int fini_calls;
 	_Atomic unsigned int get_calls;
 	_Atomic unsigned int selftest_calls;
 	_Atomic unsigned int status_calls;
+	_Atomic unsigned int rate_calls;
 	size_t last_buflen;
 	size_t last_status_buflen;
 };
@@ -73,7 +84,8 @@ struct esdm_es_ext_test_control {
  * reach of the control of the test: the test hands its settings over in this
  * environment variable instead, which the plugin reads in its init - a comma
  * separated list of selftest_ret=N, get_ret=N, claim_bits=N, get_delay_ms=N,
- * status_delay_ms=N and name=NAME - an empty NAME declares no name.
+ * status_delay_ms=N, name=NAME - an empty NAME declares no name - and rate=N,
+ * the entropy rate it declares.
  */
 #define ES_EXT_TEST_PLUGIN_ENV "ESDM_ES_EXT_TEST_PLUGIN"
 

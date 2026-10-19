@@ -42,11 +42,15 @@
  *   name next to it; a name that is not valid, or that of another entropy
  *   source, is refused, as is none, and the source shown under its instance
  *   name.
+ * - A source is credited at the rate configured for it, else at the one its
+ *   plugin declares (plugin API version 3), capped at 256, else at 256 - the
+ *   state says which it is. A plugin of version 1 or 2 declares none, whatever
+ *   lies beyond its struct.
  * - A re-init initializes the plugin anew without loading it again.
  * - Plugin libraries that do not fit are refused.
  *
  * Usage: es_extlib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> [...]
+ *	  <no plugin> <example> <version 1> <version 2> <rated plugin>
  */
 
 #include "config.h"
@@ -529,6 +533,114 @@ static void test_names(const char *path)
 	      "the name of the plugin is not back");
 }
 
+/* Is the source credited at @rate, from @source, as the state says? */
+static bool test_rate_is(uint32_t rate, const char *source)
+{
+	struct json_object *state = es_state_get(ES);
+	bool ret = es_state_int(state, "entropy_rate", -1) == rate &&
+		   es_state_str_is(state, "entropy_rate_source", source) &&
+		   esdm_config_es_ext_lib_entropy_rate(0) == rate;
+
+	if (!ret)
+		printf("expected rate %u of the %s: %s\n", rate, source,
+		       es_state_print(state));
+	json_object_put(state);
+	return ret;
+}
+
+/* Load @path anew, and pass its first self test */
+static void test_load(const char *path)
+{
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, path), 0);
+	CHECK(ES->active(), "%s is not loaded", path);
+	CHECK_EQ(ES->selftest(), 0);
+}
+
+/*
+ * The rate of the source: the one configured for it, else the one its plugin
+ * declares, else 256 - and a block credited with what the plugin claims, at
+ * most at that rate.
+ */
+static void test_rates(const char *path, const char *v1, const char *v2,
+		       const char *rated)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	struct esdm_es_ext_test_control *other;
+	void *dl;
+	unsigned int i;
+
+	/* Nothing configured, nothing declared: 256 */
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
+			 0, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+		 0);
+	ctl->entropy_rate = ES_EXT_TEST_RATE_NONE;
+	test_load(path);
+	CHECK(test_rate_is(256, "default"), "the default rate is not 256");
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+
+	/* Declared by the plugin, after its init */
+	ctl->entropy_rate = 64;
+	ctl->rate_calls = 0;
+	test_load(path);
+	CHECK_EQ(ctl->rate_calls, 1);
+	CHECK(test_rate_is(64, "plugin"), "the rate of the plugin is not taken");
+	CHECK_EQ(test_get(bits, NULL), test_level(64, bits));
+	CHECK_EQ(ES->curr_entropy(bits), test_level(64, bits));
+	CHECK_EQ(ctl->rate_calls, 1);
+
+	/* Beyond 256: capped */
+	ctl->entropy_rate = 300;
+	test_load(path);
+	CHECK(test_rate_is(256, "plugin"), "a rate beyond 256 is not capped");
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+
+	/* A rate configured takes precedence, until it is taken back */
+	ctl->entropy_rate = 64;
+	test_load(path);
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(0, 128), 0);
+	CHECK(test_rate_is(128, "config"), "the rate configured is not taken");
+	CHECK_EQ(test_get(bits, NULL), test_level(128, bits));
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(0, 0), 0);
+	CHECK(test_rate_is(0, "config"), "the rate 0 configured is not taken");
+	CHECK_EQ(test_get(bits, NULL), 0);
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
+			 0, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+		 0);
+	CHECK(test_rate_is(64, "plugin"), "the rate of the plugin is not back");
+
+	/* The plugins of version 1 and 2 have none, whatever lies beyond */
+	for (i = 0; i < 2; i++) {
+		const char *old = i ? v2 : v1;
+
+		test_load(old);
+		dl = dlopen(old, RTLD_NOW | RTLD_NOLOAD);
+		other = dl ? dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL) : NULL;
+		CHECK(other != NULL, "%s has no control", old);
+		CHECK(test_rate_is(256, "default"),
+		      "a plugin of version %u declares a rate", i + 1);
+		if (other)
+			CHECK_EQ(other->rate_calls, 0);
+		if (dl)
+			dlclose(dl);
+	}
+
+	/* The plugin of version 3 that declares its name and its rate */
+	test_load(rated);
+	CHECK(test_rate_is(ES_EXT_TEST_RATED_RATE, "plugin"),
+	      "the rate of the rated plugin is not taken");
+	CHECK(test_state_has("name", ES_EXT_TEST_RATED_NAME),
+	      "the rated plugin is not shown under its name");
+	CHECK_EQ(test_get(bits, NULL),
+		 test_level(ES_EXT_TEST_RATED_RATE, bits));
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(0, 32), 0);
+	CHECK(test_rate_is(32, "config"),
+	      "the rate configured does not override the rated plugin");
+
+	ctl->entropy_rate = ES_EXT_TEST_RATE_NONE;
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(0, 256), 0);
+	test_load(path);
+}
+
 static void test_reinit(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
@@ -611,8 +723,8 @@ int main(int argc, char *argv[])
 	void *ref;
 
 	/* The plugins the tests of this directory share */
-	if (argc < 7) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1>\n",
+	if (argc < 9) {
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <test plugin of version 1> <of version 2> <rated plugin>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -638,6 +750,7 @@ int main(int argc, char *argv[])
 	test_credit(argv[1]);
 	test_status(argv[1], argv[6]);
 	test_names(argv[1]);
+	test_rates(argv[1], argv[6], argv[7], argv[8]);
 	test_reinit();
 	test_bad_plugins(argv[1], argv[2], argv[3], argv[4]);
 

@@ -301,8 +301,13 @@ foreach es_ext_opt : [
 			error('@0@ names @1@ paths, for @2@ sources of its kind'.format(
 			      es_ext_name, es_ext_vals.length(), es_ext_num))
 		endif
-	elif es_ext_vals.length() == 1
-		es_ext_one = es_ext_vals[0]
+	elif es_ext_vals.length() <= 1
+		# None configured for any source of the kind, or one for all
+		es_ext_one = es_ext_name.endswith('_uid') ? '-1' : 'auto'
+		if es_ext_vals.length() == 1
+			es_ext_one = es_ext_vals[0]
+		endif
+
 		es_ext_vals = []
 		foreach i : range(es_ext_num)
 			es_ext_vals += es_ext_one
@@ -325,6 +330,11 @@ foreach es_ext_opt : [
 		elif es_ext_val != '' and es_ext_val.strip('0123456789') == ''
 			# Nothing but digits
 			es_ext_int = es_ext_val.to_int()
+		elif es_ext_name.endswith('_rate') and es_ext_val == 'auto'
+			# No rate configured: the one the source declares
+			conf_data.set(es_ext_opt[2] + i.to_string(),
+				      'ESDM_ES_EXT_ENTROPY_RATE_AUTO')
+			continue
 		else
 			es_ext_int = -2
 		endif
@@ -332,7 +342,7 @@ foreach es_ext_opt : [
 			error('@0@ takes uids from 0 to 4294967294, or -1, not "@1@"'.format(
 			      es_ext_name, es_ext_val))
 		elif not es_ext_name.endswith('_uid') and (es_ext_int < 0 or es_ext_int > 256)
-			error('@0@ takes entropy rates from 0 to 256, not "@1@"'.format(
+			error('@0@ takes entropy rates from 0 to 256 or auto, not "@1@"'.format(
 			      es_ext_name, es_ext_val))
 		endif
 		conf_data.set(es_ext_opt[2] + i.to_string(), es_ext_int)

@@ -36,15 +36,18 @@
  *
  * The provider is asked what it declares of itself once per connection, with
  * the INFO request: the source is shown under the name it declares, if it is a
- * valid one, in place of its name in the ES table. A provider older than INFO
- * is connected to again without asking, and is used without a name.
+ * valid one, in place of its name in the ES table, and credited at the rate it
+ * declares unless one is configured. A provider older than INFO is connected
+ * to again without asking, and is used without a name and a rate.
  *
  * Whoever can create the socket file at the configured path could feed the
  * ESDM with data credited as entropy, so the credentials of the provider are
  * checked on every connection: root, or the one uid configured in addition.
  *
  * A block is credited with what the provider claims for it, at most with what
- * the configured rate allows (esdm_config_es_ext_socket_entropy_rate()). A
+ * the rate of the source allows (esdm_config_es_ext_socket_entropy_rate()):
+ * the one configured, else the one the provider declares in its answer to
+ * INFO, else 0 - see esdm_es_extsock_rate(). A
  * provider that fails is credited with nothing until it delivers again, on a
  * seeding that asks it or on a probe of the ES monitor; one failing its self
  * test is credited with nothing until a self test passes. Nor is a provider
@@ -70,6 +73,7 @@
 
 #include "build_bug_on.h"
 #include "esdm_config.h"
+#include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_ext.h"
@@ -128,6 +132,12 @@ struct esdm_es_extsock {
 	 * valid - empty for none
 	 */
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
+
+	/*
+	 * The rate the provider declared on its last connection,
+	 * ESDM_ES_EXT_PROTO_RATE_NONE for none
+	 */
+	uint32_t rate;
 
 	/*
 	 * The DTLS of the connection, NULL while it is unencrypted - see
@@ -195,6 +205,7 @@ struct esdm_es_extsock {
 	 */
 	atomic_bool published_configured;
 	atomic_bool published_credited;
+	atomic_uint published_rate;
 	mutex_t state_mutex;
 	char state_path[ESDM_ES_EXTSOCK_PATH_SIZE];
 	char state_status[64];
@@ -216,6 +227,8 @@ struct esdm_es_extsock {
 		.who = "provider" ESDM_ES_EXTSOCK_TAG(i),                      \
 		.mutex = MUTEX_UNLOCKED,                                       \
 		.default_path = ESDM_EXT_SOCKET_PATH_##i,                      \
+		.rate = ESDM_ES_EXT_PROTO_RATE_NONE,                           \
+		.published_rate = ESDM_ES_EXT_PROTO_RATE_NONE,                 \
 		.peer_uid = ESDM_EXT_SOCKET_PEER_UID_##i,                      \
 		.fd = -1,                                                      \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
@@ -265,6 +278,7 @@ static void esdm_es_extsock_publish_locked(struct esdm_es_extsock *sock)
 		     esdm_es_extsock_configured_locked(sock));
 	atomic_store(&sock->published_credited,
 		     esdm_es_extsock_credited_locked(sock));
+	atomic_store(&sock->published_rate, sock->rate);
 
 	mutex_lock(&sock->state_mutex);
 	snprintf(sock->state_path, sizeof(sock->state_path), "%s",
@@ -304,6 +318,39 @@ esdm_es_extsock_label_locked(const struct esdm_es_extsock *sock, char *buf,
 		return sock->tag;
 	snprintf(buf, buflen, "%s (%s)", sock->tag, sock->name);
 	return buf;
+}
+
+/*
+ * The rate @sock is credited at, its provider declaring @declared: the rate
+ * configured for it takes precedence - the n-th --es_ext_socket_entropy_rate
+ * of the server, esdm_config_es_ext_socket_entropy_rate_set(), or the meson
+ * option es_ext_socket_entropy_rate - then the one the provider declares,
+ * then 0. *@source, if not NULL, tells which it is.
+ *
+ * A provider is another process, trusted for the user it runs as: accepting
+ * that user means trusting the rate the provider declares, an operator who
+ * does not want that configures the rate.
+ */
+static uint32_t esdm_es_extsock_rate(const struct esdm_es_extsock *sock,
+				     uint32_t declared, const char **source)
+{
+	uint32_t rate =
+		esdm_config_es_ext_socket_entropy_rate_configured(sock->idx);
+	const char *from = "config";
+
+	if (rate == ESDM_ES_EXT_ENTROPY_RATE_AUTO) {
+		if (declared != ESDM_ES_EXT_PROTO_RATE_NONE) {
+			rate = declared;
+			from = "provider";
+		} else {
+			rate = 0;
+			from = "default";
+		}
+	}
+
+	if (source)
+		*source = from;
+	return min_uint32(rate, ESDM_DRNG_SECURITY_STRENGTH_BITS);
 }
 
 /* Release the mutex of @sock (write lock), publishing what changed under it */
@@ -635,6 +682,7 @@ static int esdm_es_extsock_info_locked(struct esdm_es_extsock *sock)
 	ssize_t n;
 
 	sock->name[0] = '\0';
+	sock->rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 
 	n = esdm_es_extsock_transact_locked(sock, ESDM_ES_EXT_PROTO_INFO, 0,
 					    rsp);
@@ -656,6 +704,12 @@ static int esdm_es_extsock_info_locked(struct esdm_es_extsock *sock)
 		return 0;
 
 	esdm_es_extsock_name_locked(sock, name, namelen);
+	sock->rate = esdm_es_ext_proto_rate(rate);
+	if (sock->rate != rate)
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"External ES provider%s: it declares an entropy rate of %u bits per 256 bits, taken as %u\n",
+			sock->tag, rate, sock->rate);
 	return 0;
 }
 
@@ -669,6 +723,8 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 {
 	const char *path = esdm_es_extsock_path_locked(sock);
 	char label[ESDM_ES_EXT_LABEL_SIZE];
+	const char *source;
+	uint32_t rate;
 	int ret = esdm_es_extsock_open_dtls_locked(sock);
 
 	if (ret)
@@ -692,14 +748,15 @@ static int esdm_es_extsock_connect_locked(struct esdm_es_extsock *sock)
 
 	sock->last_logged = 0;
 	/* Its claims are not assessed by the ESDM, which is worth a line */
+	rate = esdm_es_extsock_rate(sock, sock->rate, &source);
 	esdm_logger(
 		sock->was_connected ? LOGGER_VERBOSE : LOGGER_STATUS,
 		LOGGER_C_ES,
-		"External ES provider%s %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits\n",
+		"External ES provider%s %s connected (uid %u, %s), its entropy claims credited with up to %u bits per 256 bits (rate of the %s)\n",
 		esdm_es_extsock_label_locked(sock, label, sizeof(label)), path,
 		(unsigned int)sock->connected_uid,
 		esdm_es_extsock_encrypted_locked(sock) ? "DTLS" : "unencrypted",
-		esdm_config_es_ext_socket_entropy_rate(sock->idx));
+		rate, source);
 	sock->was_connected = true;
 
 	/* A provider not tested yet is tested before it is asked for anything */
@@ -916,6 +973,7 @@ static void esdm_es_extsock_reset_locked(struct esdm_es_extsock *sock)
 	sock->status_warned = false;
 	sock->status_backoff_until = 0;
 	sock->name[0] = '\0';
+	sock->rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	esdm_es_extsock_status_forget_locked(sock);
 }
 
@@ -947,15 +1005,24 @@ static void esdm_es_extsock_fini(struct esdm_es_extsock *sock)
 	esdm_es_extsock_unlock(sock);
 }
 
+/* As published: a request in progress is not waited for */
+uint32_t esdm_es_extsock_entropy_rate(unsigned int idx, const char **source)
+{
+	struct esdm_es_extsock *sock = &extsock[idx];
+
+	return esdm_es_extsock_rate(sock, atomic_load(&sock->published_rate),
+				    source);
+}
+
 static uint32_t esdm_es_extsock_level(const struct esdm_es_extsock *sock,
-				      bool credited, uint32_t requested_bits)
+				      bool credited, uint32_t declared,
+				      uint32_t requested_bits)
 {
 	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
-		esdm_config_es_ext_socket_entropy_rate(sock->idx),
-		requested_bits);
+		esdm_es_extsock_rate(sock, declared, NULL), requested_bits);
 }
 
 /* Caller must hold the mutex of @sock. */
@@ -963,16 +1030,19 @@ static uint32_t
 esdm_es_extsock_entropylevel_locked(const struct esdm_es_extsock *sock,
 				    uint32_t requested_bits)
 {
-	return esdm_es_extsock_level(
-		sock, esdm_es_extsock_credited_locked(sock), requested_bits);
+	return esdm_es_extsock_level(sock,
+				     esdm_es_extsock_credited_locked(sock),
+				     sock->rate, requested_bits);
 }
 
 /* As published: a request in progress is not waited for */
 static uint32_t esdm_es_extsock_entropylevel(struct esdm_es_extsock *sock,
 					     uint32_t requested_bits)
 {
-	return esdm_es_extsock_level(
-		sock, atomic_load(&sock->published_credited), requested_bits);
+	return esdm_es_extsock_level(sock,
+				     atomic_load(&sock->published_credited),
+				     atomic_load(&sock->published_rate),
+				     requested_bits);
 }
 
 static uint32_t esdm_es_extsock_poolsize(struct esdm_es_extsock *sock)
@@ -1216,8 +1286,9 @@ out:
 static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 				     struct json_object *obj)
 {
-	uint32_t poolsize, entropy_rate;
+	uint32_t poolsize, entropy_rate, rate;
 	char path[ESDM_ES_EXTSOCK_PATH_SIZE], status[64], accepted[48];
+	const char *rate_source;
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
 	struct json_object *provider;
 	time_t now = esdm_es_extsock_now();
@@ -1255,6 +1326,7 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 
 	poolsize = esdm_es_extsock_entropylevel(sock, esdm_security_strength());
 	entropy_rate = esdm_es_extsock_entropylevel(sock, 256);
+	rate = esdm_es_extsock_entropy_rate(sock->idx, &rate_source);
 
 	if (peer_uid >= 0)
 		snprintf(accepted, sizeof(accepted), "root and uid %" PRId64,
@@ -1268,6 +1340,11 @@ static void esdm_es_extsock_es_state(struct esdm_es_extsock *sock,
 			       json_object_new_int64(poolsize));
 	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
 			       json_object_new_int64(entropy_rate));
+	/* The rate it is credited at once it delivers, and whose it is */
+	json_object_object_add(obj, "entropy_rate",
+			       json_object_new_int64(rate));
+	json_object_object_add(obj, "entropy_rate_source",
+			       json_object_new_string(rate_source));
 	json_object_object_add(obj, "provider_socket",
 			       json_object_new_string(path[0] ? path :
 								"(unset)"));

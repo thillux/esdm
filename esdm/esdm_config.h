@@ -293,6 +293,13 @@ void esdm_config_es_jent_kernel_entropy_rate_set(uint32_t ent);
  */
 uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
 
+/*
+ * The entropy rate of an external entropy source that is not configured: the
+ * source is credited at the rate it declares - see libesdm_es_ext(3) - or at
+ * the default of its kind if it declares none
+ */
+#define ESDM_ES_EXT_ENTROPY_RATE_AUTO UINT32_MAX
+
 /**
  * @brief External ES plugin configuration: set the entropy rate
  *
@@ -301,6 +308,12 @@ uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
  * credited with: a block is credited with what the plugin claims for it, but
  * with no more than this rate allows. See libesdm_es_ext(3).
  *
+ * A rate set here takes precedence over the one the plugin declares with its
+ * entropy_rate callback; ESDM_ES_EXT_ENTROPY_RATE_AUTO sets none, so that
+ * the plugin is credited at the rate it declares, at 256 if it declares none.
+ * Before a rate is set, the one of the meson option es_ext_lib_entropy_rate
+ * applies, none by default.
+ *
  * The ESDM has as many plugin library sources as the build configured (meson
  * option es_ext_lib_num), numbered from 0, each with a rate of its own.
  *
@@ -308,7 +321,7 @@ uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
  *	 than the security strength of the the applied DRNG.
  *
  * @param [in] idx Index of the plugin library source
- * @param [in] ent Entropy rate in bits.
+ * @param [in] ent Entropy rate in bits, or ESDM_ES_EXT_ENTROPY_RATE_AUTO
  *
  * @return 0 on success, -EINVAL if there is no source @idx
  */
@@ -319,7 +332,8 @@ int esdm_config_es_ext_lib_entropy_rate_set(unsigned int idx, uint32_t ent);
  *
  * @param [in] idx Index of the plugin library source
  *
- * @return Entropy rate in bits, 0 if there is no source @idx
+ * @return The rate the source is credited at, in bits: the one set, else the
+ *	   one its plugin declares, else 256; 0 if there is no source @idx
  */
 uint32_t esdm_config_es_ext_lib_entropy_rate(unsigned int idx);
 
@@ -331,6 +345,12 @@ uint32_t esdm_config_es_ext_lib_entropy_rate(unsigned int idx);
  * is credited with: a block is credited with what the provider claims for it,
  * but with no more than this rate allows. See libesdm_es_ext(3).
  *
+ * A rate set here takes precedence over the one the provider declares;
+ * ESDM_ES_EXT_ENTROPY_RATE_AUTO sets none, so that the provider is credited
+ * at the rate it declares, at 0 if it declares none. Before a rate is set,
+ * the one of the meson option es_ext_socket_entropy_rate applies, none by
+ * default.
+ *
  * The ESDM has as many provider socket sources as the build configured (meson
  * option es_ext_socket_num), numbered from 0, each with a rate of its own.
  *
@@ -338,7 +358,7 @@ uint32_t esdm_config_es_ext_lib_entropy_rate(unsigned int idx);
  *	 than the security strength of the the applied DRNG.
  *
  * @param [in] idx Index of the provider socket source
- * @param [in] ent Entropy rate in bits.
+ * @param [in] ent Entropy rate in bits, or ESDM_ES_EXT_ENTROPY_RATE_AUTO
  *
  * @return 0 on success, -EINVAL if there is no source @idx
  */
@@ -349,7 +369,9 @@ int esdm_config_es_ext_socket_entropy_rate_set(unsigned int idx, uint32_t ent);
  *
  * @param [in] idx Index of the provider socket source
  *
- * @return Entropy rate in bits, 0 if there is no source @idx
+ * @return The rate the source is credited at, in bits: the one set, else the
+ *	   one its provider declared on its last connection, else 0; 0 if there
+ *	   is no source @idx
  */
 uint32_t esdm_config_es_ext_socket_entropy_rate(unsigned int idx);
 

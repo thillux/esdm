@@ -149,7 +149,9 @@ static void usage(void)
 	fprintf(stderr,
 		"\t   --es_ext_lib_entropy_rate <BITS>\tCredit the plugin with at\n");
 	fprintf(stderr,
-		"\t\t\tmost BITS of entropy per 256 bits of data (0 to 256)\n");
+		"\t\t\tmost BITS of entropy per 256 bits of data (0 to 256), or\n");
+	fprintf(stderr,
+		"\t\t\twith what it declares (auto, by default)\n");
 	fprintf(stderr,
 		"\t   --es_ext_socket <PATH>\tRead the external entropy source\n");
 	fprintf(stderr,
@@ -157,7 +159,9 @@ static void usage(void)
 	fprintf(stderr,
 		"\t   --es_ext_socket_entropy_rate <BITS>\tCredit the provider with\n");
 	fprintf(stderr,
-		"\t\t\tat most BITS of entropy per 256 bits of data (0 to 256)\n");
+		"\t\t\tat most BITS of entropy per 256 bits of data (0 to 256), or\n");
+	fprintf(stderr,
+		"\t\t\twith what it declares (auto, by default)\n");
 	fprintf(stderr,
 		"\t   --es_ext_socket_uid <USER>\tAccept a provider running as USER\n");
 	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
@@ -293,12 +297,14 @@ static unsigned int es_ext_instance(struct es_ext_option *opt)
 
 /*
  * The entropy rate of an external entropy source, @opt for the source of its
- * occurrence, set with @set
+ * occurrence, set with @set - "auto" for none, the source being credited at
+ * the rate it declares itself
  */
 static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
 			    int (*set)(unsigned int idx, uint32_t ent))
 {
-	uint32_t rate = parse_entropy_rate(opt->name, arg);
+	uint32_t rate = strcmp(arg, "auto") ? parse_entropy_rate(opt->name, arg) :
+					      ESDM_ES_EXT_ENTROPY_RATE_AUTO;
 
 	if (set(es_ext_instance(opt), rate)) {
 		fprintf(stderr, "Cannot set the entropy rate of %s %s\n",

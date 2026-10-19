@@ -326,6 +326,9 @@ static void test_es_ext_lib_options(void)
 	const char *const opts[] = { "--es_ext_lib",
 				     "/nonexistent/libesdm-es-ext-test.so",
 				     "--es_ext_lib_entropy_rate", "128", NULL };
+	/* No rate configured: the one the plugin declares */
+	const char *const opts_auto[] = { "--es_ext_lib_entropy_rate", "auto",
+					  NULL };
 	const char *const empty[] = { "--es_ext_lib", "", NULL };
 	static const char *const bad_rates[] = { "257", "-1", "12x", "", NULL };
 	struct test_run r;
@@ -337,13 +340,19 @@ static void test_es_ext_lib_options(void)
 		CHECK_EQ(test_run(&r, opts, NULL), 1);
 		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 		      "--es_ext_lib was not accepted (output: %.300s)", r.err);
+		CHECK_EQ(test_run(&r, opts_auto, NULL), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "--es_ext_lib_entropy_rate auto was not accepted (output: %.300s)",
+		      r.err);
 	}
 #elif defined(ESDM_ES_EXT)
+	(void)opts_auto;
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "this build has no plugin library sources") != NULL,
 	      "--es_ext_lib was not refused without plugin library sources (output: %.300s)",
 	      r.err);
 #else
+	(void)opts_auto;
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
 	      "--es_ext_lib was not refused without external ES (output: %.300s)",
@@ -378,7 +387,7 @@ static void test_es_ext_socket_options(void)
 {
 	const char *const opts[] = { "--es_ext_socket",
 				     "/nonexistent/esdm-es-ext.socket",
-				     "--es_ext_socket_entropy_rate", "0",
+				     "--es_ext_socket_entropy_rate", "auto",
 				     "--es_ext_socket_uid", "1234", NULL };
 	const char *const by_name[] = { "--es_ext_socket_uid", "root", NULL };
 	const char *const empty[] = { "--es_ext_socket", "", NULL };

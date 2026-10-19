@@ -11,10 +11,24 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		build_by_default: true,
 	)
 
-	# The same plugin as one of version 1, which has no status
+	# The same plugin as one of version 1, which has no status, and as one
+	# of version 2, which has no entropy rate
 	es_ext_test_plugin_v1 = shared_module('esdm_es_ext_test_plugin_v1',
 		'es_ext_test_plugin.c',
 		c_args: [ '-DES_EXT_TEST_PLUGIN_V1' ],
+		include_directories: include_dirs_es_ext_test,
+	)
+	es_ext_test_plugin_v2 = shared_module('esdm_es_ext_test_plugin_v2',
+		'es_ext_test_plugin.c',
+		c_args: [ '-DES_EXT_TEST_PLUGIN_V2' ],
+		include_directories: include_dirs_es_ext_test,
+	)
+
+	# A plugin of version 3 declaring its name and its entropy rate
+	es_ext_test_plugin_rated = shared_module(
+		'esdm_es_ext_test_plugin_rated',
+		'es_ext_test_plugin.c',
+		c_args: [ '-DES_EXT_TEST_PLUGIN_RATED' ],
 		include_directories: include_dirs_es_ext_test,
 	)
 
@@ -59,13 +73,16 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
-			   es_ext_example_plugin, es_ext_test_plugin_v1 ]
+			   es_ext_example_plugin, es_ext_test_plugin_v1,
+			   es_ext_test_plugin_v2, es_ext_test_plugin_rated ]
 	es_ext_plugin_args = [ es_ext_test_plugin.full_path(),
 			       es_ext_bad_version_plugin.full_path(),
 			       es_ext_bad_no_get_plugin.full_path(),
 			       es_ext_bad_no_plugin.full_path(),
 			       es_ext_example_plugin.full_path(),
-			       es_ext_test_plugin_v1.full_path() ]
+			       es_ext_test_plugin_v1.full_path(),
+			       es_ext_test_plugin_v2.full_path(),
+			       es_ext_test_plugin_rated.full_path() ]
 
 	es_ext_proto_test = executable('es_ext_proto_test',
 		'es_ext_proto_test.c',
@@ -98,9 +115,12 @@ if get_option('esdm-es-ext').enabled()
 		args: es_ext_plugin_args, depends: es_ext_plugins,
 		suite: 'es_ext')
 
+	# A client of its own, with the DTLS of the common library
 	es_ext_serve_test = executable('es_ext_serve_test',
 		'es_ext_serve_test.c',
 		include_directories: include_dirs_es_ext_test,
+		dependencies: [ dependencies_client, dependency('threads') ],
+		link_with: esdm_common_static_lib,
 	)
 	# The external entropy sources as the esdm-server takes them on its
 	# command line. Skipped (77) unless run as root.
@@ -118,9 +138,11 @@ if get_option('esdm-es-ext').enabled()
 			args: [ esdm_server.full_path(),
 				esdm_es_ext_serve.full_path(),
 				es_ext_test_plugin.full_path() ] +
-			      es_ext_test_plugin_copy_args,
+			      es_ext_test_plugin_copy_args +
+			      [ es_ext_test_plugin_rated.full_path() ],
 			depends: [ esdm_server, esdm_es_ext_serve,
-				   es_ext_test_plugin ] +
+				   es_ext_test_plugin,
+				   es_ext_test_plugin_rated ] +
 				 es_ext_test_plugin_copies,
 			suite: 'es_ext', timeout: 120)
 	endif
@@ -128,9 +150,11 @@ if get_option('esdm-es-ext').enabled()
 	test('esdm-es-ext-serve', es_ext_serve_test,
 		args: [ esdm_es_ext_serve.full_path(),
 			es_ext_test_plugin.full_path(),
-			es_ext_bad_version_plugin.full_path() ],
+			es_ext_bad_version_plugin.full_path(),
+			es_ext_test_plugin_rated.full_path() ],
 		depends: [ esdm_es_ext_serve, es_ext_test_plugin,
-			   es_ext_bad_version_plugin ],
+			   es_ext_bad_version_plugin,
+			   es_ext_test_plugin_rated ],
 		suite: 'es_ext', timeout: 60)
 endif
 
@@ -195,7 +219,9 @@ if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es
 	test('External ES with several sources of each kind',
 		es_ext_multi_test,
 		args: [ esdm_es_ext_serve.full_path() ] +
-		      es_ext_test_plugin_copy_args,
-		depends: [ esdm_es_ext_serve ] + es_ext_test_plugin_copies,
+		      es_ext_test_plugin_copy_args +
+		      [ es_ext_test_plugin_v2.full_path() ],
+		depends: [ esdm_es_ext_serve, es_ext_test_plugin_v2 ] +
+			 es_ext_test_plugin_copies,
 		suite: 'es_ext', timeout: 120)
 endif

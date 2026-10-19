@@ -1339,9 +1339,14 @@ option `es_ext`). Such a plugin is handed to the ESDM in one of two ways:
   section @sec:rpc.
 
 #par(first-line-indent: 0pt)[A block is credited with the entropy the source
-claims for it, capped by `es_ext_lib_entropy_rate` (256 per default) or
-`es_ext_socket_entropy_rate` (0 per default) - a provider is credited only
-once a rate is configured. A source claiming more than the block holds, or
+claims for it, capped by the rate of the source: the one configured with
+`es_ext_lib_entropy_rate` or `es_ext_socket_entropy_rate` (or the options of
+the server), else the one the source declares - the `entropy_rate` callback of
+a plugin of API version 3, or the answer of a provider to INFO - else 256 for
+a plugin and 0 for a provider, which is credited only once it declares or is
+configured a rate. Accepting the user a provider runs as means trusting the
+rate it declares; the status shows the rate of each source as `entropy_rate`
+and where it comes from as `entropy_rate_source`. A source claiming more than the block holds, or
 failing, is credited with nothing until it delivers again, and one failing its
 self test until a self test passes.]
 

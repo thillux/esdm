@@ -92,6 +92,14 @@ struct esdm_es_ext_server {
 	 */
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
 
+	/*
+	 * The rate INFO declares: the one set with
+	 * esdm_es_ext_server_set_entropy_rate(), else the one of the plugin,
+	 * ESDM_ES_EXT_PROTO_RATE_NONE for none
+	 */
+	uint32_t rate;
+	uint32_t plugin_rate;
+
 	int listen_fd;
 	/* Written to by esdm_es_ext_server_stop() */
 	int stop_pipe[2];
@@ -459,7 +467,10 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	case ESDM_ES_EXT_PROTO_INFO:
 		status = 0;
 		datalen = esdm_es_ext_proto_info_pack(
-			data, ESDM_ES_EXT_PROTO_RATE_NONE,
+			data,
+			server->rate != ESDM_ES_EXT_PROTO_RATE_NONE ?
+				server->rate :
+				server->plugin_rate,
 			server->name[0] ? server->name : NULL);
 		break;
 	default:
@@ -515,6 +526,8 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 	if (!s)
 		return -ENOMEM;
 	s->plugin = plugin;
+	s->rate = ESDM_ES_EXT_PROTO_RATE_NONE;
+	s->plugin_rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	s->listen_fd = -1;
 	s->stop_pipe[0] = s->stop_pipe[1] = -1;
 	for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++)
@@ -582,8 +595,19 @@ int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 		}
 	}
 	s->initialized = true;
-	/* After its init, which may find out what it is */
+	/* After its init, which may find out what it is and what it has */
 	esdm_es_ext_server_plugin_name(s);
+	s->plugin_rate = esdm_es_ext_plugin_entropy_rate(plugin, s->ctx);
+
+	/*
+	 * Whether the ESDM credits the rate the plugin declares is its
+	 * business - worth a line for whoever starts the provider all the same
+	 */
+	if (s->plugin_rate != ESDM_ES_EXT_PROTO_RATE_NONE)
+		esdm_logger(
+			LOGGER_STATUS, LOGGER_C_ANY,
+			"External ES provider: the plugin declares an entropy rate of %u bits per 256 bits\n",
+			s->plugin_rate);
 
 #ifdef ESDM_DTLS
 	/* Offered by default; a server without it still serves in the clear */
@@ -635,6 +659,18 @@ int esdm_es_ext_server_set_name(struct esdm_es_ext_server *server,
 	if (!esdm_es_ext_name_or_null(name))
 		return -EINVAL;
 	snprintf(server->name, sizeof(server->name), "%s", name);
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_es_ext_server_set_entropy_rate(struct esdm_es_ext_server *server,
+					uint32_t rate)
+{
+	if (!server || (rate > ESDM_ES_EXT_ENTROPY_RATE_MAX &&
+			rate != ESDM_ES_EXT_PROTO_RATE_NONE))
+		return -EINVAL;
+
+	server->rate = rate;
 	return 0;
 }
 

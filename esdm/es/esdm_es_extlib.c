@@ -36,7 +36,9 @@
  * published like the state below: the ESDM status takes it from there.
  *
  * A block is credited with what the plugin claims for it, at most with what
- * the configured rate allows (esdm_config_es_ext_lib_entropy_rate()). A
+ * the rate of the source allows (esdm_config_es_ext_lib_entropy_rate()): the
+ * one configured, else the one the plugin declares with its entropy_rate
+ * callback after its init, else 256 - see esdm_es_extlib_rate(). A
  * plugin that fails to deliver - or claims more than the data can hold, which
  * counts as a failure - is credited with nothing until it delivers again: on
  * a seeding that asks it, its data then going into the additional data, or on
@@ -59,6 +61,7 @@
 
 #include "build_bug_on.h"
 #include "esdm_config.h"
+#include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_ext.h"
@@ -111,6 +114,9 @@ struct esdm_es_extlib {
 	/* The name the plugin declares, if it is valid - empty for none */
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
 
+	/* The rate the plugin declares, ESDM_ES_EXT_PROTO_RATE_NONE for none */
+	uint32_t rate;
+
 	/* The plugin as claimed for this source, under extlib_claim_mutex */
 	const struct esdm_es_ext_plugin *claimed;
 
@@ -150,6 +156,7 @@ struct esdm_es_extlib {
 	 */
 	atomic_bool published_loaded;
 	atomic_bool published_credited;
+	atomic_uint published_rate;
 	mutex_t state_mutex;
 	char state_path[PATH_MAX];
 	char state_name[ESDM_ES_EXT_NAME_MAX + 1];
@@ -170,6 +177,8 @@ struct esdm_es_extlib {
 		.who = "plugin" ESDM_ES_EXTLIB_TAG(i),                         \
 		.mutex = MUTEX_UNLOCKED,                                       \
 		.default_path = ESDM_EXT_LIB_PATH_##i,                         \
+		.rate = ESDM_ES_EXT_PROTO_RATE_NONE,                           \
+		.published_rate = ESDM_ES_EXT_PROTO_RATE_NONE,                 \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
 		.state_status = "not loaded",                                  \
 	},
@@ -234,6 +243,9 @@ static bool esdm_es_extlib_credited_locked(const struct esdm_es_extlib *lib)
 	       !lib->selftest_due;
 }
 
+static uint32_t esdm_es_extlib_rate(const struct esdm_es_extlib *lib,
+				    uint32_t declared, const char **source);
+
 /*
  * Publish what is read of the source without the lock, see above. Caller must
  * hold the mutex of @lib (write lock).
@@ -247,6 +259,7 @@ static void esdm_es_extlib_publish_locked(struct esdm_es_extlib *lib)
 						    "delivering";
 
 	atomic_store(&lib->published_loaded, lib->plugin != NULL);
+	atomic_store(&lib->published_rate, lib->rate);
 	atomic_store(&lib->published_credited,
 		     esdm_es_extlib_credited_locked(lib));
 
@@ -337,6 +350,7 @@ static void esdm_es_extlib_unload_locked(struct esdm_es_extlib *lib)
 
 	lib->loaded_path[0] = '\0';
 	lib->name[0] = '\0';
+	lib->rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	lib->read_failed = false;
 	lib->selftest_failed = false;
 	lib->selftest_due = false;
@@ -369,8 +383,9 @@ static int esdm_es_extlib_init_plugin_locked(struct esdm_es_extlib *lib,
 		}
 	}
 
-	/* After its init, which may find out what it is */
+	/* After its init, which may find out what it is and what it has */
 	esdm_es_extlib_name_locked(lib, p);
+	lib->rate = esdm_es_ext_plugin_entropy_rate(p, ctx);
 	lib->plugin = p;
 	lib->ctx = ctx;
 	lib->read_failed = false;
@@ -393,6 +408,8 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	const char *path = esdm_es_extlib_path_locked(lib);
 	const struct esdm_es_extlib *other;
 	const struct esdm_es_ext_plugin *p;
+	const char *source;
+	uint32_t rate;
 	void *dl;
 	int ret;
 
@@ -467,11 +484,12 @@ static int esdm_es_extlib_load_locked(struct esdm_es_extlib *lib)
 	}
 
 	/* Its claims are not assessed by the ESDM, which is worth a line */
+	rate = esdm_es_extlib_rate(lib, lib->rate, &source);
 	esdm_logger(
 		LOGGER_STATUS, LOGGER_C_ES,
-		"External ES plugin%s: %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits\n",
-		lib->tag, lib->name[0] ? lib->name : "(unnamed)", path,
-		esdm_config_es_ext_lib_entropy_rate(lib->idx));
+		"External ES plugin%s: %s loaded from %s, its entropy claims credited with up to %u bits per 256 bits (rate of the %s)\n",
+		lib->tag, lib->name[0] ? lib->name : "(unnamed)", path, rate,
+		source);
 
 	return 0;
 }
@@ -499,14 +517,54 @@ static void esdm_es_extlib_fini(struct esdm_es_extlib *lib)
 	esdm_es_extlib_unlock(lib);
 }
 
+/*
+ * The rate @lib is credited at, its plugin declaring @declared: the rate
+ * configured for it takes precedence - the n-th --es_ext_lib_entropy_rate of
+ * the server, esdm_config_es_ext_lib_entropy_rate_set(), or the meson option
+ * es_ext_lib_entropy_rate - then the one the plugin declares, then 256, which
+ * takes the claims of the plugin as they are. *@source, if not NULL, tells
+ * which it is.
+ */
+static uint32_t esdm_es_extlib_rate(const struct esdm_es_extlib *lib,
+				    uint32_t declared, const char **source)
+{
+	uint32_t rate =
+		esdm_config_es_ext_lib_entropy_rate_configured(lib->idx);
+	const char *from = "config";
+
+	if (rate == ESDM_ES_EXT_ENTROPY_RATE_AUTO) {
+		if (declared != ESDM_ES_EXT_PROTO_RATE_NONE) {
+			rate = declared;
+			from = "plugin";
+		} else {
+			rate = ESDM_ES_EXT_ENTROPY_RATE_MAX;
+			from = "default";
+		}
+	}
+
+	if (source)
+		*source = from;
+	return min_uint32(rate, ESDM_DRNG_SECURITY_STRENGTH_BITS);
+}
+
+/* As published: a request in progress is not waited for */
+uint32_t esdm_es_extlib_entropy_rate(unsigned int idx, const char **source)
+{
+	struct esdm_es_extlib *lib = &extlib[idx];
+
+	return esdm_es_extlib_rate(lib, atomic_load(&lib->published_rate),
+				   source);
+}
+
 static uint32_t esdm_es_extlib_level(const struct esdm_es_extlib *lib,
-				     bool credited, uint32_t requested_bits)
+				     bool credited, uint32_t declared,
+				     uint32_t requested_bits)
 {
 	if (!credited)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
-		esdm_config_es_ext_lib_entropy_rate(lib->idx), requested_bits);
+		esdm_es_extlib_rate(lib, declared, NULL), requested_bits);
 }
 
 /* Caller must hold the mutex of @lib. */
@@ -515,7 +573,7 @@ esdm_es_extlib_entropylevel_locked(const struct esdm_es_extlib *lib,
 				   uint32_t requested_bits)
 {
 	return esdm_es_extlib_level(lib, esdm_es_extlib_credited_locked(lib),
-				    requested_bits);
+				    lib->rate, requested_bits);
 }
 
 /* As published: a request in progress is not waited for */
@@ -523,6 +581,7 @@ static uint32_t esdm_es_extlib_entropylevel(struct esdm_es_extlib *lib,
 					    uint32_t requested_bits)
 {
 	return esdm_es_extlib_level(lib, atomic_load(&lib->published_credited),
+				    atomic_load(&lib->published_rate),
 				    requested_bits);
 }
 
@@ -644,9 +703,9 @@ static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 {
 	char path[PATH_MAX], name[ESDM_ES_EXT_NAME_MAX + 1];
 	struct json_object *provider;
-	uint32_t poolsize, entropy_rate;
+	uint32_t poolsize, entropy_rate, rate;
 	time_t now = (time_t)esdm_monotonic_now();
-	const char *status;
+	const char *status, *rate_source;
 	bool due;
 
 	mutex_lock(&lib->state_mutex);
@@ -678,6 +737,7 @@ static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 
 	poolsize = esdm_es_extlib_entropylevel(lib, esdm_security_strength());
 	entropy_rate = esdm_es_extlib_entropylevel(lib, 256);
+	rate = esdm_es_extlib_entropy_rate(lib->idx, &rate_source);
 
 	/* Its name, see esdm_es_mgr_cb.h, and its instance */
 	esdm_es_ext_state_name(obj, name, esdm_es_extlib_name(lib));
@@ -685,6 +745,11 @@ static void esdm_es_extlib_es_state(struct esdm_es_extlib *lib,
 			       json_object_new_int64(poolsize));
 	json_object_object_add(obj, "entropy_rate_per_256_data_bits",
 			       json_object_new_int64(entropy_rate));
+	/* The rate it is credited at once it delivers, and whose it is */
+	json_object_object_add(obj, "entropy_rate",
+			       json_object_new_int64(rate));
+	json_object_object_add(obj, "entropy_rate_source",
+			       json_object_new_string(rate_source));
 	json_object_object_add(obj, "plugin_library",
 			       json_object_new_string(path[0] ? path :
 								"(unset)"));

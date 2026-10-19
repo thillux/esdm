@@ -35,6 +35,10 @@
  *   shown under its instance name. Another plugin loaded into one source, or
  *   a provider restarted with another name, changes the name of that source
  *   only, and a status taken meanwhile shows the old name or the new one.
+ * - Each source is credited at its own rate: the one configured for it, else
+ *   the one its plugin or provider declares, else the default of its kind.
+ *   Configuring one source, loading another plugin into one, or restarting
+ *   one provider with another rate changes the rate of that source only.
  *
  * Both sources are compiled into the test, with a short retry interval and
  * timeout of the provider sockets. The plugin libraries are copies of the test
@@ -42,6 +46,7 @@
  * processes serving further copies, steered through the environment.
  *
  * Usage: es_ext_multi_test <esdm-es-ext-serve> <plugin copy> x 8
+ *			    <plugin of version 2>
  */
 
 #define _GNU_SOURCE
@@ -72,6 +77,7 @@
 #define TEST_PLUGINS 8
 
 static const char *test_serve_bin;
+static const char *test_plugin_v2;
 static const char *test_plugin[TEST_PLUGINS];
 static struct esdm_es_ext_test_control *test_ctl[TEST_PLUGINS];
 static void *test_ref[TEST_PLUGINS];
@@ -531,6 +537,182 @@ static void test_provider_names(void)
 	}
 }
 
+/* Is @es credited at @rate, from @source, as its state says? */
+static bool test_rate_is(const struct esdm_es_cb *es, uint32_t rate,
+			 const char *source)
+{
+	struct json_object *state = es_state_get(es);
+	bool ret = es_state_int(state, "entropy_rate", -1) == rate &&
+		   es_state_str_is(state, "entropy_rate_source", source);
+
+	if (!ret)
+		printf("expected rate %u of the %s for %s: %s\n", rate, source,
+		       es->name, es_state_print(state));
+	json_object_put(state);
+	return ret;
+}
+
+/*
+ * The rates of the plugin library sources, each of its own: declared by their
+ * plugins - 64, 200, 300 capped at 256, none from a plugin of version 2 - or
+ * configured for one source, for all, and back; another plugin loaded into
+ * one source changes its rate only.
+ */
+static void test_plugin_rates(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	static const uint32_t declared[] = { 64, 200, 300 };
+	static const uint32_t expected[] = { 64, 200, 256, 256 };
+	static const char *const sources[] = { "plugin", "plugin", "plugin",
+					       "default" };
+	unsigned int i, n = ESDM_EXT_LIB_NUM < 4 ? ESDM_EXT_LIB_NUM : 4;
+
+	for (i = 0; i < n; i++) {
+		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
+				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+			 0);
+		if (i < 3)
+			test_ctl[i]->entropy_rate = declared[i];
+		CHECK_EQ(esdm_es_ext_lib_set_path(i, i < 3 ? test_plugin[i] :
+							      test_plugin_v2),
+			 0);
+	}
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
+		CHECK_EQ(LIB(i)->init(), 0);
+	for (i = 0; i < n; i++) {
+		CHECK_EQ(LIB(i)->selftest(), 0);
+		CHECK(test_rate_is(LIB(i), expected[i], sources[i]),
+		      "%s is not credited at its rate", LIB(i)->name);
+		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate(i), expected[i]);
+		/* The claim of each block, at the rate of its source */
+		CHECK_EQ(test_get(LIB(i), bits), test_level(expected[i], bits));
+	}
+
+	/* Configured for one source only */
+	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(1, 32), 0);
+	for (i = 0; i < n; i++) {
+		CHECK(test_rate_is(LIB(i), i == 1 ? 32 : expected[i],
+				   i == 1 ? "config" : sources[i]),
+		      "%s changed with another source", LIB(i)->name);
+		CHECK_EQ(test_get(LIB(i), bits),
+			 test_level(i == 1 ? 32 : expected[i], bits));
+	}
+
+	/* Configured for all, overriding every plugin, and taken back */
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(i, 16), 0);
+	for (i = 0; i < n; i++) {
+		CHECK(test_rate_is(LIB(i), 16, "config"),
+		      "%s is not credited at the rate configured",
+		      LIB(i)->name);
+		CHECK_EQ(test_get(LIB(i), bits), test_level(16, bits));
+	}
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
+				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+			 0);
+
+	/* Another plugin into the first source: its rate only */
+	test_ctl[6]->entropy_rate = 8;
+	CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[6]), 0);
+	CHECK(test_rate_is(LIB(0), 8, "plugin"),
+	      "the rate of the other plugin is not taken");
+	CHECK_EQ(test_get(LIB(0), bits), test_level(8, bits));
+	for (i = 1; i < n; i++)
+		CHECK(test_rate_is(LIB(i), expected[i], sources[i]),
+		      "%s changed with the first source", LIB(i)->name);
+
+	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
+		LIB(i)->fini();
+		esdm_es_ext_lib_set_path(i, "");
+		esdm_config_es_ext_lib_entropy_rate_set(i, 256);
+	}
+	for (i = 0; i < TEST_PLUGINS; i++)
+		test_ctl[i]->entropy_rate = ES_EXT_TEST_RATE_NONE;
+}
+
+/*
+ * The rates of the provider socket sources, each of its own: declared by
+ * esdm-es-ext-serve --entropy_rate, by the plugin it serves, by a plugin
+ * declaring more than 256, or none - 0 then; configured for one source; a
+ * provider restarted with another rate, read anew for its source only.
+ */
+static void test_provider_rates(void)
+{
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	const char *const rate_48[] = { "--entropy_rate", "48", NULL };
+	const char *const rate_24[] = { "--entropy_rate", "24", NULL };
+	static const char *const settings[] = { NULL, "rate=96", NULL,
+						"rate=1000" };
+	static const uint32_t expected[] = { 48, 96, 0, 256 };
+	static const char *const sources[] = { "provider", "provider",
+					       "default", "provider" };
+	unsigned int i, n = ESDM_EXT_SOCKET_NUM < 4 ? ESDM_EXT_SOCKET_NUM : 4;
+	pid_t provider[4] = { -1, -1, -1, -1 };
+
+	for (i = 0; i < n; i++) {
+		provider[i] = es_ext_test_serve(test_serve_bin,
+						test_plugin[4 + i],
+						test_socket[i],
+						i ? NULL : rate_48,
+						settings[i]);
+		CHECK(provider[i] > 0, "provider %u did not come up", i);
+		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+			 0);
+	}
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK_EQ(SOCK(i)->init(), 0);
+
+	for (i = 0; i < n; i++) {
+		CHECK(test_rate_is(SOCK(i), expected[i], sources[i]),
+		      "%s is not credited at its rate", SOCK(i)->name);
+		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate(i),
+			 expected[i]);
+		CHECK_EQ(test_get(SOCK(i), bits),
+			 test_level(expected[i], bits));
+	}
+
+	/* Configured for one source only */
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(1, 12), 0);
+	for (i = 0; i < n; i++)
+		CHECK(test_rate_is(SOCK(i), i == 1 ? 12 : expected[i],
+				   i == 1 ? "config" : sources[i]),
+		      "%s changed with another source", SOCK(i)->name);
+	CHECK_EQ(test_get(SOCK(1), bits), test_level(12, bits));
+	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+			 1, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+		 0);
+
+	/* The first restarted with another rate: read anew, for it only */
+	es_ext_test_terminate(provider[0]);
+	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
+					test_socket[0], rate_24, NULL);
+	CHECK(provider[0] > 0, "the provider did not come back");
+	test_get(SOCK(0), bits);
+	for (i = 0; i < 10 && !test_rate_is(SOCK(0), 24, "provider"); i++) {
+		es_ext_test_sleep_ms(300);
+		test_get(SOCK(0), bits);
+	}
+	CHECK(test_rate_is(SOCK(0), 24, "provider"),
+	      "the rate of the provider back is not read anew");
+	CHECK_EQ(test_get(SOCK(0), bits), test_level(24, bits));
+	for (i = 1; i < n; i++)
+		CHECK(test_rate_is(SOCK(i), expected[i], sources[i]),
+		      "%s changed with the first source", SOCK(i)->name);
+
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		SOCK(i)->fini();
+	for (i = 0; i < n; i++) {
+		es_ext_test_terminate(provider[i]);
+		esdm_es_ext_socket_set_path(i, "");
+		esdm_es_ext_socket_set_peer_uid(i, -1);
+		esdm_config_es_ext_socket_entropy_rate_set(i, 0);
+	}
+}
+
 /*
  * The JSON status of the ESDM lists each source once, under its name, with
  * its own configuration.
@@ -604,11 +786,12 @@ int main(int argc, char *argv[])
 {
 	unsigned int i;
 
-	if (argc < 2 + TEST_PLUGINS) {
-		printf("usage: %s <esdm-es-ext-serve> <plugin copy> x %u\n",
+	if (argc < 3 + TEST_PLUGINS) {
+		printf("usage: %s <esdm-es-ext-serve> <plugin copy> x %u <plugin of version 2>\n",
 		       argv[0], TEST_PLUGINS);
 		return 1;
 	}
+	test_plugin_v2 = argv[2 + TEST_PLUGINS];
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
@@ -648,6 +831,8 @@ int main(int argc, char *argv[])
 	test_providers();
 	test_plugin_names();
 	test_provider_names();
+	test_plugin_rates();
+	test_provider_rates();
 	test_status();
 
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)

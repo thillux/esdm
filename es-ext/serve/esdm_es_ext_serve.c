@@ -88,6 +88,11 @@ static void usage(void)
 		"\t\t\tnext to root; may be repeated (default: nobody)\n");
 	fprintf(stderr, "\t   --no_dtls\tDo not offer DTLS to the clients\n");
 	fprintf(stderr,
+		"\t   --entropy_rate <BITS>\tDeclare BITS of entropy per 256 bits of\n");
+	fprintf(stderr,
+		"\t\t\tdata, 0 to 256, as the rate of the source in place of the one\n");
+	fprintf(stderr, "\t\t\tof the plugin\n");
+	fprintf(stderr,
 		"\t   --name <NAME>\tDeclare NAME as the name of the source in place\n");
 	fprintf(stderr,
 		"\t\t\tof the one of the plugin: 1 to %u bytes of UTF-8 without\n",
@@ -108,6 +113,7 @@ int main(int argc, char *argv[])
 		{ "client_uid", required_argument, NULL, 'u' },
 		{ "no_dtls", no_argument, NULL, 'D' },
 		{ "name", required_argument, NULL, 'N' },
+		{ "entropy_rate", required_argument, NULL, 'R' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
@@ -119,6 +125,7 @@ int main(int argc, char *argv[])
 	struct sigaction sa;
 	uid_t client_uids[SERVE_MAX_CLIENT_UIDS];
 	unsigned int client_uids_num = 0, i;
+	uint32_t rate = ESDM_ES_EXT_PROTO_RATE_NONE;
 	mode_t mode = 0666;
 	bool dtls = true;
 	int c, ret;
@@ -168,6 +175,23 @@ int main(int argc, char *argv[])
 		case 'D':
 			dtls = false;
 			break;
+		case 'R': {
+			unsigned long val;
+			char *end;
+
+			errno = 0;
+			val = strtoul(optarg, &end, 10);
+			if (errno || end == optarg || *end != '\0' ||
+			    optarg[0] == '-' ||
+			    val > ESDM_ES_EXT_ENTROPY_RATE_MAX) {
+				fprintf(stderr,
+					"--entropy_rate takes an entropy rate from 0 to %u, not \"%s\"\n",
+					ESDM_ES_EXT_ENTROPY_RATE_MAX, optarg);
+				return 1;
+			}
+			rate = (uint32_t)val;
+			break;
+		}
 		case 'N':
 			if (!esdm_es_ext_name_valid(optarg, strlen(optarg))) {
 				fprintf(stderr,
@@ -246,6 +270,8 @@ int main(int argc, char *argv[])
 	/* Checked above already */
 	if (name)
 		(void)esdm_es_ext_server_set_name(serve_server, name);
+	if (rate != ESDM_ES_EXT_PROTO_RATE_NONE)
+		(void)esdm_es_ext_server_set_entropy_rate(serve_server, rate);
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = serve_stop;

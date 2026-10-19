@@ -58,10 +58,13 @@ extern "C" {
 
 /*
  * Version of struct esdm_es_ext_plugin a plugin is written against. Version 2
- * added @status_json; a plugin of version 1, which does not have it, is
- * loaded all the same.
+ * added @status_json, version 3 @entropy_rate; a plugin of an earlier version,
+ * which does not have them, is loaded all the same.
  */
-#define ESDM_ES_EXT_PLUGIN_VERSION 2
+#define ESDM_ES_EXT_PLUGIN_VERSION 3
+
+/* The highest entropy rate a source may declare: bits per 256 bits of data */
+#define ESDM_ES_EXT_ENTROPY_RATE_MAX 256
 
 /*
  * The largest status @status_json may report: bytes of JSON text, the
@@ -142,6 +145,16 @@ extern "C" {
  *		 JSON object. Asked for when the ESDM status is, at most every
  *		 5 seconds, so it must not block for long. Version 2 and later
  *		 only; may be NULL.
+ * @entropy_rate: The entropy rate the source declares for its data, bits of
+ *		  entropy per 256 bits of data, 0 to
+ *		  ESDM_ES_EXT_ENTROPY_RATE_MAX - a rate beyond is taken as
+ *		  that. Called once after @init, so that the plugin can decide
+ *		  from the hardware it found. A block of the source is credited
+ *		  with what @get_entropy claims for it, at most with this rate -
+ *		  unless a rate is configured for the source in the ESDM, which
+ *		  takes precedence. Without it the default of the ESDM applies:
+ *		  256 for a plugin loaded into the ESDM, 0 for one served by a
+ *		  provider. Version 3 and later only; may be NULL.
  */
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -153,6 +166,8 @@ struct esdm_es_ext_plugin {
 	int (*selftest)(void *ctx);
 	/* Version 2 */
 	int (*status_json)(void *ctx, char *buf, size_t buflen);
+	/* Version 3 */
+	uint32_t (*entropy_rate)(void *ctx);
 };
 
 /******************************************************************************
@@ -209,7 +224,11 @@ struct esdm_es_ext_plugin {
  * per connection - right after STARTDTLS and the DTLS handshake, inside the
  * DTLS session where there is one, before any other request. The request has
  * length 0. A provider answers it with status 0 and the data
- *	u32 entropy_rate	ESDM_ES_EXT_PROTO_RATE_NONE (0xffffffff)
+ *	u32 entropy_rate	the entropy rate the provider declares for its
+ *				data, bits per 256 bits of data, 0 to
+ *				ESDM_ES_EXT_ENTROPY_RATE_MAX - one beyond is
+ *				taken as that; ESDM_ES_EXT_PROTO_RATE_NONE
+ *				(0xffffffff) for none
  *	u8  name[]		0 to ESDM_ES_EXT_NAME_MAX bytes: the name of the
  *				source, UTF-8 without control characters and
  *				without a NUL - none for a provider without a
@@ -217,10 +236,16 @@ struct esdm_es_ext_plugin {
  * or with a negative errno and no data, which declares nothing. The ESDM shows
  * the source under the name as a plugin library under the @name of its plugin:
  * a name that is not valid is not taken, and the source shown under its
- * instance name. esdm-es-ext-serve answers with the name of its plugin, or the
- * one of its --name option. A provider older than INFO closes the connection
- * on it: the ESDM connects again at once and does not ask on that connection,
- * so the provider keeps working without a name.
+ * instance name. It credits the provider at the rate it declares, as a plugin
+ * library at the rate of its @entropy_rate, unless a rate is configured for
+ * the source, and at 0 if the provider declares none: accepting the user a
+ * provider runs as means trusting the rate it declares - an operator who does
+ * not want that configures the rate of the source. esdm-es-ext-serve answers
+ * with the name and the rate of its plugin, or the ones of its --name and
+ * --entropy_rate options. A provider older than INFO closes the connection on
+ * it: the ESDM connects again at once and does not ask on that connection, so
+ * the provider keeps working without a name and a rate. Both are asked for on
+ * every connection: a provider restarted may declare others.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
  * first request. A provider answering it with status 0 expects a DTLS 1.2
@@ -328,6 +353,23 @@ int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable);
  */
 int esdm_es_ext_server_set_name(struct esdm_es_ext_server *server,
 				const char *name);
+
+/**
+ * @brief Answer INFO with another entropy rate than the one of the plugin
+ *
+ * The server declares the rate the @entropy_rate callback of its plugin
+ * returns by default, none for a plugin without one - see the INFO request
+ * above. A rate set here is declared instead.
+ *
+ * @param [in] server The server, not running yet
+ * @param [in] rate Bits of entropy per 256 bits of data, 0 to
+ *		    ESDM_ES_EXT_ENTROPY_RATE_MAX; ESDM_ES_EXT_PROTO_RATE_NONE to
+ *		    go back to the rate of the plugin
+ *
+ * @return 0 on success, -EINVAL for a rate out of range
+ */
+int esdm_es_ext_server_set_entropy_rate(struct esdm_es_ext_server *server,
+					uint32_t rate);
 
 /**
  * @brief Serve requests until esdm_es_ext_server_stop() is called

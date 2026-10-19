@@ -171,8 +171,11 @@ Credit a block of the plugin with at most
 .I BITS
 bits of entropy per 256 bits of data, 0 to 256, instead of the rate of the
 build (meson option
-.BR es_ext_lib_entropy_rate ,
-256 by default).
+.BR es_ext_lib_entropy_rate ),
+or \- with
+.B auto
+\- at the rate the plugin declares, 256 if it declares none. Without the option
+and the meson option, the plugin is credited at the rate it declares.
 .TP
 .BR \-\-es_ext_socket " \fIPATH\fR"
 Read the external entropy source a provider process serves on the UNIX domain
@@ -188,15 +191,21 @@ below.
 Credit a block of the provider with at most
 .I BITS
 bits of entropy per 256 bits of data, 0 to 256 (meson option
-.BR es_ext_socket_entropy_rate ).
-The default is 0: the data of a provider is not credited with entropy until a
-rate is configured.
+.BR es_ext_socket_entropy_rate ),
+or \- with
+.B auto
+\- at the rate the provider declares. Without the option and the meson option,
+the provider is credited at the rate it declares, and at 0 if it declares none:
+its data is not credited with entropy then.
 .TP
 .BR \-\-es_ext_socket_uid " \fIUSER\fR"
 Accept a provider running as
 .I USER
 \- a uid or a user name \- next to one running as root (meson option
 .BR es_ext_socket_peer_uid ).
+Accepting the user means trusting the entropy rate the provider declares, too,
+unless a rate is configured for the source with
+.BR \-\-es_ext_socket_entropy_rate .
 .TP
 .BR \-\-es_jent_kernel_name " \fINAME\fR"
 Read the kernel crypto API RNG
@@ -299,9 +308,27 @@ protocol does not allow, is disconnected and not connected to again for 5
 seconds; one that is not connected, or failed, is credited with nothing until
 it delivers again, which the daemon finds out on its own. The same entropy credit
 applies as for a plugin, with the rate of
-.BR \-\-es_ext_socket_entropy_rate ;
+.BR \-\-es_ext_socket_entropy_rate ,
+else the one the provider declares, else 0;
 a provider that is not there at start up has its first self test on the first
 connection to it.
+.PP
+A plugin or a provider may declare the entropy rate of its data (plugin API
+version 3, and the INFO request of the socket protocol, see
+.BR libesdm_es_ext (3)):
+the daemon credits the source at that rate unless one is configured for the
+source, which takes precedence. The status of each source shows the rate it is
+credited at as
+.B entropy_rate
+and where the rate comes from as
+.BR entropy_rate_source :
+.BR config ,
+.B plugin
+or
+.BR provider ,
+or
+.B default
+\- 256 for a plugin, 0 for a provider.
 .PP
 A plugin, or a provider, may report a status of its own, a JSON object: the
 status of the daemon shows it as the

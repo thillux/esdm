@@ -270,11 +270,15 @@ handed to the ESDM in one of two ways:
   providers written without the library.
 
 A block is credited with the entropy the source claims for it, capped by
-`es_ext_lib_entropy_rate` / `es_ext_socket_entropy_rate` (or
-`--es_ext_lib_entropy_rate` / `--es_ext_socket_entropy_rate`). The cap of a
-plugin defaults to 256, which takes its claims as they are; that of a
-provider defaults to 0, so a provider is credited only once a rate is
-configured. A source claiming more than the block holds, or failing, is
+the rate of the source: the one configured with `es_ext_lib_entropy_rate` /
+`es_ext_socket_entropy_rate` (or `--es_ext_lib_entropy_rate` /
+`--es_ext_socket_entropy_rate`), else the one the source declares - the
+`entropy_rate` callback of a plugin of API version 3, the answer of a
+provider to INFO, which `esdm-es-ext-serve --entropy_rate` overrides - else
+256 for a plugin, which takes its claims as they are, and 0 for a provider,
+so a provider declaring none is credited only once a rate is configured.
+Accepting the user of a provider means trusting the rate it declares; the
+status shows the rate of each source and where it comes from. A source claiming more than the block holds, or failing, is
 credited with nothing until it delivers again, and one failing its self test
 until a self test passes.
 

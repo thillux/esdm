@@ -27,7 +27,12 @@
  * defined, compiled into a test that serves it in process. With
  * ES_EXT_TEST_PLUGIN_V1 defined, it is a plugin of version 1, which has no
  * status - the status callback it sets all the same stands for whatever lies
- * beyond the struct of such a plugin, which must not be called.
+ * beyond the struct of such a plugin, which must not be called; with
+ * ES_EXT_TEST_PLUGIN_V2 one of version 2, likewise for its entropy rate.
+ *
+ * It declares no entropy rate unless the test sets one, which the plugin of
+ * ES_EXT_TEST_PLUGIN_RATED does by default: a plugin of version 3 declaring
+ * its name, es-ext-rated, and a rate of 128 bits per 256 bits.
  */
 
 #include <errno.h>
@@ -50,8 +55,16 @@ static void es_ext_test_sleep(unsigned int ms)
 ESDM_ES_EXT_PLUGIN_EXPORT
 struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 	.claim_bits = UINT32_MAX,
-	.name = "es-ext-test",
+#ifdef ES_EXT_TEST_PLUGIN_RATED
+	.name = ES_EXT_TEST_RATED_NAME,
+	.entropy_rate = ES_EXT_TEST_RATED_RATE,
+#else
+	.name = ES_EXT_TEST_NAME,
+	.entropy_rate = ES_EXT_TEST_RATE_NONE,
+#endif
 };
+
+static uint32_t es_ext_test_entropy_rate(void *ctx);
 
 /*
  * The plugin, not const: a test sets the name it declares, @name of the
@@ -99,6 +112,8 @@ static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
 			ctl->get_delay_ms = (unsigned int)n;
 		else if (!strcmp(setting, "status_delay_ms"))
 			ctl->status_delay_ms = (unsigned int)n;
+		else if (!strcmp(setting, "rate"))
+			ctl->entropy_rate = (uint32_t)n;
 	}
 }
 
@@ -109,6 +124,14 @@ static int es_ext_test_init(void **ctx)
 	es_ext_test_env(ctl);
 	ctl->init_calls++;
 	*ctx = ctl;
+
+#if !defined(ES_EXT_TEST_PLUGIN_V1) && !defined(ES_EXT_TEST_PLUGIN_V2)
+	/* Asked after the init: the rate the test set, or none */
+	ES_EXT_TEST_PLUGIN.entropy_rate =
+		ctl->entropy_rate == ES_EXT_TEST_RATE_NONE ?
+			NULL :
+			es_ext_test_entropy_rate;
+#endif
 
 	return ctl->init_ret;
 }
@@ -151,6 +174,14 @@ static int es_ext_test_selftest(void *ctx)
 	return ctl->selftest_ret;
 }
 
+static uint32_t es_ext_test_entropy_rate(void *ctx)
+{
+	struct esdm_es_ext_test_control *ctl = ctx;
+
+	ctl->rate_calls++;
+	return ctl->entropy_rate;
+}
+
 static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 {
 	struct esdm_es_ext_test_control *ctl = ctx;
@@ -180,8 +211,10 @@ static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 ESDM_ES_EXT_PLUGIN_EXPORT
 #endif
 struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
-#ifdef ES_EXT_TEST_PLUGIN_V1
+#if defined(ES_EXT_TEST_PLUGIN_V1)
 	.version = 1,
+#elif defined(ES_EXT_TEST_PLUGIN_V2)
+	.version = 2,
 #else
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
 #endif
@@ -191,4 +224,5 @@ struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
 	.get_entropy = es_ext_test_get_entropy,
 	.selftest = es_ext_test_selftest,
 	.status_json = es_ext_test_status_json,
+	.entropy_rate = es_ext_test_entropy_rate,
 };
