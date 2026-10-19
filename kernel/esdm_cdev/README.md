@@ -186,20 +186,37 @@ long after the ESDM came back.
 
 ## Testing
 
-The NixOS VM test `checks.x86_64-linux.esdm_cdev` of the flake loads the
-module next to a running ESDM and exercises the devices, `poll()`,
-`O_NONBLOCK`, `O_SYNC`, writes, the ioctls as root, as an unprivileged user and
-as root without `CAP_SYS_ADMIN`, writers stalled on their own memory, every
-file of `/proc/esdm`, a restart of the ESDM during reads, an ESDM that does not
-answer, an ESDM that is gone, loading the module without an ESDM and unloading
-it. A fake EGD server of the check script stands in for what the ESDM cannot be
-made to do: never answering, for the backoff; logging what the module sends,
-for the credit of `RNDADDENTROPY` and `RNDADDTOENTCNT` interrupted by a signal;
-not being operational, for `poll()`:
+The checks of the module are the subcommands of `esdm-cdev-check`, built from
+`tests/esdm_cdev` of the ESDM source tree with its test suite, each exiting with
+0 when the module does what it promises and with a `FAIL` line otherwise:
+
+    esdm-cdev-check <check> [args]
+
+Those that hold next to the ESDM of an ordinary machine are tests of the meson
+test suite as well, in its suite `esdm_cdev`: the reads, also with `O_SYNC`
+and `O_NONBLOCK`, `poll()`, writes and the ioctls without `CAP_SYS_ADMIN`, and
+as root `/proc/esdm` and writers stalled on their own memory. They skip where
+the module is not loaded, as they do where they need root and do not run as
+root:
+
+    meson test -C build --suite esdm_cdev
+
+The build option `esdm-cdev-check` installs the program, for a machine that
+loads the module but has no build tree.
+
+The NixOS VM test `checks.x86_64-linux.esdm_cdev` of the flake runs all of
+them with the installed program. It loads the module next to a running ESDM
+and exercises the devices, `poll()`, `O_NONBLOCK`, `O_SYNC`, writes, the ioctls
+as root, as an unprivileged user and as root without `CAP_SYS_ADMIN`, writers
+stalled on their own memory, every file of `/proc/esdm`, a restart of the ESDM
+during reads, an ESDM that does not answer, an ESDM that is gone, loading the
+module without an ESDM and unloading it. The fake EGD server of
+`esdm-cdev-check fake-egd` stands in for what the ESDM cannot be made to do:
+never answering, for the backoff; logging what the module sends, for the credit
+of `RNDADDENTROPY` and `RNDADDTOENTCNT` interrupted by a signal; not being
+operational, for `poll()`:
 
     nix build .#checks.x86_64-linux.esdm_cdev
-
-The checks it runs inside the VM are in `tests/esdm_cdev_check.py`.
 
 # Author
 

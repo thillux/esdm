@@ -66,6 +66,13 @@ the ioctls of the kernel's random devices - the counterpart of the CUSE
 frontend in the kernel, leaving the kernel's own devices untouched; it falls
 back to the kernel's RNG while the ESDM is not reachable
 
+* esdm_cdev: the checks of the module are esdm-cdev-check (tests/esdm_cdev), a
+C program in place of the Python script of the 1.2.4 development versions:
+meson test runs those that hold next to the ESDM of the machine (suite
+esdm_cdev) where the module is loaded and skips them elsewhere, the build option
+esdm-cdev-check installs the program, and the VM test of the flake runs every
+check with it, without Python
+
 * Add esdm-vhost-user-rng (meson option vhost-user-rng, Linux only): the
 vhost-user back-end of a virtio entropy device, giving QEMU (vhost-user-rng-pci,
 and vhost-user-rng on virtio-mmio, e.g. on microvm) and Cloud Hypervisor

@@ -1384,7 +1384,13 @@
           kernel:
           let
             esdm = self.packages.${system}.esdm;
-            check = "python3 ${./kernel/esdm_cdev/tests/esdm_cdev_check.py}";
+            # The checks of tests/esdm_cdev, one subcommand each, installed
+            # with the ESDM by its option esdm-cdev-check. The ones running
+            # in the background are stopped by pkill -f 'esdm-cdev-check
+            # [b]lock' and the like, which matches their command line only:
+            # the brackets keep the pattern from matching one that holds the
+            # pattern itself, such as that of a shell running pkill.
+            check = "${esdm}/bin/esdm-cdev-check";
           in
           pkgs.testers.nixosTest {
             name = "esdm_cdev character devices";
@@ -1406,10 +1412,7 @@
                 # The module talks to the EGD socket, which is opt-in.
                 systemd.sockets."esdm-server-egd".wantedBy = [ "sockets.target" ];
 
-                environment.systemPackages = [
-                  esdm
-                  pkgs.python3
-                ];
+                environment.systemPackages = [ esdm ];
 
                 virtualisation = {
                   memorySize = 2048;
@@ -1495,8 +1498,8 @@
                   machine.sleep(1)
                   machine.fail("rmmod esdm_cdev")
                   machine.succeed("systemctl kill -s SIGCONT esdm-server.service")
-                  machine.succeed("pkill -f 'esdm_cdev_check.py [b]lock'")
-                  machine.wait_until_fails("pgrep -f 'esdm_cdev_check.py [b]lock'", 30)
+                  machine.succeed("pkill -f 'esdm-cdev-check [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm-cdev-check [b]lock'", 30)
                   machine.wait_until_succeeds(
                       "grep -q 'ESDM library version' /proc/esdm/status", 60
                   )
@@ -1527,7 +1530,7 @@
                   machine.succeed("${check} reads")
                   machine.succeed("${check} ioctl-priv")
 
-              # The module against a fake EGD server of the check script, for
+              # The module against the fake EGD server of esdm-cdev-check, for
               # what the ESDM cannot be made to do: see its fake-egd command.
               def fake_egd(mode, params=""):
                   machine.succeed("rmmod esdm_cdev")
@@ -1543,7 +1546,7 @@
 
               def real_egd():
                   machine.succeed("rmmod esdm_cdev")
-                  machine.succeed("pkill -f 'esdm_cdev_check.py [f]ake-egd'")
+                  machine.succeed("pkill -f 'esdm-cdev-check [f]ake-egd'")
                   machine.succeed("modprobe esdm_cdev")
 
               with subtest("an ESDM that accepts but does not answer is backed off from"):
@@ -1574,8 +1577,8 @@
                   )
                   machine.wait_until_succeeds("grep -q blocking /tmp/block2.log", 30)
                   machine.fail("rmmod esdm_cdev")
-                  machine.succeed("pkill -f 'esdm_cdev_check.py [b]lock'")
-                  machine.wait_until_fails("pgrep -f 'esdm_cdev_check.py [b]lock'", 30)
+                  machine.succeed("pkill -f 'esdm-cdev-check [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm-cdev-check [b]lock'", 30)
                   machine.succeed("rmmod esdm_cdev")
                   machine.fail("test -e /dev/esdm_random")
                   machine.fail("test -e /proc/esdm")
@@ -2707,6 +2710,9 @@
                     # The EGD protocol over the network, its TLS mode by
                     # Botan as well
                     "-Degd-net=enabled"
+                    # esdm-cdev-check, the checks of the esdm_cdev kernel
+                    # module, which the VM of mkEsdmCdevCheck runs
+                    "-Desdm-cdev-check=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
