@@ -97,10 +97,11 @@ The components are:
   implementation: `libcrypto.so` (OpenSSL), `libgnutls.so` together with
   `libnettle.so`, `libbotan-3.so` or `libleancrypto.so`.
 
-The last two are attested wherever they are loaded from; the server names any
-component whose reference value is missing, so starting it once tells you which
-files still need one. Write them when the module is installed, over the files as
-they were built:
+The last two are attested wherever they are loaded from. The server stops at
+the first component whose reference value is missing or does not match, and
+names that one only - so write the reference values of all of them when the
+module is installed, over the files as they were built, rather than finding
+them one start at a time:
 
 ```
 esdm-tool --fips-targetfile /usr/bin/esdm-server \
