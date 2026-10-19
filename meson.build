@@ -349,6 +349,9 @@ elif get_option('egd-net-tls').enabled()
 endif
 dependencies_client += egd_net_tls_deps
 dependencies_server += egd_net_tls_deps
+if egd_net
+	subdirs += [ 'frontends/egd-net' ]
+endif
 
 if get_option('openssl-rand-provider').enabled()
 	subdirs += [ 'frontends/openssl-provider' ]
