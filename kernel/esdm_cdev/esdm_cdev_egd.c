@@ -406,6 +406,27 @@ static int esdm_cdev_recv(struct socket *sock, void *buf, size_t len)
 	return 0;
 }
 
+/*
+ * Receive what is there, up to @len bytes, waiting for the first of them.
+ * Returns the number of bytes received, or a negative errno.
+ */
+static int esdm_cdev_recv_some(struct socket *sock, void *buf, size_t len)
+{
+	struct kvec iov = { .iov_base = buf, .iov_len = len };
+	struct msghdr msg = { .msg_flags = 0 };
+	int ret = kernel_recvmsg(sock, &msg, &iov, 1, len, 0);
+
+	/* The ESDM closed the connection */
+	if (!ret)
+		return -ECONNRESET;
+	if (ret == -EAGAIN)
+		return -ETIMEDOUT;
+	if (ret > 0 && (size_t)ret > len)
+		return -EIO;
+
+	return ret;
+}
+
 static bool esdm_cdev_interrupted(int ret)
 {
 	return ret == -ERESTARTSYS || ret == -EINTR || ret == -ERESTARTNOINTR ||
@@ -544,13 +565,20 @@ struct esdm_cdev_read_op {
  * The read commands of one request go out together, and their answers are
  * collected after: one round trip for up to ESDM_CDEV_READ_MAX bytes rather
  * than one per 255 bytes. The ESDM serves the commands of a connection in
- * order, so the answers come in the order of the commands.
+ * order, so the answers come in the order of the commands - as one response,
+ * where they are served in full, see esdm_egd_read_run(). They are received
+ * as they come, as much at a time as there is, rather than with two receives
+ * per answer, and their bytes are moved to the front of the buffer behind
+ * each other.
  */
 static int esdm_cdev_read_op(struct socket *sock, void *arg, bool *sent)
 {
 	struct esdm_cdev_read_op *op = arg;
 	u8 req[2 * ESDM_CDEV_READ_CMDS];
-	size_t i, num = DIV_ROUND_UP(op->len, ESDM_EGD_MAX_TRANSFER);
+	size_t num = DIV_ROUND_UP(op->len, ESDM_EGD_MAX_TRANSFER);
+	/* The answers in full, with their length bytes */
+	size_t room = ESDM_CDEV_READ_ROOM(op->len);
+	size_t i, have = 0, pos = 0;
 	int ret;
 
 	for (i = 0; i < num; i++) {
@@ -566,30 +594,56 @@ static int esdm_cdev_read_op(struct socket *sock, void *arg, bool *sent)
 		return ret;
 
 	op->got = 0;
-	for (i = 0; i < num; i++) {
-		u8 got;
+	i = 0;
+	while (i < num) {
+		/* The answers complete so far */
+		while (i < num && pos < have) {
+			u8 got = op->buf[pos];
 
-		ret = esdm_cdev_recv(sock, &got, sizeof(got));
-		if (ret)
-			goto err;
+			/* More than asked for is not the protocol */
+			if (got > req[2 * i + 1]) {
+				ret = -EPROTO;
+				goto err;
+			}
+			if (pos + 1 + got > have)
+				break;
 
-		/* More than asked for is not the protocol */
-		if (got > req[2 * i + 1]) {
-			ret = -EPROTO;
-			goto err;
+			/*
+			 * A short answer leaves no gap: what came is
+			 * contiguous. Ahead of the answer by its length byte
+			 * at least, so nothing not taken yet is overwritten.
+			 */
+			memmove(op->buf + op->got, op->buf + pos + 1, got);
+			op->got += got;
+			pos += 1 + (size_t)got;
+			i++;
 		}
+		if (i == num)
+			break;
 
-		/* A short answer leaves no gap: what came is contiguous */
-		ret = esdm_cdev_recv(sock, op->buf + op->got, got);
-		if (ret)
+		/*
+		 * No more than the answers can hold, so nothing is taken from
+		 * the stream that does not belong to them
+		 */
+		ret = esdm_cdev_recv_some(sock, op->buf + have, room - have);
+		if (ret < 0)
 			goto err;
-		op->got += got;
+		have += (size_t)ret;
 	}
+
+	/* Bytes behind the last answer, which nothing asked for */
+	if (pos != have) {
+		ret = -EPROTO;
+		goto err;
+	}
+
+	/* What is left behind the bytes moved to the front */
+	memzero_explicit(op->buf + op->got, room - op->got);
 
 	return 0;
 
 err:
-	memzero_explicit(op->buf, op->len);
+	memzero_explicit(op->buf, room);
 	op->got = 0;
 	return ret;
 }
@@ -614,7 +668,7 @@ int esdm_cdev_egd_read(u8 cmd, u8 *buf, size_t len)
 /********************************** Writes ***********************************/
 
 /* Insertions sent together, and the bytes they carry at most */
-#define ESDM_CDEV_INSERT_CMDS ESDM_CDEV_READ_CMDS
+#define ESDM_CDEV_INSERT_CMDS 16
 #define ESDM_CDEV_INSERT_MAX (ESDM_CDEV_INSERT_CMDS * ESDM_EGD_MAX_TRANSFER)
 
 struct esdm_cdev_insert_op {

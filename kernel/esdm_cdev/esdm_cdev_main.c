@@ -34,6 +34,7 @@
 #include <linux/capability.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/random.h>
@@ -228,14 +229,19 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 	 * esdm_egd_protocol.h, a batch would wait for several rounds.
 	 */
 	size_t max = pr ? ESDM_EGD_MAX_TRANSFER : ESDM_CDEV_READ_MAX;
-	size_t done = 0;
+	size_t done = 0, room;
 	ssize_t ret = 0;
 	u8 *block;
 
 	if (!count)
 		return 0;
 
-	block = kmalloc(max, GFP_KERNEL);
+	/*
+	 * As large as the read needs, up to the 64 KiB of one request to the
+	 * ESDM: a read of 32 bytes is no reason to take that much.
+	 */
+	room = ESDM_CDEV_READ_ROOM(min_t(size_t, count, max));
+	block = kvmalloc(room, GFP_KERNEL);
 	if (!block)
 		return -ENOMEM;
 
@@ -323,7 +329,7 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 		done += got;
 	}
 
-	kfree_sensitive(block);
+	kvfree_sensitive(block, room);
 
 	/* What was read is returned, an error only without any */
 	if (done)

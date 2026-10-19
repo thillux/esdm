@@ -8,6 +8,7 @@
 #ifndef ESDM_CDEV_H
 #define ESDM_CDEV_H
 
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/uio.h>
 
@@ -26,16 +27,26 @@ struct esdm_cdev_state {
 int esdm_cdev_egd_init(void);
 void esdm_cdev_egd_fini(void);
 
-/* Read commands sent together, and the bytes they ask for at most */
-#define ESDM_CDEV_READ_CMDS 16
+/*
+ * Read commands sent together, and the bytes they ask for at most: 64 KiB of
+ * answers, which the ESDM sends as one response, see esdm_egd_read_run()
+ */
+#define ESDM_CDEV_READ_CMDS 256
 #define ESDM_CDEV_READ_MAX (ESDM_CDEV_READ_CMDS * ESDM_EGD_MAX_TRANSFER)
 
 /*
+ * Room a read of @len bytes needs in its buffer: the answers are received
+ * into it as they come, with the length byte of each
+ */
+#define ESDM_CDEV_READ_ROOM(len) ((len) + DIV_ROUND_UP(len, ESDM_EGD_MAX_TRANSFER))
+
+/*
  * Read up to @len bytes, at most ESDM_CDEV_READ_MAX, with the read command
- * @cmd, which answers with a length byte and that many bytes. Returns the
- * number of bytes delivered, which may be fewer than asked for, or a negative
- * errno: -ERESTARTSYS when a signal interrupted the caller, any other when the
- * ESDM could not be asked.
+ * @cmd, which answers with a length byte and that many bytes, into @buf of
+ * ESDM_CDEV_READ_ROOM(@len) bytes. Returns the number of bytes delivered, at
+ * the start of @buf, which may be fewer than asked for, or a negative errno:
+ * -ERESTARTSYS when a signal interrupted the caller, any other when the ESDM
+ * could not be asked.
  */
 int esdm_cdev_egd_read(u8 cmd, u8 *buf, size_t len);
 

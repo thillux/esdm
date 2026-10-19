@@ -83,18 +83,17 @@ static int esdm_cdev_fill_uuid(const struct esdm_cdev_proc_file *file,
 			       char **text, size_t *len)
 {
 	char str[ESDM_CDEV_UUID_LEN + 1];
-	u8 uuid[16];
+	u8 uuid[ESDM_CDEV_READ_ROOM(16)];
 	int ret;
 
 	/*
 	 * As the kernel's uuid file, which uses get_random_bytes(): a UUID is
 	 * not a key, so the DRNG need not be fully seeded for it.
 	 */
-	ret = esdm_cdev_egd_read(ESDM_EGD_CMD_ESDM_READ_UNSEEDED, uuid,
-				 sizeof(uuid));
+	ret = esdm_cdev_egd_read(ESDM_EGD_CMD_ESDM_READ_UNSEEDED, uuid, 16);
 	if (ret == -ERESTARTSYS)
 		return ret;
-	if (ret != sizeof(uuid)) {
+	if (ret != 16) {
 		memzero_explicit(uuid, sizeof(uuid));
 		return esdm_cdev_text(text, len, "", 0);
 	}
