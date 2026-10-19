@@ -1315,6 +1315,421 @@
             '';
           };
 
+        # The guest of the vhost-user RNG checks: the stock kernel, booted
+        # directly, and an initrd of busybox, kmod and the virtio modules. Its
+        # init does what a guest does with an entropy device - load the driver,
+        # see it become the current hwrng, read /dev/hwrng - and reports each
+        # step on the serial console, prefixed with "VURNG: ". Then it goes on
+        # reading 64 bytes a second, "VURNG: loop <n>", for the checks to stall
+        # and resume. A VMM with an entropy device of its own (Cloud
+        # Hypervisor) is handled with vurng_keep=<PCI address> on the kernel
+        # command line: every other virtio-rng is unbound, so the one of the
+        # ESDM is what /dev/hwrng reads.
+        vhostUserRngGuest =
+          let
+            kernel = stockKernels.latest.kernel;
+            modules = pkgs.makeModulesClosure {
+              kernel = lib.getOutput "modules" kernel;
+              firmware = pkgs.emptyDirectory;
+              rootModules = [
+                "virtio_pci"
+                "virtio_mmio"
+                "virtio_rng"
+              ];
+            };
+            init = pkgs.writeScript "vhost-user-rng-guest-init" ''
+              #!${pkgs.busybox}/bin/sh
+              export PATH=${pkgs.busybox}/bin
+              say() { echo "VURNG: $*"; }
+              hold() { say "$@"; while true; do sleep 3600; done; }
+
+              mkdir -p /proc /sys /dev /tmp
+              mount -t proc proc /proc
+              mount -t sysfs sysfs /sys
+              mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+              for m in virtio_pci virtio_mmio virtio_rng; do
+                ${pkgs.kmod}/bin/modprobe -d ${modules} $m || say "cannot load $m"
+              done
+
+              # Up to 30 s for a virtio-rng to become the current hwrng and
+              # its device to show up bound to the driver: on virtio-mmio,
+              # the guest under TCG gets there well after modprobe returned
+              drv=/sys/bus/virtio/drivers/virtio_rng
+              cur=
+              wait_current() {
+                i=0
+                while [ $i -lt 300 ]; do
+                  cur=$(cat /sys/class/misc/hw_random/rng_current 2>/dev/null)
+                  case "$cur" in
+                    virtio_rng.*) [ -n "$(ls -d $drv/virtio* 2>/dev/null)" ] && return ;;
+                  esac
+                  sleep 0.1
+                  i=$((i + 1))
+                done
+              }
+
+              wait_current
+              keep=$(sed -n 's/.*vurng_keep=\([^ ]*\).*/\1/p' /proc/cmdline)
+              for d in $drv/virtio*; do
+                [ -e "$d" ] || continue
+                path=$(readlink -f "$d")
+                say "device: ''${d##*/} at $path"
+                if [ -n "$keep" ]; then
+                  case "$path" in
+                    */$keep/*) ;;
+                    *) echo "''${d##*/}" > $drv/unbind; say "unbound ''${d##*/}" ;;
+                  esac
+                fi
+              done
+              # The hwrng core moves on to the one kept
+              wait_current
+
+              say "available: $(cat /sys/class/misc/hw_random/rng_available)"
+              say "current: $cur"
+              case "$cur" in
+                virtio_rng.*) ;;
+                *) hold "FAIL no virtio-rng is the current hwrng" ;;
+              esac
+              n=$(ls -d $drv/virtio* 2>/dev/null | wc -l)
+              [ "$n" = 1 ] || hold "FAIL $n virtio-rng devices bound"
+
+              say "reading /dev/hwrng"
+              head -c 4096 /dev/hwrng > /tmp/a
+              head -c 4096 /dev/hwrng > /tmp/b
+              size=$(wc -c < /tmp/a)
+              distinct=$(od -An -v -tx1 /tmp/a | tr -s ' ' '\n' | grep . | sort -u | wc -l)
+              if [ "$size" -eq 4096 ] && ! cmp -s /tmp/a /tmp/b && [ "$distinct" -gt 200 ]; then
+                say "OK $size bytes of /dev/hwrng, $distinct distinct byte values"
+              else
+                hold "FAIL $size bytes of /dev/hwrng, $distinct distinct byte values"
+              fi
+
+              i=0
+              while true; do
+                if head -c 64 /dev/hwrng > /dev/null; then
+                  i=$((i + 1))
+                  say "loop $i"
+                fi
+                sleep 1
+              done
+            '';
+          in
+          {
+            kernel = "${kernel}/bzImage";
+            initrd = "${
+              pkgs.makeInitrd {
+                contents = [
+                  {
+                    object = init;
+                    symlink = "/init";
+                  }
+                ];
+              }
+            }/initrd";
+            cmdline = "console=ttyS0 panic=-1 loglevel=4";
+          };
+
+        # One check of esdm-vhost-user-rng: the ESDM and the socket units of
+        # the daemon on a NixOS VM, a VMM running as the unprivileged user
+        # "vmm" in the group the sockets belong to, and @script driving it.
+        # The helpers of the script: start_vm(name, cmd) starts the socket of
+        # the VM and the VMM as a transient unit; wait_ok(name) waits for the
+        # guest to read /dev/hwrng; loops(name) counts its reads since;
+        # stall_and_resume(name) shows the bytes come from the ESDM - the guest
+        # stalls while the ESDM is stopped and resumes once it is back.
+        mkVhostUserRngCheck =
+          {
+            name,
+            script,
+            node ? { },
+          }:
+          let
+            esdm = self.packages.${system}.esdm;
+            connect = pkgs.writeText "vhost-user-rng-connect.py" ''
+              import socket, sys
+              s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              s.connect(sys.argv[1])
+            '';
+          in
+          pkgs.testers.nixosTest {
+            inherit name;
+
+            nodes.machine =
+              { lib, ... }:
+              {
+                imports = [ node ];
+
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                users.users.vmm = {
+                  isSystemUser = true;
+                  group = "vmm";
+                  extraGroups = [ "kvm" ];
+                  home = "/var/lib/vmm";
+                  createHome = true;
+                };
+                users.groups.vmm = { };
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.python3
+                ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import time
+
+              def serial_log(name):
+                  return f"/var/lib/vmm/{name}.log"
+
+              def start_vm(name, cmd):
+                  sock = f"/run/esdm-vhost-user-rng/{name}.sock"
+                  machine.succeed(f"systemctl start esdm-vhost-user-rng@{name}.socket")
+                  machine.succeed(f"test -S {sock}")
+                  # The VMM user connects through the group of the socket
+                  mode = machine.succeed(f"stat -c '%a %G' {sock}").strip()
+                  assert mode == "660 kvm", f"{sock}: {mode}"
+                  print(f"{name}: {cmd}")
+                  machine.succeed(
+                      f"systemd-run --unit=vm-{name} -p User=vmm -p Group=vmm -- {cmd}"
+                  )
+
+              def wait_ok(name):
+                  try:
+                      machine.wait_until_succeeds(
+                          f"grep -a -q -e 'VURNG: OK' -e 'VURNG: FAIL' {serial_log(name)}", 600
+                      )
+                  except Exception:
+                      # What the guest got to, and the VMM said
+                      print(machine.execute(f"tail -c 4000 {serial_log(name)}")[1])
+                      print(machine.execute(f"journalctl -b -u vm-{name} --no-pager")[1])
+                      raise
+                  # -a and tr: the serial port may put a stray byte that is
+                  # no text before a line, and grep then holds back the line
+                  out = machine.succeed(
+                      f"grep -a VURNG: {serial_log(name)} | tr -cd '[:print:]\\n'"
+                  )
+                  print(out)
+                  assert "VURNG: FAIL" not in out, f"{name} failed:\n{out}"
+                  assert "VURNG: current: virtio_rng." in out, out
+                  return out
+
+              def loops(name):
+                  out = machine.succeed(f"grep -a -c 'VURNG: loop' {serial_log(name)} || true")
+                  return int(out.strip() or "0")
+
+              def wait_loops(name, n, timeout=120):
+                  machine.wait_until_succeeds(
+                      f"[ $(grep -a -c 'VURNG: loop' {serial_log(name)}) -ge {n} ]", timeout
+                  )
+
+              esdm_units = "esdm-server-unpriv.socket esdm-server-priv.socket esdm-server.service"
+
+              def stall_and_resume(name):
+                  wait_loops(name, loops(name) + 2)
+                  machine.succeed(f"systemctl stop {esdm_units}")
+                  # A read under way when the ESDM went may still complete
+                  time.sleep(3)
+                  before = loops(name)
+                  time.sleep(8)
+                  after = loops(name)
+                  assert after == before, \
+                      f"{name} read {after - before} times without the ESDM"
+                  machine.succeed(f"systemctl start {esdm_units}")
+                  wait_loops(name, after + 2)
+
+              def daemon_unprivileged(name):
+                  user = machine.succeed(
+                      f"systemctl show -P MainPID esdm-vhost-user-rng@{name}.service"
+                      " | xargs ps -o user= -p"
+                  ).strip()
+                  assert user and user != "root", f"daemon of {name} runs as {user!r}"
+
+              def others_refused(name):
+                  machine.fail(
+                      "setpriv --reuid=nobody --regid=nogroup --clear-groups "
+                      f"python3 ${connect} /run/esdm-vhost-user-rng/{name}.sock"
+                  )
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-server.service")
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              ${script}
+
+              machine.succeed("systemctl stop 'vm-*'")
+              machine.succeed("journalctl -b -u 'esdm-vhost-user-rng@*' --no-pager >&2")
+              machine.fail("journalctl -b -u 'esdm-vhost-user-rng@*' | grep -q -e 'Not processing' -e 'Malformed'")
+            '';
+          };
+
+        # QEMU's vhost-user-rng-pci on a q35 guest, under TCG - no nested KVM
+        # needed. The chardev has no reconnect-ms: QEMU 11.1's vhost-user-rng
+        # does not wait for a reconnecting chardev to connect before it talks
+        # to the back-end, and fails at start up with it ("Failed to set msg
+        # fds"), and its reconnect re-starts the vhost device it tore down
+        # without setting it up again, which QEMU aborts on. So the check has
+        # the next VM take over the daemon instead of the same one reconnect.
+        mkVhostUserRngQemuCheck =
+          let
+            g = vhostUserRngGuest;
+            qemu = "${pkgs.qemu_test}/bin/qemu-system-x86_64";
+            cmd =
+              log:
+              lib.concatStringsSep " " [
+                qemu
+                "-machine q35,memory-backend=mem -accel tcg -cpu max -smp 1 -m 256M"
+                "-object memory-backend-memfd,id=mem,size=256M,share=on"
+                "-kernel ${g.kernel} -initrd ${g.initrd} -append '${g.cmdline}'"
+                "-chardev socket,id=rng0,path=/run/esdm-vhost-user-rng/pci.sock"
+                "-device vhost-user-rng-pci,chardev=rng0"
+                "-nodefaults -no-user-config -display none -serial file:/var/lib/vmm/${log}.log"
+              ];
+          in
+          mkVhostUserRngCheck {
+            name = "vhost-user RNG with QEMU vhost-user-rng-pci";
+            script = ''
+              start_vm("pci", "${cmd "pci"}")
+              wait_ok("pci")
+              daemon_unprivileged("pci")
+              others_refused("pci")
+
+              with subtest("the guest waits for the ESDM"):
+                  stall_and_resume("pci")
+
+              with subtest("the daemon serves the next VM"):
+                  machine.succeed("systemctl stop vm-pci")
+                  machine.wait_until_succeeds(
+                      "journalctl -b -u esdm-vhost-user-rng@pci.service"
+                      " | grep -q 'Front-end disconnected'", 30
+                  )
+                  machine.succeed(
+                      "systemd-run --unit=vm-pci-next -p User=vmm -p Group=vmm -- ${cmd "pci-next"}"
+                  )
+                  wait_ok("pci-next")
+                  wait_loops("pci-next", 3)
+            '';
+          };
+
+        # QEMU's microvm machine: virtio-mmio rather than PCI, the device as
+        # vhost-user-rng on the virtio-mmio bus, under TCG. Twice: the legacy
+        # virtio-mmio transport microvm defaults to, found through ACPI, and
+        # the virtio 1.0 one, found through the kernel command line QEMU
+        # extends with acpi=off.
+        #
+        # The guests get the TSC frequency on the command line. microvm's
+        # ACPI is hardware-reduced, and Linux then sets up neither the PIT
+        # nor the PIC as its tick: it has the TSC and the local APIC timer
+        # only, and has to know the TSC frequency for both. microvm has no
+        # HPET or ACPI PM timer to measure it against, and TCG no kvmclock,
+        # which leaves polling the PIT - and that fails when TCG runs in a
+        # busy VM ("tsc: Unable to calibrate against PIT"), with the guest
+        # waiting for a jiffy that never comes. TCG's TSC is the one of the
+        # test VM, so its frequency is the one the test VM's kernel found.
+        mkVhostUserRngMicrovmCheck =
+          let
+            g = vhostUserRngGuest;
+            qemu = "${pkgs.qemu_test}/bin/qemu-system-x86_64";
+            cmd =
+              name: machineOpts: extra:
+              lib.concatStringsSep " " (
+                [
+                  qemu
+                  "-machine microvm,memory-backend=mem${machineOpts} -accel tcg -cpu max -smp 1 -m 256M"
+                  "-object memory-backend-memfd,id=mem,size=256M,share=on"
+                ]
+                ++ extra
+                ++ [
+                  "-kernel ${g.kernel} -initrd ${g.initrd} -append '${g.cmdline} tsc_early_khz={tsc_khz}'"
+                  "-chardev socket,id=rng0,path=/run/esdm-vhost-user-rng/${name}.sock"
+                  "-device vhost-user-rng,chardev=rng0"
+                  "-nodefaults -no-user-config -display none -serial file:/var/lib/vmm/${name}.log"
+                ]
+              );
+            legacy = cmd "mmio-legacy" "" [ ];
+            modern = cmd "mmio-modern" ",acpi=off" [ "-global virtio-mmio.force-legacy=false" ];
+          in
+          mkVhostUserRngCheck {
+            name = "vhost-user RNG with QEMU microvm";
+            script = ''
+              import re
+
+              mhz = re.findall(
+                  r"tsc: (?:Detected|Refined TSC clocksource calibration:) ([0-9.]+) MHz",
+                  machine.succeed("dmesg"),
+              )
+              assert mhz, "the kernel of the test VM logged no TSC frequency"
+              tsc_khz = int(float(mhz[-1]) * 1000)
+
+              start_vm("mmio-legacy", f"${legacy}")
+              start_vm("mmio-modern", f"${modern}")
+              for name in ["mmio-legacy", "mmio-modern"]:
+                  out = wait_ok(name)
+                  assert "virtio-mmio" in out or "LNRO0005" in out, \
+                      f"{name}: the device is not on virtio-mmio:\n{out}"
+                  daemon_unprivileged(name)
+
+              with subtest("the guests wait for the ESDM"):
+                  stall_and_resume("mmio-modern")
+                  wait_loops("mmio-legacy", loops("mmio-legacy") + 2)
+            '';
+          };
+
+        # Cloud Hypervisor's generic vhost-user device. It needs KVM, so the VM
+        # of the check needs nested virtualization: the host has to allow it
+        # (kvm_amd/kvm_intel nested=1), the test VM passes the CPU on with
+        # -cpu max. Cloud Hypervisor has an entropy device of its own besides,
+        # on /dev/urandom of the VM; the guest unbinds it, keeping the
+        # generic device at PCI slot 10.
+        mkVhostUserRngChCheck =
+          let
+            g = vhostUserRngGuest;
+            cmd = lib.concatStringsSep " " [
+              "${pkgs.cloud-hypervisor}/bin/cloud-hypervisor"
+              "--kernel ${g.kernel} --initramfs ${g.initrd}"
+              "--cmdline '${g.cmdline} vurng_keep=0000:00:0a.0'"
+              "--cpus boot=1 --memory size=256M,shared=on"
+              "--generic-vhost-user 'socket=/run/esdm-vhost-user-rng/ch.sock,device_type=rng,queue_sizes=[256],pci_device_id=10'"
+              "--serial file=/var/lib/vmm/ch.log --console off"
+            ];
+          in
+          mkVhostUserRngCheck {
+            name = "vhost-user RNG with Cloud Hypervisor";
+            node = {
+              boot.kernelModules = [
+                "kvm-amd"
+                "kvm-intel"
+              ];
+            };
+            script = ''
+              machine.succeed(
+                  "test -c /dev/kvm || "
+                  "{ echo 'no /dev/kvm in the VM: this check needs nested virtualization' >&2; false; }"
+              )
+              start_vm("ch", "${cmd}")
+              out = wait_ok("ch")
+              assert "unbound" in out, f"the built-in virtio-rng was not there:\n{out}"
+              daemon_unprivileged("ch")
+
+              with subtest("the guest waits for the ESDM"):
+                  stall_and_resume("ch")
+
+              with subtest("Cloud Hypervisor reconnects to a restarted daemon"):
+                  machine.succeed("systemctl restart esdm-vhost-user-rng@ch.service")
+                  wait_loops("ch", loops("ch") + 3)
+            '';
+          };
+
       in
       {
         # nix fmt
@@ -1352,6 +1767,13 @@
           // lib.optionalAttrs (system == "x86_64-linux") {
             i686 = self.packages.${system}.esdm-i686;
             i686-openssl = self.packages.${system}.esdm-i686-openssl;
+
+            # esdm-vhost-user-rng serving real guests, see
+            # mkVhostUserRngCheck - the QEMU ones under TCG, Cloud
+            # Hypervisor with nested KVM.
+            vhost_user_rng_qemu = mkVhostUserRngQemuCheck;
+            vhost_user_rng_microvm = mkVhostUserRngMicrovmCheck;
+            vhost_user_rng_ch = mkVhostUserRngChCheck;
           };
 
         packages =
@@ -2005,6 +2427,8 @@
                     # with its systemd unit. It needs a --module, as no
                     # default is built in. See mkPkcs11Check.
                     "-Des_pkcs11=enabled"
+                    # The vhost-user back-end of a virtio entropy device
+                    "-Dvhost-user-rng=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
