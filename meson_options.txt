@@ -747,9 +747,9 @@ overrides it, the n-th occurrence of the option for the n-th source.
 One rate applies to all plugin library sources; a comma separated list of
 es_ext_lib_num rates sets the i-th rate for the i-th source. auto - and the
 default, no rate at all - configures none: the plugin is credited at the rate
-its entropy_rate callback declares (plugin API version 3), and at 256 if it
-declares none, which takes its claims as they are - the plugin is chosen by
-whoever configures the ESDM, and it knows its noise source.
+its entropy_rate callback declares, and at 256 if it declares none, which
+takes its claims as they are - the plugin is chosen by whoever configures the
+ESDM, and it knows its noise source.
 
 When configuring this value to 0, the plugin provides data without being
 credited to contain entropy.
