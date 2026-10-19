@@ -135,6 +135,14 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;
+
+		/*
+		 * The next part on a connection checked out anew, see
+		 * esdm_rpcc_unpriv_service_next()
+		 */
+		if (buflen)
+			CKINT(esdm_rpcc_unpriv_service_next(&rpc_conn, int_data,
+							    NULL));
 	}
 
 out:

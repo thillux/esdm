@@ -544,6 +544,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC client: a process holds as many connections as it has calls in flight at the same time, not one per CPU its threads ran on - a call takes the connection its thread had last, or the free one of the lowest number
 
+* RPC client: a call served in several parts - a read beyond 64 KiB, or of prediction resistant data - puts its connection back between them, so that the other threads of the process are not held up for the length of the call
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

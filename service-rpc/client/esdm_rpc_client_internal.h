@@ -249,6 +249,33 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   void *int_data,
 				   const struct timespec *deadline);
 
+/**
+ * @brief Put the connection back between two parts of a request, and check one
+ *	  out again for the next part
+ *
+ * A request larger than one answer carries - or one of prediction resistant
+ * data, which comes in parts of ESDM_RPC_MAX_PR_REQUEST_SIZE bytes, each
+ * collected from the entropy sources - holds its connection for as many round
+ * trips as it has parts: a prediction resistant read of 64 KiB for seconds.
+ * Every other thread of the process that finds the connections busy waits for
+ * one of them meanwhile, also one that must not wait, such as a check whether
+ * the ESDM is seeded. Put back between the parts, the connection is free for
+ * a moment, and the request goes on with the one the calling thread finds
+ * free then - mostly the same, see esdm_rpcc_get_service().
+ *
+ * @param [in,out] rpc_conn The checked out connection, which is put back. Set
+ *			    to the connection checked out for the next part,
+ *			    NULL when that failed.
+ * @param [in] int_data Opaque data pointer for the interrupt function
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time of the call, NULL for
+ *			none, as for esdm_rpcc_get_unpriv_service_deadline()
+ *
+ * @return 0 on success, < 0 on errors of esdm_rpcc_get_unpriv_service_deadline
+ */
+int esdm_rpcc_unpriv_service_next(esdm_rpc_client_connection_t **rpc_conn,
+				  void *int_data,
+				  const struct timespec *deadline);
+
 #ifdef __cplusplus
 }
 #endif

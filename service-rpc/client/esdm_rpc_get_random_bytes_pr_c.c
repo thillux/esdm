@@ -162,6 +162,21 @@ static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;
+
+		/*
+		 * See esdm_rpcc_get_random_bytes_full_int(). Without a connection
+		 * for the next part, a call that does not wait returns what it
+		 * obtained, as it does for a busy PR DRNG.
+		 */
+		if (buflen) {
+			ret = esdm_rpcc_unpriv_service_next(&rpc_conn, int_data,
+							    NULL);
+			if (ret) {
+				if (nonblock)
+					ret = (ssize_t)(orig_buflen - buflen);
+				goto out;
+			}
+		}
 	}
 
 	ret = (ssize_t)orig_buflen;

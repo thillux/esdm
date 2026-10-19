@@ -2058,6 +2058,19 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				     deadline);
 }
 
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+int esdm_rpcc_unpriv_service_next(esdm_rpc_client_connection_t **rpc_conn,
+				  void *int_data,
+				  const struct timespec *deadline)
+{
+	esdm_rpcc_put_unpriv_service(*rpc_conn);
+	*rpc_conn = NULL;
+
+	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline);
+}
+
 DSO_PUBLIC
 void esdm_rpcc_put_unpriv_service(esdm_rpc_client_connection_t *rpc_conn)
 {
