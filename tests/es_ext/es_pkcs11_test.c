@@ -38,7 +38,8 @@
  * - A PIN the token refuses is tried once and never again - not when the token
  *   is looked for again, not when it is opened anew after a failed read. The
  *   token is used without a login then. A login failing for another reason
- *   keeps the PIN, and the token is looked for, and logged in to, again.
+ *   keeps the PIN, and the token is looked for, and logged in to, again. A
+ *   token reporting its user PIN on its final try is not logged in to.
  * - A failed C_GenerateRandom drops the token, which is looked for again on
  *   the next request, and logged in to again.
  * - A token repeating its output fails the self test and is credited with
@@ -728,6 +729,50 @@ static void test_login_failure(void)
 }
 
 /*
+ * A token reporting its user PIN on its final try is not logged in to, even
+ * with the right PIN: a daemon started anew does not know that a daemon before
+ * it had the PIN refused, and a refusal now would lock the token. The PIN is
+ * wiped as one the token refused, and the token used without a login.
+ */
+static void test_final_try(void)
+{
+	const char *const args[] = { "--module",  pk.shim,	"--token_label",
+				     TOKEN_LABEL, "--pin_file", pk.pin_good,
+				     NULL };
+	struct json_object *status;
+	uint32_t bits;
+
+	CHECK(!pk_write_file(pk.final_try, "", 0600),
+	      "cannot have the token report its final try");
+	if (!pk_start(args, NULL)) {
+		CHECK(0,
+		      "esdm-es-pkcs11 does not serve a token on its final try");
+		unlink(pk.final_try);
+		return;
+	}
+	CHECK(test_connect(), "cannot connect");
+
+	status = test_status();
+	CHECK_STR_EQ(test_plugin_str(status, "pin"), "final_try");
+	CHECK(test_plugin_bool(status, "logged_in", false) &&
+		      test_plugin_str(status, "last_error") &&
+		      strstr(test_plugin_str(status, "last_error"),
+			     "one try left"),
+	      "the final try is not reported: %s", test_print(status));
+	json_object_put(status);
+
+	/* SoftHSM hands out random numbers without a login */
+	CHECK_EQ(test_get(32, NULL, &bits), 0);
+	CHECK(test_token_present(), "the token is not used without a login");
+	CHECK_EQ(pk_count_lines(pk.login_log, "C_Login"), 0);
+	CHECK_EQ(pk_count_lines(pk.daemon_log, "one try left"), 1);
+
+	es_ext_test_client_close(&test_client);
+	test_stop();
+	unlink(pk.final_try);
+}
+
+/*
  * A token repeating its output fails the self test and is credited with
  * nothing - its data still handed out - until a self test passes again
  */
@@ -925,6 +970,7 @@ int main(int argc, char *argv[])
 	test_pin_credential();
 	test_wrong_pin();
 	test_login_failure();
+	test_final_try();
 	test_repetition();
 	test_labels();
 	/* Last: it creates the token it looks for */

@@ -43,7 +43,10 @@
  *   not tried again - neither by the look-ups for a token nor by a re-open -
  *   until the daemon is started anew with another one. A login failing for
  *   another reason - the token refusing no PIN - keeps the PIN, and the token
- *   is looked for again.
+ *   is looked for again. A refusal is known to this process only: started
+ *   anew with the same PIN, the daemon tries it once more - but not on a
+ *   token whose user PIN is on its final try, so that a daemon restarted again
+ *   and again with a wrong PIN does not lock the token.
  * - A token that is not there - pulled, not inserted yet, or lost to a failed
  *   C_GenerateRandom - is looked for again on demand, at most every
  *   ESDM_PKCS11_RETRY_INTERVAL_SEC. The module is loaded anew when its slots
@@ -95,6 +98,8 @@ enum esdm_pkcs11_pin {
 	ESDM_PKCS11_PIN_REFUSED,
 	/* The token reported its user PIN locked - wiped, not tried */
 	ESDM_PKCS11_PIN_LOCKED,
+	/* The token reported its user PIN on its final try - wiped, not tried */
+	ESDM_PKCS11_PIN_FINAL_TRY,
 };
 
 /* The verdict of the last test of the output of the token */
@@ -357,7 +362,9 @@ static bool esdm_es_pkcs11_pin_refused(void)
  * token asks for it.
  *
  * A PIN the token refuses is wiped, and so not tried again. Nor is a PIN tried
- * on a token reporting its user PIN locked. A login that fails for another
+ * on a token reporting its user PIN locked, or on its final try: this process
+ * does not know whether the PIN was refused by the daemon started before it,
+ * and a refusal now would lock the PIN. A login that fails for another
  * reason keeps the PIN: the token is looked for again, and logged in to again,
  * as one lost to a failed read is.
  *
@@ -391,6 +398,25 @@ static int esdm_es_pkcs11_login(struct esdm_es_pkcs11 *p)
 		p->last_logged = p->last_error;
 		return -EACCES;
 	}
+
+	if (token->userPinFinalTry) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ES,
+			"PKCS#11 entropy source: the user PIN of token '%s' has one try left, the PIN is not tried - refused, it would lock the token\n",
+			esdm_es_pkcs11_slot_label(p->slot));
+		esdm_es_pkcs11_pin_drop(p, ESDM_PKCS11_PIN_FINAL_TRY);
+		/* Logged above */
+		p->last_error = "the user PIN of the token has one try left";
+		p->last_logged = p->last_error;
+		return -EACCES;
+	}
+
+	/* Refused since the last login - maybe by a daemon started before */
+	if (token->userPinCountLow)
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"PKCS#11 entropy source: token '%s' refused a user PIN since its last login, trying the PIN\n",
+			esdm_es_pkcs11_slot_label(p->slot));
 
 	/* What the login leaves on the queue is to be about the login */
 	ERR_clear_error();
@@ -711,6 +737,8 @@ static const char *esdm_es_pkcs11_pin_state(enum esdm_pkcs11_pin pin)
 		return "refused";
 	case ESDM_PKCS11_PIN_LOCKED:
 		return "locked";
+	case ESDM_PKCS11_PIN_FINAL_TRY:
+		return "final_try";
 	case ESDM_PKCS11_PIN_NONE:
 	default:
 		return "none";

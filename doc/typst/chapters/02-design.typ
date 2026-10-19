@@ -1477,7 +1477,10 @@ generator among the slots of its module (`--module`, meson option
 the token asks for a login; the PIN is read from a file or a systemd
 credential, never from the command line or the build. As every failed login
 uses up one of the PIN retries of the token, a PIN the token refused is wiped
-and never tried again. A token that is not there, or lost to a failed
+and not tried again by the daemon; as the daemon does not remember a refusal
+across a restart, it does not try the PIN on a token that reports its user PIN
+on its final try either. A login failing for another reason than the PIN
+keeps it. A token that is not there, or lost to a failed
 `C_GenerateRandom`, is looked for again at most every 5 seconds, loading the
 module anew where its slots hold no usable token. A token is tested whenever
 it is bound - two reads that have to differ - and one repeating its output is

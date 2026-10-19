@@ -19,7 +19,7 @@
 
 /*
  * A PKCS#11 module for the tests of esdm-es-pkcs11, standing in front of a
- * real one - SoftHSM - and passing everything on to it, but for two calls:
+ * real one - SoftHSM - and passing everything on to it, but for three calls:
  *
  * - C_Login is recorded, one line per call with its result, in the file
  *   $ESDM_PKCS11_SHIM_LOG. SoftHSM counts no PIN retries, so this is how a test
@@ -27,6 +27,9 @@
  *   CKR_DEVICE_ERROR, without asking SoftHSM, while the file
  *   $ESDM_PKCS11_SHIM_FAIL_LOGIN exists, as a token failing for another
  *   reason than the PIN does.
+ * - C_GetTokenInfo reports the user PIN on its final try while the file
+ *   $ESDM_PKCS11_SHIM_FINAL_TRY exists, as a token does after all but one
+ *   of its PIN retries were used up, which SoftHSM never does.
  * - C_GenerateRandom fails with CKR_DEVICE_ERROR while the file
  *   $ESDM_PKCS11_SHIM_FAIL exists, as a smartcard pulled mid-request does,
  *   and hands out the same bytes every time while the file
@@ -51,10 +54,21 @@ typedef unsigned long CK_RV;
 typedef unsigned long CK_ULONG;
 typedef unsigned long CK_SESSION_HANDLE;
 typedef unsigned long CK_USER_TYPE;
+typedef unsigned long CK_SLOT_ID;
 typedef unsigned char CK_BYTE;
 
 #define CKR_GENERAL_ERROR 0x05UL
 #define CKR_DEVICE_ERROR 0x30UL
+#define CKF_USER_PIN_FINAL_TRY 0x00020000UL
+
+/*
+ * The start of CK_TOKEN_INFO, up to the flags: the label, the manufacturer,
+ * the model and the serial number come first, as blank padded text
+ */
+struct ck_token_info_head {
+	CK_BYTE text[32 + 32 + 16 + 16];
+	unsigned long flags;
+};
 
 typedef struct {
 	CK_BYTE major;
@@ -75,10 +89,13 @@ typedef CK_RV (*ck_login)(CK_SESSION_HANDLE session, CK_USER_TYPE user,
 			  CK_BYTE *pin, CK_ULONG pin_len);
 typedef CK_RV (*ck_generate_random)(CK_SESSION_HANDLE session, CK_BYTE *data,
 				    CK_ULONG len);
+typedef CK_RV (*ck_get_token_info)(CK_SLOT_ID slot,
+				   struct ck_token_info_head *info);
 
 static struct ck_function_list shim_list;
 static ck_login real_login;
 static ck_generate_random real_generate_random;
+static ck_get_token_info real_get_token_info;
 
 /* Does the file named by the environment variable @var exist? */
 static int shim_file(const char *var)
@@ -112,6 +129,16 @@ static CK_RV shim_login(CK_SESSION_HANDLE session, CK_USER_TYPE user,
 		}
 	}
 
+	return rv;
+}
+
+static CK_RV shim_get_token_info(CK_SLOT_ID slot,
+				 struct ck_token_info_head *info)
+{
+	CK_RV rv = real_get_token_info(slot, info);
+
+	if (!rv && shim_file("ESDM_PKCS11_SHIM_FINAL_TRY"))
+		info->flags |= CKF_USER_PIN_FINAL_TRY;
 	return rv;
 }
 
@@ -163,7 +190,7 @@ CK_RV C_GetFunctionList(struct ck_function_list **list)
 {
 	const char *module = getenv("ESDM_PKCS11_SHIM_MODULE");
 	struct ck_function_list *real;
-	ck_fn get, login, generate;
+	ck_fn get, login, generate, token_info;
 	void *handle;
 
 	if (!list || !module)
@@ -177,15 +204,18 @@ CK_RV C_GetFunctionList(struct ck_function_list **list)
 	get = shim_sym(handle, "C_GetFunctionList");
 	login = shim_sym(handle, "C_Login");
 	generate = shim_sym(handle, "C_GenerateRandom");
-	if (!get || !login || !generate || ((ck_get_function_list)get)(&real) ||
-	    !real)
+	token_info = shim_sym(handle, "C_GetTokenInfo");
+	if (!get || !login || !generate || !token_info ||
+	    ((ck_get_function_list)get)(&real) || !real)
 		return CKR_GENERAL_ERROR;
 
 	memcpy(&shim_list, real, sizeof(shim_list));
 	real_login = (ck_login)login;
 	real_generate_random = (ck_generate_random)generate;
+	real_get_token_info = (ck_get_token_info)token_info;
 	if (!shim_replace(login, (ck_fn)shim_login) ||
-	    !shim_replace(generate, (ck_fn)shim_generate_random))
+	    !shim_replace(generate, (ck_fn)shim_generate_random) ||
+	    !shim_replace(token_info, (ck_fn)shim_get_token_info))
 		return CKR_GENERAL_ERROR;
 
 	*list = &shim_list;

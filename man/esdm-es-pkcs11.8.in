@@ -60,11 +60,17 @@ tokens hand out random numbers without one.
 .PP
 Every failed login uses up one of the PIN retries of a token, after which the
 token locks its PIN. A PIN the token refuses is therefore wiped from memory
-and never tried again \- neither when the token is looked for again nor when
-the module is loaded anew \- until the daemon is started again with another
-PIN; the token is used without a login meanwhile, as far as it allows. Nor is
-a PIN tried on a token that reports its user PIN locked. The status tells
-either.
+and not tried again by this process \- neither when the token is looked for
+again nor when the module is loaded anew; the token is used without a login
+meanwhile, as far as it allows. The daemon does not remember a refusal across
+a restart: started again with the same PIN, it tries it once more, and every
+such try uses up another retry. Nor is a PIN tried on a token that reports its
+user PIN locked, or on its final try \- one refusal from locked \- so that a
+daemon restarted again and again with a wrong PIN, say by systemd, does not
+lock the token, and the last try is left to whoever puts the PIN right. A
+login that fails for another reason than the PIN \- a session the token
+cannot open, a device error \- keeps the PIN, and the token is looked for and
+logged in to again. The status tells each.
 .PP
 A token that is not there \- not inserted yet, pulled, or lost to a failed
 .B C_GenerateRandom
@@ -201,7 +207,9 @@ with one,
 .B refused
 once the token refused it,
 .B locked
-if the token reported its user PIN locked \- the PIN is wiped then;
+if the token reported its user PIN locked,
+.B final_try
+if it reported its user PIN on its final try \- the PIN is wiped then;
 .TP
 .B repetition_test
 the verdict of the last test of the output of the token:
