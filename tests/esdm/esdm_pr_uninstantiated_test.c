@@ -36,6 +36,7 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
+#include "esdm_node.h"
 #include "es_rates.h"
 
 #ifdef ESDM_TESTMODE
@@ -109,13 +110,17 @@ static int esdm_pru_test(void)
 	/*
 	 * From here on, the aux pool is the only source, and holds too little.
 	 * Under the pool lock: each of these calls tries a seeding, which
-	 * would instantiate the PR DRNG from the sources still credited.
+	 * would instantiate the PR DRNG from the sources still credited. The
+	 * DRNG instances first, as every seeding takes them before the pool
+	 * lock - the other order is a lock order inversion.
 	 */
+	esdm_drng_get_instances();
 	esdm_pool_lock();
 	esdm_test_es_rates_zero();
 	esdm_pool_set_entropy(0);
 	esdm_pool_insert_aux(data, sizeof(data), ESDM_PRU_SHORT_BITS);
 	esdm_pool_unlock();
+	esdm_drng_put_instances();
 
 	if (esdm_pru_pr_initiated()) {
 		printf("PR DRNG instantiated along with the initial DRNG\n");
