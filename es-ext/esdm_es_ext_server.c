@@ -815,7 +815,7 @@ int esdm_es_ext_server_run(struct esdm_es_ext_server *server)
 
 	for (;;) {
 		unsigned int nfds = 2;
-		int ret;
+		int ret, timeout = -1;
 
 		pfd[0] = (struct pollfd){ .fd = server->stop_pipe[0],
 					  .events = POLLIN };
@@ -825,9 +825,19 @@ int esdm_es_ext_server_run(struct esdm_es_ext_server *server)
 			pfd[nfds] = (struct pollfd){ .fd = server->clients[i],
 						     .events = POLLIN };
 			nfds++;
+
+			/*
+			 * A record the DTLS layer holds already - taken off
+			 * the socket together with the last step of the
+			 * handshake, or with the request before - is not
+			 * signaled by the socket any more: do not wait for it.
+			 */
+			if (server->clients[i] >= 0 &&
+			    esdm_dtls_pending(server->client_dtls[i]))
+				timeout = 0;
 		}
 
-		ret = poll(pfd, nfds, -1);
+		ret = poll(pfd, nfds, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -840,7 +850,12 @@ int esdm_es_ext_server_run(struct esdm_es_ext_server *server)
 		for (i = 0; i < ESDM_ES_EXT_SERVER_MAX_CLIENTS; i++) {
 			short revents = pfd[i + 2].revents;
 
-			if (server->clients[i] < 0 || !revents)
+			if (server->clients[i] < 0)
+				continue;
+			/* What the DTLS layer holds is received as well */
+			if (esdm_dtls_pending(server->client_dtls[i]))
+				revents |= POLLIN;
+			if (!revents)
 				continue;
 			if (revents & POLLIN)
 				esdm_es_ext_server_serve(server, i);
