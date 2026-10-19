@@ -2255,7 +2255,9 @@
         # the VM and the VMM as a transient unit; wait_ok(name) waits for the
         # guest to read /dev/hwrng; loops(name) counts its reads since;
         # stall_and_resume(name) shows the bytes come from the ESDM - the guest
-        # stalls while the ESDM is stopped and resumes once it is back.
+        # stalls while the ESDM is stopped and resumes once it is back;
+        # hmp(name, cmd...) sends commands to the monitor of a QEMU started
+        # with "-monitor unix:/var/lib/vmm/<name>.mon,server=on,wait=off".
         mkVhostUserRngCheck =
           {
             name,
@@ -2268,6 +2270,24 @@
               import socket, sys
               s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
               s.connect(sys.argv[1])
+            '';
+            hmp = pkgs.writeText "vhost-user-rng-hmp.py" ''
+              import socket, sys
+              s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              s.settimeout(30)
+              s.connect(sys.argv[1])
+              def prompt():
+                  buf = b""
+                  while not buf.endswith(b"(qemu) "):
+                      data = s.recv(4096)
+                      if not data:
+                          sys.exit("the monitor closed the connection")
+                      buf += data
+                  return buf.decode(errors="replace")
+              prompt()
+              for cmd in sys.argv[2:]:
+                  s.sendall(cmd.encode() + b"\n")
+                  print(prompt())
             '';
           in
           pkgs.testers.nixosTest {
@@ -2373,6 +2393,11 @@
                   ).strip()
                   assert user and user != "root", f"daemon of {name} runs as {user!r}"
 
+              def hmp(name, *cmds):
+                  return machine.succeed(
+                      f"python3 ${hmp} /var/lib/vmm/{name}.mon " + " ".join(cmds)
+                  )
+
               def others_refused(name):
                   machine.fail(
                       "setpriv --reuid=nobody --regid=nogroup --clear-groups "
@@ -2412,6 +2437,7 @@
                 "-chardev socket,id=rng0,path=/run/esdm-vhost-user-rng/pci.sock"
                 "-device vhost-user-rng-pci,chardev=rng0"
                 "-nodefaults -no-user-config -display none -serial file:/var/lib/vmm/${log}.log"
+                "-monitor unix:/var/lib/vmm/${log}.mon,server=on,wait=off"
               ];
           in
           mkVhostUserRngCheck {
@@ -2424,6 +2450,16 @@
 
               with subtest("the guest waits for the ESDM"):
                   stall_and_resume("pci")
+
+              # A stopped VM stops its vhost device - GET_VRING_BASE - and
+              # cont starts it again, with new kick and call notifiers but
+              # not a new err notifier: QEMU sets that once, at realize
+              with subtest("the device serves again once the VM continues"):
+                  wait_loops("pci", loops("pci") + 2)
+                  hmp("pci", "stop")
+                  time.sleep(3)
+                  hmp("pci", "cont")
+                  wait_loops("pci", loops("pci") + 3)
 
               with subtest("the daemon serves the next VM"):
                   machine.succeed("systemctl stop vm-pci")

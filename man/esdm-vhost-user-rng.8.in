@@ -85,8 +85,8 @@ guest memory is, not a multiple of a descriptor, nested or longer than the
 queue, is completed with nothing written and a used length of 0. A queue
 whose available index moves by more than the queue size or that names a
 descriptor beyond it is not processed any more until the VMM restarts it, and
-the VMM is told on the error file descriptor of the queue once. A buffer may
-span adjacent memory regions.
+the VMM is told on the error file descriptor of the queue, once per start of
+the queue. A buffer may span adjacent memory regions.
 .PP
 The daemon offers the split virtqueue with indirect descriptors and the event
 index (VIRTIO_F_VERSION_1, VIRTIO_RING_F_INDIRECT_DESC,

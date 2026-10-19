@@ -1038,7 +1038,9 @@ static void test_table_desc(struct fe *fe, size_t off, uint16_t i,
 
 /*
  * Stop and restart a broken ring at where it stopped, with a usable request
- * where the broken one was
+ * where the broken one was. Like QEMU, the front-end hands over new kick and
+ * call notifiers, but not the err notifier: QEMU sets that once, when it sets
+ * the device up, and the next broken ring is signalled on it all the same.
  */
 static void test_restart(struct fe *fe)
 {
@@ -1062,8 +1064,6 @@ static void test_restart(struct fe *fe)
 	      "SET_VRING_KICK");
 	CHECK(!fe_set_vring_fd(fe, VHOST_USER_SET_VRING_CALL),
 	      "SET_VRING_CALL");
-	CHECK(!fe_set_vring_fd(fe, VHOST_USER_SET_VRING_ERR),
-	      "SET_VRING_ERR");
 
 	test_serve(fe, 0, 16);
 }
@@ -1190,7 +1190,8 @@ static void test_hostile_ring(struct fe *fe)
 	used = drv_used_idx(fe);
 	drv_avail_raw(fe, (uint16_t)(fe->avail_idx + fe->num + 1));
 	drv_kick(fe);
-	CHECK(fe_signalled(fe->err, TEST_WAIT_MS), "error signalled");
+	CHECK(fe_signalled(fe->err, TEST_WAIT_MS),
+	      "error signalled after a restart, on the err notifier of the set-up");
 	CHECK(drv_used_idx(fe) == used, "nothing completed");
 	test_restart(fe);
 
@@ -1198,7 +1199,8 @@ static void test_hostile_ring(struct fe *fe)
 	used = drv_used_idx(fe);
 	drv_avail_raw(fe, (uint16_t)(fe->avail_idx - 1));
 	drv_kick(fe);
-	CHECK(fe_signalled(fe->err, TEST_WAIT_MS), "error signalled");
+	CHECK(fe_signalled(fe->err, TEST_WAIT_MS),
+	      "error signalled after another restart");
 	CHECK(drv_used_idx(fe) == used, "nothing completed");
 	test_restart(fe);
 

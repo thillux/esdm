@@ -587,9 +587,11 @@ static int vu_set_vring_base(struct vu_dev *dev, struct vu_msg *msg,
 /*
  * Stop the ring and tell where it stopped. Once the lock is held, the worker
  * writes nothing into guest memory, and the generation keeps it from going on
- * with what it is serving - see vhost_user_dev.h. Its notifiers are closed:
- * a stopped ring signals nothing, and the front-end hands new ones over when it
- * starts the ring again.
+ * with what it is serving - see vhost_user_dev.h. Its kick and call notifiers
+ * are closed: a stopped ring signals nothing, and the front-end hands new ones
+ * over when it starts the ring again. The err notifier is kept, as QEMU hands
+ * it over only once, when it sets the device up: a ring the guest corrupts
+ * after a restart is reported on it as well.
  */
 static int vu_get_vring_base(struct vu_dev *dev, struct vu_msg *msg,
 			     struct vu_reply *reply)
@@ -603,8 +605,7 @@ static int vu_get_vring_base(struct vu_dev *dev, struct vu_msg *msg,
 		return -EINVAL;
 
 	vu_lock(dev);
-	vr->started = false;
-	vu_vring_close_fds(vr);
+	vu_vring_stop(vr);
 	dev->kick_gen++;
 	vu_bump(dev);
 	state.num = vr->last_avail;

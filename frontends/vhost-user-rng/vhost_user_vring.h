@@ -145,7 +145,16 @@ enum vu_pop {
 /** @brief Initialize a ring: stopped, disabled, unconfigured, no notifiers */
 void vu_vring_init(struct vu_vring *vr);
 
-/** @brief Close the notifiers of a ring */
+/**
+ * @brief Stop a ring, closing its kick and call notifiers
+ *
+ * The front-end hands those over again when it starts the ring. The err
+ * notifier stays: QEMU hands it over once, when it sets the device up, and not
+ * with every start of the ring.
+ */
+void vu_vring_stop(struct vu_vring *vr);
+
+/** @brief Close all notifiers of a ring, the err notifier as well */
 void vu_vring_close_fds(struct vu_vring *vr);
 
 /**

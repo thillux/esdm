@@ -113,18 +113,24 @@ void vu_vring_init(struct vu_vring *vr)
 	vr->err_fd = -1;
 }
 
-void vu_vring_close_fds(struct vu_vring *vr)
+void vu_vring_stop(struct vu_vring *vr)
 {
+	vr->started = false;
 	if (vr->kick_fd >= 0)
 		close(vr->kick_fd);
 	if (vr->call_fd >= 0)
 		close(vr->call_fd);
-	if (vr->err_fd >= 0)
-		close(vr->err_fd);
 	vr->kick_fd = -1;
 	vr->call_fd = -1;
-	vr->err_fd = -1;
 	vr->kick_poll = false;
+}
+
+void vu_vring_close_fds(struct vu_vring *vr)
+{
+	vu_vring_stop(vr);
+	if (vr->err_fd >= 0)
+		close(vr->err_fd);
+	vr->err_fd = -1;
 }
 
 int vu_vring_map(struct vu_vring *vr, struct vu_mem *mem)
