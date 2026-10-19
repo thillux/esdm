@@ -33,9 +33,11 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <linux/capability.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1179,6 +1181,88 @@ out:
 	free(es->fetched);
 	es->fetched = NULL;
 	esdm_ebpf_pool_dealloc(es);
+	return ret;
+}
+
+/*
+ * Before Linux 5.19, a kernel with kernel.unprivileged_bpf_disabled set refuses
+ * every bpf(2) command to a caller holding neither CAP_BPF nor CAP_SYS_ADMIN;
+ * only from 5.19 on is that confined to creating maps and loading programs.
+ * The distributions of that time set it by default, Ubuntu 22.04 among them,
+ * so after the privilege drop of the server the source would run blind there:
+ * a health test failure never noticed, the pending events frozen at what they
+ * were and the raw samples left behind on unload.
+ *
+ * Ask the kernel rather than its version, which distributions backport around:
+ * read the health map and rewrite the status map with the effective
+ * capabilities of this thread lowered, as they are after the drop.
+ * Capabilities are a property of the thread, so no other thread of the process
+ * sees the change, and this one raises them back from its permitted ones
+ * afterwards. The permission check of those kernels is one for all commands,
+ * which is why a map read and write stand for the test run of the wipe as
+ * well - that cannot be tried without writing the ring buffer.
+ */
+int esdm_ebpf_check_unprivileged(struct esdm_ebpf_es *es)
+{
+	struct __user_cap_header_struct hdr = { _LINUX_CAPABILITY_VERSION_3,
+						0 };
+	struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+	struct __user_cap_data_struct lowered[_LINUX_CAPABILITY_U32S_3];
+	struct esdm_ebpf_status status = {
+		.reset_gen = es->reset_gen,
+	};
+	struct esdm_ebpf_health health;
+	uint32_t zero = 0;
+	unsigned int i;
+	bool lower;
+	int ret = 0;
+
+	if (!es->loaded)
+		return -EINVAL;
+
+	if (syscall(SYS_capget, &hdr, caps)) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "%s ES: cannot read the capabilities: %s\n",
+			    es->name, strerror(errno));
+		return ret;
+	}
+
+	/* A thread without effective capabilities is in that state already */
+	memcpy(lowered, caps, sizeof(lowered));
+	for (i = 0; i < _LINUX_CAPABILITY_U32S_3; i++)
+		lowered[i].effective = 0;
+	lower = !!memcmp(lowered, caps, sizeof(lowered));
+
+	if (lower && syscall(SYS_capset, &hdr, lowered)) {
+		ret = -errno;
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ES,
+			"%s ES: cannot lower the capabilities to check the access to the BPF maps without them: %s\n",
+			es->name, strerror(errno));
+		return ret;
+	}
+
+	/* The status map is rewritten with what it holds already */
+	if (bpf_map__lookup_elem(es->health_map, &zero, sizeof(zero), &health,
+				 sizeof(health), 0) ||
+	    bpf_map__update_elem(es->status_map, &zero, sizeof(zero), &status,
+				 sizeof(status), 0))
+		ret = errno ? -errno : -EPERM;
+
+	if (lower && syscall(SYS_capset, &hdr, caps)) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "%s ES: cannot restore the capabilities: %s\n",
+			    es->name, strerror(errno));
+		return -ENOTRECOVERABLE;
+	}
+
+	if (ret)
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ES,
+			"%s ES: the BPF maps cannot be accessed without CAP_BPF or CAP_SYS_ADMIN (%s) - once the server dropped its privileges the source could neither follow its health tests nor erase the events it collected. Linux 5.19 or later, or kernel.unprivileged_bpf_disabled = 0, is required\n",
+			es->name, strerror(-ret));
+
 	return ret;
 }
 

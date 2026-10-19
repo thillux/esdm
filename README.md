@@ -225,7 +225,16 @@ Requirements: a kernel with BTF support (`CONFIG_DEBUG_INFO_BTF`, standard
 on the common distributions; kernel 5.15 or later on x86_64, 6.1 or later
 on arm64), libbpf >= 1.2, and `clang` plus `bpftool` at build time. The
 programs are loaded during the privileged initialization phase of the
-`esdm-server`. Like all timing entropy sources, at most one of `es_irq`,
+`esdm-server`, which keeps operating their maps after it dropped its
+privileges: it reads the SP800-90B health state of the programs from them and
+erases the collected events when the sources are unloaded. Kernels before
+5.19 refuse that to an unprivileged process while
+`kernel.unprivileged_bpf_disabled` is set, as distributions of that time do by
+default - Ubuntu 22.04 among them. The sources check for it during the
+initialization and disable themselves where they could not operate their maps
+after the privilege drop, so on such a kernel they need
+`kernel.unprivileged_bpf_disabled = 0`, which opens `bpf(2)` to every user.
+Like all timing entropy sources, at most one of `es_irq`,
 `es_sched`, `es_irq_ebpf` and `es_sched_ebpf` may be credited with a
 non-zero entropy rate.
 

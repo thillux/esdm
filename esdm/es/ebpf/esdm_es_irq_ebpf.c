@@ -210,6 +210,27 @@ static int esdm_irq_ebpf_initialize(void)
 		goto out;
 	}
 
+	/*
+	 * The source goes on operating its maps after the server dropped its
+	 * privileges, which not every kernel permits. Where it does not, the
+	 * source would neither see its health tests nor be able to erase what
+	 * it collects: it is not attached at all. It is initialized already,
+	 * so torn down as esdm_irq_ebpf_finalize_locked() does.
+	 */
+	ret = esdm_ebpf_check_unprivileged(&esdm_irq_ebpf_es);
+	if (ret) {
+		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
+		esdm_es_irq_ebpf_bpf__destroy(skel);
+		if (ret == -ENOTRECOVERABLE)
+			goto out;
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"Disabling eBPF interrupt-based entropy source as it cannot operate its BPF maps without privileges: %d\n",
+			ret);
+		ret = 0;
+		goto out;
+	}
+
 	ret = esdm_es_irq_ebpf_bpf__attach(skel);
 	if (ret) {
 		esdm_logger(

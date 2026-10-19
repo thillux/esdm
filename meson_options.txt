@@ -328,7 +328,10 @@ may have an entropy rate greater than zero.
 
 The BPF programs are loaded during the privileged
 initialization phase of the ESDM server (root or
-CAP_BPF + CAP_PERFMON required).
+CAP_BPF + CAP_PERFMON required). The server operates their maps
+after it dropped its privileges, which Linux before 5.19 only
+permits with kernel.unprivileged_bpf_disabled = 0: the entropy
+source checks for it and disables itself where it does not hold.
 ''')
 
 # Option for: ESDM_SCHED_EBPF_ENTROPY_RATE
@@ -402,6 +405,13 @@ This entropy source is mutually exclusive with the es_sched
 and es_irq entropy sources with respect to entropy crediting:
 at most one of the scheduler/interrupt-based entropy sources
 may have an entropy rate greater than zero.
+
+The BPF programs are loaded during the privileged
+initialization phase of the ESDM server (root or
+CAP_BPF + CAP_PERFMON required). The server operates their maps
+after it dropped its privileges, which Linux before 5.19 only
+permits with kernel.unprivileged_bpf_disabled = 0: the entropy
+source checks for it and disables itself where it does not hold.
 ''')
 
 # Option for: ESDM_IRQ_EBPF_ENTROPY_RATE

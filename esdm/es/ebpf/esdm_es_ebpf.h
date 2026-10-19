@@ -183,6 +183,21 @@ int esdm_ebpf_prepare(struct esdm_ebpf_es *es, struct bpf_object *obj,
 int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj);
 
 /*
+ * Check that the initialized entropy source can still operate its maps once
+ * the ESDM server dropped its privileges for good: it reads the health state
+ * and the pending events of the programs from then on, announces resets and,
+ * when it is unloaded, erases the events it collected. The check runs the map
+ * accesses with the effective capabilities of the calling thread lowered and
+ * restores them afterwards.
+ *
+ * The caller runs it before the programs are attached and does not run a
+ * source that fails it: one that cannot see its health tests or erase its raw
+ * samples must not collect any. -ENOTRECOVERABLE means the capabilities of the
+ * calling thread could not be restored, which the caller must treat as fatal.
+ */
+int esdm_ebpf_check_unprivileged(struct esdm_ebpf_es *es);
+
+/*
  * Ingest deposited events, up to the number the conditioning pool still has
  * room to credit. Never blocks and never drains more than that, so the events
  * beyond it stay in the ring buffer for the next call.
