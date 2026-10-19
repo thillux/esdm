@@ -33,6 +33,11 @@
  * answers as the consumer expects it, and lets the library's reconnect hide a
  * restart of the server between two commands. The local connections are
  * bounded per user, as those of the esdm-server's EGD socket are.
+ *
+ * In TLS mode, the main thread keeps house as the server does: it takes up
+ * renewed TLS files on SIGHUP and when they change, closes the upstream
+ * connections to a server whose certificate got revoked or expired, and
+ * reports CRLs about to expire.
  */
 
 #define _GNU_SOURCE
@@ -56,6 +61,7 @@
 #include "config.h"
 #include "egd_net_common.h"
 #include "esdm_egd_client.h"
+#include "esdm_egd_client_tls.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_serve.h"
 #include "esdm_logger.h"
@@ -82,6 +88,7 @@ struct relay_conn {
 	char peer[64];
 	uid_t account;
 	bool account_counted;
+	/* Set under the lock of the connections, see relay_check_conns() */
 	struct esdm_egd_client *upstream;
 	TAILQ_ENTRY(relay_conn) tailq;
 };
@@ -122,10 +129,11 @@ static struct esdm_peer_limit relay_peer_limit =
 static struct esdm_egd_serve_pool relay_pool = ESDM_EGD_SERVE_POOL_INIT;
 
 /*
- * TLS mode: a context of the files, kept to report the state of the CRLs and
- * to check a rotation of the files as soon as it happens. The upstream
- * connections take the files up themselves, see the network modes of
- * esdm_egd_client.h.
+ * TLS mode: a context of the files, kept to report the state of the CRLs, to
+ * check a rotation of the files as soon as it happens, and to check the
+ * upstream connections against its CRLs. The upstream connections take the
+ * files up themselves, see the network modes of esdm_egd_client.h. Replaced
+ * by the main thread, under the lock of the connections.
  */
 static struct esdm_tls_ctx *relay_ctx = NULL;
 static uint8_t relay_stamp[ESDM_TLS_STAMP_LEN];
@@ -319,8 +327,10 @@ static const struct esdm_egd_serve_io relay_io = {
 static int relay_upstream(struct relay_conn *conn)
 {
 	struct esdm_egd_client_net_config cfg;
+	struct esdm_egd_client *up = NULL;
 	const char *crls[ESDM_TLS_MAX_CRL_FILES + 1];
 	unsigned int i;
+	int ret;
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.size = sizeof(cfg);
@@ -348,7 +358,29 @@ static int relay_upstream(struct relay_conn *conn)
 				 0);
 	}
 
-	return esdm_egd_client_alloc_net(&conn->upstream, &cfg);
+	ret = esdm_egd_client_alloc_net(&up, &cfg);
+	if (ret)
+		return ret;
+
+	/*
+	 * From here on the housekeeping looks at it, see relay_check_conns().
+	 *
+	 * The connection made right away had its handshake with the files as
+	 * the library loaded them, and a reload of the relay meanwhile checked
+	 * the upstream connections - which this one was not yet among. So it
+	 * is checked here, under the lock that reload takes: either the reload
+	 * replaced the context before, which is seen here, or it checks this
+	 * connection after.
+	 */
+	pthread_mutex_lock(&relay_conns_lock);
+	conn->upstream = up;
+#ifdef ESDM_EGD_NET_TLS
+	if (relay_ctx)
+		esdm_egd_client_net_check(up, relay_ctx);
+#endif
+	pthread_mutex_unlock(&relay_conns_lock);
+
+	return 0;
 }
 
 static void relay_conn_release(struct relay_conn *conn)
@@ -473,14 +505,36 @@ static void relay_accept(int lfd)
 }
 
 /*
+ * TLS mode: close the upstream connections to a server revoked by the CRLs of
+ * the files loaded last, or whose certificate expired - see
+ * esdm_egd_client_net_check(). The next command of the consumer makes a new
+ * one, whose handshake the server has to pass. A connection in a command is
+ * checked before its next one.
+ */
+static void relay_check_conns(void)
+{
+#ifdef ESDM_EGD_NET_TLS
+	struct relay_conn *conn;
+
+	pthread_mutex_lock(&relay_conns_lock);
+	TAILQ_FOREACH (conn, &relay_conns, tailq) {
+		if (conn->upstream)
+			esdm_egd_client_net_check(conn->upstream, relay_ctx);
+	}
+	pthread_mutex_unlock(&relay_conns_lock);
+#endif
+}
+
+/*
  * TLS mode: check the files - at start, on SIGHUP and when they changed - so
  * a rotation that does not load is reported at once, rather than at the next
- * connection, and report the CRLs.
+ * connection, report the CRLs, and check the upstream connections against
+ * them.
  */
 static int relay_reload(bool force)
 {
 	struct esdm_tls_config cfg;
-	struct esdm_tls_ctx *ctx = NULL;
+	struct esdm_tls_ctx *ctx = NULL, *old;
 	int ret;
 
 	esdm_net_tls_config(&relay_cfg.files, &cfg);
@@ -489,12 +543,19 @@ static int relay_reload(bool force)
 	if (ret <= 0)
 		return ret;
 
-	esdm_tls_ctx_put(relay_ctx);
+	pthread_mutex_lock(&relay_conns_lock);
+	old = relay_ctx;
 	relay_ctx = ctx;
+	pthread_mutex_unlock(&relay_conns_lock);
+	esdm_tls_ctx_put(old);
+
 	esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
 		    "%s: the TLS files of %s load\n", RELAY_NAME,
 		    relay_cfg.files.cert);
 	esdm_tls_ctx_crl_report(ctx, true);
+
+	/* Revocation has to bite on the connections that are there already */
+	relay_check_conns();
 
 	return 0;
 }
@@ -915,7 +976,10 @@ int main(int argc, char *argv[])
 		}
 		if (now - last_housekeeping >= RELAY_HOUSEKEEPING_SEC * 1000) {
 			last_housekeeping = now;
+			/* Only this thread replaces the context */
 			esdm_tls_ctx_crl_report(relay_ctx, false);
+			/* Expired certificates, and checks put off */
+			relay_check_conns();
 		}
 	}
 

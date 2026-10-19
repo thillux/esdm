@@ -134,6 +134,16 @@ static inline const char *esdm_egd_notls_error(struct esdm_tls *tls)
 #endif
 
 /*
+ * The check of a TLS connection against reloaded CRLs and for the expiry of
+ * the server's certificate, for the esdm-egd-net-relay - see
+ * esdm_egd_client_net_check() in esdm_egd_client_tls.h. Only where the TLS
+ * layer is linked in: the library and its module know nothing of it.
+ */
+#if defined(ESDM_EGD_NET_TLS) && !defined(ESDM_EGD_CLIENT_TLS_MODULE)
+#define ESDM_EGD_CLIENT_NET_CHECK
+#endif
+
+/*
  * Attempts per operation: the initial one plus a single retry on a freshly
  * opened connection. A second retry would not add anything - if a brand new
  * connection cannot carry the request either, the peer is not merely gone
@@ -246,6 +256,17 @@ struct esdm_egd_client {
 
 	/* SIGPIPE was ignored at connect time, see esdm_egd_client_write(). */
 	bool sigpipe_ignored;
+
+#ifdef ESDM_EGD_CLIENT_NET_CHECK
+	/*
+	 * A check of the connection asked for while the client was in a
+	 * request, made before the next one - see esdm_egd_client_net_check():
+	 * the context whose CRLs to check against, with a reference. Guarded
+	 * by the TLS cache lock, which is never held across I/O.
+	 */
+	bool check_pending;
+	struct esdm_tls_ctx *check_ctx;
+#endif
 
 	/* Registry entry, see esdm_egd_client_atfork_child(). */
 	TAILQ_ENTRY(esdm_egd_client) tailq;
@@ -1249,9 +1270,120 @@ static bool esdm_egd_client_net_alive_locked(struct esdm_egd_client *client)
 	return false;
 }
 
+#ifdef ESDM_EGD_CLIENT_NET_CHECK
+
+/*
+ * Close the TLS connection of @client if its server is revoked by the CRLs of
+ * @ctx - NULL for none - or its certificate expired, as the server checks its
+ * clients. Caller holds the lock.
+ *
+ * @return 1 if the connection was closed, 0 if not
+ */
+static int esdm_egd_client_net_check_locked(struct esdm_egd_client *client,
+					    struct esdm_tls_ctx *ctx)
+{
+	char why[256];
+	int64_t not_after;
+
+	if (client->fd < 0 || !client->tls)
+		return 0;
+
+	if (ctx &&
+	    esdm_tls_peer_revoked(client->tls, ctx, why, sizeof(why)) == 1) {
+		esdm_logger(
+			LOGGER_STATUS, LOGGER_C_ANY,
+			"EGD client: closing the connection to %s (%s), revoked: %s\n",
+			client->socket_path, esdm_tls_peer_subject(client->tls),
+			why);
+	} else {
+		not_after = esdm_tls_peer_not_after(client->tls);
+		if (!not_after || (int64_t)time(NULL) <= not_after)
+			return 0;
+		esdm_logger(
+			LOGGER_STATUS, LOGGER_C_ANY,
+			"EGD client: closing the connection to %s (%s), its certificate expired\n",
+			client->socket_path,
+			esdm_tls_peer_subject(client->tls));
+	}
+
+	esdm_egd_client_disconnect_locked(client, true);
+	return 1;
+}
+
+/*
+ * The check asked for while the client was in a request, see
+ * esdm_egd_client_net_check(). Caller holds the lock.
+ */
+static void
+esdm_egd_client_net_check_pending_locked(struct esdm_egd_client *client)
+{
+	struct esdm_tls_ctx *ctx;
+	bool pending;
+
+	esdm_egd_tls_cache_lock_acquire();
+	pending = client->check_pending;
+	ctx = client->check_ctx;
+	client->check_pending = false;
+	client->check_ctx = NULL;
+	mutex_w_unlock(&esdm_egd_tls_cache_lock);
+
+	if (pending)
+		esdm_egd_client_net_check_locked(client, ctx);
+	esdm_tls_ctx_put(ctx);
+}
+
+int esdm_egd_client_net_check(struct esdm_egd_client *client,
+			      struct esdm_tls_ctx *ctx)
+{
+	struct esdm_tls_ctx *old = NULL;
+	int ret;
+
+	if (!client || client->transport != ESDM_EGD_CLIENT_TLS)
+		return 0;
+
+	/*
+	 * A request in flight is not waited for - it may take the timeout of
+	 * the client -, its connection is checked before the next one. A
+	 * lock taken over from a died owner leaves the connection where that
+	 * owner left it, which is no connection to use again, see
+	 * esdm_egd_client_invoke() - the raw trylock tells.
+	 */
+	ret = pthread_mutex_trylock(&client->lock.lock);
+	if (ret == EBUSY) {
+		esdm_egd_tls_cache_lock_acquire();
+		client->check_pending = true;
+		/* A check without CRLs keeps the CRLs of one pending */
+		if (ctx) {
+			esdm_tls_ctx_get(ctx);
+			old = client->check_ctx;
+			client->check_ctx = ctx;
+		}
+		mutex_w_unlock(&esdm_egd_tls_cache_lock);
+		esdm_tls_ctx_put(old);
+		return -EBUSY;
+	}
+	if (ret == EOWNERDEAD) {
+		pthread_mutex_consistent(&client->lock.lock);
+		esdm_egd_client_disconnect_locked(client, false);
+	} else if (ret) {
+		return -ret;
+	}
+
+	ret = esdm_egd_client_net_check_locked(client, ctx);
+	mutex_w_unlock(&client->lock);
+
+	return ret;
+}
+
+#endif /* ESDM_EGD_CLIENT_NET_CHECK */
+
 /* Caller holds the lock. */
 static int esdm_egd_client_ensure_connected_locked(struct esdm_egd_client *client)
 {
+#ifdef ESDM_EGD_CLIENT_NET_CHECK
+	esdm_egd_client_net_check_pending_locked(client);
+#endif
+
 	if (client->fd >= 0 && client->owner_pid == getpid() &&
 	    esdm_egd_client_fd_is_ours_locked(client)) {
 		if (esdm_egd_client_net_alive_locked(client))
@@ -2083,6 +2215,9 @@ int esdm_egd_client_get_pid(struct esdm_egd_client *client, pid_t *pid)
 /* Release what a client holds besides its connection - not published yet. */
 static void esdm_egd_client_release(struct esdm_egd_client *client)
 {
+#ifdef ESDM_EGD_CLIENT_NET_CHECK
+	esdm_tls_ctx_put(client->check_ctx);
+#endif
 #ifdef ESDM_EGD_NET_TLS
 	esdm_egd_tls_cache_put(client->tls_cache);
 #endif

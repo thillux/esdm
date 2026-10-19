@@ -83,9 +83,12 @@ static bool wait_socket(const char *path, unsigned int ms)
 	return false;
 }
 
-/* A relay on @sock, to @port, with the client certificate @cert */
+/*
+ * A relay on @sock, to @port, with the client certificate @cert and the CRLs
+ * of @crl - ca.crl if NULL
+ */
 static pid_t relay_start(const char *sock, uint16_t port, bool plain,
-			 const char *cert, const char *key)
+			 const char *cert, const char *key, const char *crl)
 {
 	char connect[64];
 	const char *args[32];
@@ -113,7 +116,9 @@ static pid_t relay_start(const char *sock, uint16_t port, bool plain,
 		args[n++] = "--server_name";
 		args[n++] = "localhost";
 		args[n++] = "--crl";
-		args[n++] = PKI("ca.crl");
+		args[n++] = crl ? crl : PKI("ca.crl");
+		args[n++] = "--reload_interval";
+		args[n++] = "0";
 	}
 	args[n] = NULL;
 
@@ -311,7 +316,7 @@ static void test_tls(void)
 	lfd = test_listener("127.0.0.1", &port);
 	server = net_server_start(lfd, false);
 	relay = relay_start(sock, port, false, PKI("client1.crt"),
-			    PKI("client1.key"));
+			    PKI("client1.key"), NULL);
 	CHECK(server > 0 && relay > 0, "the TLS daemons did not start");
 
 	client = net_client(port, false);
@@ -342,7 +347,7 @@ static void test_tls(void)
 	CHECK(!test_install(PKI("client1.crt"), crt) &&
 		      !test_install(PKI("client1.key"), key),
 	      "cannot install the certificate of the relay");
-	relay_rot = relay_start(sock_rot, port, false, crt, key);
+	relay_rot = relay_start(sock_rot, port, false, crt, key, NULL);
 	CHECK(relay_rot > 0, "the rotating relay did not start");
 	a = unix_client(sock_rot);
 	CHECK(!esdm_egd_client_get_random(a, buf, sizeof(buf)),
@@ -378,6 +383,61 @@ static void test_tls(void)
 #endif
 }
 
+/*
+ * Revocation of the server, taken up by the relay: its established upstream
+ * connection is closed, and the next command of the consumer fails with the
+ * handshake of the new one - rather than going on over the old one. With the
+ * server not revoked any more, it is served again.
+ */
+static void test_tls_revocation(void)
+{
+#ifdef ESDM_EGD_NET_TLS
+	char sock[sizeof(tmpdir) + 16], crl[sizeof(tmpdir) + 16];
+	struct esdm_egd_client *client;
+	uint8_t buf[64];
+	uint16_t port = 0;
+	pid_t server, relay;
+	int lfd;
+
+	printf("Relay: revocation of the server\n");
+
+	snprintf(sock, sizeof(sock), "%s/egd-crl.sock", tmpdir);
+	snprintf(crl, sizeof(crl), "%s/relay.crl", tmpdir);
+	CHECK(!test_install(PKI("ca.crl"), crl), "cannot install the CRL");
+
+	lfd = test_listener("127.0.0.1", &port);
+	server = net_server_start(lfd, false);
+	relay = relay_start(sock, port, false, PKI("client1.crt"),
+			    PKI("client1.key"), crl);
+	CHECK(server > 0 && relay > 0, "the TLS daemons did not start");
+
+	client = unix_client(sock);
+	CHECK(!esdm_egd_client_get_random(client, buf, sizeof(buf)),
+	      "the server was refused before its revocation");
+
+	CHECK(!test_install(PKI("ca-revoked-server.crl"), crl),
+	      "cannot install the CRL revoking the server");
+	kill(relay, SIGHUP);
+	test_sleep_ms(1000);
+	CHECK(esdm_egd_client_get_random(client, buf, sizeof(buf)) < 0,
+	      "the relay went on with a revoked server");
+	esdm_egd_client_free(client);
+
+	CHECK(!test_install(PKI("ca.crl"), crl), "cannot install the CRL");
+	kill(relay, SIGHUP);
+	test_sleep_ms(1000);
+	client = unix_client(sock);
+	CHECK(!esdm_egd_client_get_random(client, buf, sizeof(buf)),
+	      "the server was refused after its revocation was lifted");
+	esdm_egd_client_free(client);
+
+	CHECK(test_daemon_stop(relay) == 0, "the relay did not stop");
+	CHECK(test_daemon_stop(server) == 0, "the server did not stop");
+	close(lfd);
+	unlink(crl);
+#endif
+}
+
 /* Plain TCP: every command directly and through the relay, and a restart */
 static void test_plain(void)
 {
@@ -392,7 +452,7 @@ static void test_plain(void)
 
 	lfd = test_listener("127.0.0.1", &port);
 	server = net_server_start(lfd, true);
-	relay = relay_start(sock, port, true, NULL, NULL);
+	relay = relay_start(sock, port, true, NULL, NULL, NULL);
 	CHECK(server > 0 && relay > 0, "the plain daemons did not start");
 
 	client = net_client(port, true);
@@ -455,6 +515,7 @@ int main(void)
 	}
 
 	test_tls();
+	test_tls_revocation();
 	test_plain();
 
 	test_daemon_stop(esdm_pid);

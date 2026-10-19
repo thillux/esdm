@@ -122,8 +122,10 @@ Use a CRL past its nextUpdate with a warning.
 .TP
 .BI \-\-reload_interval " SEC"
 Check the TLS files for a change this often \- to report a rotation that does
-not load right away, and the CRLs close to or past their nextUpdate. The
-upstream connections check the files themselves, see
+not load right away and the CRLs close to or past their nextUpdate, and to
+check the established upstream connections against the CRLs, see
+.BR REVOCATION .
+New upstream connections check the files themselves, see
 .BR ROTATION .
 0 checks them on
 .B SIGHUP
@@ -210,10 +212,25 @@ downloaded as described in
 .B CRL UPDATES
 of
 .BR esdm\-egd\-net\-server (8).
+.SH REVOCATION
+Consumers hold their connection for their whole life, and with it their
+upstream connection, so revocation has to bite on established connections
+too: after every reload of the TLS files, the relay checks the chains of its
+upstream connections against the new CRLs and closes those to a revoked
+server \- one whose handshake ran during the reload is checked once it
+completed. Every 30 seconds, it checks them again and closes those whose server
+certificate expired. Both are logged with the subject of the server. A
+connection in the middle of a command is checked before the next one.
+.PP
+The consumer keeps its local connection: its next command makes a new
+upstream connection, whose handshake the server has to pass with the files as
+they are then \- a revoked server fails it, and the command with it.
 .SH SIGNALS
 .TP
 .B SIGHUP
-Check the TLS files at once, and report what is wrong with them.
+Check the TLS files at once, report what is wrong with them, and check the
+upstream connections against the CRLs, see
+.BR REVOCATION .
 .TP
 .BR SIGTERM ", " SIGINT
 Close the connections and exit with status 0.

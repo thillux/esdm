@@ -78,6 +78,26 @@ struct esdm_egd_tls_module {
 /* The entry point of the module */
 const struct esdm_egd_tls_module *esdm_egd_tls_module(void);
 
+struct esdm_egd_client;
+
+/**
+ * @brief Check the TLS connection of a client as a server checks its clients
+ *
+ * For the esdm-egd-net-relay, which links the client with the TLS layer - the
+ * library and its module have no such function: the connection is closed if
+ * the server's chain is revoked by a CRL of @ctx - NULL for none -, or if its
+ * certificate expired. The next request makes a new connection, whose
+ * handshake the server has to pass with the files as they are then.
+ *
+ * A client in a request is not waited for: its connection is checked before
+ * its next request, against @ctx.
+ *
+ * @return 1 if the connection was closed, 0 if it is in order or there is
+ *	   none, -EBUSY if the check waits for the next request
+ */
+int esdm_egd_client_net_check(struct esdm_egd_client *client,
+			      struct esdm_tls_ctx *ctx);
+
 #ifdef __cplusplus
 }
 #endif
