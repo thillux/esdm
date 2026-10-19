@@ -656,6 +656,7 @@ static void test_provider_rates(void)
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	const char *const rate_48[] = { "--entropy_rate", "48", NULL };
 	const char *const rate_24[] = { "--entropy_rate", "24", NULL };
+	const char *const no_dtls[] = { "--no_dtls", NULL };
 	static const char *const settings[] = { NULL, "rate=96", NULL,
 						"rate=1000" };
 	static const uint32_t expected[] = { 48, 96, 0, 256 };
@@ -665,10 +666,13 @@ static void test_provider_rates(void)
 	pid_t provider[4] = { -1, -1, -1, -1 };
 
 	for (i = 0; i < n; i++) {
+		/* The last one in the clear, the others over DTLS */
 		provider[i] = es_ext_test_serve(test_serve_bin,
 						test_plugin[4 + i],
 						test_socket[i],
-						i ? NULL : rate_48,
+						!i	   ? rate_48 :
+						i == 3 ? no_dtls :
+							 NULL,
 						settings[i]);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
@@ -683,6 +687,11 @@ static void test_provider_rates(void)
 	for (i = 0; i < n; i++) {
 		CHECK(test_rate_is(SOCK(i), expected[i], sources[i]),
 		      "%s is not credited at its rate", SOCK(i)->name);
+#ifdef ESDM_DTLS
+		CHECK(test_state_has(SOCK(i), "status",
+				     i == 3 ? "unencrypted" : "DTLS"),
+		      "%s does not run the connection it should", SOCK(i)->name);
+#endif
 		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate(i),
 			 expected[i]);
 		CHECK_EQ(test_get(SOCK(i), bits),
