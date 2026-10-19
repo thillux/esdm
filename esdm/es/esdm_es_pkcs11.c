@@ -439,14 +439,14 @@ static int esdm_es_pkcs11_open_module_locked(void)
 	if (!pkcs11_ctx) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling PKCS#11 entropy source: PKCS11_CTX_new failed\n");
+			"PKCS#11 entropy source unavailable until a retry succeeds: PKCS11_CTX_new failed\n");
 		return -ENOMEM;
 	}
 
 	if (PKCS11_CTX_load(pkcs11_ctx, module_path) != 0) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling PKCS#11 entropy source: failed to load module %s\n",
+			"PKCS#11 entropy source unavailable until a retry succeeds: failed to load module %s\n",
 			module_path);
 		PKCS11_CTX_free(pkcs11_ctx);
 		pkcs11_ctx = NULL;
@@ -458,7 +458,7 @@ static int esdm_es_pkcs11_open_module_locked(void)
 	    0) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling PKCS#11 entropy source: failed to enumerate slots\n");
+			"PKCS#11 entropy source unavailable until a retry succeeds: failed to enumerate slots\n");
 		pkcs11_slots = NULL;
 		pkcs11_nslots = 0;
 		return -EIO;
@@ -468,7 +468,7 @@ static int esdm_es_pkcs11_open_module_locked(void)
 	if (!pkcs11_slot) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"Disabling PKCS#11 entropy source: no usable token with RNG found\n");
+			"PKCS#11 entropy source unavailable until a retry succeeds: no usable token with RNG found\n");
 		return -ENOENT;
 	}
 
