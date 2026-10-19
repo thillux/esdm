@@ -1455,7 +1455,22 @@
                   machine.succeed("${check} nonblock")
                   machine.succeed("${check} poll")
                   machine.succeed("${check} writes")
+
+              with subtest("throughput, informational"):
+                  # Logged, never asserted on: the VM shares its host with
+                  # whatever else runs there. Whether it runs with KVM, and
+                  # the figures with the clocksource the test framework pins,
+                  # acpi_pm - every read of it traps to QEMU, as it has no
+                  # vDSO - and with kvm-clock, which a KVM guest runs with
+                  # otherwise.
+                  print("virtualization: " + machine.succeed("systemd-detect-virt || true"))
                   print(machine.succeed("${check} throughput"))
+                  cs = "/sys/devices/system/clocksource/clocksource0"
+                  pinned = machine.succeed(f"cat {cs}/current_clocksource").strip()
+                  if "kvm-clock" in machine.succeed(f"cat {cs}/available_clocksource"):
+                      machine.succeed(f"echo kvm-clock > {cs}/current_clocksource")
+                      print(machine.succeed("${check} throughput"))
+                      machine.succeed(f"echo {pinned} > {cs}/current_clocksource")
 
               with subtest("/proc/esdm"):
                   machine.succeed("${check} proc")

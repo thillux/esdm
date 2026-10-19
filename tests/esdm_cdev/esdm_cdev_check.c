@@ -1309,62 +1309,219 @@ static int send_all(int fd, const void *buf, size_t len)
 	return 0;
 }
 
+/* Runs per figure of the throughput, and how long each one reads */
+#define THROUGHPUT_RUNS 5
+#define THROUGHPUT_RUN_SEC 0.25
+
+static int cmp_double(const void *a, const void *b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+
+	return (x > y) - (x < y);
+}
+
 /*
- * throughput [socket]: informational - 4 MiB through each device, and the same
- * through the EGD socket of the ESDM from user space, one read command at a
- * time and 16 of them at a time, for comparison.
+ * Nanoseconds one reading of @clock takes, the median of several runs. The
+ * figures of the throughput depend on it: the ESDM reads the clock along the
+ * way, which costs a trap to the hypervisor on a clocksource without a vDSO,
+ * such as the acpi_pm the NixOS test framework boots its VMs with.
+ */
+static double clock_cost_ns(clockid_t clock)
+{
+	double runs[THROUGHPUT_RUNS];
+	unsigned int r, i;
+
+	for (r = 0; r < THROUGHPUT_RUNS; r++) {
+		struct timespec ts;
+		double t = now();
+
+		for (i = 0; i < 1000; i++)
+			clock_gettime(clock, &ts);
+		runs[r] = (now() - t) / 1000 * 1e9;
+	}
+	qsort(runs, THROUGHPUT_RUNS, sizeof(runs[0]), cmp_double);
+
+	return runs[THROUGHPUT_RUNS / 2];
+}
+
+/* The clocksource of the kernel, and what reading the clocks costs */
+static void throughput_clocks(void)
+{
+	char source[64] = "unknown";
+	FILE *f = fopen("/sys/devices/system/clocksource/clocksource0/current_clocksource",
+			"r");
+
+	if (f) {
+		if (fgets(source, sizeof(source), f))
+			source[strcspn(source, "\n")] = '\0';
+		fclose(f);
+	}
+
+	printf("clocksource %s: CLOCK_MONOTONIC %.0f ns, CLOCK_MONOTONIC_COARSE %.0f ns\n",
+	       source, clock_cost_ns(CLOCK_MONOTONIC),
+	       clock_cost_ns(CLOCK_MONOTONIC_COARSE));
+}
+
+/*
+ * One read of up to @size bytes into @buf: the number of bytes read, or a
+ * negative errno
+ */
+typedef ssize_t (*throughput_fn)(void *ctx, uint8_t *buf, size_t size);
+
+/*
+ * Answers of the EGD socket shorter than asked for. An unseeded read is
+ * answered short when the DRNG serving it reaches the most it may generate
+ * without a full reseed on the way - 2^17 bits in a build for SP800-90C, which
+ * a reader at full speed runs into every 16 KiB -, and empty while every DRNG
+ * waits for its reseed. Counted, not failed: it says the reseeds set the pace.
+ */
+static unsigned long throughput_short;
+
+/*
+ * Reads of @size bytes by @fn for THROUGHPUT_RUN_SEC each of THROUGHPUT_RUNS
+ * runs: the median in MB/s and reads per second, and the slowest and fastest
+ * run - the VM shares its host with whatever else runs there.
+ */
+static void throughput_one(const char *what, throughput_fn fn, void *ctx,
+			   uint8_t *buf, size_t size)
+{
+	double mbs[THROUGHPUT_RUNS];
+	unsigned int r;
+
+	for (r = 0; r < THROUGHPUT_RUNS; r++) {
+		double t = now(), end = t + THROUGHPUT_RUN_SEC, dt;
+		size_t total = 0;
+
+		do {
+			ssize_t got = fn(ctx, buf, size);
+
+			if (got < 0)
+				fail("%s: read of %zu bytes: %s", what, size,
+				     strerror((int)-got));
+			total += (size_t)got;
+		} while (now() < end);
+		dt = now() - t;
+		mbs[r] = (double)total / dt / 1e6;
+	}
+	qsort(mbs, THROUGHPUT_RUNS, sizeof(mbs[0]), cmp_double);
+
+	printf("%-34s %6zu B: %8.2f MB/s %8.0f reads/s (%.2f .. %.2f)", what,
+	       size, mbs[THROUGHPUT_RUNS / 2],
+	       mbs[THROUGHPUT_RUNS / 2] * 1e6 / (double)size, mbs[0],
+	       mbs[THROUGHPUT_RUNS - 1]);
+	if (throughput_short)
+		printf(", %lu answers short", throughput_short);
+	printf("\n");
+	throughput_short = 0;
+}
+
+/* A read of a device, on the descriptor @ctx points to */
+static ssize_t throughput_dev(void *ctx, uint8_t *buf, size_t size)
+{
+	int fd = *(int *)ctx;
+	size_t done = 0;
+
+	while (done < size) {
+		ssize_t n = read(fd, buf + done, size - done);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0)
+			return -errno;
+		if (!n)
+			return -EIO;
+		done += (size_t)n;
+	}
+
+	return (ssize_t)done;
+}
+
+/*
+ * A read on the EGD socket at the descriptor @ctx points to: the unseeded read
+ * of /dev/esdm_urandom, all commands of it sent at once and the answers
+ * collected after, as the module sends them.
+ */
+static ssize_t throughput_egd(void *ctx, uint8_t *buf, size_t size)
+{
+	int fd = *(int *)ctx;
+	size_t num = (size + ESDM_EGD_MAX_TRANSFER - 1) / ESDM_EGD_MAX_TRANSFER;
+	size_t i, done = 0;
+	uint8_t *req = xmalloc(2 * num);
+	ssize_t ret;
+
+	for (i = 0; i < num; i++) {
+		size_t chunk = size - i * ESDM_EGD_MAX_TRANSFER;
+
+		req[2 * i] = ESDM_EGD_CMD_ESDM_READ_UNSEEDED;
+		req[2 * i + 1] = (uint8_t)(chunk > ESDM_EGD_MAX_TRANSFER ?
+						   ESDM_EGD_MAX_TRANSFER :
+						   chunk);
+	}
+
+	if (send_all(fd, req, 2 * num)) {
+		ret = errno ? -errno : -EIO;
+		goto out;
+	}
+	for (i = 0; i < num; i++) {
+		uint8_t n;
+
+		if (recv_exact(fd, &n, 1)) {
+			ret = -EPIPE;
+			goto out;
+		}
+		/*
+		 * An operational ESDM serves, if short at times, see above -
+		 * with nothing even, while all of its DRNGs wait for their
+		 * reseed
+		 */
+		if (n > req[2 * i + 1] || recv_exact(fd, buf + done, n)) {
+			ret = -EIO;
+			goto out;
+		}
+		if (n < req[2 * i + 1])
+			throughput_short++;
+		done += n;
+	}
+	ret = (ssize_t)done;
+
+out:
+	free(req);
+	return ret;
+}
+
+/*
+ * throughput [socket]: informational - reads of 32 bytes, of the 255 bytes of
+ * one EGD transfer, of a page and of 64 KiB through each device, and through
+ * the EGD socket of the ESDM from user space, for comparison: the commands of a
+ * read sent at once, the way the module sends them. With the clocksource and
+ * the cost of reading the clocks, which the figures depend on.
  */
 static void cmd_throughput(int argc, char *argv[])
 {
-	static const unsigned int batches[] = { 1, 16 };
+	static const size_t sizes[] = { 32, ESDM_EGD_MAX_TRANSFER, 4096,
+					65536 };
 	const char *path = argc ? argv[0] : ESDM_SERVER_EGD_SOCKET_PATH;
-	const size_t size = 4 << 20;
-	uint8_t *buf = xmalloc(size), req[2 * 16];
-	unsigned int d, b, i;
-	double t, dt;
+	uint8_t *buf = xmalloc(65536);
+	unsigned int d, i;
 	int fd;
 
-	for (d = 0; d < CDEV_NUM_DEVS; d++) {
-		t = now();
-		read_exact_or_fail(cdev_devs[d], buf, size, 0);
-		dt = now() - t;
-		printf("%s: %.1f MB/s\n", cdev_devs[d],
-		       (double)size / dt / 1e6);
-	}
+	throughput_clocks();
 
-	for (i = 0; i < ARRAY_SIZE(req); i += 2) {
-		req[i] = ESDM_EGD_CMD_ESDM_READ_UNSEEDED;
-		req[i + 1] = ESDM_EGD_MAX_TRANSFER;
+	for (d = 0; d < CDEV_NUM_DEVS; d++) {
+		fd = open_or_fail(cdev_devs[d], O_RDONLY);
+		for (i = 0; i < ARRAY_SIZE(sizes); i++)
+			throughput_one(cdev_devs[d], throughput_dev, &fd, buf,
+				       sizes[i]);
+		close(fd);
 	}
 
 	fd = unix_connect(path);
-	for (b = 0; b < ARRAY_SIZE(batches); b++) {
-		size_t total = 0;
-
-		t = now();
-		while (total < size) {
-			if (send_all(fd, req, 2 * (size_t)batches[b]))
-				fail("%s: send: %s", path, strerror(errno));
-			for (i = 0; i < batches[b]; i++) {
-				uint8_t n;
-
-				if (recv_exact(fd, &n, 1))
-					fail("%s: no answer", path);
-				/* Seeded or not, an operational ESDM serves */
-				if (!n)
-					fail("%s: a read answered with nothing",
-					     path);
-				if (recv_exact(fd, buf, n))
-					fail("%s: answer cut short", path);
-				total += n;
-			}
-		}
-		dt = now() - t;
-		printf("EGD socket, %u commands at a time: %.1f MB/s\n",
-		       batches[b], (double)total / dt / 1e6);
-	}
-
+	for (i = 0; i < ARRAY_SIZE(sizes); i++)
+		throughput_one("EGD socket", throughput_egd, &fd, buf,
+			       sizes[i]);
 	close(fd);
+
+	memset(buf, 0, 65536);
 	free(buf);
 }
 
