@@ -393,6 +393,120 @@ static void test_slow_and_wrong(void)
 	test_daemon_stop(serve);
 }
 
+/* Copy @src to @dst, by renaming a copy into its place */
+static int install_file(const char *src, const char *dst)
+{
+	char tmp[256], buf[8192];
+	int in, out;
+	ssize_t n;
+
+	snprintf(tmp, sizeof(tmp), "%s.new", dst);
+	in = open(src, O_RDONLY | O_CLOEXEC);
+	if (in < 0)
+		return -1;
+	out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (out < 0) {
+		close(in);
+		return -1;
+	}
+	while ((n = read(in, buf, sizeof(buf))) > 0) {
+		if (write(out, buf, (size_t)n) != n) {
+			n = -1;
+			break;
+		}
+	}
+	close(in);
+	close(out);
+	if (n < 0)
+		return -1;
+	return rename(tmp, dst);
+}
+
+/*
+ * The CRLs taken up while the handshake with the provider runs: the handshake
+ * was begun with the context before, whose CRL did not revoke the provider -
+ * the one in place once it completes does. The provider is held up by
+ * SIGSTOP: its kernel takes the association, and the handshake waits for it.
+ * Then an established upstream connection, closed by a reload revoking it.
+ */
+static void test_revocation(void)
+{
+	uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+	char crl[sizeof(test_dir) + 16];
+	/*
+	 * Root keeps root, so that the relay reads the files of the test
+	 * again on a reload - nobody may not
+	 */
+	const char *const extra[] = { "--crl",
+				      crl,
+				      "--reload_interval",
+				      "0",
+				      "--timeout_ms",
+				      "8000",
+				      getuid() ? NULL : "--username",
+				      "root",
+				      NULL };
+	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
+	struct es_ext_test_client c;
+	const char *name;
+	char info[64];
+	uint16_t port = 0;
+	size_t namelen;
+	uint32_t rate;
+	int32_t status = 0;
+	pid_t serve, relay;
+	ssize_t n;
+
+	printf("Relay: revocation of the provider, during its handshake and after\n");
+
+	snprintf(crl, sizeof(crl), "%s/crl.pem", test_dir);
+	CHECK(!install_file(PKI("ca.crl"), crl), "installing the CRL");
+	serve = serve_start(&port, NULL, NULL);
+	relay = relay_start(port, "localhost", extra);
+	CHECK(serve > 0 && relay > 0, "daemons");
+
+	/* INFO waits for the handshake, while the CRL revoking it is loaded */
+	kill(serve, SIGSTOP);
+	CHECK(!es_ext_test_client_open(&c, test_socket, false),
+	      "no local connection");
+	esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO, 0);
+	CHECK(!es_ext_test_client_send(&c, req, sizeof(req)), "sending INFO");
+	test_sleep_ms(500);
+	CHECK(!install_file(PKI("ca-revoked-server.crl"), crl),
+	      "installing the CRL revoking the provider");
+	kill(relay, SIGHUP);
+	test_sleep_ms(1000);
+	kill(serve, SIGCONT);
+
+	n = es_ext_test_client_recv(&c, rsp, sizeof(rsp));
+	CHECK(n > 0 && !esdm_es_ext_proto_info_unpack(rsp, (size_t)n, &status,
+						      &rate, &name, &namelen) &&
+		      status < 0,
+	      "a provider revoked during its handshake was taken: %zd, %d",
+	      n, status);
+	CHECK(local_closed(&c, 3000), "the local connection stayed");
+	es_ext_test_client_close(&c);
+
+	/* Established, and revoked by the next reload */
+	CHECK(!install_file(PKI("ca.crl"), crl), "installing the CRL");
+	kill(relay, SIGHUP);
+	test_sleep_ms(1000);
+	CHECK(!es_ext_test_client_open(&c, test_socket, false),
+	      "no local connection");
+	CHECK(!relay_info(&c, info, sizeof(info), &rate),
+	      "INFO with the provider no longer revoked");
+	CHECK(!install_file(PKI("ca-revoked-server.crl"), crl),
+	      "installing the CRL revoking the provider");
+	kill(relay, SIGHUP);
+	CHECK(local_closed(&c, 5000),
+	      "the connection to a revoked provider was kept");
+	es_ext_test_client_close(&c);
+
+	test_daemon_stop(relay);
+	test_daemon_stop(serve);
+	unlink(crl);
+}
+
 int main(int argc, char *argv[])
 {
 	uint16_t port = 0;
@@ -440,6 +554,7 @@ int main(int argc, char *argv[])
 	test_daemon_stop(serve);
 
 	test_slow_and_wrong();
+	test_revocation();
 
 	unlink(test_socket);
 	rmdir(test_dir);

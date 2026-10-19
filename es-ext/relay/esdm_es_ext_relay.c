@@ -274,9 +274,11 @@ static int relay_connect_addr(const struct addrinfo *ai, uint64_t deadline)
 static int relay_upstream(struct relay_conn *conn, uint64_t deadline)
 {
 	struct addrinfo hints, *res = NULL, *ai;
-	struct esdm_tls_ctx *ctx;
+	struct esdm_tls_ctx *ctx, *cur;
 	struct esdm_dtls *up = NULL;
 	uint8_t fp[ESDM_TLS_FINGERPRINT_LEN];
+	char why[256];
+	bool revoked;
 	int fd = -1, ret;
 
 	memset(&hints, 0, sizeof(hints));
@@ -341,12 +343,43 @@ static int relay_upstream(struct relay_conn *conn, uint64_t deadline)
 		return ret;
 	}
 
+	/*
+	 * From here on the housekeeping looks at it, see relay_check_conns().
+	 *
+	 * A reload while the handshake ran put a context in place whose CRLs
+	 * the handshake did not see, and checked the upstream connections
+	 * against them - which this one was not yet. So it is checked here,
+	 * under the lock that check takes: either the reload replaced the
+	 * context before, which is seen here, or it checks this connection
+	 * after. The context of the handshake is held by the connection, so
+	 * the comparison is with one that is still there.
+	 */
 	pthread_mutex_lock(&relay_conns_lock);
-	conn->up_fd = fd;
-	conn->up = up;
-	esdm_tls_peer_fingerprint(esdm_dtls_tls(up), fp);
-	esdm_tls_fingerprint_hex(fp, conn->up_fingerprint);
+	pthread_mutex_lock(&relay_ctx_lock);
+	cur = relay_ctx;
+	esdm_tls_ctx_get(cur);
+	pthread_mutex_unlock(&relay_ctx_lock);
+	revoked = cur != ctx && esdm_tls_peer_revoked(esdm_dtls_tls(up), cur,
+						      why, sizeof(why)) == 1;
+	if (!revoked) {
+		conn->up_fd = fd;
+		conn->up = up;
+		esdm_tls_peer_fingerprint(esdm_dtls_tls(up), fp);
+		esdm_tls_fingerprint_hex(fp, conn->up_fingerprint);
+	}
 	pthread_mutex_unlock(&relay_conns_lock);
+	esdm_tls_ctx_put(cur);
+
+	if (revoked) {
+		esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
+			    "%s: closing the connection to %s, revoked: %s\n",
+			    RELAY_NAME,
+			    esdm_tls_peer_subject(esdm_dtls_tls(up)), why);
+		esdm_tls_close_notify(esdm_dtls_tls(up));
+		esdm_dtls_free(up);
+		close(fd);
+		return -EKEYREVOKED;
+	}
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 		    "%s: connected to %s (SHA-256 %s) for %s, %s\n", RELAY_NAME,

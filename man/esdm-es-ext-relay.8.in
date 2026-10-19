@@ -267,9 +267,10 @@ use; otherwise the error is logged and the relay goes on with what was loaded
 before. New upstream connections are made with the new files; established
 ones keep theirs. After every reload, the relay checks the providers of its
 upstream connections against the new CRLs, and closes the connections of a
-provider revoked; every 30 seconds, it closes those of a provider whose
-certificate expired. Either closes the local connection as well, and the ESDM
-connects again.
+provider revoked \- one whose handshake began before the reload is checked
+against the new CRLs once it completes; every 30 seconds, it closes those of a
+provider whose certificate expired. Either closes the local connection as well,
+and the ESDM connects again.
 .PP
 The credentials of
 .B LoadCredential=

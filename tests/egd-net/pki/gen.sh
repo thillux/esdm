@@ -35,6 +35,7 @@
 #  ca.crl           of the root CA, revoking nothing - it covers the
 #                   intermediate CA and the servers
 #  ca-revoked-int.crl  of the root CA, revoking the intermediate CA
+#  ca-revoked-server.crl  of the root CA, revoking server.crt
 #  int.crl          of the intermediate CA, revoking client-revoked
 #  int-empty.crl    of the intermediate CA, revoking nothing
 #  int-expired.crl  of the intermediate CA, revoking nothing, its nextUpdate
@@ -88,6 +89,21 @@ serial = \$dir/serial
 crlnumber = \$dir/crlnumber
 certificate = $OUT/int.crt
 private_key = $OUT/int.key
+default_md = sha256
+default_days = $DAYS
+default_crl_days = $DAYS
+policy = policy_any
+unique_subject = no
+copy_extensions = none
+
+[ root_server ]
+dir = $WORK/root-server
+database = \$dir/index.txt
+new_certs_dir = \$dir/certs
+serial = \$dir/serial
+crlnumber = \$dir/crlnumber
+certificate = $OUT/ca.crt
+private_key = $OUT/ca.key
 default_md = sha256
 default_days = $DAYS
 default_crl_days = $DAYS
@@ -210,6 +226,7 @@ crl() {
 }
 
 ca_dir root
+ca_dir root-server
 ca_dir int
 ca_dir rogue
 
@@ -271,5 +288,11 @@ crl int int.crl
 openssl ca -config "$WORK/ca.cnf" -name root -revoke "$OUT/int.crt" \
 	2>/dev/null
 crl root ca-revoked-int.crl
+
+# The root CA revoking the server alone: a database of its own, which knows
+# of no other certificate
+openssl ca -config "$WORK/ca.cnf" -name root_server -revoke "$OUT/server.crt" \
+	2>/dev/null
+crl root_server ca-revoked-server.crl
 
 echo "Test PKI written to $OUT"
