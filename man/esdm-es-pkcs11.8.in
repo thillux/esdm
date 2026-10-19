@@ -478,14 +478,19 @@ of its unit:
 Environment="ESDM_SERVER_OPTIONS=\-\-es_ext_socket /run/esdm\-es\-pkcs11/esdm\-es\-pkcs11.socket \-\-es_ext_socket_uid esdm\-es\-pkcs11"
 .fi
 .SH EXAMPLE
-A SoftHSM token, the PIN in a file only root can read, the daemon started by
-root on a socket of its own \- the ESDM accepts a provider running as root,
-while the unit runs it as the user
+A SoftHSM token, the PIN in a file of root that the group
 .B esdm\-es\-pkcs11
-in the directory it creates, see
+can read as well, and nobody else, the daemon started by root on a socket of
+its own \- the ESDM accepts a provider running as root. The unit runs it as the
+user
+.B esdm\-es\-pkcs11
+in the directory it creates, which reads such a file, or takes the PIN from a
+credential instead, see
 .BR SYSTEMD :
 .PP
 .nf
+chown root:esdm\-es\-pkcs11 /etc/esdm/pkcs11\-pin
+chmod 0640 /etc/esdm/pkcs11\-pin
 esdm\-es\-pkcs11 \-\-module /usr/lib/softhsm/libsofthsm2.so \\
 	\-\-token_label my\-token \-\-pin_file /etc/esdm/pkcs11\-pin \\
 	\-\-socket /run/esdm\-es\-pkcs11.socket
