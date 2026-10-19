@@ -20,7 +20,7 @@ reads (esdm_egd_client_get_random_pr), libesdm-egd-provider.so serves OpenSSL's
 prediction resistance requests with them and libesdm-egd-provider-pr.so all
 requests
 
-* Add the kernel module esdm_cdev (addon/linux_esdm_cdev): /dev/esdm_random,
+* Add the kernel module esdm_cdev (kernel/esdm_cdev): /dev/esdm_random,
 /dev/esdm_urandom and /proc/esdm served from the ESDM over its EGD socket, with
 the ioctls of the kernel's random devices - the counterpart of the CUSE
 frontend in the kernel, leaving the kernel's own devices untouched; it falls
@@ -70,12 +70,16 @@ addon/es_ebpf_testing
 
 * Entropy pools: each auxiliary pool and the conditioning pool of the eBPF entropy sources is an XDRBG-256 - the XDRBG over SHAKE256 with a state of 512 bits - instead of a pair of conditioning hashes; whatever is inserted is the seed of the next reseed and an extraction reseeds and generates; the SHAKE256 is that of the crypto backend (nettle >= 3.6 for the GnuTLS backend, Botan >= 3.2), the crypto self test covers it with a known-answer test of the XDRBG, and esdm_get_digestsize() reports the size of the state
 
+* Kernel module esdm_es: the DRBG post-processing the interrupt and scheduler entropy sources is the XDRBG-256 of the ESDM (esdm/crypto/esdm_xdrbg.c, the one of the auxiliary pools), compiled into the module and operated on the SHAKE256 of the kernel's SHA-3 library, on every kernel that has it (CONFIG_CRYPTO_LIB_SHA3, selected e.g. by CONFIG_CRYPTO_SHA3, which Linux 7.2 and later require); its known-answer test runs when the module is loaded; the HMAC_DRBG the module carried for Linux 7.2 and later is gone; a kernel without the SHA-3 library uses the HMAC_DRBG with SHA-512 of the kernel crypto API as the only one, so the module parameter esdm_drbg_type, which selected the Hash_DRBG or the CTR_DRBG instead, is gone
+
 * Status: the status is built as JSON only, the entropy sources report their state as a JSON object, and every text status - esdm_status(), RPC, shared memory, CUSE, esdm-tool - is the JSON status printed as text; numbers are JSON numbers, the eBPF ES reports a permanent health test failure as a member of its own, and the ExternalSocket ES no longer reports "root0" for a provider accepted only as root
 
 * The shell scripts of the repository run with set -euxo pipefail and bash
 
 * The source tree of the library is sorted into esdm/es, esdm/crypto,
 esdm/drng and esdm/status
+
+* The kernel modules moved from addon/linux_esdm_es and addon/linux_esdm_cdev to kernel/esdm_es and kernel/esdm_cdev and are built from the source tree, sharing code with the ESDM instead of carrying copies: the IOCTL interface of /dev/esdm_es (kernel/shared/esdm_es_ioctl.h) with the interrupt and scheduler entropy sources, the cutoffs of the SP800-90B health tests (kernel/shared/esdm_health_cutoffs.h) with the eBPF entropy sources, the XDRBG-256 with the auxiliary pools, and the EGD protocol (service-egd/esdm_egd_protocol.h) of esdm_cdev with the EGD interface
 
 * The design document and the presentation are Typst sources with their figures
 as draw.io, PlantUML and Typst plot sources (doc/typst, nix build .#esdm-doc),
