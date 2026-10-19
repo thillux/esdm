@@ -57,16 +57,70 @@ static struct rand_data *esdm_jent_state = NULL;
 static atomic_bool esdm_jent_health_failed = false;
 
 /*
- * Whether the synchronous collector is gone. jent_read_entropy_safe() answers
- * a failed health test of a collector by freeing it and allocating a new one
- * once the startup test passes again - and when either does not work out, it
- * leaves the collector NULL behind. The Jitter RNG is initialized all the same
- * then, but delivers nothing, and is credited with nothing until the periodic
- * self test brings a collector back (esdm_jent_selftest()). Kept apart from
- * esdm_jent_state, which is only read under esdm_jent_lock, so that the
- * lock-free readers can ask.
+ * Whether the synchronous collector is gone, or fails every read.
+ * jent_read_entropy_safe() answers an intermittent health test failure by
+ * replacing the collector once the startup test passes again. When that does
+ * not work out, older releases of the library leave the collector NULL behind,
+ * later ones keep it - failing every read, as after a permanent health test
+ * failure, which the library does not recover from at all: the failures of a
+ * collector stand. The Jitter RNG is initialized all the same then, but
+ * delivers nothing, and is credited with nothing until a read delivers again
+ * or the periodic self test replaces the collector (esdm_jent_selftest()).
+ * Kept apart from esdm_jent_state, which is only read under esdm_jent_lock, so
+ * that the lock-free readers can ask.
  */
 static atomic_bool esdm_jent_collector_lost = false;
+
+/*
+ * The health test failures jent_read_entropy_safe() reports. The library names
+ * them from 3.8.0 on, with the numbers of the earlier releases.
+ */
+#ifndef JENT_ERR_RCT
+#define JENT_ERR_RCT (-2)
+#endif
+#ifndef JENT_ERR_APT
+#define JENT_ERR_APT (-3)
+#endif
+#ifndef JENT_ERR_LAG
+#define JENT_ERR_LAG (-5)
+#endif
+#ifndef JENT_ERR_RCT_PERMANENT
+#define JENT_ERR_RCT_PERMANENT (-6)
+#endif
+#ifndef JENT_ERR_APT_PERMANENT
+#define JENT_ERR_APT_PERMANENT (-7)
+#endif
+#ifndef JENT_ERR_LAG_PERMANENT
+#define JENT_ERR_LAG_PERMANENT (-8)
+#endif
+#ifndef JENT_ERR_RCT_MEM
+#define JENT_ERR_RCT_MEM (-9)
+#endif
+#ifndef JENT_ERR_RCT_MEM_PERMANENT
+#define JENT_ERR_RCT_MEM_PERMANENT (-10)
+#endif
+
+/*
+ * Did jent_read_entropy_safe() leave the collector failing every read? It
+ * reports an intermittent health test failure only when it could not replace
+ * the collector, and a permanent one at once. See esdm_jent_collector_lost.
+ */
+static bool esdm_jent_health_err(ssize_t ret)
+{
+	switch (ret) {
+	case JENT_ERR_RCT:
+	case JENT_ERR_APT:
+	case JENT_ERR_LAG:
+	case JENT_ERR_RCT_PERMANENT:
+	case JENT_ERR_APT_PERMANENT:
+	case JENT_ERR_LAG_PERMANENT:
+	case JENT_ERR_RCT_MEM:
+	case JENT_ERR_RCT_MEM_PERMANENT:
+		return true;
+	default:
+		return false;
+	}
+}
 
 #if (ESDM_JENT_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf esdm_jent_buf;
@@ -158,11 +212,19 @@ static void esdm_jent_get(struct rand_data **ec, struct entropy_es *eb_es,
 	 * fills blocks without entropy then, which esdm_es_buf_try_get() takes
 	 * for misses, sending the requests to the synchronous collector.
 	 */
-	if (!*ec && ec == &esdm_jent_state &&
-	    !atomic_exchange(&esdm_jent_collector_lost, true)) {
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ES,
-			"JitterRNG ES: the collector could not be recovered after a failed health test, no entropy until the next self test\n");
+	if (ec == &esdm_jent_state) {
+		if (!*ec || esdm_jent_health_err(ret)) {
+			if (!atomic_exchange(&esdm_jent_collector_lost, true))
+				esdm_logger(
+					LOGGER_ERR, LOGGER_C_ES,
+					"JitterRNG ES: the collector could not be recovered after a failed health test (%zd), no entropy until it delivers again or the next self test replaces it\n",
+					ret);
+		} else if (ret >= 0 &&
+			   atomic_exchange(&esdm_jent_collector_lost, false)) {
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_ES,
+				"JitterRNG ES: the collector delivers again\n");
+		}
 	}
 
 	if (ret < 0) {
@@ -669,27 +731,34 @@ static int esdm_jent_selftest(void)
 
 	/*
 	 * A collector jent_read_entropy_safe() could not bring back after a
-	 * failed health test (esdm_jent_collector_lost): nothing to bind the
-	 * known answer tests above to, and nothing that would deliver. The
+	 * failed health test, or one that failed for good
+	 * (esdm_jent_collector_lost): nothing that would deliver - the known
+	 * answer tests and the startup test above pass all the same. The
 	 * startup test just passed, so it is allocated anew - which is what
 	 * the library would have done - and the run fails if that does not
 	 * work out either, instead of passing a source that serves nothing.
+	 * The old one is freed only once there is a new one.
 	 *
 	 * Asked under the lock: esdm_jent_finalize_internal() clears the
 	 * initialized flag before it takes the lock to free the collector, so
 	 * a source being torn down is not handed a new one here.
 	 */
-	if (!ret && !esdm_jent_state && atomic_load(&esdm_jent_initialized)) {
-		esdm_jent_state = jent_entropy_collector_alloc(
+	if (!ret &&
+	    (!esdm_jent_state || atomic_load(&esdm_jent_collector_lost)) &&
+	    atomic_load(&esdm_jent_initialized)) {
+		struct rand_data *ec = jent_entropy_collector_alloc(
 			ESDM_JENT_OSR, esdm_jent_flags());
-		if (esdm_jent_state) {
+
+		if (ec) {
+			jent_entropy_collector_free(esdm_jent_state);
+			esdm_jent_state = ec;
 			atomic_store(&esdm_jent_collector_lost, false);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
 				    "JitterRNG ES: collector reallocated\n");
 		} else {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ES,
-				"JitterRNG ES: no collector, and none can be allocated\n");
+				"JitterRNG ES: no working collector, and none can be allocated\n");
 			ret = -ENOMEM;
 		}
 	}

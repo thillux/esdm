@@ -26,10 +26,14 @@
  * rate as available entropy, and the periodic self test passed - it skipped the
  * NULL collector - while every read delivered nothing.
  *
+ * Later releases keep the collector instead, and so does a permanent health
+ * test failure: the collector fails every read from then on, which the ESDM
+ * did not notice at all.
+ *
  * The test defines jent_read_entropy_safe() and jent_entropy_collector_alloc()
  * itself, which take precedence over the library's. They hand the calls on to
- * the library until told to lose the collector the way the library does, or to
- * fail the allocation of a new one.
+ * the library until told to lose the collector the way the library does, to
+ * fail it, or to fail the allocation of a new one.
  */
 
 #define _GNU_SOURCE
@@ -55,6 +59,13 @@ void jent_entropy_collector_free(struct rand_data *ec);
 static pthread_t main_thread;
 /* Lose the collector on the next read of the main thread */
 static bool jent_lose = false;
+/*
+ * Fail the next read of the main thread with jent_fail_err, and every later
+ * one of the collector it was made with (jent_failed), as the library does
+ */
+static bool jent_fail = false;
+static ssize_t jent_fail_err = 0;
+static struct rand_data *jent_failed = NULL;
 static bool jent_alloc_fail = false;
 
 ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
@@ -70,6 +81,13 @@ ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
 		jent_entropy_collector_free(*ec);
 		*ec = NULL;
 		return -1;
+	}
+
+	if (pthread_equal(pthread_self(), main_thread) &&
+	    (jent_fail || (*ec && *ec == jent_failed))) {
+		jent_fail = false;
+		jent_failed = *ec;
+		return jent_fail_err;
 	}
 
 	*(void **)(&real) = dlsym(RTLD_NEXT, "jent_read_entropy_safe");
@@ -194,8 +212,70 @@ int main(void)
 		ret = 1;
 	}
 
+	/* A permanent RCT failure: the collector fails every read from now on */
+	jent_fail_err = -6;
+	jent_fail = true;
+	bits = jent_read();
+	if (bits || jent_fail) {
+		printf("ES Jitter RNG - fail: the collector did not fail (%u bits)\n",
+		       bits);
+		ret = 1;
+		goto out;
+	}
+
+	bits = jent_read();
+	if (bits) {
+		printf("ES Jitter RNG - fail: a failed collector delivered %u bits\n",
+		       bits);
+		ret = 1;
+	}
+
+	bits = jent_credit();
+	if (bits) {
+		printf("ES Jitter RNG - fail: still credited with %u bits with a failed collector\n",
+		       bits);
+		ret = 1;
+	}
+
+	if (esdm_es[esdm_ext_es_jitter]->active()) {
+		printf("ES Jitter RNG - fail: active with a failed collector\n");
+		ret = 1;
+	}
+
+	/* The self test passes once it has replaced the collector */
+	if (esdm_es[esdm_ext_es_jitter]->selftest()) {
+		printf("ES Jitter RNG - fail: the self test did not replace the failed collector\n");
+		ret = 1;
+	}
+
+	if (!jent_credit() || !esdm_es[esdm_ext_es_jitter]->active() ||
+	    !jent_read()) {
+		printf("ES Jitter RNG - fail: not credited again with a collector replacing the failed one\n");
+		ret = 1;
+	}
+
+	/*
+	 * An intermittent failure the library could not replace the collector
+	 * after - until a later read where it can.
+	 */
+	jent_fail_err = -2;
+	jent_fail = true;
+	bits = jent_read();
+	if (bits || jent_credit() || esdm_es[esdm_ext_es_jitter]->active()) {
+		printf("ES Jitter RNG - fail: credited after an intermittent failure without recovery (%u bits)\n",
+		       bits);
+		ret = 1;
+	}
+
+	jent_failed = NULL;
+	if (!jent_read() || !jent_credit() ||
+	    !esdm_es[esdm_ext_es_jitter]->active()) {
+		printf("ES Jitter RNG - fail: not credited again once the collector delivers\n");
+		ret = 1;
+	}
+
 	if (!ret)
-		printf("ES Jitter RNG - pass: a lost collector is credited with nothing until the self test brings it back\n");
+		printf("ES Jitter RNG - pass: a lost or failed collector is credited with nothing until it delivers again or the self test replaces it\n");
 
 out:
 	esdm_fini();
