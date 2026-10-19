@@ -70,9 +70,13 @@ Linux 5.6 - equivalent to `getrandom(0)` - and what the CUSE frontend's
 as the default it would make every read wait for the entropy sources, which
 deliver a few hundred bytes per second at best.
 
-Reads are interrupted by signals like those of the kernel's devices: a read
-that got data returns it, one that did not returns `ERESTARTSYS`, so the
-caller sees `EINTR` or the read is restarted.
+Signals end reads and writes. A read that got data returns it, one that did
+not returns `ERESTARTSYS`, so the caller sees `EINTR` or the read is restarted,
+even a read of a single byte. That differs from the kernel's devices, whose
+reads finish at least their first page whatever signal comes: they do not wait
+for anything once the kernel's RNG is initialized, while the module waits for
+the ESDM's answers, interruptibly. A write ended by a signal returns what was
+written.
 
 ### ioctls
 
@@ -88,7 +92,15 @@ The ioctls of `drivers/char/random.c`, with its checks:
 
 Every other command is answered with `EINVAL`, as by the kernel. As there, the
 caller's capability is checked first and the arguments after it; a negative
-entropy count or size is `EINVAL`.
+entropy count or size is `EINVAL`. As there, `RNDADDENTROPY` inserts all of its
+data before it credits the entropy, and credits nothing when not all of it went
+in.
+
+The ioctls that change something in the ESDM are carried out by the ESDM once
+their command went out, whether the module waits for the answer or not. So
+from then on, the module waits for the answer despite signals - bounded by
+`timeout_ms`, and a fatal signal still ends the wait - and never restarts the
+ioctl.
 
 ## /proc/esdm
 
@@ -119,15 +131,24 @@ does, which falls back to the kernel's devices:
 * reads are served by the kernel's RNG; `/dev/esdm_random` waits for the
   kernel's RNG to be initialized first (`EAGAIN` with `O_NONBLOCK`),
 * writes are mixed into the kernel's RNG without entropy credit,
-* the ioctls fail with `ENOTCONN` - the kernel's own entropy accounting cannot
-  be changed from a module, and the kernel's devices are there for that,
+* the ioctls fail - the kernel's own entropy accounting cannot be changed from
+  a module, and the kernel's devices are there for that - with `ENOTCONN`
+  when the ESDM cannot be connected to, `ETIMEDOUT` when it does not answer
+  within `timeout_ms`, `ECONNRESET` or `EPIPE` when it closes the connection,
+  as an ESDM from before the extensions does, and `EPROTO` for an answer that
+  does not fit the protocol. An ioctl changing something whose answer did not
+  come may have been carried out all the same,
 * the files of `/proc/esdm` other than `boot_id` are empty.
 
+A request that finds no connection free within `timeout_ms` - all of them busy
+with an ESDM that takes its time - fails as one the ESDM did not answer.
+
 The module logs once when it cannot connect and once when it connected again.
-A connection that failed is not tried again for a moment, up to two seconds, so
-a missing ESDM costs a failed connect now and then rather than one per read; a
-reader may be served by the kernel's RNG for that long after the ESDM came
-back.
+A connection that could not be made, or whose ESDM did not answer, is not made
+again for a moment, growing up to two seconds until a request on it succeeds,
+so a missing or frozen ESDM costs a failed connect or a timeout now and then
+rather than one per read; a reader may be served by the kernel's RNG for that
+long after the ESDM came back.
 
 ## Security
 
@@ -149,9 +170,16 @@ back.
   answers is checked against what was asked for and the protocol's bounds
   before anything is read; a connection with an answer that does not fit is
   closed. The status report is bounded to 64 KiB.
-* **Hygiene.** Every buffer that held random data is wiped, nothing random is
-  logged, large buffers are allocated rather than on the stack, transfers are
-  bounded by `timeout_ms`, and waits are interruptible.
+* **Hygiene.** Every buffer of the module that held random data is wiped,
+  nothing random is logged, large buffers are allocated rather than on the
+  stack, transfers are bounded by `timeout_ms`, and waits are interruptible -
+  but for the answer of an ioctl changing something in the ESDM, see above.
+  The socket buffers of the kernel that carry the random data from the ESDM
+  are freed as those of any Unix domain socket, without being wiped.
+* **No waiting for user memory with a connection.** A connection to the ESDM
+  is held for its answers only: a write copies its data from user memory
+  before it takes one, so a writer whose memory takes its time - a mapping of
+  a FUSE daemon that does not answer - keeps nobody else from the ESDM.
 * **Unloading.** An open device holds a reference to the module, so it cannot
   be unloaded while a reader is in it; the proc files are removed waiting for
   their readers.
@@ -161,9 +189,13 @@ back.
 The NixOS VM test `checks.x86_64-linux.esdm_cdev` of the flake loads the
 module next to a running ESDM and exercises the devices, `poll()`,
 `O_NONBLOCK`, `O_SYNC`, writes, the ioctls as root, as an unprivileged user and
-as root without `CAP_SYS_ADMIN`, every file of `/proc/esdm`, a restart of the
-ESDM during reads, an ESDM that does not answer, an ESDM that is gone, loading
-the module without an ESDM and unloading it:
+as root without `CAP_SYS_ADMIN`, writers stalled on their own memory, every
+file of `/proc/esdm`, a restart of the ESDM during reads, an ESDM that does not
+answer, an ESDM that is gone, loading the module without an ESDM and unloading
+it. A fake EGD server of the check script stands in for what the ESDM cannot be
+made to do: never answering, for the backoff; logging what the module sends,
+for the credit of `RNDADDENTROPY` and `RNDADDTOENTCNT` interrupted by a signal;
+not being operational, for `poll()`:
 
     nix build .#checks.x86_64-linux.esdm_cdev
 

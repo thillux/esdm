@@ -22,7 +22,7 @@
  * While the ESDM cannot be reached, reads and writes are served by the
  * kernel's RNG instead, as the CUSE frontend falls back to the kernel's
  * devices: /dev/esdm_random waits for the kernel's RNG to be initialized
- * first. The ioctls fail with -ENOTCONN then, see esdm_cdev_ioctl().
+ * first. The ioctls fail then, see esdm_cdev_ioctl().
  *
  * The kernel's /dev/random and /dev/urandom are left as they are.
  *
@@ -243,7 +243,11 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 		size_t len = min_t(size_t, count - done, max);
 		int got;
 
-		/* As the kernel's devices, a signal ends the read */
+		/*
+		 * A signal ends the read, as it ends the waits for the ESDM's
+		 * answers. The kernel's devices finish the first page of a
+		 * read regardless, they wait for nothing then.
+		 */
 		if (signal_pending(current)) {
 			ret = -ERESTARTSYS;
 			break;
@@ -400,9 +404,12 @@ static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
  * sends. That makes the CAP_SYS_ADMIN check here the one that keeps an
  * unprivileged caller from changing the ESDM's entropy accounting.
  *
- * While the ESDM cannot be reached, they fail with -ENOTCONN: the kernel's own
- * entropy accounting cannot be changed from a module, and the kernel's devices
- * are there for that.
+ * While the ESDM cannot be reached, they fail: -ENOTCONN when it cannot be
+ * connected to, -ETIMEDOUT when it does not answer, -ECONNRESET or -EPIPE when
+ * it closes the connection - as an ESDM from before the EGD extensions does -
+ * or -EPROTO for an answer that does not fit. The kernel's own entropy
+ * accounting cannot be changed from a module, and the kernel's devices are
+ * there for that.
  */
 static long esdm_cdev_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
