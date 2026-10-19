@@ -62,6 +62,24 @@ esdm_es_ext_serve = executable('esdm-es-ext-serve',
 	install: true
 	)
 
+# The relay of a provider on another host: a local provider socket for the
+# ESDM, forwarded to a provider served on the network - see
+# esdm-es-ext-relay(8). The provider protocol, the DTLS of both sides and the
+# creation of the local socket; nothing of the provider server.
+if es_ext_net
+	esdm_es_ext_relay = executable('esdm-es-ext-relay',
+		[ 'relay/esdm_es_ext_relay.c',
+		  '../service-rpc/server/privileges.c',
+		  '../service-egd/server/esdm_server_socket.c' ],
+		c_args: [ '-DESDM_ES_EXT_RELAY_VERSION="' + meson.project_version() + '"' ],
+		include_directories: include_dirs_es_ext_daemons,
+		link_with: [ esdm_common_static_lib ],
+		dependencies: [ dependency('threads') ] + dtls_deps +
+			      es_ext_net_deps,
+		install: true
+		)
+endif
+
 # The PKCS#11 entropy source: a provider of its own, serving the random number
 # generator of a PKCS#11 token with the provider server above - see
 # esdm-es-pkcs11(8). It is the only part of the ESDM that needs libp11.
