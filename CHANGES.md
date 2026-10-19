@@ -532,6 +532,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * The documentation describes the jitter RNG NTG.1 shortcut, the errors, signals and wiping of esdm_cdev, the sandboxed EGD client, the DTLS wait of the RPC client, the status of a short buffer, where the init of a plugin runs, the getrandom shim's __real_*() under --wrap, the IPC resources at shutdown, the eBPF event data and the options of the frontends as they are
 
+* Add rpc_bench (meson test --benchmark): the throughput and the CPU time per request of the RPC interface by the calls of its consumers - full, prediction resistant and unseeded reads, getrandom(2) through libesdm_getrandom and, for comparison, the kernel's -, in requests of 32 bytes to 1 MiB, from several threads of several processes
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

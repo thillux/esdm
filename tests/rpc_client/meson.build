@@ -245,4 +245,28 @@ if get_option('esdm-server').enabled()
 	# larger timeout.
 	test('RPC call whole client API', rpc_api_test,
 		env: [ tester_esdm_env ], timeout: 300)
+
+	# Throughput of the RPC interface by the calls of its consumers, from
+	# several threads and processes - see rpc_bench.c. A benchmark, run by
+	# meson test --benchmark only; it starts an esdm-server, which takes
+	# root, and skips (77) otherwise. Run by hand with -x, it measures the
+	# server running already.
+	rpc_bench = executable(
+			'rpc_bench',
+			[ 'rpc_bench.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client,
+					dependency('threads'),
+					cc.find_library('dl', required: false) ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
+	rpc_bench_env = [ tester_esdm_env ]
+	if get_option('linux-getrandom').enabled()
+		rpc_bench_env += [ 'ESDM_GETRANDOM_LIB=' +
+				   esdm_getrandom_lib.full_path() ]
+	endif
+
+	benchmark('RPC throughput', rpc_bench,
+		env: rpc_bench_env, timeout: 1800, suite: 'rpc')
 endif
