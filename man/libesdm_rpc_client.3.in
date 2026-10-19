@@ -89,10 +89,14 @@ requests and answers then pass encrypted. The DTLS is opportunistic: a server
 that does not agree \- one started with
 .BR \-\-no_dtls ,
 one built without DTLS, or one of ESDM 1.2.3 or before, which does not know the
-request \- is used in the clear, on the same connection or on a new one, without
-the call failing or waiting for it; a connection whose server did not agree
-does not ask again for a minute. Should the handshake fail, the connection is
-used in the clear as well. It is unauthenticated, as described in
+request \- is used in the clear, without the call failing: on the same
+connection once the server answered, on a new one should it close the
+connection instead. A server answering neither the request nor the one the
+library sends right behind it is waited for a second at the most \- the time
+asking for DTLS and the handshake may take together \-, and the call goes on in
+the clear on a new connection then, as it does should the handshake fail. A
+connection whose server did not agree or did not complete the handshake does
+not ask again for a minute. The DTLS is unauthenticated, as described in
 .BR esdm\-server (8).
 With debug logging, every connection is logged with whether it is encrypted.
 .PP
