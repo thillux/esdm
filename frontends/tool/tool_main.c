@@ -1573,6 +1573,11 @@ int main(int argc, char **argv)
 	/* initialized in child processes in this test */
 	esdm_rpcc_init_unpriv_service(NULL);
 
+#ifndef ESDM_HAS_AUX_CLIENT
+	/* Only --reseed-via-os of the aux client takes --reseed-delay-ms */
+	(void)reseed_delay_ms;
+#endif
+
 	/*
 	 * handle individual commands
 	 */

@@ -428,6 +428,7 @@ void esdm_config_es_jent_kernel_entropy_rate_set(uint32_t ent)
 	esdm_es_add_entropy();
 }
 
+#if ESDM_EXT_LIB_NUM > 0 || ESDM_EXT_SOCKET_NUM > 0
 /*
  * The rate configured for an external source: capped as any rate, but
  * ESDM_ES_EXT_ENTROPY_RATE_AUTO, no rate configured, kept as it is
@@ -438,6 +439,7 @@ static uint32_t esdm_config_es_ext_rate(uint32_t ent)
 		       ent :
 		       esdm_config_entropy_rate_max(ent);
 }
+#endif
 
 uint32_t esdm_config_es_ext_lib_entropy_rate_configured(unsigned int idx)
 {

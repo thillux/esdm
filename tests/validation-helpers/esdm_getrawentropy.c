@@ -69,8 +69,9 @@ static int getrawentropy(struct opts *opts)
 
 	while (requested) {
 		unsigned int i;
-		unsigned int gather =
-			((BUFFER_SIZE > requested) ? requested : BUFFER_SIZE);
+		/* At most BUFFER_SIZE, so the cast cannot truncate */
+		size_t gather = (size_t)((BUFFER_SIZE > requested) ? requested :
+								    BUFFER_SIZE);
 
 		buffer_p = buffer;
 

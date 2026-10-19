@@ -140,6 +140,7 @@ static const char *test_es_section(const char *status, const char *instance)
 	return name;
 }
 
+#if ESDM_EXT_SOCKET_NUM > 0
 static bool test_wait_socket(void)
 {
 	unsigned int i;
@@ -152,6 +153,7 @@ static bool test_wait_socket(void)
 
 	return false;
 }
+#endif
 
 #if ESDM_EXT_LIB_NUM > 0
 static void test_plugin(const char *server, const char *plugin)
