@@ -131,17 +131,26 @@ static long pidfile_pid(void)
 	return len ? strtol(buf, NULL, 10) : 0;
 }
 
+/* How often the start of the server is looked at, per second */
+#define TEST_SERVER_POLL_HZ 200
+
 /*
  * Start the server with the PID file, wait until the daemon dropped its
  * privileges - the point from which it cannot remove the file any more - and
  * terminate it again.
+ *
+ * With @suspend, the process the PID file names is sent SIGUSR1, as
+ * esdm-server-signal-helper --suspend does, from the moment the file names it
+ * until the daemon dropped its privileges. That covers the start-up up to the
+ * installation of the suspend handler, which the daemon has to survive.
  */
-static int server_run(bool pid_namespace, char **envp)
+static int server_run(bool pid_namespace, bool suspend, char **envp)
 {
 	const char *server = getenv("ESDM_SERVER");
-	struct timespec wait = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
+	struct timespec wait = { .tv_sec = 0,
+				 .tv_nsec = 1000000000L / TEST_SERVER_POLL_HZ };
 	pid_t server_pid, daemon_pid = 0;
-	unsigned int i;
+	unsigned int i, signalled = 0;
 	int status;
 
 	server_pid = fork();
@@ -167,11 +176,19 @@ static int server_run(bool pid_namespace, char **envp)
 		_exit(1);
 	}
 
-	for (i = 0; i < TEST_SERVER_START_SEC * 5; i++) {
-		if (waitpid(server_pid, NULL, WNOHANG) == server_pid) {
-			printf("The esdm-server terminated during its start\n");
+	for (i = 0; i < TEST_SERVER_START_SEC * TEST_SERVER_POLL_HZ; i++) {
+		if (waitpid(server_pid, &status, WNOHANG) == server_pid) {
+			printf("The esdm-server terminated during its start%s\n",
+			       WIFSIGNALED(status) &&
+					       WTERMSIG(status) == SIGUSR1 ?
+				       ", killed by SIGUSR1" :
+				       "");
 			return 1;
 		}
+
+		if (suspend && pidfile_pid() == (long)server_pid &&
+		    !kill(server_pid, SIGUSR1))
+			signalled++;
 
 		daemon_pid =
 			pid_namespace ? proc_child(server_pid) : server_pid;
@@ -187,6 +204,10 @@ static int server_run(bool pid_namespace, char **envp)
 		waitpid(server_pid, NULL, 0);
 		return 1;
 	}
+
+	if (suspend)
+		CHECK(signalled > 0,
+		      "the PID file did not name the server before it dropped its privileges");
 
 	/* The process to signal is the one started here, in either mode */
 	CHECK(pidfile_pid() == (long)server_pid,
@@ -273,7 +294,7 @@ int main(int argc, char *argv[])
 	 * no process any more.
 	 */
 	printf("PID file: plain daemon\n");
-	if (!server_run(false, server_envp)) {
+	if (!server_run(false, false, server_envp)) {
 		pid = pidfile_pid();
 		CHECK(pid <= 0,
 		      "the terminated daemon left its PID file naming %ld",
@@ -289,7 +310,7 @@ int main(int argc, char *argv[])
 	 * server_run() checks that the file names it.
 	 */
 	printf("PID file: removed while the daemon opens it\n");
-	if (!server_run(false, unlink_envp)) {
+	if (!server_run(false, false, unlink_envp)) {
 		pid = pidfile_pid();
 		CHECK(pid <= 0,
 		      "the terminated daemon left its PID file naming %ld",
@@ -301,13 +322,27 @@ int main(int argc, char *argv[])
 
 	/* The supervisor kept its privileges and removes the file */
 	printf("PID file: PID namespace supervisor\n");
-	if (!server_run(true, server_envp)) {
+	if (!server_run(true, false, server_envp)) {
 		CHECK(stat(pidpath, &sb) < 0 && errno == ENOENT,
 		      "the supervisor left its PID file behind (naming %ld)",
 		      pidfile_pid());
 	} else {
 		ret = 1;
 	}
+	unlink(pidpath);
+
+	/*
+	 * The PID file is there before the suspend handler: a suspend signalled
+	 * in between must not terminate the server.
+	 */
+	printf("PID file: SIGUSR1 while the daemon starts\n");
+	if (server_run(false, true, server_envp))
+		ret = 1;
+	unlink(pidpath);
+
+	printf("PID file: SIGUSR1 while the supervised daemon starts\n");
+	if (server_run(true, true, server_envp))
+		ret = 1;
 	unlink(pidpath);
 
 	rmdir(tmpdir);

@@ -694,6 +694,17 @@ static void install_term(void)
 	sigaction(SIGTERM, &sa, NULL);
 }
 
+/* SIGUSR1 is the suspend trigger, see main() */
+static void ignore_suspend(void)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, NULL);
+}
+
 /*
  * How often a PID file removed between its open and its lock is opened again.
  * Each attempt lost the race against an instance that removed the file while
@@ -935,6 +946,18 @@ int main(int argc, char *argv[])
 				"Cannot tune glibc allocator for small memory mode\n");
 #endif
 	}
+
+	/*
+	 * Once the PID file names this process, esdm-server-signal-helper
+	 * --suspend sends it SIGUSR1, the only signal it sends. The handler is
+	 * installed by libesdm when it publishes its status, after the entropy
+	 * sources and the self tests - until then the default action would
+	 * terminate the daemon. Ignore the signal in between: the suspend is
+	 * recorded in that status, so one before it is published cannot be
+	 * recorded anyway. Installing the handler replaces the disposition, as
+	 * does the forwarder of a PID namespace supervisor.
+	 */
+	ignore_suspend();
 
 	if (pidfile && strlen(pidfile))
 		create_pid_file(pidfile);
