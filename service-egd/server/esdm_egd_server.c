@@ -647,12 +647,24 @@ int esdm_egd_server_socket_init(void)
 	return 0;
 }
 
-/* Milliseconds on the monotonic clock. */
+/*
+ * Milliseconds on the monotonic clock.
+ *
+ * The coarse one: what is timed in milliseconds here - the idle and the write
+ * timeout, the idle scan, the pause of the listener - is timed in seconds, and
+ * the clock is read several times per request, for the activity of the
+ * connection and the age of its response. The coarse clock is the time of the
+ * last tick, which the vDSO reads from memory whatever the clocksource is,
+ * while CLOCK_MONOTONIC reads the clocksource: a system call and a trap to the
+ * hypervisor on one without a vDSO, such as acpi_pm or the HPET of a guest
+ * whose TSC is not trusted. The acpi_pm of the VMs of the NixOS tests takes
+ * 6.7 us per read, and a read of 32 bytes - 83 us - read it four times here.
+ */
 static uint64_t esdm_egd_now_ms(void)
 {
 	struct timespec ts;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
 
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
