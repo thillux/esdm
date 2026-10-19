@@ -286,6 +286,15 @@ static void *esdm_drbg_alloc(u8 *personalization, u32 perslen)
 	if (ret)
 		goto err;
 
+	/*
+	 * The instantiation below is the update without reseed, which takes
+	 * C as zero (SP800-90A 10.1.2.3 step 2). drbg_alloc_state() kmallocs
+	 * V and C, which the kernel's own instantiation zeroes in drbg_seed()
+	 * - bypassed here.
+	 */
+	memset(drbg_s->V, 0, drbg_statelen(drbg_s));
+	memset(drbg_s->C, 0, drbg_statelen(drbg_s));
+
 	if (sec_strength > drbg_sec_strength(drbg_s->core->flags)) {
 		pr_err("Security strength of DRBG (%u bits) lower "
 		       "than requested by ESDM (%u bits)\n",
