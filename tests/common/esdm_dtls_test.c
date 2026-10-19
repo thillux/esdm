@@ -26,6 +26,8 @@
  *   none of them readable on the socket;
  * - a message larger than allowed, a record that is not one of ours, and a
  *   peer that is gone end the connection;
+ * - a message whose records arrive apart is kept until it is complete - in
+ *   the room the call receiving its start had;
  * - an error the application left with the TLS stack is none of the DTLS;
  * - what the TLS stack frees holds no plaintext.
  */
@@ -197,6 +199,65 @@ static bool test_has_run(const uint8_t *buf, size_t len)
 	return false;
 }
 
+/*
+ * A message of three records whose first one arrives alone: the receiver keeps
+ * it, with a buffer of @first_len, and takes the others with a buffer of
+ * TEST_MAX_MSG - expecting @exp. The records are taken off the socket of the
+ * receiver and sent on it again, the first one before the others.
+ */
+static void test_split(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx,
+		       size_t first_len, ssize_t exp)
+{
+	static uint8_t msg[3 * ESDM_DTLS_PART_SIZE], got[TEST_MAX_MSG];
+	static uint8_t held[3][ESDM_DTLS_PART_SIZE + 1024];
+	struct esdm_dtls *client = NULL, *server = NULL;
+	ssize_t held_len[3];
+	unsigned int i;
+	uint8_t more;
+	int sv[2];
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+		       0, sv)) {
+		CHECK(0, "socketpair: %s", strerror(errno));
+		return;
+	}
+	CHECK_EQ(esdm_dtls_alloc(cctx, sv[0], TEST_MAX_MSG, &client), 0);
+	CHECK_EQ(esdm_dtls_alloc(sctx, sv[1], TEST_MAX_MSG, &server), 0);
+	if (!client || !server)
+		goto out;
+	CHECK_EQ(test_handshake(client, server, sv[0], sv[1]), 0);
+
+	memset(msg, 0x24, sizeof(msg));
+	CHECK_EQ(esdm_dtls_send(client, msg, sizeof(msg)), 0);
+	for (i = 0; i < 3; i++) {
+		held_len[i] =
+			recv(sv[1], held[i], sizeof(held[i]), MSG_DONTWAIT);
+		/* A record per message of the socket */
+		CHECK(held_len[i] > ESDM_DTLS_PART_SIZE, "record %u: %zd", i,
+		      held_len[i]);
+		if (held_len[i] <= ESDM_DTLS_PART_SIZE)
+			goto out;
+	}
+	CHECK(recv(sv[1], &more, 1, MSG_DONTWAIT) < 0, "a fourth record");
+
+	CHECK_EQ(send(sv[0], held[0], (size_t)held_len[0], MSG_NOSIGNAL),
+		 held_len[0]);
+	CHECK_EQ(esdm_dtls_recv(server, got, first_len), -EAGAIN);
+	for (i = 1; i < 3; i++)
+		CHECK_EQ(send(sv[0], held[i], (size_t)held_len[i],
+			      MSG_NOSIGNAL),
+			 held_len[i]);
+	CHECK_EQ(esdm_dtls_recv(server, got, sizeof(got)), exp);
+	if (exp == (ssize_t)sizeof(msg))
+		CHECK_MEM_EQ(got, msg, sizeof(msg));
+
+out:
+	esdm_dtls_free(client);
+	esdm_dtls_free(server);
+	close(sv[0]);
+	close(sv[1]);
+}
+
 static void test_dtls(void)
 {
 	static uint8_t msg[TEST_MAX_MSG], got[TEST_MAX_MSG + 16];
@@ -313,6 +374,14 @@ static void test_dtls(void)
 	}
 	close(peek[0]);
 	close(peek[1]);
+
+	/* A message whose records arrive apart */
+	test_split(cctx, sctx, TEST_MAX_MSG, 3 * ESDM_DTLS_PART_SIZE);
+	/*
+	 * Its start went into a buffer for the first part only: what follows
+	 * does not fit there, larger as the buffer of the call taking it is
+	 */
+	test_split(cctx, sctx, ESDM_DTLS_PART_SIZE + 100, -EMSGSIZE);
 
 out:
 	CHECK_EQ(esdm_dtls_busy(), false);

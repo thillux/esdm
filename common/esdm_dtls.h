@@ -143,9 +143,10 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len);
  * @return the size of the message once it is complete, -EAGAIN while it is not
  *	   (poll the socket for reading - but see esdm_dtls_pending()),
  *	   -EMSGSIZE for a message larger than @len or the max_msg of
- *	   esdm_dtls_alloc(), -ECONNRESET if the peer is gone, another negative
- *	   errno on a failure of the DTLS. After any error but -EAGAIN, the
- *	   connection is not to be used any more.
+ *	   esdm_dtls_alloc() - or than the @len of the call that received its
+ *	   start -, -ECONNRESET if the peer is gone, another negative errno on
+ *	   a failure of the DTLS. After any error but -EAGAIN, the connection
+ *	   is not to be used any more.
  */
 ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len);
 

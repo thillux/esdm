@@ -59,10 +59,12 @@ struct esdm_dtls {
 	/*
 	 * The parts of a message received so far, allocated for a message of
 	 * several parts only: a connection mostly carries messages of one
-	 * record, and a server holds many connections.
+	 * record, and a server holds many connections. Its size is the limit
+	 * of the call receiving the first part.
 	 */
 	uint8_t *partial;
 	size_t partial_len;
+	size_t partial_size;
 };
 
 static __thread unsigned int esdm_dtls_busy_depth = 0;
@@ -159,6 +161,7 @@ static void esdm_dtls_drop_partial(struct esdm_dtls *dtls)
 	}
 	dtls->partial = NULL;
 	dtls->partial_len = 0;
+	dtls->partial_size = 0;
 }
 
 DSO_PUBLIC
@@ -234,6 +237,9 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 		return -EINVAL;
 
 	limit = len < dtls->max_msg ? len : dtls->max_msg;
+	/* The rest of a message must fit where its first parts went */
+	if (dtls->partial && limit > dtls->partial_size)
+		limit = dtls->partial_size;
 
 	rec = malloc(ESDM_DTLS_RECORD_BUF);
 	if (!rec)
@@ -273,6 +279,7 @@ ssize_t esdm_dtls_recv(struct esdm_dtls *dtls, void *buf, size_t len)
 				ret = -ENOMEM;
 				goto out;
 			}
+			dtls->partial_size = limit;
 		}
 		memcpy(dtls->partial + dtls->partial_len, rec + 1, part);
 		dtls->partial_len += part;
