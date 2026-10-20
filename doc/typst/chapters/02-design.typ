@@ -1430,8 +1430,9 @@ DTLS over SCTP, for every TLS stack, the transport an option of the context.
 The post-quantum algorithms are those of TLS 1.3 only: over TCP, the key
 exchange prefers the groups of ML-KEM - SecP384r1MLKEM1024, MLKEM1024, but no
 hybrid whose conventional half falls short of 192 bits - to (EC)DHE, and
-certificates may be on ML-DSA, as far as the TLS stack has them; DTLS 1.2
-over SCTP keeps to ECDHE with ECDSA or RSA certificates, which a CA on ML-DSA
+certificates may be on ML-DSA-87, as far as the TLS stack has them - not on
+ML-DSA-44 or ML-DSA-65, which are refused in a chain as well; DTLS 1.2 over
+SCTP keeps to ECDHE with ECDSA or RSA certificates, which a CA on ML-DSA-87
 may issue, as none of the TLS stacks implements DTLS 1.3.
 
 #par(first-line-indent: 0pt)[The SCTP association authenticates its DATA and

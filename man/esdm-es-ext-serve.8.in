@@ -374,9 +374,9 @@ The cipher suites are ECDHE with ECDSA or RSA certificates, and AES-GCM or
 ChaCha20-Poly1305. DTLS 1.2 has no post-quantum algorithms: the key exchange
 of ML-KEM and the signatures of ML-DSA are defined for TLS 1.3 only, and none
 of the TLS stacks has DTLS 1.3. A certificate on ML-DSA is refused at the
-start; the certificates may still be issued by a CA on ML-DSA, where the TLS
-stack verifies ML-DSA \- OpenSSL 3.5 and later, GnuTLS built with leancrypto,
-Botan 3.6 and later.
+start; the certificates may still be issued by a CA on ML-DSA-87, where the
+TLS stack verifies ML-DSA \- OpenSSL 3.5 and later, GnuTLS built with
+leancrypto, Botan 3.6 and later -, not by one on ML-DSA-44 or ML-DSA-65.
 .IP \(bu 2
 The association authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH
 (RFC 4895): both sides require it before the association is set up, and refuse

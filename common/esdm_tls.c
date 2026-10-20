@@ -43,6 +43,7 @@
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
 #include "esdm_tls_sctp.h"
+#include "helper.h"
 #include "leak_check.h"
 #include "memset_secure.h"
 
@@ -503,9 +504,62 @@ esdm_tls_check_chain(struct esdm_tls_ctx *ctx, const struct esdm_tls_der *chain,
 }
 
 /*
- * The revocation policy on the chain of the peer, from the verification of the
- * TLS stack - see esdm_tls_backend_check. The chain it accepts is kept for
- * what the connection tells of its peer, and esdm_tls_peer_revoked().
+ * Of ML-DSA, ML-DSA-87 alone is taken - see "Post-quantum algorithms" in
+ * esdm_tls.h: the OIDs of the keys of the others
+ */
+static const struct {
+	const char *oid;
+	const char *name;
+} esdm_tls_mldsa_refused[] = {
+	{ "2.16.840.1.101.3.4.3.17", "ML-DSA-44" },
+	{ "2.16.840.1.101.3.4.3.18", "ML-DSA-65" },
+};
+
+/*
+ * Is a certificate of @chain - the peer's, a CA's, the trust anchor - on a key
+ * of ML-DSA-44 or ML-DSA-65? It signed the handshake, or the certificate
+ * below it. Checked here for every TLS stack and either transport, whatever
+ * the stack verifies.
+ *
+ * @return the verdict, with the reason in @why if it is no acceptance
+ */
+static enum esdm_tls_verdict
+esdm_tls_check_mldsa(const struct esdm_tls_der *chain, size_t num, char *why,
+		     size_t whylen)
+{
+	size_t depth, i;
+
+	for (depth = 0; depth < num; depth++) {
+		struct esdm_tls_cert_info cert;
+
+		if (esdm_tls_backend_cert_info(&chain[depth], &cert)) {
+			snprintf(why, whylen,
+				 "the certificate at depth %zu does not parse",
+				 depth);
+			return esdm_tls_verdict_bad_chain;
+		}
+		for (i = 0; i < ARRAY_SIZE(esdm_tls_mldsa_refused); i++) {
+			if (strcmp(cert.key_oid, esdm_tls_mldsa_refused[i].oid))
+				continue;
+			/* A long subject cut off, for the log */
+			if (snprintf(
+				    why, whylen,
+				    "%s (depth %zu) is on %s - of ML-DSA, only ML-DSA-87 is taken",
+				    cert.subject, depth,
+				    esdm_tls_mldsa_refused[i].name) < 0)
+				why[0] = '\0';
+			return esdm_tls_verdict_bad_chain;
+		}
+	}
+
+	return esdm_tls_verdict_accepted;
+}
+
+/*
+ * The parameter sets of ML-DSA and the revocation policy on the chain of the
+ * peer, from the verification of the TLS stack - see esdm_tls_backend_check.
+ * The chain they accept is kept for what the connection tells of its peer,
+ * and esdm_tls_peer_revoked().
  */
 static enum esdm_tls_verdict esdm_tls_check_peer(void *arg,
 						 struct esdm_tls_der *chain,
@@ -521,8 +575,11 @@ static enum esdm_tls_verdict esdm_tls_check_peer(void *arg,
 		return esdm_tls_verdict_bad_chain;
 	}
 
-	verdict = esdm_tls_check_chain(tls->ctx, chain, num, false, tls->error,
+	verdict = esdm_tls_check_mldsa(chain, num, tls->error,
 				       sizeof(tls->error));
+	if (verdict == esdm_tls_verdict_accepted)
+		verdict = esdm_tls_check_chain(tls->ctx, chain, num, false,
+					       tls->error, sizeof(tls->error));
 	if (verdict != esdm_tls_verdict_accepted) {
 		esdm_tls_chain_free(chain, num);
 		return verdict;

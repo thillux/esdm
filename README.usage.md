@@ -401,7 +401,7 @@ There are two modes:
   anchors and CRLs are taken up while the daemons run. The TLS stack is that
   of the crypto backend - OpenSSL, GnuTLS or Botan. The key exchange prefers
   the post-quantum SecP384r1MLKEM1024 and MLKEM1024 to (EC)DHE,
-  and certificates and CAs may be on ML-DSA, as far as the TLS stack has them -
+  and certificates and CAs may be on ML-DSA-87, as far as the TLS stack has them -
   see `esdm-egd-net-server(8)`.
 
 * Plain TCP, neither encrypted nor authenticated. It is meant only for

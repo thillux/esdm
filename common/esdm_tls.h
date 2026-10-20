@@ -92,25 +92,30 @@
  *  - Botan 3.7 and later, with its modules ml_kem and tls_13_pqc: MLKEM1024,
  *    and SecP384r1MLKEM1024 from 3.8 on.
  *
- * The signature schemes mldsa44, mldsa65 and mldsa87 of TLS 1.3 are offered
- * and accepted next to the others: a side with an ML-DSA certificate signs
- * its handshake with it, and its peer verifies that. A CA on ML-DSA - a trust
- * anchor or an intermediate one - signs certificates and CRLs, which the
- * verification, the check of the own chain and the revocation check verify as
- * any others; the chain may mix ML-DSA with the classical algorithms. Every
- * check of a context - the key belongs to the certificate, the certificate
- * chains to the trust anchors, the CRLs - holds for ML-DSA as well.
- * esdm_tls_mldsa() tells what of it the TLS stack does:
+ * Of ML-DSA, ML-DSA-87 alone is taken, at the security level of ML-KEM-1024:
+ * its signature scheme mldsa87 of TLS 1.3 is offered and accepted next to the
+ * classical ones, a side with a certificate on it signs its handshake with it,
+ * and its peer verifies that. A CA on ML-DSA-87 - a trust anchor or an
+ * intermediate one - signs certificates and CRLs, which the verification, the
+ * check of the own chain and the revocation check verify as any others; the
+ * chain may mix ML-DSA-87 with the classical algorithms. Every check of a
+ * context - the key belongs to the certificate, the certificate chains to the
+ * trust anchors, the CRLs - holds for ML-DSA as well. ML-DSA-44 and ML-DSA-65
+ * are not taken: their signature schemes are neither offered nor accepted, a
+ * context with a certificate on one is not built, and a peer with a
+ * certificate on one in its chain - its own or a CA's - is refused, with
+ * every TLS stack and on either transport, by the check of esdm_tls.c next to
+ * the revocation policy. esdm_tls_mldsa() tells what of ML-DSA-87 the TLS
+ * stack does:
  *
- *  - OpenSSL 3.5 and later: all of it - its default signature schemes list
- *    the ones of ML-DSA first.
+ *  - OpenSSL 3.5 and later: all of it.
  *  - GnuTLS built with leancrypto: certificates and CRLs signed with ML-DSA
  *    from 3.8.9 on, and the handshake signed with ML-DSA from 3.8.10 on.
  *  - Botan: certificates and CRLs signed with ML-DSA, 3.6 and later with its
  *    module ml_dsa - but no signature scheme of TLS for ML-DSA (Botan 3.13):
  *    a context with a certificate on ML-DSA is not built, as no handshake
  *    could be signed with it. The certificates of the sides are on ECDSA or
- *    RSA then, and may be issued by a CA on ML-DSA.
+ *    RSA then, and may be issued by a CA on ML-DSA-87.
  *
  * DTLS 1.2 on SCTP has neither, and keeps to ECDHE with certificates on ECDSA
  * or RSA: ML-KEM is a key encapsulation, which the key exchange of (D)TLS 1.2
@@ -119,7 +124,7 @@
  * only as well. DTLS 1.3 (RFC 9147) would carry both, but none of the TLS
  * stacks implements it - OpenSSL 3.5, GnuTLS 3.8, Botan 3.13. A context for
  * SCTP with a certificate on ML-DSA is not built; the certificates on ECDSA or
- * RSA may still be issued by a CA on ML-DSA, where the TLS stack verifies
+ * RSA may still be issued by a CA on ML-DSA-87, where the TLS stack verifies
  * ML-DSA (ESDM_TLS_MLDSA_CA).
  *
  * Contexts
@@ -584,15 +589,16 @@ const char *esdm_tls_group(struct esdm_tls *tls);
  */
 const char *esdm_tls_mlkem_group(void);
 
-/* What the TLS stack does with ML-DSA in TLS 1.3, see esdm_tls_mldsa() */
-/* Verifies certificates and CRLs signed by a CA on ML-DSA */
+/* What the TLS stack does with ML-DSA-87 in TLS 1.3, see esdm_tls_mldsa() */
+/* Verifies certificates and CRLs signed by a CA on ML-DSA-87 */
 #define ESDM_TLS_MLDSA_CA (1U << 0)
-/* Signs its handshake with a certificate on ML-DSA, verifies a peer's */
+/* Signs its handshake with a certificate on ML-DSA-87, verifies a peer's */
 #define ESDM_TLS_MLDSA_AUTH (1U << 1)
 
 /**
- * @brief What the TLS stack of the build does with ML-DSA in TLS 1.3, see
- *	  "Post-quantum algorithms" above
+ * @brief What the TLS stack of the build does with ML-DSA-87 in TLS 1.3 - the
+ *	  only parameter set of ML-DSA taken, see "Post-quantum algorithms"
+ *	  above
  *
  * @return ESDM_TLS_MLDSA_CA and ESDM_TLS_MLDSA_AUTH as far as it does, 0 if it
  *	   has no ML-DSA

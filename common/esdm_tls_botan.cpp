@@ -1328,6 +1328,15 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 				std::snprintf(info->serial + 2 * i, 3, "%02X",
 					      serial[i]);
 		}
+
+		/* Told whether Botan has the algorithm or not */
+		const std::string oid =
+			x.subject_public_key_algo().oid().to_string();
+
+		info->key_oid[0] = '\0';
+		if (oid.size() < sizeof(info->key_oid))
+			std::snprintf(info->key_oid, sizeof(info->key_oid),
+				      "%s", oid.c_str());
 		return 0;
 	} catch (...) {
 		return -EINVAL;

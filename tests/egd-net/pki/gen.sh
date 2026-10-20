@@ -27,14 +27,18 @@
 #  +- rogue-client.crt
 #
 # ML-DSA Root CA "ESDM EGD Test ML-DSA Root CA" (mldsa-ca.crt), on ML-DSA-87
-#  +- mldsa-server.crt      the server on ML-DSA-65, the names of server.crt
+#  +- mldsa-server.crt      the server on ML-DSA-87, the names of server.crt
 #  +- mldsa-ec-server.crt   the same on ECDSA P-256
 #  +- mldsa-int.crt         intermediate CA "ESDM EGD Test ML-DSA Intermediate
-#      |                    CA", on ML-DSA-65
-#      +- mldsa-client.crt  a client on ML-DSA-44, the intermediate in its file
-#      +- mldsa-client-revoked.crt  another one, revoked by mldsa-int.crl
-#      +- mldsa-ec-client.crt  a client on ECDSA P-256, the intermediate in its
-#                          file
+#  |   |                    CA", on ML-DSA-87
+#  |   +- mldsa-client.crt  a client on ML-DSA-87, the intermediate in its file
+#  |   +- mldsa-client-revoked.crt  another one, revoked by mldsa-int.crl
+#  |   +- mldsa-ec-client.crt  a client on ECDSA P-256, the intermediate in its
+#  |   |                   file
+#  |   +- mldsa65-client.crt  a client on ML-DSA-65, which is not taken
+#  +- mldsa65-int.crt       intermediate CA on ML-DSA-65, which is not taken
+#      +- mldsa65-ec-client.crt  a client on ECDSA P-256, that intermediate in
+#                          its file
 #
 # The ML-DSA part takes OpenSSL 3.5 or later - an older openssl leaves it out.
 # ca-mldsa.crt holds the root CA and the ML-DSA root CA, as trust anchors of
@@ -165,6 +169,21 @@ serial = \$dir/serial
 crlnumber = \$dir/crlnumber
 certificate = $OUT/mldsa-int.crt
 private_key = $OUT/mldsa-int.key
+default_md = default
+default_days = $DAYS
+default_crl_days = $DAYS
+policy = policy_any
+unique_subject = no
+copy_extensions = none
+
+[ mldsa65_int ]
+dir = $WORK/mldsa65-int
+database = \$dir/index.txt
+new_certs_dir = \$dir/certs
+serial = \$dir/serial
+crlnumber = \$dir/crlnumber
+certificate = $OUT/mldsa65-int.crt
+private_key = $OUT/mldsa65-int.key
 default_md = default
 default_days = $DAYS
 default_crl_days = $DAYS
@@ -351,27 +370,36 @@ crl root_server ca-revoked-server.crl
 if openssl list -signature-algorithms 2>/dev/null | grep ML-DSA-87 >/dev/null; then
 	ca_dir mldsa-root
 	ca_dir mldsa-int
+	ca_dir mldsa65-int
 
 	self_signed "$OUT/mldsa-ca.key" "$OUT/mldsa-ca.crt" \
 		"ESDM EGD Test ML-DSA Root CA" ML-DSA-87
 
-	KEY_ALG=ML-DSA-65 issue mldsa_root v3_int mldsa-int \
+	KEY_ALG=ML-DSA-87 issue mldsa_root v3_int mldsa-int \
 		"ESDM EGD Test ML-DSA Intermediate CA"
-	KEY_ALG=ML-DSA-65 issue mldsa_root v3_server mldsa-server \
+	KEY_ALG=ML-DSA-87 issue mldsa_root v3_server mldsa-server \
 		"ESDM EGD Test ML-DSA Server"
 	issue mldsa_root v3_server mldsa-ec-server \
 		"ESDM EGD Test ECDSA Server (ML-DSA CA)"
+	KEY_ALG=ML-DSA-65 issue mldsa_root v3_int mldsa65-int \
+		"ESDM EGD Test ML-DSA-65 Intermediate CA"
 
-	KEY_ALG=ML-DSA-44 issue mldsa_int v3_client mldsa-client \
+	KEY_ALG=ML-DSA-87 issue mldsa_int v3_client mldsa-client \
 		"ESDM EGD Test ML-DSA Client"
-	KEY_ALG=ML-DSA-44 issue mldsa_int v3_client mldsa-client-revoked \
+	KEY_ALG=ML-DSA-87 issue mldsa_int v3_client mldsa-client-revoked \
 		"ESDM EGD Test ML-DSA Client (revoked)"
 	issue mldsa_int v3_client mldsa-ec-client \
 		"ESDM EGD Test ECDSA Client (ML-DSA CA)"
+	KEY_ALG=ML-DSA-65 issue mldsa_int v3_client mldsa65-client \
+		"ESDM EGD Test ML-DSA-65 Client"
+	issue mldsa65_int v3_client mldsa65-ec-client \
+		"ESDM EGD Test ECDSA Client (ML-DSA-65 CA)"
 
-	for c in mldsa-client mldsa-client-revoked mldsa-ec-client; do
+	for c in mldsa-client mldsa-client-revoked mldsa-ec-client \
+		mldsa65-client; do
 		cat "$OUT/mldsa-int.crt" >>"$OUT/$c.crt"
 	done
+	cat "$OUT/mldsa65-int.crt" >>"$OUT/mldsa65-ec-client.crt"
 	cat "$OUT/ca.crt" "$OUT/mldsa-ca.crt" >"$OUT/ca-mldsa.crt"
 
 	crl mldsa_root mldsa-ca.crl

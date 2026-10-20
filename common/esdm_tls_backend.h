@@ -76,13 +76,19 @@ struct esdm_tls_der {
 	size_t len;
 };
 
-/* What the revocation check needs to know about a certificate */
+/* What the checks of a chain need to know about a certificate */
 struct esdm_tls_cert_info {
 	char subject[ESDM_TLS_TEXT_LEN];
 	/* Serial number in hex, for the log */
 	char serial[80];
 	/* Seconds since the epoch, 0 if the TLS stack cannot tell */
 	int64_t not_after;
+	/*
+	 * The OID of the algorithm of its key, dotted - empty if the TLS stack
+	 * cannot tell -, for the parameter sets of ML-DSA taken, see
+	 * "Post-quantum algorithms" in esdm_tls.h
+	 */
+	char key_oid[64];
 };
 
 /* The CRL of a certificate, see esdm_tls_backend_crl_lookup() */
@@ -121,7 +127,10 @@ enum esdm_tls_verdict {
 	esdm_tls_verdict_crl_expired,
 	/* No CRL covers a certificate that needs one: alert unknown_ca */
 	esdm_tls_verdict_no_crl,
-	/* A certificate of the chain does not parse: alert bad_certificate */
+	/*
+	 * A certificate of the chain does not parse, or is on a key that is not
+	 * taken - ML-DSA-44 or ML-DSA-65: alert bad_certificate
+	 */
 	esdm_tls_verdict_bad_chain,
 };
 

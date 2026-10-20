@@ -448,7 +448,8 @@ static void test_refusals(void)
 /*
  * DTLS 1.2 has no signature of ML-DSA: a context with a certificate on ML-DSA
  * is not built - see "Post-quantum algorithms" in esdm_tls.h. Certificates on
- * ECDSA of a CA on ML-DSA serve where the TLS stack verifies ML-DSA.
+ * ECDSA of a CA on ML-DSA-87 serve where the TLS stack verifies ML-DSA, those
+ * of a CA on ML-DSA-65 are refused.
  */
 static void test_mldsa(void)
 {
@@ -461,6 +462,9 @@ static void test_mldsa(void)
 	struct esdm_tls_config ccfg =
 		cfg_of(PKI("mldsa-ec-client.crt"), PKI("mldsa-ec-client.key"),
 		       PKI("mldsa-ca.crt"));
+	struct esdm_tls_config c65 =
+		cfg_of(PKI("mldsa65-ec-client.crt"),
+		       PKI("mldsa65-ec-client.key"), PKI("mldsa-ca.crt"));
 	struct esdm_tls_ctx *ctx = NULL, *sctx, *cctx;
 	int ret;
 
@@ -479,6 +483,10 @@ static void test_mldsa(void)
 	sctx = ctx_of(true, &scfg);
 	cctx = ctx_of(false, &ccfg);
 	expect_accepted(sctx, cctx, "ECDSA certificates of a CA on ML-DSA");
+	esdm_tls_ctx_put(cctx);
+	cctx = ctx_of(false, &c65);
+	expect_refused(sctx, cctx, "localhost",
+		       "an ECDSA client of a CA on ML-DSA-65");
 	esdm_tls_ctx_put(sctx);
 	esdm_tls_ctx_put(cctx);
 }
