@@ -46,6 +46,7 @@
 #include "esdm_peer_limit.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
+#include "esdm_seed_sizes.h"
 #include "esdm_server_socket.h"
 #include "helper.h"
 #include "memset_secure.h"
@@ -109,12 +110,23 @@
  * A time rather than a number of generations, as the cost of one depends on
  * the entropy sources. The first generation of a round is always made, so even
  * one longer than this makes progress - a round runs over by the generation
- * it is in at most, which for a request of ESDM_EGD_MAX_TRANSFER bytes may
- * take several reseeds. The next round begins where this one ran out of
- * budget, see esdm_egd_handler() - otherwise the connections at the head of
- * the list would get all of it.
+ * it is in at most, which ESDM_EGD_PR_PIECE bounds to one seeding of the PR
+ * DRNG. The next round begins where this one ran out of budget, see
+ * esdm_egd_handler() - otherwise the connections at the head of the list
+ * would get all of it.
  */
 #define ESDM_EGD_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
+
+/*
+ * Most prediction resistant bytes one generation asks for: one block of the
+ * PR DRNG, which is preceded by a seeding of its own - the security strength,
+ * as the RPC clients ask for in ESDM_RPC_MAX_PR_REQUEST_SIZE. A request of
+ * ESDM_EGD_MAX_TRANSFER bytes generated at once takes eight seedings, which
+ * the round budget above cannot stop half-way: the round would run over by all
+ * of them. In pieces, it is assembled over as many rounds, which follow at once
+ * - see esdm_egd_cmd_read_block() - at no cost in seedings.
+ */
+#define ESDM_EGD_PR_PIECE ESDM_DRNG_SECURITY_STRENGTH_BYTES
 
 /*
  * Largest response of a run of reads answered together, see
@@ -322,8 +334,9 @@ struct esdm_egd_conn {
 
 	/*
 	 * A command is waiting in the input buffer for the next round's
-	 * budget. It is served by the event loop without any event of its own:
-	 * its bytes are no longer in the socket.
+	 * budget, or a deferred request is, see esdm_egd_serve_deferred(). It
+	 * is served by the event loop without any event of its own: its bytes
+	 * are no longer in the socket.
 	 */
 	bool yielded;
 
@@ -890,7 +903,9 @@ static int esdm_egd_get_random(struct esdm_egd_conn *conn, bool pr,
 
 		if (conn->pr_budget)
 			conn->pr_budget--;
-		ret = esdm_get_random_bytes_pr_noblock(buf, len);
+		ret = esdm_get_random_bytes_pr_noblock(
+			buf,
+			(len < ESDM_EGD_PR_PIECE) ? len : ESDM_EGD_PR_PIECE);
 		esdm_egd_round.spent_ns += esdm_egd_now_ns() - start;
 	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
@@ -1449,9 +1464,17 @@ static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 	if (!conn->deferred)
 		return 0;
 
-	/* Still deferred - the next round continues it. */
-	if (!esdm_egd_may_generate(conn, conn->deferred_pr))
+	/*
+	 * Still deferred - the next round continues it. It waits for nothing
+	 * but that round's budget, as a request of more than a generation
+	 * gives does after every piece of its answer, see ESDM_EGD_PR_PIECE: the
+	 * round follows at once, not after the poll interval of a request
+	 * waiting for entropy.
+	 */
+	if (!esdm_egd_may_generate(conn, conn->deferred_pr)) {
+		conn->yielded = true;
 		return -EAGAIN;
+	}
 
 	ret = esdm_egd_cmd_read_block(conn, conn->deferred_pr, conn->deferred);
 	if (ret)

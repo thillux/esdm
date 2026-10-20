@@ -30,7 +30,10 @@
  *
  *   - a cheap command of another client is answered within a fraction of the
  *     time one generation for each of the connections takes,
- *   - every request is answered in full nonetheless.
+ *   - every request is answered in full nonetheless,
+ *   - and a generation is of one block of the PR DRNG at most, so a round runs
+ *     over its budget by one seeding at most, while a request of more is
+ *     assembled in rounds following one another at once.
  *
  * Like the other EGD server tests, the server runs in this process with a
  * single worker, and no daemon is needed. Unlike them, the ESDM has to be
@@ -232,6 +235,123 @@ static uint64_t test_pr_cost_us(void)
 	return best;
 }
 
+/*
+ * One generation is of one block of the PR DRNG at most, a seeding's worth:
+ * the round budget cannot stop a generation half-way, and one of the largest
+ * request at once would make the round run over by all of its seedings. The
+ * non-blocking read answers with what one generation gave it.
+ */
+static void test_piece(void)
+{
+	const uint8_t cmd[2] = { ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK,
+				 ESDM_EGD_MAX_TRANSFER };
+	uint8_t answer[1 + ESDM_EGD_MAX_TRANSFER] = { 0 };
+	unsigned int i;
+	int fd;
+
+	printf("EGD PR budget: one generation is one block\n");
+
+	fd = test_connect(sockpath);
+	CHECK(fd >= 0, "cannot connect");
+	if (fd < 0)
+		return;
+
+	/* An empty answer says nothing - the entropy sources did not deliver */
+	for (i = 0; i < 10; i++) {
+		if (test_send(fd, cmd, sizeof(cmd)) ||
+		    test_recv(fd, answer, 1, TEST_RESPONSE_MS) ||
+		    (answer[0] &&
+		     test_recv(fd, answer + 1, answer[0], TEST_RESPONSE_MS))) {
+			CHECK(0, "no answer to the non-blocking read");
+			break;
+		}
+		if (answer[0])
+			break;
+	}
+
+	printf("  %u bytes answered to a non-blocking read of %u\n", answer[0],
+	       ESDM_EGD_MAX_TRANSFER);
+	CHECK(answer[0] <= 32,
+	      "one generation produced %u bytes, more than one block of 32",
+	      answer[0]);
+
+	close(fd);
+}
+
+/*
+ * A blocking read of more than one block is assembled over as many rounds, and
+ * they follow one another at once: between its pieces, the request waits for
+ * nothing but the next round's budget, not for the poll interval of a request
+ * waiting for entropy. Timed against the same blocks generated directly,
+ * before and after, the slower of the two counting - the poll interval would
+ * add 50 ms to each request of two blocks, a second over all of them.
+ */
+#define TEST_PIECES_REQUESTS 20
+#define TEST_PIECES_BLOCKS 2
+
+/* The blocks of the requests generated directly, in microseconds */
+static uint64_t test_pieces_direct_us(void)
+{
+	uint8_t block[32];
+	uint64_t start = test_now_us();
+	unsigned int i;
+
+	for (i = 0; i < TEST_PIECES_REQUESTS * TEST_PIECES_BLOCKS; i++) {
+		if (esdm_get_random_bytes_pr_noblock(block, sizeof(block)) <= 0)
+			return 0;
+	}
+
+	return test_now_us() - start;
+}
+
+static void test_pieces(void)
+{
+	const uint8_t cmd[2] = { ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
+				 32 * TEST_PIECES_BLOCKS };
+	uint8_t answer[32 * TEST_PIECES_BLOCKS];
+	uint64_t start, direct_us, after_us, egd_us;
+	unsigned int i;
+	int fd;
+
+	printf("EGD PR budget: a request of %u blocks, %u times\n",
+	       TEST_PIECES_BLOCKS, TEST_PIECES_REQUESTS);
+
+	direct_us = test_pieces_direct_us();
+	if (!direct_us) {
+		printf("  SKIPPED: the PR DRNG does not deliver here\n");
+		return;
+	}
+
+	fd = test_connect(sockpath);
+	CHECK(fd >= 0, "cannot connect");
+	if (fd < 0)
+		return;
+
+	start = test_now_us();
+	for (i = 0; i < TEST_PIECES_REQUESTS; i++) {
+		if (test_send(fd, cmd, sizeof(cmd)) ||
+		    test_recv(fd, answer, sizeof(answer), TEST_RESPONSE_MS)) {
+			CHECK(0, "request %u was not answered", i);
+			break;
+		}
+	}
+	egd_us = test_now_us() - start;
+
+	after_us = test_pieces_direct_us();
+	if (after_us > direct_us)
+		direct_us = after_us;
+
+	printf("  %llu ms through the EGD server, %llu ms for the blocks directly\n",
+	       (unsigned long long)(egd_us / 1000),
+	       (unsigned long long)(direct_us / 1000));
+	CHECK(egd_us < 2 * direct_us + 500000,
+	      "the requests took %llu ms, their blocks %llu ms - the pieces waited between rounds",
+	      (unsigned long long)(egd_us / 1000),
+	      (unsigned long long)(direct_us / 1000));
+
+	close(fd);
+}
+
 static void test_flood(void)
 {
 	static int fds[TEST_MAX_CONNS];
@@ -375,6 +495,8 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	test_piece();
+	test_pieces();
 	test_flood();
 
 out:
