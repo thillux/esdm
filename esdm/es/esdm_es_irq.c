@@ -21,8 +21,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "esdm_config.h"
@@ -89,10 +91,50 @@ static void esdm_irq_buf_discard(void)
 #endif
 }
 
+/* Where the kernel shows the add-on - the module esdm_es - while it is loaded */
+#ifndef ESDM_IRQ_ADDON_SYSFS
+#define ESDM_IRQ_ADDON_SYSFS "/sys/module/esdm_es"
+#endif
+
+/* How often the add-on is looked for there at most, milliseconds */
+#ifndef ESDM_IRQ_ADDON_PROBE_INTERVAL_MS
+#define ESDM_IRQ_ADDON_PROBE_INTERVAL_MS 1000
+#endif
+
+/*
+ * Is the module of the add-on loaded? Looked for anew once the last look is
+ * ESDM_IRQ_ADDON_PROBE_INTERVAL_MS old: the question is asked whenever the
+ * kernel RNG is, which is on every seeding and more.
+ */
+static bool esdm_irq_addon_loaded(void)
+{
+	static _Atomic uint64_t probed_at = 0;
+	static atomic_bool loaded = false;
+	struct timespec ts;
+	uint64_t now, at;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return !access(ESDM_IRQ_ADDON_SYSFS, F_OK);
+	now = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 + 1;
+
+	at = atomic_load(&probed_at);
+	if (at && now < at + ESDM_IRQ_ADDON_PROBE_INTERVAL_MS)
+		return atomic_load(&loaded);
+
+	atomic_store(&loaded, !access(ESDM_IRQ_ADDON_SYSFS, F_OK));
+	atomic_store(&probed_at, now);
+	return atomic_load(&loaded);
+}
+
 /*
  * The kernel add-on is there, credited or not: its hook in random.c takes the
  * interrupts away from the kernel RNG as soon as the add-on registers, whatever
  * rate user space credits the source with.
+ *
+ * Its descriptor tells while the ESDM holds one. Loaded after the ESDM started,
+ * the add-on is not opened - es_irq_retry, which would look for it again, is
+ * off by default, and the ESDM may lack the privileges by then - but its
+ * module is there to see, and takes the interrupts all the same.
  */
 bool esdm_irq_present(void)
 {
@@ -102,7 +144,7 @@ bool esdm_irq_present(void)
 	ret = esdm_irq_entropy_fd >= 0;
 	mutex_reader_unlock(&irq_mutex);
 
-	return ret;
+	return ret || esdm_irq_addon_loaded();
 }
 
 bool esdm_irq_enabled(void)
