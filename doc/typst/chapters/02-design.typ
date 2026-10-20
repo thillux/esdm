@@ -1822,7 +1822,13 @@ external entropy sources (section @sec:ext-es-net) and of the EGD protocol -
 share one backend per TLS stack (`common/esdm_tls_backend.h`): one set-up of
 the library, one error mapping and one connection, which differ per transport
 only in the protocol, the suites, the groups and the way the socket is
-reached.]
+reached. Both run in a secure minimal mode, set up in one place per TLS
+stack: a connection carries the one full handshake it starts with - no
+session cache, no tickets of TLS 1.2 or TLS 1.3 and no pre-shared key of
+resumption, no early data (0-RTT), no renegotiation either way, no
+post-handshake authentication, no compression and no heartbeat -, and DTLS
+1.2 requires the extended master secret (RFC 7627) and, with a CBC suite,
+Encrypt-then-MAC.]
 
 #figure(
   image("../figures/dtls-handshake.svg", width: 85%),

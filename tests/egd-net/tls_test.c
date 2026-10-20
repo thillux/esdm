@@ -21,9 +21,10 @@
  * The TLS layer of the EGD network mode, common/esdm_tls.h, against the test
  * PKI of tests/egd-net/pki - for whichever TLS stack the build uses: the
  * mutual authentication, the server name, the revocation policy, the
- * transfers and the end of a connection. Both ends run in this one thread on
- * a socket pair, each step of the one made whenever the other waits, so no
- * timing decides anything. Skips (77) in a build without egd-net-tls.
+ * transfers and the end of a connection, and the secure minimal mode on the
+ * wire. Both ends run in this one thread on a socket pair, each step of the
+ * one made whenever the other waits, so no timing decides anything. Skips
+ * (77) in a build without egd-net-tls.
  *
  * The post-quantum algorithms are parts of their own, run with an argument:
  * "mlkem" the key exchange by the group of ML-KEM the TLS stack prefers,
@@ -46,6 +47,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../test_tls_wire.h"
 #include "config.h"
 #include "esdm_logger.h"
 #include "esdm_tls.h"
@@ -550,6 +552,190 @@ static void test_transfer_and_eof(void)
 out:
 	free(data);
 	free(out);
+	esdm_tls_ctx_put(sctx);
+	esdm_tls_ctx_put(cctx);
+}
+
+/*
+ * The secure minimal mode on the wire, see common/esdm_tls_backend.h: the
+ * client on cs[0], the server on ss[1], and every byte moved by the test
+ * between cs[1] and ss[0], read on the way - see tests/test_tls_wire.h.
+ */
+struct wire {
+	int cs[2], ss[2];
+	struct esdm_tls *c, *s;
+	/* What the client sends, and what the server does */
+	struct test_tls_wire c2s, s2c;
+};
+
+static void wire_close(struct wire *w)
+{
+	unsigned int i;
+
+	esdm_tls_free(w->c);
+	esdm_tls_free(w->s);
+	w->c = w->s = NULL;
+	for (i = 0; i < 2; i++) {
+		if (w->cs[i] >= 0)
+			close(w->cs[i]);
+		if (w->ss[i] >= 0)
+			close(w->ss[i]);
+		w->cs[i] = w->ss[i] = -1;
+	}
+}
+
+/* Move what @from has to @to, reading it into @t; @return the bytes */
+static size_t wire_move(int from, int to, struct test_tls_wire *t)
+{
+	uint8_t buf[4096];
+	size_t moved = 0;
+	ssize_t n;
+
+	while ((n = recv(from, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+		test_tls_wire_stream(t, buf, (size_t)n);
+		/* The relay ends block: the socket of the other end takes it */
+		if (send(to, buf, (size_t)n, MSG_NOSIGNAL) != n) {
+			CHECK(0, "the relay lost %zd bytes", n);
+			break;
+		}
+		moved += (size_t)n;
+	}
+	return moved;
+}
+
+/* Move what there is both ways, or wait for an end to send something */
+static void wire_step(struct wire *w)
+{
+	struct pollfd pfd[2] = { { .fd = w->cs[1], .events = POLLIN },
+				 { .fd = w->ss[0], .events = POLLIN } };
+
+	if (!wire_move(w->cs[1], w->ss[0], &w->c2s) &&
+	    !wire_move(w->ss[0], w->cs[1], &w->s2c))
+		poll(pfd, 2, 20);
+}
+
+/*
+ * One connection between @sctx and @cctx through the relay: its ClientHello
+ * offers no session ticket, no pre-shared key - which TLS 1.3 resumes with -
+ * and no early data, and asks for no heartbeat and no post-handshake
+ * authentication; its ServerHello takes no pre-shared key, so the handshake is
+ * a full one; and once the client is through, the server sends nothing but its
+ * data - no NewSessionTicket, which TLS 1.3 sends after the handshake,
+ * encrypted: the records are counted. The legacy session ID of a ClientHello
+ * of TLS 1.3 is the random one of the middlebox compatibility, nothing to
+ * resume.
+ */
+static void wire_connection(struct esdm_tls_ctx *sctx,
+			    struct esdm_tls_ctx *cctx, unsigned int nr)
+{
+	static struct wire w;
+	int cret = -EAGAIN, sret = -EAGAIN;
+	unsigned int i, before = 0, after;
+	uint8_t got[4];
+	ssize_t n = -EAGAIN;
+
+	memset(&w, 0, sizeof(w));
+	w.cs[0] = w.cs[1] = w.ss[0] = w.ss[1] = -1;
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, w.cs) ||
+	    socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, w.ss) ||
+	    fcntl(w.cs[0], F_SETFL, O_NONBLOCK) ||
+	    fcntl(w.ss[1], F_SETFL, O_NONBLOCK) ||
+	    esdm_tls_alloc(sctx, w.ss[1], NULL, &w.s) ||
+	    esdm_tls_alloc(cctx, w.cs[0], "localhost", &w.c)) {
+		CHECK(0, "connection %u: no relay", nr);
+		goto out;
+	}
+
+	for (i = 0; i < 2000 && (cret == -EAGAIN || sret == -EAGAIN); i++) {
+		if (cret == -EAGAIN) {
+			cret = esdm_tls_handshake(w.c);
+			/* What the server sent so far was its handshake */
+			if (!cret)
+				before = w.s2c.records;
+		}
+		if (sret == -EAGAIN)
+			sret = esdm_tls_handshake(w.s);
+		wire_step(&w);
+	}
+	CHECK(!cret && !sret, "connection %u: handshake %d (%s) / %d (%s)", nr,
+	      cret, esdm_tls_error(w.c), sret, esdm_tls_error(w.s));
+	if (cret || sret)
+		goto out;
+
+	/* Whatever the server sent once through, moved and counted */
+	for (i = 0; i < 5; i++)
+		wire_step(&w);
+	after = w.s2c.records - before;
+
+	/* The data of the server is the next record */
+	CHECK(esdm_tls_send(w.s, "data", 4) == 4, "connection %u: send", nr);
+	for (i = 0; i < 100 && esdm_tls_flush(w.s) == -EAGAIN; i++)
+		wire_step(&w);
+	for (i = 0; i < 200 && n == -EAGAIN; i++) {
+		wire_step(&w);
+		n = esdm_tls_recv(w.c, got, sizeof(got));
+	}
+	CHECK(n == 4 && !memcmp(got, "data", 4),
+	      "connection %u: the data of the server came as %zd", nr, n);
+
+	printf("  connection %u: ClientHello with %u extensions and a legacy session ID of %u bytes, %u records of the server's handshake, %u after it, %u with its data\n",
+	       nr, w.c2s.nexts, w.c2s.session_id_len, before, after,
+	       w.s2c.records - before - after);
+	CHECK(!w.c2s.malformed && !w.s2c.malformed,
+	      "connection %u: a record not understood", nr);
+	CHECK(test_tls_has_hs(&w.c2s, TEST_TLS_HS_CLIENT_HELLO) &&
+		      test_tls_has_hs(&w.s2c, TEST_TLS_HS_SERVER_HELLO),
+	      "connection %u: no hellos on the wire", nr);
+	CHECK(test_tls_has_ext(&w.c2s, TEST_TLS_EXT_SUPPORTED_VERSIONS) &&
+		      test_tls_has_ext(&w.s2c, TEST_TLS_EXT_SUPPORTED_VERSIONS),
+	      "connection %u: no TLS 1.3", nr);
+	CHECK(!test_tls_has_ext(&w.c2s, TEST_TLS_EXT_SESSION_TICKET),
+	      "connection %u: the client asks for a ticket", nr);
+	CHECK(!test_tls_has_ext(&w.c2s, TEST_TLS_EXT_PRE_SHARED_KEY),
+	      "connection %u: the client offers a pre-shared key", nr);
+	CHECK(!test_tls_has_ext(&w.c2s, TEST_TLS_EXT_EARLY_DATA),
+	      "connection %u: the client offers early data", nr);
+	CHECK(!test_tls_has_ext(&w.c2s, TEST_TLS_EXT_HEARTBEAT),
+	      "connection %u: the client asks for the heartbeat", nr);
+	CHECK(!test_tls_has_ext(&w.c2s, TEST_TLS_EXT_POST_HANDSHAKE_AUTH),
+	      "connection %u: the client offers post-handshake authentication",
+	      nr);
+	CHECK(!test_tls_has_ext(&w.s2c, TEST_TLS_EXT_PRE_SHARED_KEY),
+	      "connection %u: the server takes a pre-shared key - no full handshake",
+	      nr);
+	CHECK(!test_tls_has_ext(&w.s2c, TEST_TLS_EXT_EARLY_DATA),
+	      "connection %u: the server takes early data", nr);
+	CHECK(before > 0 && !after,
+	      "connection %u: the server sent %u records after its handshake - a NewSessionTicket",
+	      nr, after);
+	CHECK(w.s2c.records - before - after == 1,
+	      "connection %u: the data of the server took %u records", nr,
+	      w.s2c.records - before - after);
+
+out:
+	wire_close(&w);
+}
+
+/*
+ * The secure minimal mode on the wire: two connections between the same
+ * contexts, the second a full handshake as the first
+ */
+static void test_minimal(void)
+{
+	struct esdm_tls_config scfg = cfg_of(PKI("server.crt"),
+					     PKI("server.key"), PKI("ca.crt"));
+	struct esdm_tls_config c1 = cfg_of(PKI("client1.crt"),
+					   PKI("client1.key"), PKI("ca.crt"));
+	struct esdm_tls_ctx *sctx = server_ctx(&scfg), *cctx = client_ctx(&c1);
+
+	printf("TLS (%s): the secure minimal mode on the wire\n",
+	       esdm_tls_stack());
+
+	if (sctx && cctx) {
+		wire_connection(sctx, cctx, 1);
+		wire_connection(sctx, cctx, 2);
+	}
+
 	esdm_tls_ctx_put(sctx);
 	esdm_tls_ctx_put(cctx);
 }
@@ -1155,6 +1341,7 @@ int main(int argc, char *argv[])
 	test_refused_clients();
 	test_server_name();
 	test_transfer_and_eof();
+	test_minimal();
 	test_crl();
 	test_crl_client();
 	test_crl_established();

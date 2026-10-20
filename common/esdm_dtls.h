@@ -44,9 +44,14 @@
  *
  * The CBC suite goes with Encrypt-then-MAC (RFC 7366): every backend offers
  * and agrees to it, a Botan or GnuTLS peer refuses a session without it, and
- * so does an OpenSSL server - an OpenSSL client cannot tell. There is no
- * post-quantum key exchange: ML-KEM is a key exchange of TLS 1.3 only, and
+ * so does an OpenSSL server - an OpenSSL client cannot tell. Every session has
+ * the extended master secret (RFC 7627), which every peer requires. There is
+ * no post-quantum key exchange: ML-KEM is a key exchange of TLS 1.3 only, and
  * none of the TLS stacks has DTLS 1.3.
+ *
+ * No session is resumed, no ticket issued, and nothing renegotiated: every
+ * connection runs the one full handshake it starts with - the secure minimal
+ * mode of esdm_tls_backend.h.
  *
  * The pre-shared key and its identity are constants compiled into the ESDM,
  * the same in every build, and no secret - see esdm_tls_backend.h. Anybody

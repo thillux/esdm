@@ -69,26 +69,52 @@
 #include "memset_secure.h"
 
 /*
- * TLS 1.3 exactly; the tickets are turned off with the session flags. The
- * groups and the signature algorithms are added to it, see
- * esdm_tls_gnutls_stream_priority().
+ * The secure minimal mode of esdm_tls_backend.h, the same on every transport -
+ * a connection lives as long as it does, with the one full handshake it
+ * started with. It is in three places, as GnuTLS takes it:
+ *
+ *  - The priorities, ESDM_TLS_GNUTLS_MINIMAL: no tickets of TLS 1.2 or
+ *    TLS 1.3, and Encrypt-then-MAC required for a CBC suite. The extended
+ *    master secret is not turned off (%NO_SESSION_HASH), and is required by
+ *    esdm_tls_gnutls_minimal_check() - %FORCE_SESSION_HASH is no keyword of
+ *    every GnuTLS the ESDM builds with.
+ *  - The flags of a session, ESDM_TLS_GNUTLS_MINIMAL_FLAGS: no tickets
+ *    either. Neither GNUTLS_ENABLE_EARLY_DATA nor GNUTLS_ENABLE_EARLY_START,
+ *    so no early data (0-RTT) is taken, nor GNUTLS_POST_HANDSHAKE_AUTH, so
+ *    there is no post-handshake authentication of TLS 1.3.
+ *  - The session: no session cache - no database functions on a server, no
+ *    session data on a client -, so nothing is resumed and a client offers
+ *    no session and no pre-shared key of resumption. A server of DTLS 1.2
+ *    sends a session ID nevertheless, which GnuTLS gives no way to leave out.
+ *    A renegotiation either way ends the connection, see
+ *    esdm_tls_gnutls_error(). GnuTLS has no compression any more, and sends no
+ *    heartbeat unless told to.
  */
-#define ESDM_TLS_GNUTLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.3"
+#define ESDM_TLS_GNUTLS_MINIMAL ":%NO_TICKETS:%FORCE_ETM"
+#define ESDM_TLS_GNUTLS_MINIMAL_FLAGS GNUTLS_NO_TICKETS
+
+/*
+ * TLS 1.3 exactly, in the minimal mode. The groups and the signature
+ * algorithms are added to it, see esdm_tls_gnutls_stream_priority().
+ */
+#define ESDM_TLS_GNUTLS_PRIORITY                                               \
+	"NORMAL:-VERS-ALL:+VERS-TLS1.3" ESDM_TLS_GNUTLS_MINIMAL
 
 /* Room for the priority of TLS 1.3 with its groups and signatures */
 #define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
 
 /*
- * The local DTLS: DTLS 1.2 exactly, TLS_ECDHE_PSK_AES_256_CBC_SHA384 on P-521.
- * GnuTLS has no ECDHE-PSK suite with AES-GCM - RFC 8442's - and its one with
- * an AEAD cipher is ChaCha20-Poly1305, which neither NIST SP 800-52r2 nor
- * BSI TR-02102-2 allows. Encrypt-then-MAC is on by default, and required:
- * see esdm_tls_backend_handshake(). Nothing is signed - GnuTLS only wants a
- * signature algorithm in the priorities, and the hello carries it.
+ * The local DTLS: DTLS 1.2 exactly, TLS_ECDHE_PSK_AES_256_CBC_SHA384 on P-521,
+ * in the minimal mode. GnuTLS has no ECDHE-PSK suite with AES-GCM - RFC 8442's
+ * - and its one with an AEAD cipher is ChaCha20-Poly1305, which neither NIST
+ * SP 800-52r2 nor BSI TR-02102-2 allows. Encrypt-then-MAC is required - by
+ * %FORCE_ETM, and checked by esdm_tls_gnutls_minimal_check(). Nothing is
+ * signed - GnuTLS only wants a signature algorithm in the priorities, and the
+ * hello carries it.
  */
 #define ESDM_TLS_GNUTLS_PSK_PRIORITY                                           \
 	"NONE:+VERS-DTLS1.2:+ECDHE-PSK:+AES-256-CBC:+SHA384:"                  \
-	"+GROUP-SECP521R1:+SIGN-ECDSA-SHA512:+COMP-NULL"
+	"+GROUP-SECP521R1:+SIGN-ECDSA-SHA512:+COMP-NULL" ESDM_TLS_GNUTLS_MINIMAL
 
 /*
  * The retransmission and the total timeout of the DTLS handshake, in
@@ -268,6 +294,15 @@ static int esdm_tls_gnutls_error(struct esdm_tls_gnutls_conn *c, int ret,
 		snprintf(c->error, sizeof(c->error), "alert received: %s",
 			 gnutls_alert_get_name(alert));
 		return esdm_tls_gnutls_cert_alert(alert) ? -EACCES : -EPROTO;
+	case GNUTLS_E_REHANDSHAKE:
+	case GNUTLS_E_REAUTH_REQUEST:
+		/*
+		 * A peer asking for a new handshake - a renegotiation of
+		 * DTLS 1.2, or a post-handshake authentication of TLS 1.3 -,
+		 * which none of the ESDM does: see ESDM_TLS_GNUTLS_MINIMAL
+		 */
+		snprintf(c->error, sizeof(c->error), "renegotiation refused");
+		return -EPROTO;
 	default:
 		if (!gnutls_error_is_fatal(ret)) {
 			/* A warning alert, a datagram dropped: try again */
@@ -545,7 +580,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 	unsigned char addr[sizeof(struct in6_addr)];
 	bool psk = c->transport == ESDM_TLS_TRANSPORT_SEQPACKET;
 	unsigned int flags = (server ? GNUTLS_SERVER : GNUTLS_CLIENT) |
-			     GNUTLS_NONBLOCK | GNUTLS_NO_TICKETS;
+			     GNUTLS_NONBLOCK | ESDM_TLS_GNUTLS_MINIMAL_FLAGS;
 	void *cred = NULL;
 
 	d = calloc(1, sizeof(*d));
@@ -667,15 +702,34 @@ void esdm_tls_backend_conn_free(void *conn)
 }
 
 /*
- * The local DTLS refuses a session without Encrypt-then-MAC (RFC 7366):
- * MAC-then-encrypt of CBC is what Lucky Thirteen reads records from, and DTLS
- * lets an attacker try again after every record it broke. Every peer of the
- * ESDM offers and agrees to it, whichever its TLS stack.
+ * The minimal mode on a session the handshake completed, see
+ * ESDM_TLS_GNUTLS_MINIMAL: nothing resumed, and DTLS 1.2 with the extended
+ * master secret (RFC 7627), which binds the master secret to the handshake it
+ * came from, and with Encrypt-then-MAC (RFC 7366) - MAC-then-encrypt of CBC is
+ * what Lucky Thirteen reads records from, and DTLS lets an attacker try again
+ * after every record it broke. Every peer of the ESDM offers and agrees to
+ * both, whichever its TLS stack; TLS 1.3 has them built in, or needs none.
+ *
+ * @return NULL, or what is missing
  */
+static const char *esdm_tls_gnutls_minimal_check(struct esdm_tls_gnutls_conn *d)
+{
+	if (gnutls_session_is_resumed(d->session))
+		return "a resumed session";
+	if (!d->dgram)
+		return NULL;
+	if (!gnutls_session_ext_master_secret_status(d->session))
+		return "no extended master secret";
+	if (!gnutls_session_etm_status(d->session))
+		return "CBC without Encrypt-then-MAC";
+	return NULL;
+}
+
 int esdm_tls_backend_handshake(void *conn, short *want)
 {
 	struct esdm_tls_gnutls_conn *d = conn;
 	int ret = gnutls_handshake(d->session), err;
+	const char *missing;
 
 	if (ret != GNUTLS_E_SUCCESS) {
 		err = esdm_tls_gnutls_error(d, ret, want);
@@ -684,10 +738,12 @@ int esdm_tls_backend_handshake(void *conn, short *want)
 		return err;
 	}
 
-	if (d->ctx->transport == ESDM_TLS_TRANSPORT_SEQPACKET &&
-	    !gnutls_session_etm_status(d->session)) {
-		snprintf(d->error, sizeof(d->error),
-			 "CBC without Encrypt-then-MAC");
+	missing = esdm_tls_gnutls_minimal_check(d);
+	if (missing) {
+		snprintf(d->error, sizeof(d->error), "%s", missing);
+		d->alert = GNUTLS_A_INSUFFICIENT_SECURITY;
+		d->alert_set = true;
+		esdm_tls_gnutls_alert(d, GNUTLS_E_INSUFFICIENT_SECURITY);
 		return -EPROTO;
 	}
 	return 0;

@@ -47,6 +47,28 @@
  * certificates, and in a build with it the linker drops them from a library
  * that does not call them.
  *
+ * The secure minimal mode: every context of every transport is set up so that
+ * a connection carries the one full handshake it started with, and nothing of
+ * it outlives the connection - in one place per backend, see there:
+ *
+ *  - no session cache, no session ID and no ticket of TLS 1.2 or TLS 1.3 to
+ *    resume a session with, issued or asked for, and no pre-shared key of
+ *    resumption - the only pre-shared key is the one of the local DTLS, the
+ *    key exchange of its suites;
+ *  - no early data (0-RTT);
+ *  - no renegotiation either way, and no post-handshake authentication;
+ *  - no compression and no heartbeat;
+ *  - DTLS 1.2 with the extended master secret (RFC 7627) and, for a CBC suite,
+ *    Encrypt-then-MAC (RFC 7366) - both required: a session without them is
+ *    refused. TLS 1.3 has the one built in and no CBC suite.
+ *
+ * What a TLS stack sends nevertheless, with nothing to resume: a client of
+ * Botan an empty session_ticket extension in its ClientHello of DTLS 1.2, and
+ * a server of GnuTLS or Botan a session ID in its ServerHello of DTLS 1.2 - a
+ * session no session cache keeps. The ClientHello of TLS 1.3 carries the random
+ * legacy session ID of the middlebox compatibility. The tests read all of it
+ * off the wire, see tests/test_tls_wire.h.
+ *
  * Every function that has to wait for the socket returns -EAGAIN and stores
  * what it waits for, POLLIN or POLLOUT, in *want. The socket is reached with
  * send(2) with MSG_NOSIGNAL and recv(2) only. On SOCK_SEQPACKET, the TLS stack

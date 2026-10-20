@@ -51,7 +51,9 @@
  *    below.
  *
  * No session tickets and no resumption: a connection is long-lived and carries
- * exactly the one handshake it started with.
+ * exactly the one full handshake it started with - no early data (0-RTT), no
+ * post-handshake authentication either: the secure minimal mode of
+ * esdm_tls_backend.h.
  *
  * The TLS is provided by the TLS stack of the crypto backend the ESDM is built
  * with: OpenSSL, GnuTLS or Botan. The builtin and the leancrypto backend have

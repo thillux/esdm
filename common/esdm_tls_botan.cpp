@@ -137,7 +137,23 @@ static std::vector<Botan::TLS::Group_Params> esdm_tls_botan_mlkem()
 #endif
 
 /*
- * The protocol of a transport, and no resumption nor renegotiation on either.
+ * The protocol of a transport, and the secure minimal mode of
+ * esdm_tls_backend.h on both - a connection lives as long as it does, with the
+ * one full handshake it started with:
+ *
+ *  - Nothing is resumed: the session manager of the contexts keeps no session
+ *    (Session_Manager_Noop) and issues no ticket of TLS 1.2, and a server of
+ *    TLS 1.3 issues none either. A client offers no session and no pre-shared
+ *    key of resumption, as it has none - but a client of DTLS 1.2 sends an
+ *    empty session_ticket extension all the same, and a server of DTLS 1.2 a
+ *    session ID, which Botan gives no way to leave out.
+ *  - No early data (0-RTT): Botan has none.
+ *  - No renegotiation either way: a request for one ends the connection, and
+ *    no resumption stands in for one. Botan has no post-handshake
+ *    authentication of TLS 1.3, no compression and no heartbeat.
+ *  - DTLS 1.2 requires the extended master secret and, for CBC,
+ *    Encrypt-then-MAC - see Esdm_Tls_Callbacks::tls_session_established(),
+ *    which checks both whatever the version of Botan.
  *
  * On a stream socket, TLS 1.3 exactly, with the groups of ML-KEM first and a
  * server that requires a certificate.
@@ -303,6 +319,7 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 		return m_server && !m_dgram;
 	}
 
+	/* The minimal mode, see above */
 	bool allow_client_initiated_renegotiation() const override
 	{
 		return false;
@@ -313,10 +330,42 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 		return false;
 	}
 
+	bool allow_insecure_renegotiation() const override
+	{
+		return false;
+	}
+
+	bool abort_connection_on_undesired_renegotiation() const override
+	{
+		return true;
+	}
+
+	bool allow_resumption_for_renegotiation() const override
+	{
+		return false;
+	}
+
 	size_t new_session_tickets_upon_handshake_success() const override
 	{
 		return 0;
 	}
+
+	bool reuse_session_tickets() const override
+	{
+		return false;
+	}
+
+	bool allow_dtls_epoch0_restart() const override
+	{
+		return false;
+	}
+
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 13, 0)
+	bool require_extended_master_secret() const override
+	{
+		return true;
+	}
+#endif
 
 	size_t dtls_default_mtu() const override
 	{
@@ -499,14 +548,27 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	}
 
 	/*
-	 * A CBC suite without Encrypt-then-MAC is refused, see
+	 * The minimal mode, see Esdm_Tls_Policy: a resumed session is refused,
+	 * and so is one of DTLS 1.2 without the extended master secret (RFC
+	 * 7627), which binds the master secret to the handshake it came from,
+	 * and a CBC suite without Encrypt-then-MAC, see
 	 * Esdm_Tls_Policy::ciphersuite_list(): the exception ends the handshake
-	 * with a fatal alert. Every peer of the ESDM offers and agrees to it,
-	 * whichever its TLS stack - and TLS 1.3 has no CBC suite.
+	 * with a fatal alert. Every peer of the ESDM offers and agrees to both,
+	 * whichever its TLS stack - and TLS 1.3 has the one built in and no CBC
+	 * suite.
 	 */
 	void tls_session_established(
 		const Botan::TLS::Session_Summary &session) override
 	{
+		if (session.was_resumption())
+			throw Botan::TLS::TLS_Exception(
+				Botan::TLS::Alert::InsufficientSecurity,
+				"a resumed session");
+		if (session.version().is_pre_tls_13() &&
+		    !session.supports_extended_master_secret())
+			throw Botan::TLS::TLS_Exception(
+				Botan::TLS::Alert::InsufficientSecurity,
+				"no extended master secret");
 		if (session.ciphersuite().cbc_ciphersuite() &&
 		    !session.supports_encrypt_then_mac())
 			throw Botan::TLS::TLS_Exception(

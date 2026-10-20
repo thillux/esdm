@@ -32,6 +32,9 @@
  * - what the TLS stack frees holds no plaintext;
  * - the handshake, read off the wire, is ECDHE-PSK with the suites and the
  *   curves of the backend, with Encrypt-then-MAC for CBC, and no certificate;
+ * - and in the secure minimal mode: a full handshake with the extended
+ *   master secret, between contexts that had connections before - no session
+ *   or ticket offered or issued, no early data, no heartbeat;
  * - a record sent again - a replay - is dropped by the replay detection of
  *   DTLS, also after a newer one: the message comes once.
  */
@@ -47,6 +50,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "../test_tls_wire.h"
 #include "common_test.h"
 #include "esdm_dtls.h"
 #include "helper.h"
@@ -91,6 +95,24 @@ static const uint16_t test_groups[] = { TEST_GROUP_P521 };
 #else
 #define TEST_CIPHER "ECDHE_PSK_AES_256_CBC_SHA384"
 #endif
+#endif
+
+/*
+ * The secure minimal mode as each backend can have it, see
+ * common/esdm_tls_backend.h: a client of Botan sends an empty session_ticket
+ * extension, which asks for no ticket a server would send without the
+ * extension of its ServerHello - and a server of GnuTLS or Botan a session ID
+ * of 32 bytes, which no session cache keeps.
+ */
+#if defined(ESDM_BOTAN)
+#define TEST_TICKET_EXT_LEN 0
+#else
+#define TEST_TICKET_EXT_LEN -1
+#endif
+#if defined(ESDM_OPENSSL)
+#define TEST_SERVER_SESSION_ID_LEN 0U
+#else
+#define TEST_SERVER_SESSION_ID_LEN 32U
 #endif
 
 /*
@@ -238,196 +260,18 @@ static bool test_has_run(const uint8_t *buf, size_t len)
 /*
  * The handshake on the wire, which is in the clear up to the ChangeCipherSpec:
  * the suites and groups a ClientHello offers, the suite and the group the
- * server takes, Encrypt-then-MAC offered and agreed to, and any certificate.
+ * server takes, Encrypt-then-MAC offered and agreed to, and any certificate -
+ * see tests/test_tls_wire.h.
  */
-#define TEST_HS_CLIENT_HELLO 1
-#define TEST_HS_SERVER_HELLO 2
-#define TEST_HS_CERTIFICATE 11
-#define TEST_HS_SERVER_KEY_EXCHANGE 12
-#define TEST_EXT_GROUPS 10
-#define TEST_EXT_ETM 22
-#define TEST_SCSV 0x00ff
-
-struct test_wire {
-	uint16_t suites[16];
-	unsigned int nsuites;
-	uint16_t groups[16];
-	unsigned int ngroups;
-	/* Of the ServerHello and the ServerKeyExchange, 0 without */
-	uint16_t suite;
-	uint16_t group;
-	bool etm;
-	bool certificate;
-	bool malformed;
-};
-
-struct test_reader {
-	const uint8_t *p;
-	size_t len, off;
-	bool bad;
-};
-
-/* A big-endian number of @n bytes, 0 and bad past the end */
-static uint32_t test_get(struct test_reader *r, size_t n)
-{
-	uint32_t v = 0;
-
-	if (r->bad || n > r->len - r->off) {
-		r->bad = true;
-		return 0;
-	}
-	while (n--)
-		v = (v << 8) | r->p[r->off++];
-	return v;
-}
-
-static void test_skip(struct test_reader *r, size_t n)
-{
-	if (r->bad || n > r->len - r->off)
-		r->bad = true;
-	else
-		r->off += n;
-}
-
-/* The extensions of a hello, the rest of @r */
-static void test_wire_exts(struct test_reader *r, struct test_wire *w)
-{
-	struct test_reader exts = { .p = r->p + r->off };
-
-	/* A hello without any */
-	if (r->off == r->len)
-		return;
-	exts.len = test_get(r, 2);
-	test_skip(r, exts.len);
-	if (r->bad)
-		return;
-	exts.p += 2;
-
-	while (!exts.bad && exts.off < exts.len) {
-		uint32_t type = test_get(&exts, 2);
-		struct test_reader ext = { .len = test_get(&exts, 2) };
-
-		ext.p = exts.p + exts.off;
-		test_skip(&exts, ext.len);
-
-		if (type == TEST_EXT_ETM)
-			w->etm = true;
-		if (type != TEST_EXT_GROUPS || exts.bad)
-			continue;
-
-		/* The list of the groups is all of the extension */
-		if (test_get(&ext, 2) + 2 != ext.len || ext.len % 2) {
-			w->malformed = true;
-			continue;
-		}
-		while (ext.off < ext.len && w->ngroups < ARRAY_SIZE(w->groups))
-			w->groups[w->ngroups++] = (uint16_t)test_get(&ext, 2);
-	}
-	w->malformed |= exts.bad;
-}
-
-/* A handshake message of @type, its body in @r */
-static void test_wire_hs(uint8_t type, struct test_reader *r,
-			 struct test_wire *w)
-{
-	uint32_t n;
-
-	switch (type) {
-	case TEST_HS_CLIENT_HELLO:
-		/* version, random, session ID, cookie */
-		test_skip(r, 34);
-		test_skip(r, test_get(r, 1));
-		test_skip(r, test_get(r, 1));
-		n = test_get(r, 2);
-		if (n % 2)
-			r->bad = true;
-		for (; n >= 2 && !r->bad; n -= 2) {
-			uint16_t suite = (uint16_t)test_get(r, 2);
-
-			if (suite != TEST_SCSV &&
-			    w->nsuites < ARRAY_SIZE(w->suites))
-				w->suites[w->nsuites++] = suite;
-		}
-		test_skip(r, test_get(r, 1));
-		test_wire_exts(r, w);
-		break;
-	case TEST_HS_SERVER_HELLO:
-		/* version, random, session ID */
-		test_skip(r, 34);
-		test_skip(r, test_get(r, 1));
-		w->suite = (uint16_t)test_get(r, 2);
-		test_skip(r, 1);
-		test_wire_exts(r, w);
-		break;
-	case TEST_HS_CERTIFICATE:
-		w->certificate = true;
-		break;
-	case TEST_HS_SERVER_KEY_EXCHANGE:
-		/* The PSK identity hint, then a named curve (3) and its ID */
-		test_skip(r, test_get(r, 2));
-		if (test_get(r, 1) == 3)
-			w->group = (uint16_t)test_get(r, 2);
-		else
-			r->bad = true;
-		break;
-	default:
-		break;
-	}
-	w->malformed |= r->bad;
-}
-
-/* The records of one message of the socket */
-static void test_wire_parse(const uint8_t *msg, size_t len, struct test_wire *w)
-{
-	struct test_reader rec = { .p = msg, .len = len };
-
-	while (!rec.bad && rec.off < rec.len) {
-		/* type, version, epoch, sequence number, length */
-		uint32_t ctype = test_get(&rec, 1), epoch;
-		struct test_reader frag = { 0 };
-
-		test_skip(&rec, 2);
-		epoch = test_get(&rec, 2);
-		test_skip(&rec, 6);
-		frag.len = test_get(&rec, 2);
-		frag.p = rec.p + rec.off;
-		test_skip(&rec, frag.len);
-		if (rec.bad || ctype != 22 || epoch)
-			continue;
-
-		while (!frag.bad && frag.off < frag.len) {
-			/* type, length, sequence, fragment offset and length */
-			uint8_t type = (uint8_t)test_get(&frag, 1);
-			uint32_t hlen = test_get(&frag, 3), foff, flen;
-			struct test_reader body = { 0 };
-
-			test_skip(&frag, 2);
-			foff = test_get(&frag, 3);
-			flen = test_get(&frag, 3);
-			body.p = frag.p + frag.off;
-			body.len = flen;
-			test_skip(&frag, flen);
-			/* Nothing is fragmented with the MTU of the backends */
-			if (frag.bad || foff || flen != hlen) {
-				w->malformed = true;
-				break;
-			}
-			test_wire_hs(type, &body, w);
-		}
-		w->malformed |= frag.bad;
-	}
-	w->malformed |= rec.bad;
-}
-
 /* Move what @from has to @to, reading it into @w; @return the messages */
-static unsigned int test_wire_move(int from, int to, struct test_wire *w)
+static unsigned int test_wire_move(int from, int to, struct test_tls_wire *w)
 {
 	static uint8_t buf[32 * 1024];
 	unsigned int moved = 0;
 	ssize_t n;
 
 	while ((n = recv(from, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
-		test_wire_parse(buf, (size_t)n, w);
+		test_tls_wire_records(buf, (size_t)n, w);
 		CHECK_EQ(send(to, buf, (size_t)n, MSG_NOSIGNAL), n);
 		moved++;
 	}
@@ -441,7 +285,7 @@ static unsigned int test_wire_move(int from, int to, struct test_wire *w)
  */
 static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
 {
-	struct test_wire hello = { 0 }, reply = { 0 };
+	static struct test_tls_wire hello, reply;
 	struct esdm_dtls *client = NULL, *server = NULL;
 	int cs[2] = { -1, -1 }, ss[2] = { -1, -1 };
 	int c = -EAGAIN, s = -EAGAIN;
@@ -461,6 +305,9 @@ static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
 	if (!client || !server)
 		goto out;
 
+	memset(&hello, 0, sizeof(hello));
+	memset(&reply, 0, sizeof(reply));
+	hello.dtls = reply.dtls = true;
 	for (i = 0; i < 1000 && (c || s); i++) {
 		struct pollfd pfd[2] = { { .fd = cs[1], .events = POLLIN },
 					 { .fd = ss[0], .events = POLLIN } };
@@ -503,6 +350,40 @@ static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
 	      "a certificate was sent");
 	CHECK_STR_EQ(esdm_dtls_cipher(client), TEST_CIPHER);
 	CHECK_STR_EQ(esdm_dtls_cipher(server), TEST_CIPHER);
+
+	/*
+	 * The secure minimal mode - between contexts that had connections
+	 * before: the client offers no session to resume, no ticket and no
+	 * early data, and asks for no heartbeat; the server takes none, issues
+	 * no ticket and runs the full handshake, its ServerKeyExchange
+	 * included; both take the extended master secret
+	 */
+	printf("minimal mode on the wire: session IDs %u and %u bytes, "
+	       "session_ticket %d, extended master secret %s\n",
+	       hello.session_id_len, reply.session_id_len,
+	       test_tls_ext_len(&hello, TEST_TLS_EXT_SESSION_TICKET),
+	       test_tls_has_ext(&reply, TEST_TLS_EXT_EMS) ? "yes" : "no");
+	CHECK_EQ(hello.session_id_len, 0U);
+	CHECK_EQ(test_tls_ext_len(&hello, TEST_TLS_EXT_SESSION_TICKET),
+		 TEST_TICKET_EXT_LEN);
+	CHECK(!test_tls_has_ext(&hello, TEST_TLS_EXT_PRE_SHARED_KEY) &&
+		      !test_tls_has_ext(&hello, TEST_TLS_EXT_EARLY_DATA),
+	      "the client offers a pre-shared key or early data");
+	CHECK(!test_tls_has_ext(&hello, TEST_TLS_EXT_HEARTBEAT),
+	      "the client offers the heartbeat");
+	CHECK(test_tls_has_ext(&hello, TEST_TLS_EXT_EMS),
+	      "the client does not offer the extended master secret");
+	CHECK(test_tls_has_ext(&reply, TEST_TLS_EXT_EMS),
+	      "the server does not take the extended master secret");
+	CHECK(!test_tls_has_ext(&reply, TEST_TLS_EXT_SESSION_TICKET) &&
+		      !test_tls_has_hs(&reply, TEST_TLS_HS_NEW_SESSION_TICKET),
+	      "the server issues a ticket");
+	CHECK(!test_tls_has_ext(&reply, TEST_TLS_EXT_HEARTBEAT),
+	      "the server takes the heartbeat");
+	CHECK_EQ(reply.session_id_len, TEST_SERVER_SESSION_ID_LEN);
+	CHECK(test_tls_has_hs(&reply, TEST_TLS_HS_SERVER_KEY_EXCHANGE) &&
+		      test_tls_has_hs(&reply, TEST_TLS_HS_SERVER_HELLO_DONE),
+	      "no full handshake");
 
 	/* And the connection works through the test */
 	if (c || s)

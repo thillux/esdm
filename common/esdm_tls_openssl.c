@@ -361,32 +361,58 @@ static int esdm_tls_openssl_error(struct esdm_tls_openssl_conn *c, int ret,
  ******************************************************************************/
 
 /*
- * Everything of a context but the files, the same on either transport:
- * neither tickets nor a session cache nor renegotiation - a connection lives as
- * long as it does, with the one handshake it started with. A server holds many
- * connections, most of them idle between the requests: no record buffers for
- * those. A record is decrypted in place, in the read buffer: wipe what was
- * handed out, and the buffer as it is released or freed.
+ * The secure minimal mode of esdm_tls_backend.h, the same on every transport -
+ * a connection lives as long as it does, with the one full handshake it
+ * started with:
+ *
+ *  - no session cache on either side, and no tickets of TLS 1.2 or TLS 1.3,
+ *    none issued and none asked for: nothing is resumed - a client offers no
+ *    session, and a server of DTLS 1.2 sends an empty session ID -, and a
+ *    pre-shared key of TLS 1.3 could only be one of resumption;
+ *  - no early data (0-RTT), sent or taken;
+ *  - no renegotiation either way - the insecure legacy one, which
+ *    SSL_OP_LEGACY_SERVER_CONNECT would allow with an old server, included -,
+ *    and no post-handshake authentication of TLS 1.3;
+ *  - no compression; OpenSSL 3 has no heartbeat;
+ *  - the extended master secret and Encrypt-then-MAC stay offered and taken,
+ *    and are required by the local DTLS, see esdm_tls_openssl_client_hello()
+ *    and esdm_tls_backend_handshake().
+ *
+ * A server holds many connections, most of them idle between the requests: no
+ * record buffers for those. A record is decrypted in place, in the read buffer:
+ * wipe what was handed out, and the buffer as it is released or freed.
  */
-static void esdm_tls_openssl_common(SSL_CTX *c)
+static int esdm_tls_openssl_minimal(SSL_CTX *c)
 {
 	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION |
+				       SSL_OP_NO_COMPRESSION |
 				       SSL_OP_CLEANSE_PLAINTEXT);
+	SSL_CTX_clear_options(c,
+			      SSL_OP_ALLOW_CLIENT_RENEGOTIATION |
+				      SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION |
+				      SSL_OP_LEGACY_SERVER_CONNECT |
+				      SSL_OP_NO_EXTENDED_MASTER_SECRET |
+				      SSL_OP_NO_ENCRYPT_THEN_MAC);
 	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+	SSL_CTX_set_post_handshake_auth(c, 0);
 	SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
+
+	if (!SSL_CTX_set_num_tickets(c, 0) ||
+	    !SSL_CTX_set_max_early_data(c, 0) ||
+	    !SSL_CTX_set_recv_max_early_data(c, 0))
+		return -ENOMEM;
+	return 0;
 }
 
 #ifdef ESDM_TLS_AUTH
 /*
- * TLS 1.3 exactly on a stream socket, without its tickets either. A write the
- * socket only took part of is continued with the rest, from wherever the
- * caller keeps it.
+ * TLS 1.3 exactly on a stream socket. A write the socket only took part of is
+ * continued with the rest, from wherever the caller keeps it.
  */
 static int esdm_tls_openssl_stream(SSL_CTX *c)
 {
 	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_num_tickets(c, 0))
+	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION))
 		return -ENOMEM;
 	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
 				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
@@ -464,6 +490,11 @@ static unsigned int esdm_tls_openssl_psk_server(SSL *ssl, const char *identity,
  * from, and DTLS lets an attacker try again after every record it broke. A
  * client of OpenSSL cannot tell whether its server agreed - every server of
  * the ESDM does, whichever its TLS stack.
+ *
+ * And it has to offer the extended master secret (RFC 7627), which binds the
+ * master secret to the handshake it came from - the client checks that the
+ * server agreed, see esdm_tls_backend_handshake(). OpenSSL has no option to
+ * require either.
  */
 static int esdm_tls_openssl_client_hello(SSL *ssl, int *alert, void *arg)
 {
@@ -473,7 +504,9 @@ static int esdm_tls_openssl_client_hello(SSL *ssl, int *alert, void *arg)
 	(void)arg;
 
 	if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_encrypt_then_mac, &ext,
-				      &len))
+				      &len) &&
+	    SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_extended_master_secret,
+				      &ext, &len))
 		return SSL_CLIENT_HELLO_SUCCESS;
 
 	*alert = SSL_AD_INSUFFICIENT_SECURITY;
@@ -571,9 +604,10 @@ int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
 		goto err;
 	}
 
-	esdm_tls_openssl_common(oc->ssl_ctx);
-	ret = stream ? esdm_tls_openssl_stream(oc->ssl_ctx) :
-		       esdm_tls_openssl_seqpacket(oc->ssl_ctx, server);
+	ret = esdm_tls_openssl_minimal(oc->ssl_ctx);
+	if (!ret)
+		ret = stream ? esdm_tls_openssl_stream(oc->ssl_ctx) :
+			       esdm_tls_openssl_seqpacket(oc->ssl_ctx, server);
 	if (ret)
 		goto err;
 
@@ -669,6 +703,10 @@ void esdm_tls_backend_conn_free(void *conn)
 	free(c);
 }
 
+/*
+ * DTLS 1.2 requires the extended master secret, see
+ * esdm_tls_openssl_client_hello() - TLS 1.3 has it built in
+ */
 int esdm_tls_backend_handshake(void *conn, short *want)
 {
 	struct esdm_tls_openssl_conn *c = conn;
@@ -676,8 +714,15 @@ int esdm_tls_backend_handshake(void *conn, short *want)
 
 	ERR_clear_error();
 	ret = SSL_do_handshake(c->ssl);
+	if (ret != 1)
+		return esdm_tls_openssl_error(c, ret, want);
 
-	return ret == 1 ? 0 : esdm_tls_openssl_error(c, ret, want);
+	if (c->dgram && SSL_get_extms_support(c->ssl) != 1) {
+		snprintf(c->error, sizeof(c->error),
+			 "no extended master secret");
+		return -EPROTO;
+	}
+	return 0;
 }
 
 ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
