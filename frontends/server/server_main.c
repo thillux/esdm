@@ -167,6 +167,13 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\twith io_uring (used by default where built and available)\n");
 	fprintf(stderr,
+		"\t   --no_io_uring_multishot\tWith io_uring, poll the RPC\n");
+	fprintf(stderr,
+		"\t\t\tconnections and read and write them as with epoll, rather\n");
+	fprintf(stderr,
+		"\t\t\tthan receive and send through the ring (the default where\n");
+	fprintf(stderr, "\t\t\tthe kernel has it)\n");
+	fprintf(stderr,
 		"\t   --no_fixed_drng_mapping\tServe the RPC and EGD workers from\n");
 	fprintf(stderr,
 		"\t\t\tthe first free node DRNG rather than one node DRNG each\n");
@@ -373,6 +380,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "no_dtls", 0, 0, 0 },
 			{ "no_io_uring", 0, 0, 0 },
 			{ "no_fixed_drng_mapping", 0, 0, 0 },
+			{ "no_io_uring_multishot", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
@@ -491,6 +499,10 @@ static void parse_opts(int argc, char *argv[])
 			case 23:
 				/* no_fixed_drng_mapping */
 				esdm_rpc_server_set_drng_mapping(false);
+				break;
+			case 24:
+				/* no_io_uring_multishot */
+				esdm_rpc_server_set_io_uring_multishot(false);
 				break;
 
 			default:

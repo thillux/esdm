@@ -1837,10 +1837,51 @@ drain, is reported again in the next one. With the meson option `rpc-io-uring`
 every connection has a one-shot poll there, armed again in the same system call
 that waits for the next round, and a poll armed on a socket that is ready
 completes at once, so what a round leaves unread is reported again, as by
-epoll. Either way the worker reads the requests and writes the answers itself,
-as the DTLS of a connection reads and writes its socket itself. A worker that
-cannot set up its io\_uring falls back to epoll: on a kernel without it, with
+epoll; the worker reads the requests and writes the answers itself, as the
+DTLS of a connection reads and writes its socket itself. A worker that cannot
+set up its io\_uring falls back to epoll: on a kernel without it, with
 `kernel.io_uring_disabled` set, or under a seccomp filter refusing it.]
+
+#par(first-line-indent: 0pt)[Where the kernel has multishot receives into
+buffer rings (Linux 6.0), the io\_uring of a worker reads and writes the
+connections in the clear itself, and only those with DTLS are polled. The
+worker registers a ring of 64 buffers of 64 KiB - the largest request, as
+large as the buffer of the read - and every connection has a multishot
+`IORING_OP_RECV` selecting from them: one completion per message of the
+`SOCK_SEQPACKET` socket, the receive staying armed. A round serves each
+request from its buffer, wipes it and hands it back to the ring, so that no
+buffer is held from one round to the next; a receive that finds none
+(`ENOBUFS`) leaves the request in the socket and is armed again with the next
+wait. `MSG_TRUNC` reports a message larger than a buffer with its size, which
+ends the connection - the read, which cut such a message short and served its
+first 64 KiB, does the same now. The answer is packed into a buffer the
+connection holds until its `IORING_OP_SEND` completed, submitted together with
+the wait for the next round, at most one per connection in flight, the next
+one queued behind it, `MSG_DONTWAIT` so that an answer not fitting into the
+socket closes the connection as with the write. The answers of a round and
+the wait for the next one are a single `io_uring_enter()`, which waits for
+one completion beyond those of its sends.
+
+A multishot receive takes everything the socket holds into as many buffers as
+it finds. A client that sends a request before it has the answer of the one
+before would have all of its requests served in one round, and leave no
+buffer to the others: a round serves one request per connection, as with the
+poll, the others of a connection are copied out of the ring and served in the
+rounds to come, and its receive is cancelled until then. A receive that
+follows such a connection, a new one, one that found no buffer or left more
+in the socket (`IORING_CQE_F_SOCK_NONEMPTY`) takes a single request; those
+that found no buffer come first in the next round. Whether a connection has a
+request not served yet - so that it is not closed as idle or to make room -
+is told by the completions of its receive as well, as a request the ring
+received is not in the socket any more.
+
+A connection switching to DTLS is read by its TLS stack from the handshake
+on: its receive is cancelled once the probe is answered, in the submission
+ahead of the send of that answer, so that no record of the handshake ends up
+in a buffer of the ring, and the connection is polled from then on. Moving
+the DTLS into the ring as well needs its records read from and written to
+buffers the server owns - the TLS stack on memory BIOs rather than on the
+socket.]
 
 #par(first-line-indent: 0pt)[With the meson option `dtls` (disabled per
 default), the connections between the processes of the ESDM are protected

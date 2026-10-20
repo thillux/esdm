@@ -503,6 +503,7 @@ conf_data.set('ESDM_RPC_IDLE_TIMEOUT_USEC', get_option('esdm-server-rpc-idle-tim
 
 # The io_uring event loop of the RPC server, see rpc-io-uring
 conf_data.set('ESDM_RPC_IO_URING', rpc_io_uring)
+conf_data.set('ESDM_RPC_IO_URING_MULTISHOT', rpc_io_uring_multishot)
 
 conf_data.set('ESDM_HAS_AUX_CLIENT', get_option('esdm-aux-client').enabled())
 

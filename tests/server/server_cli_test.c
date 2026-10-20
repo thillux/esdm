@@ -158,7 +158,8 @@ static void test_options_accepted(void)
 	};
 	/* The switches of the RPC server, taken whatever the build */
 	static const char *const rpc_switches[] = {
-		"--no_dtls", "--no_io_uring", "--no_fixed_drng_mapping", NULL
+		"--no_dtls", "--no_io_uring", "--no_fixed_drng_mapping",
+		"--no_io_uring_multishot", NULL
 	};
 	static const char *const short_form[] = { "-v", "-f",       "-i", "-s",
 						  "-m", "-M",       "-P", "-u",

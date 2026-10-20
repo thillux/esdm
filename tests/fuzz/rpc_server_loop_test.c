@@ -27,7 +27,14 @@
  * as the server cannot be started again in one that stopped it:
  *
  *   - by default: with io_uring where it is built (meson option rpc-io-uring)
- *     and the kernel lets this process set up a ring, with epoll otherwise,
+ *     and the kernel lets this process set up a ring - receiving and sending
+ *     through it where the kernel and liburing have the multishot receive -,
+ *     with epoll otherwise,
+ *   - with the receiving and sending through the ring switched off
+ *     (esdm-server --no_io_uring_multishot): polling with the ring,
+ *   - with the buffer rings refused - as a kernel before Linux 5.19 has it,
+ *     here by a seccomp filter failing IORING_REGISTER_PBUF_RING with EINVAL:
+ *     polling with the ring, with one log line for all workers,
  *   - with io_uring switched off (esdm-server --no_io_uring): with epoll,
  *   - with io_uring_setup(2) refused by a seccomp filter - with EPERM, as
  *     kernel.io_uring_disabled or the profile of a container has it, and with
@@ -39,17 +46,26 @@
  * on both interfaces have their requests answered - several in turn, a
  * request sent while the one before is still unanswered, which a loop has to
  * report again after it served the first, and the clients of connections that
- * others closed meanwhile.
+ * others closed meanwhile. And in every case the same for what the receiving
+ * through the ring has to get right:
+ *
+ *   - a message larger than a request can be ends its connection, unanswered,
+ *   - clients closing their connections before they read their answers - the
+ *     ring's send of each finding the peer gone - leave the others served,
+ *   - more requests at once than the ring has buffers - its receives running
+ *     out of them, ENOBUFS, and armed again - are all answered.
  */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <dirent.h>
+#include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -75,6 +91,7 @@
 #include "esdm_logger.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
+#include "esdm_rpc_service.h"
 #include "priv_access.pb-c.h"
 #include "threading_support.h"
 #include "unpriv_access.pb-c.h"
@@ -96,6 +113,8 @@ static char test_log_path[sizeof(test_dir) + 16];
 /* What a case does to the server before it starts */
 enum test_case {
 	TEST_DEFAULT,
+	TEST_POLL,
+	TEST_NO_PBUF,
 	TEST_SWITCHED_OFF,
 	TEST_REFUSED_EPERM,
 	TEST_REFUSED_ENOSYS,
@@ -103,10 +122,25 @@ enum test_case {
 
 static const char *const test_case_name[] = {
 	[TEST_DEFAULT] = "default",
+	[TEST_POLL] = "io_uring multishot switched off",
+	[TEST_NO_PBUF] = "io_uring buffer rings refused",
 	[TEST_SWITCHED_OFF] = "io_uring switched off",
 	[TEST_REFUSED_EPERM] = "io_uring_setup refused with EPERM",
 	[TEST_REFUSED_ENOSYS] = "io_uring_setup refused with ENOSYS",
 };
+
+/* The log lines telling how the workers wait */
+#define TEST_LOG_MULTISHOT "wait with io_uring, receiving and sending"
+#define TEST_LOG_POLLING "wait with io_uring, polling the connections"
+#define TEST_LOG_NO_PBUF "cannot receive multishot, polling"
+
+/* The size of the answers while test_big is set */
+#define TEST_BIG_ANSWER 60000
+static atomic_bool test_big;
+
+/* A call while test_hold is set holds up its worker until it is cleared */
+static atomic_bool test_hold;
+static atomic_bool test_held;
 
 static void test_sleep_ms(unsigned int ms)
 {
@@ -120,17 +154,37 @@ static void test_sleep_ms(unsigned int ms)
  * Server
  ****************************/
 
-/* Answers every call with ret 0 */
+/*
+ * Answers every call with ret 0 - with TEST_BIG_ANSWER bytes while test_big is
+ * set, after test_hold is cleared while it is set
+ */
 static void test_service_invoke(ProtobufCService *service,
 				unsigned int method_index,
 				const ProtobufCMessage *input,
 				ProtobufCClosure closure, void *closure_data)
 {
+	static uint8_t big[TEST_BIG_ANSWER];
 	RetResponse response = RET_RESPONSE__INIT;
+	RandValResponse big_response = RAND_VAL_RESPONSE__INIT;
+	unsigned int i;
 
 	(void)service;
 	(void)method_index;
 	(void)input;
+
+	if (atomic_load(&test_hold)) {
+		atomic_store(&test_held, true);
+		for (i = 0; i < 10000 && atomic_load(&test_hold); i++)
+			test_sleep_ms(1);
+		atomic_store(&test_held, false);
+	}
+
+	if (atomic_load(&test_big)) {
+		big_response.randval.data = big;
+		big_response.randval.len = sizeof(big);
+		closure((const ProtobufCMessage *)&big_response, closure_data);
+		return;
+	}
 
 	closure((const ProtobufCMessage *)&response, closure_data);
 }
@@ -224,6 +278,46 @@ static int test_refuse_io_uring(int err)
 #endif
 }
 
+/*
+ * Fail the registration of buffer rings with EINVAL, as a kernel before Linux
+ * 5.19 does, for this thread and the threads it starts. The opcode is the
+ * second argument of io_uring_register(2) - its low word, with the flag of a
+ * registered ring descriptor masked off.
+ */
+static int test_refuse_pbuf_ring(void)
+{
+#if defined(__NR_io_uring_register) && defined(ESDM_RPC_IO_URING)
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+			 offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_register, 0,
+			 4),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+			 offsetof(struct seccomp_data, args[1]) +
+				 (__BYTE_ORDER == __BIG_ENDIAN ? 4 : 0)),
+		BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xffff),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IORING_REGISTER_PBUF_RING,
+			 0, 1),
+		BPF_STMT(BPF_RET | BPF_K,
+			 SECCOMP_RET_ERRNO | (EINVAL & SECCOMP_RET_DATA)),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = sizeof(filter) / sizeof(filter[0]),
+		.filter = filter,
+	};
+
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+		return -errno;
+	if (syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog))
+		return -errno;
+
+	return 0;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
 /****************************
  * Clients
  ****************************/
@@ -265,7 +359,7 @@ static bool test_send(int fd, uint32_t request_id)
 /* Receive the answer of request @request_id, a success */
 static bool test_answered(int fd, uint32_t request_id)
 {
-	uint8_t buf[256];
+	static _Thread_local uint8_t buf[TEST_BIG_ANSWER + 256];
 	struct esdm_rpc_proto_sc_header header;
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
 	ssize_t n;
@@ -359,6 +453,154 @@ static void test_clients(const char *path)
 	}
 }
 
+/* Is @fd closed by the server within TEST_ANSWER_MS, without an answer? */
+static bool test_closed_unanswered(int fd)
+{
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	uint8_t buf[64];
+	ssize_t n;
+
+	if (poll(&pfd, 1, TEST_ANSWER_MS) != 1)
+		return false;
+	n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+
+	return n == 0 || (n < 0 && errno == ECONNRESET);
+}
+
+/*
+ * A message larger than a request can be - ESDM_RPC_MAX_MSG_SIZE - ends its
+ * connection without an answer, its header asking for a call all the same,
+ * and others are served on.
+ */
+static void test_oversized(const char *path)
+{
+	static uint8_t msg[ESDM_RPC_MAX_MSG_SIZE + 4096];
+	struct esdm_rpc_proto_cs_header header = {
+		.message_length = 0,
+		.method_index = 0,
+		.request_id = le_bswap32(1),
+	};
+	int sndbuf = (int)sizeof(msg) * 2;
+	int fd = test_connect(path);
+
+	CHECK(fd >= 0, "cannot connect to %s", path);
+	if (fd < 0)
+		return;
+
+	memcpy(msg, &header, sizeof(header));
+	setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+	CHECK(send(fd, msg, sizeof(msg), MSG_NOSIGNAL) == (ssize_t)sizeof(msg),
+	      "cannot send %zu bytes: %s", sizeof(msg), strerror(errno));
+	CHECK(test_closed_unanswered(fd),
+	      "a message of %zu bytes did not end its connection",
+	      sizeof(msg));
+	close(fd);
+
+	/* One of the size of a request is served */
+	fd = test_connect(path);
+	CHECK(fd >= 0, "cannot connect to %s", path);
+	if (fd < 0)
+		return;
+	memset(msg, 0, sizeof(msg));
+	memcpy(msg, &header, sizeof(header));
+	CHECK(send(fd, msg, ESDM_RPC_MAX_MSG_SIZE, MSG_NOSIGNAL) ==
+		      ESDM_RPC_MAX_MSG_SIZE,
+	      "cannot send %u bytes", ESDM_RPC_MAX_MSG_SIZE);
+	CHECK(test_answered(fd, 1), "a message of %u bytes was not answered",
+	      ESDM_RPC_MAX_MSG_SIZE);
+	close(fd);
+}
+
+/*
+ * Clients asking for large answers and closing their connections at once: the
+ * server finds them gone as it sends, and serves the others on.
+ */
+#define TEST_LEAVING 32
+static void test_leaving(const char *path)
+{
+	int fds[TEST_LEAVING], fd;
+	unsigned int i, round;
+
+	atomic_store(&test_big, true);
+	for (round = 0; round < 4; round++) {
+		for (i = 0; i < TEST_LEAVING; i++) {
+			fds[i] = test_connect(path);
+			CHECK(fds[i] >= 0, "cannot connect to %s", path);
+		}
+		for (i = 0; i < TEST_LEAVING; i++) {
+			if (fds[i] < 0)
+				continue;
+			CHECK(test_send(fds[i], i), "cannot send");
+			/* Half of them before, half as the answer comes */
+			if (i & 1)
+				test_sleep_ms(0);
+			close(fds[i]);
+		}
+	}
+
+	/* Answered whole, in order, on a connection of its own */
+	fd = test_connect(path);
+	CHECK(fd >= 0, "cannot connect to %s", path);
+	if (fd >= 0) {
+		CHECK(test_send(fd, 7) && test_answered(fd, 7) &&
+			      test_send(fd, 8) && test_send(fd, 9) &&
+			      test_answered(fd, 8) && test_answered(fd, 9),
+		      "large answers not served after clients left");
+		close(fd);
+	}
+	atomic_store(&test_big, false);
+}
+
+/*
+ * More requests at once than the ring of a worker has buffers: the privileged
+ * worker - there is one - held up, a request on each of TEST_BURST connections
+ * that were served before, then let go. Each is answered.
+ */
+#define TEST_BURST 200
+static void test_burst(const char *path)
+{
+	static int fds[TEST_BURST];
+	unsigned int i, answered = 0;
+	int hold;
+
+	for (i = 0; i < TEST_BURST; i++) {
+		fds[i] = test_connect(path);
+		CHECK(fds[i] >= 0, "cannot connect to %s: %s", path,
+		      strerror(-fds[i]));
+		if (fds[i] >= 0)
+			CHECK(test_send(fds[i], i) && test_answered(fds[i], i),
+			      "burst connection %u not served", i);
+	}
+
+	hold = test_connect(path);
+	CHECK(hold >= 0, "cannot connect to %s", path);
+	atomic_store(&test_hold, true);
+	if (hold >= 0)
+		CHECK(test_send(hold, 0), "cannot hold up the worker");
+	for (i = 0; i < 2000 && !atomic_load(&test_held); i++)
+		test_sleep_ms(1);
+	CHECK(atomic_load(&test_held), "the worker was not held up");
+
+	for (i = 0; i < TEST_BURST; i++) {
+		if (fds[i] >= 0)
+			CHECK(test_send(fds[i], 1000 + i), "cannot send");
+	}
+	atomic_store(&test_hold, false);
+
+	if (hold >= 0) {
+		CHECK(test_answered(hold, 0), "the holding call unanswered");
+		close(hold);
+	}
+	for (i = 0; i < TEST_BURST; i++) {
+		if (fds[i] < 0)
+			continue;
+		if (test_answered(fds[i], 1000 + i))
+			answered++;
+		close(fds[i]);
+	}
+	CHECK_EQ(answered, TEST_BURST);
+}
+
 /*
  * The io_uring instances and the epoll instances of this process - those of
  * the workers, the test itself has none
@@ -409,6 +651,21 @@ static unsigned int test_log_lines(const char *what)
 	return n;
 }
 
+/* Print the lines of the log of the case holding @what */
+static void test_log_print(const char *what)
+{
+	char line[1024];
+	FILE *fp = fopen(test_log_path, "r");
+
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		if (strstr(line, what))
+			printf("  %s", line);
+	}
+	fclose(fp);
+}
+
 /*
  * The process of a case: the server, its clients, and whether its workers
  * wait with io_uring (@uring) - its exit status the failed checks.
@@ -430,6 +687,17 @@ static int test_case_run(enum test_case tc, bool uring)
 
 	switch (tc) {
 	case TEST_DEFAULT:
+		break;
+	case TEST_POLL:
+		esdm_rpc_server_set_io_uring_multishot(false);
+		break;
+	case TEST_NO_PBUF:
+		ret = test_refuse_pbuf_ring();
+		if (ret) {
+			printf("cannot install the seccomp filter: %s\n",
+			       strerror(-ret));
+			return 77;
+		}
 		break;
 	case TEST_SWITCHED_OFF:
 		esdm_rpc_server_set_io_uring(false);
@@ -454,6 +722,12 @@ static int test_case_run(enum test_case tc, bool uring)
 		return 1;
 	}
 
+	/*
+	 * Fewer buffers than the requests a round of the burst takes in at
+	 * once - the kernel runs some 20 receives per wait at most
+	 */
+	esdm_rpcs_fuzz_uring_bufs(4);
+
 	if (thread_init(1)) {
 		fprintf(stdout, "cannot initialize threading support\n");
 		return 1;
@@ -473,6 +747,20 @@ static int test_case_run(enum test_case tc, bool uring)
 
 	test_clients(test_unpriv_path);
 	test_clients(test_priv_path);
+	test_oversized(test_unpriv_path);
+	test_oversized(test_priv_path);
+	test_leaving(test_unpriv_path);
+	test_burst(test_priv_path);
+	test_clients(test_unpriv_path);
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* Through the ring, the burst ran its receives out of buffers */
+	if (uring && tc == TEST_DEFAULT)
+		CHECK(esdm_rpcs_fuzz_uring_enobufs() > 0,
+		      "no receive ran out of buffers in the burst");
+	else
+		CHECK_EQ(esdm_rpcs_fuzz_uring_enobufs(), 0);
+#endif
 
 	/*
 	 * Every worker has set up its loop by now: each one serving a client
@@ -548,7 +836,8 @@ int main(void)
 
 	for (tc = TEST_DEFAULT; tc <= TEST_REFUSED_ENOSYS; tc++) {
 		/* io_uring where it is built, usable and neither off nor refused */
-		bool uring = usable && tc == TEST_DEFAULT;
+		bool uring = usable && (tc == TEST_DEFAULT || tc == TEST_POLL ||
+					tc == TEST_NO_PBUF);
 		bool fallback = usable && (tc == TEST_REFUSED_EPERM ||
 					   tc == TEST_REFUSED_ENOSYS);
 		int status;
@@ -592,10 +881,35 @@ int main(void)
 			       test_case_name[tc],
 			       test_log_lines("wait with io_uring"));
 			failed++;
+		} else if (uring) {
+			/* Receiving through the ring, or polling with it */
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+			bool mshot = tc == TEST_DEFAULT;
+#else
+			bool mshot = false;
+#endif
+			if (test_log_lines(mshot ? TEST_LOG_MULTISHOT :
+						   TEST_LOG_POLLING) != 1) {
+				printf("%s: expected the workers to %s\n",
+				       test_case_name[tc],
+				       mshot ? "receive through the ring" :
+					       "poll with the ring");
+				failed++;
+			}
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+			if (test_log_lines(TEST_LOG_NO_PBUF) !=
+			    (tc == TEST_NO_PBUF ? 1U : 0U)) {
+				printf("%s: %u lines on the buffer rings refused\n",
+				       test_case_name[tc],
+				       test_log_lines(TEST_LOG_NO_PBUF));
+				failed++;
+			}
+#endif
 		}
 
 		if (WEXITSTATUS(status)) {
 			printf("%s: FAIL\n", test_case_name[tc]);
+			test_log_print("FAIL ");
 			failed++;
 		} else {
 			printf("%s: waiting with %s, PASS\n", test_case_name[tc],

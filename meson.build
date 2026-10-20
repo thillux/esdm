@@ -373,6 +373,7 @@ endif
 # The headers of liburing are taken as system headers: their inline functions
 # do not pass the warnings of this project.
 rpc_io_uring = false
+rpc_io_uring_multishot = false
 if not get_option('rpc-io-uring').disabled()
 	if host_machine.system() != 'linux'
 		if get_option('rpc-io-uring').enabled()
@@ -385,6 +386,18 @@ if not get_option('rpc-io-uring').disabled()
 		if liburing_dep.found()
 			dependencies_server += liburing_dep
 			rpc_io_uring = true
+			# Receiving and sending through the ring - buffer rings and
+			# the multishot receive, liburing 2.4 - where the kernel has
+			# them, see esdm_rpc_server_set_io_uring_multishot()
+			rpc_io_uring_multishot = true
+			foreach sym : [ 'io_uring_setup_buf_ring',
+					'io_uring_free_buf_ring',
+					'io_uring_prep_recv_multishot' ]
+				if not cc.has_header_symbol('liburing.h', sym,
+							    dependencies: liburing_dep)
+					rpc_io_uring_multishot = false
+				endif
+			endforeach
 		endif
 	endif
 endif

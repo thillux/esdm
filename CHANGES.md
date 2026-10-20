@@ -656,6 +656,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * common/ is sorted into subfolders by type - tls/ (the TLS and DTLS layer and the network code), log/, sys/, testmode/, threading/, util/ -, as esdm/ was; the headers keep being included by their names
 
+* RPC server, io_uring event loop: where the kernel has multishot receives into buffer rings (Linux 6.0, liburing 2.4), the ring receives the requests of the connections in the clear and sends their answers with the wait for the next events - about 2 system calls per request instead of 3.6 (the wait and the fork check of the OpenSSL DRBG), 1.2-1.4 us less server CPU per request; connections with DTLS and esdm-server --no_io_uring_multishot keep the poll of the ring
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

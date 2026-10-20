@@ -1287,9 +1287,14 @@ option('rpc-io-uring', type: 'feature', value: 'disabled',
 Each worker thread of the RPC interfaces waits for the events of its
 connections - a request, a new connection, its idle timer - with an epoll
 instance of its own. With this option, it waits with an io_uring of its own
-instead: a poll of the ring per connection, armed again in the same system
-call that waits for the next events. The requests and answers are read and
-written as with epoll - by the DTLS of a connection itself, where it has one.
+instead. Where the kernel has multishot receives into buffer rings (Linux 6.0)
+and liburing is 2.4 or later, the ring receives the requests of the
+connections in the clear and sends their answers, submitted with the wait for
+the next events - one system call per round of a worker. The connections with
+DTLS, whose TLS stack reads and writes the socket itself, and all of them with
+esdm-server --no_io_uring_multishot or an older kernel, have a poll of the
+ring, armed again in the same system call that waits for the next events, and
+are read and written as with epoll.
 
 Needs liburing 2.2 or later, found with pkg-config, and Linux. epoll remains:
 a worker that cannot set up its io_uring - a kernel without it or with
@@ -1299,10 +1304,9 @@ epoll when started with --no_io_uring. The rings are set up after the
 privileges are dropped, so with kernel.io_uring_disabled=1 they are only
 where the user the server drops to is a member of kernel.io_uring_group.
 
-Disabled by default. Both loops wait for readiness, and the requests are
-read and the answers written with the same system calls either way; the RPC
-benchmark (tests/rpc_client/rpc_bench.c, meson test --benchmark) compares
-them in one build, with -S --no_io_uring for epoll.
+Disabled by default. The RPC benchmark (tests/rpc_client/rpc_bench.c, meson
+test --benchmark) compares the loops in one build: -S --no_io_uring for epoll,
+-S --no_io_uring_multishot for the poll of the ring.
 ''')
 
 

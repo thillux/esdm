@@ -107,6 +107,23 @@ void esdm_rpc_server_set_dtls(bool enable);
 void esdm_rpc_server_set_io_uring(bool enable);
 
 /**
+ * @brief Receive and send through the io_uring, or poll with it only
+ *
+ * A worker waiting with io_uring (see esdm_rpc_server_set_io_uring()) receives
+ * the requests of its connections in the clear with a multishot receive of the
+ * ring into buffers of the ring, and queues their answers as sends of the ring,
+ * submitted with the wait for the next events - where the kernel has it (Linux
+ * 6.0) and the build has it (meson option rpc-io-uring with liburing 2.4 or
+ * later). Switching it off has the workers poll their connections with the
+ * ring and read and write them themselves, as epoll does. Takes effect for the
+ * workers started afterwards; to be called before esdm_rpc_server_init().
+ *
+ * @param [in] enable Receive and send through the ring (true) or poll only
+ *		      (false)
+ */
+void esdm_rpc_server_set_io_uring_multishot(bool enable);
+
+/**
  * @brief Map each worker to a node DRNG of its own, or not
  *
  * By default, each worker of the unprivileged RPC interface, and of the EGD
@@ -199,6 +216,18 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
  */
 int esdm_rpcs_fuzz_serve(const char *socket_path, ProtobufCService *service,
 			 bool privileged);
+
+/**
+ * @brief How often a multishot receive of the io_uring loop found no buffer
+ *	  and was armed again, over all workers of the process
+ */
+unsigned int esdm_rpcs_fuzz_uring_enobufs(void);
+
+/**
+ * @brief Set the number of buffers of the io_uring of the workers started
+ *	  from now on - a power of 2, at most the default, which it is otherwise
+ */
+void esdm_rpcs_fuzz_uring_bufs(unsigned int bufs);
 #endif /* ESDM_FUZZING */
 
 #ifdef __cplusplus

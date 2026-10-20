@@ -37,6 +37,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/queue.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
@@ -159,6 +160,46 @@ struct esdm_rpcs_connection {
 	bool poll_cancelled;
 	bool closed;
 	TAILQ_ENTRY(esdm_rpcs_connection) poll_entry;
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/*
+	 * Served through the ring, see esdm_rpcs_loop: its requests arrive by
+	 * the multishot receive of the connection, armed - recv_armed - until
+	 * it ends, and its answers leave as sends of the ring, the one at
+	 * the head of tx_head in flight - tx_inflight - while the others wait
+	 * for it. A connection in the clear only: one switching to DTLS goes
+	 * over to the poll, its receive cancelled - recv_cancel, set while it
+	 * waits in the list rearm of the loop - before the answer to STARTDTLS
+	 * goes out. So is the receive of a client sending a request before
+	 * it has the answer of the one before, see esdm_rpcs_rx.
+	 */
+	bool ring_io;
+	bool recv_armed;
+	/*
+	 * Is the receive armed a multishot one? Is the next one to take a
+	 * single request? See esdm_rpcs_uring_recv().
+	 */
+	bool recv_multishot;
+	bool recv_single;
+	bool recv_cancel;
+	bool recv_cancelled;
+	bool tx_inflight;
+	bool tx_queued;
+	/* The client ended the connection, or the server's SHUT_RD drained it */
+	bool rx_eof;
+	/* In the list deferq of the loop, with requests in rx_defer_head */
+	bool deferred;
+	/* Requests received by the ring the worker did not serve yet */
+	unsigned int rx_pending;
+	/* The round of the loop that has a request of it, see esdm_rpcs_rx */
+	uint64_t rx_round;
+	unsigned int rx_defer_num;
+	struct esdm_rpcs_rx *rx_defer_head, *rx_defer_tail;
+	TAILQ_ENTRY(esdm_rpcs_connection) defer_entry;
+	/* Answers waiting in tx_head, the first one possibly in flight */
+	unsigned int tx_num;
+	struct esdm_rpcs_tx *tx_head, *tx_tail;
+	TAILQ_ENTRY(esdm_rpcs_connection) tx_entry;
+#endif
 #endif
 };
 TAILQ_HEAD(esdm_rpcs_connection_list, esdm_rpcs_connection);
@@ -189,6 +230,156 @@ struct esdm_rpcs_write_buf {
 	ProtobufCBuffer base;
 	struct esdm_rpcs_connection *rpc_conn;
 };
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+/*
+ * An answer of a connection served through the ring, see esdm_rpcs_loop: the
+ * per-worker request buffer is used for the next request before the send of
+ * the answer is submitted, so the answer is packed into one of these instead,
+ * which the connection holds until its send completed. Taken from a small
+ * cache of the worker, zeroized when it goes back.
+ */
+struct esdm_rpcs_tx {
+	struct esdm_rpcs_tx *next;
+	size_t len;
+	uint8_t buf[ESDM_RPC_MAX_MSG_SIZE]
+		__attribute__((aligned(sizeof(uint64_t))));
+};
+
+/* Answers of the worker kept for reuse, at most ESDM_RPCS_TX_CACHE */
+#define ESDM_RPCS_TX_CACHE 16
+static __thread struct esdm_rpcs_tx *esdm_rpcs_tx_cache;
+static __thread unsigned int esdm_rpcs_tx_cached;
+
+static struct esdm_rpcs_tx *esdm_rpcs_tx_get(void)
+{
+	struct esdm_rpcs_tx *tx = esdm_rpcs_tx_cache;
+
+	if (tx) {
+		esdm_rpcs_tx_cache = tx->next;
+		esdm_rpcs_tx_cached--;
+	} else {
+		tx = malloc(sizeof(*tx));
+		if (!tx)
+			return NULL;
+	}
+
+	tx->next = NULL;
+	/* All of it is wiped should it go back before it is sent */
+	tx->len = sizeof(tx->buf);
+
+	return tx;
+}
+
+static void esdm_rpcs_tx_put(struct esdm_rpcs_tx *tx)
+{
+	if (!tx)
+		return;
+
+	memset_secure(tx->buf, 0, tx->len);
+	if (esdm_rpcs_tx_cached >= ESDM_RPCS_TX_CACHE) {
+		free(tx);
+		return;
+	}
+	tx->next = esdm_rpcs_tx_cache;
+	esdm_rpcs_tx_cache = tx;
+	esdm_rpcs_tx_cached++;
+}
+
+/* The cache of the calling worker, as it exits */
+static void esdm_rpcs_tx_cache_free(void)
+{
+	struct esdm_rpcs_tx *tx;
+
+	while ((tx = esdm_rpcs_tx_cache)) {
+		esdm_rpcs_tx_cache = tx->next;
+		free(tx);
+	}
+	esdm_rpcs_tx_cached = 0;
+}
+
+/*
+ * Give up the answers of a connection that is closed - but the one whose send
+ * is in flight, which its completion gives up
+ */
+static void esdm_rpcs_tx_drop(struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpcs_tx *tx = rpc_conn->tx_head, *next;
+
+	if (tx && rpc_conn->tx_inflight) {
+		next = tx->next;
+		tx->next = NULL;
+		rpc_conn->tx_tail = tx;
+		rpc_conn->tx_num = 1;
+		tx = next;
+	} else {
+		rpc_conn->tx_head = rpc_conn->tx_tail = NULL;
+		rpc_conn->tx_num = 0;
+	}
+
+	while (tx) {
+		next = tx->next;
+		esdm_rpcs_tx_put(tx);
+		tx = next;
+	}
+}
+
+/*
+ * Answers a connection may have waiting - a client sends one request at a
+ * time and reads its answer before the next one, so more is a client that does
+ * not read them, which is closed as one whose answer does not fit into its
+ * socket, see esdm_rpcs_write_data().
+ */
+#define ESDM_RPCS_TX_MAX 16
+
+static int esdm_rpcs_tx_queue(struct esdm_rpcs_connection *rpc_conn,
+			      struct esdm_rpcs_tx *tx, size_t len);
+
+/*
+ * A request the ring received for a connection that has one in the round
+ * already: copied out of the buffer of the ring, which goes back at once, and
+ * served in a round to come, one per round - a client that sends requests
+ * without waiting for the answers gets its turn in a round as everybody else,
+ * as by the poll, and holds no buffer of the ring meanwhile. Its receive is
+ * cancelled until they are served, which leaves what it sends further in the
+ * socket. Bounded per connection and per worker - beyond, the client does not
+ * read its answers, see esdm_rpcs_write_data().
+ */
+struct esdm_rpcs_rx {
+	struct esdm_rpcs_rx *next;
+	size_t len;
+	uint8_t data[];
+};
+
+/*
+ * Per connection: the requests one multishot receive can take into the
+ * buffers of the ring at a time, twice
+ */
+#define ESDM_RPCS_RX_DEFER_MAX 64
+/* Per worker, in bytes */
+#define ESDM_RPCS_RX_DEFER_BYTES (8U << 20)
+
+static void esdm_rpcs_rx_free(struct esdm_rpcs_rx *rx)
+{
+	memset_secure(rx->data, 0, rx->len);
+	free(rx);
+}
+
+/* Give up the requests not served yet of a connection that is closed */
+static void esdm_rpcs_rx_drop(struct esdm_rpcs_connection *rpc_conn,
+			      size_t *bytes)
+{
+	struct esdm_rpcs_rx *rx;
+
+	while ((rx = rpc_conn->rx_defer_head)) {
+		rpc_conn->rx_defer_head = rx->next;
+		*bytes -= rx->len;
+		esdm_rpcs_rx_free(rx);
+	}
+	rpc_conn->rx_defer_tail = NULL;
+	rpc_conn->rx_defer_num = 0;
+}
+#endif
 
 enum esdm_rpcs_init_state {
 	esdm_rpcs_state_uninitialized,
@@ -411,6 +602,37 @@ void esdm_rpc_server_set_io_uring(bool enable)
 }
 
 /*
+ * Do the workers waiting with io_uring receive and send through it? See
+ * esdm_rpc_server_set_io_uring_multishot()
+ */
+static atomic_bool esdm_rpcs_io_uring_multishot = true;
+
+void esdm_rpc_server_set_io_uring_multishot(bool enable)
+{
+	atomic_store(&esdm_rpcs_io_uring_multishot, enable);
+}
+
+#if defined(ESDM_FUZZING) && defined(ESDM_RPC_IO_URING_MULTISHOT)
+/* Multishot receives that ran out of buffers, see esdm_rpcs_fuzz_uring_enobufs */
+static atomic_uint esdm_rpcs_enobufs;
+
+unsigned int esdm_rpcs_fuzz_uring_enobufs(void)
+{
+	return atomic_load(&esdm_rpcs_enobufs);
+}
+#elif defined(ESDM_FUZZING)
+unsigned int esdm_rpcs_fuzz_uring_enobufs(void)
+{
+	return 0;
+}
+
+void esdm_rpcs_fuzz_uring_bufs(unsigned int bufs)
+{
+	(void)bufs;
+}
+#endif
+
+/*
  * Is each worker of the unprivileged interface mapped to a node DRNG of its
  * own? See esdm_rpc_server_set_drng_mapping()
  */
@@ -565,6 +787,23 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 		return -errsv;
 	}
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* Sent by the ring, from a buffer of its own - see esdm_rpcs_tx */
+	if (rpc_conn->ring_io) {
+		struct esdm_rpcs_tx *tx;
+
+		if (len > sizeof(tx->buf))
+			return -EINVAL;
+		tx = esdm_rpcs_tx_get();
+		if (!tx) {
+			esdm_rpcs_conn_close(rpc_conn, false);
+			return -ENOMEM;
+		}
+		memcpy(tx->buf, data, len);
+		return esdm_rpcs_tx_queue(rpc_conn, tx, len);
+	}
+#endif
+
 	do {
 		ret = write(rpc_conn->child_fd, data, len);
 	} while (ret < 0 && errno == EINTR);
@@ -633,13 +872,32 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 {
 #define ESDM_RPCS_BUF_WRITE_HEADER_SZ (sizeof(struct esdm_rpc_proto_sc_header))
 
-	uint8_t *const payload_buf =
-		esdm_rpcs_reqbuf + ESDM_RPCS_BUF_WRITE_HEADER_SZ;
+	/*
+	 * The answer is packed into the request buffer of the worker - or, for
+	 * a connection served through the ring, into one it holds until the
+	 * answer is sent, see esdm_rpcs_tx.
+	 */
+	uint8_t *buf = esdm_rpcs_reqbuf;
+	uint8_t *payload_buf;
 	const size_t payload_max =
 		sizeof(esdm_rpcs_reqbuf) - ESDM_RPCS_BUF_WRITE_HEADER_SZ;
 	size_t message_length;
 	int ret;
 	struct esdm_rpc_proto_sc_header *sc_header;
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	struct esdm_rpcs_tx *tx = NULL;
+
+	BUILD_BUG_ON(sizeof(tx->buf) != sizeof(esdm_rpcs_reqbuf));
+	if (rpc_conn->ring_io) {
+		tx = esdm_rpcs_tx_get();
+		if (!tx) {
+			ret = -ENOMEM;
+			goto out_failure;
+		}
+		buf = tx->buf;
+	}
+#endif
+	payload_buf = buf + ESDM_RPCS_BUF_WRITE_HEADER_SZ;
 
 	if (esdm_rpc_is_fast_bytes_response(message->descriptor)) {
 		/*
@@ -706,7 +964,7 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 		}
 	}
 
-	sc_header = (struct esdm_rpc_proto_sc_header *)esdm_rpcs_reqbuf;
+	sc_header = (struct esdm_rpc_proto_sc_header *)buf;
 	sc_header->status_code = le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SUCCESS);
 	sc_header->method_index = le_bswap32(rpc_conn->method_index);
 	sc_header->message_length = le_bswap32(message_length);
@@ -717,6 +975,21 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 		"Server sending: server status %u, message length %u, message index %u, request ID %u\n",
 		sc_header->status_code, sc_header->message_length,
 		sc_header->method_index, sc_header->request_id);
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* Handed over to the connection, which wipes it once it is sent */
+	if (tx) {
+		ret = esdm_rpcs_tx_queue(rpc_conn, tx,
+					 ESDM_RPCS_BUF_WRITE_HEADER_SZ +
+						 message_length);
+		if (ret)
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_RPC,
+				"Submission of message data failed with error %d\n",
+				ret);
+		return ret ? -EFAULT : 0;
+	}
+#endif
 
 	/* this message is also printed when the client closed early, don't spam logs */
 	ret = esdm_rpcs_write_data(rpc_conn, esdm_rpcs_reqbuf,
@@ -743,6 +1016,10 @@ out:
 	return ret;
 
 out_failure:
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* Wiped in full, whatever was packed into it */
+	esdm_rpcs_tx_put(tx);
+#endif
 	/* Nothing was written yet - tell the client the call failed */
 	esdm_rpcs_send_failure(rpc_conn);
 	return ret;
@@ -923,13 +1200,28 @@ refuse:
 }
 
 /*
- * Handle one request that was received in full into the per-worker request
- * buffer: validate its header, then unpack and dispatch it.
+ * Handle one request that was received in full into @buf - the per-worker
+ * request buffer, or a buffer of the io_uring of the worker: validate its
+ * header, then unpack and dispatch it. @buf is wiped.
+ *
+ * @received may exceed ESDM_RPC_MAX_MSG_SIZE, the size of the buffers, for a
+ * message that was cut short to fit (MSG_TRUNC): the client sent more than a
+ * request can be, and the connection is ended.
  */
 static int esdm_rpcs_process(struct esdm_rpcs_connection *rpc_conn,
-			     ssize_t received)
+			     uint8_t *buf, ssize_t received)
 {
 	int ret = 0;
+
+	if (received > (ssize_t)sizeof(esdm_rpcs_reqbuf)) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "Request of %zd bytes on client FD %d exceeds %zu\n",
+			    received, rpc_conn->child_fd,
+			    sizeof(esdm_rpcs_reqbuf));
+		received = (ssize_t)sizeof(esdm_rpcs_reqbuf);
+		ret = -EMSGSIZE;
+		goto out;
+	}
 
 	/* We insist on having at least a header received. */
 	if (received < (ssize_t)sizeof(struct esdm_rpc_proto_cs_header)) {
@@ -939,7 +1231,7 @@ static int esdm_rpcs_process(struct esdm_rpcs_connection *rpc_conn,
 
 	/* Header is received, analyze it. */
 	struct esdm_rpc_proto_cs_header *header =
-		(struct esdm_rpc_proto_cs_header *)esdm_rpcs_reqbuf;
+		(struct esdm_rpc_proto_cs_header *)buf;
 
 	/* Convert incoming data to LE */
 	header->message_length = le_bswap32(header->message_length);
@@ -980,12 +1272,11 @@ static int esdm_rpcs_process(struct esdm_rpcs_connection *rpc_conn,
 	 * as much data as the header defined. We also start the
 	 * processing of data and the subsequent submission of the answer here.
 	 */
-	CKINT(esdm_rpcs_unpack(rpc_conn,
-			       (struct esdm_rpc_proto_cs *)esdm_rpcs_reqbuf));
+	CKINT(esdm_rpcs_unpack(rpc_conn, (struct esdm_rpc_proto_cs *)buf));
 
 out:
 	if (received > 0) {
-		memset_secure(esdm_rpcs_reqbuf, 0, (size_t)received);
+		memset_secure(buf, 0, (size_t)received);
 	}
 	return ret;
 }
@@ -1080,10 +1371,12 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 			/*
 			 * The client uses SOCK_SEQPACKET which ensures that
 			 * always the full message is submitted in one send
-			 * operation.
+			 * operation. One larger than the buffer is cut short,
+			 * MSG_TRUNC telling its full size, which ends the
+			 * connection - as for the receive of the io_uring.
 			 */
-			received = read(rpc_conn->child_fd, esdm_rpcs_reqbuf,
-					sizeof(esdm_rpcs_reqbuf));
+			received = recv(rpc_conn->child_fd, esdm_rpcs_reqbuf,
+					sizeof(esdm_rpcs_reqbuf), MSG_TRUNC);
 			if (received < 0)
 				return -errno;
 		}
@@ -1091,7 +1384,7 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n",
 			    received);
 
-		ret = esdm_rpcs_process(rpc_conn, received);
+		ret = esdm_rpcs_process(rpc_conn, esdm_rpcs_reqbuf, received);
 
 		/* The probe is answered in the clear, the handshake follows */
 		if (!ret && probe)
@@ -1161,7 +1454,7 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 
 	memcpy(esdm_rpcs_reqbuf, data, len);
 
-	ret = esdm_rpcs_process(&rpc_conn, (ssize_t)len);
+	ret = esdm_rpcs_process(&rpc_conn, esdm_rpcs_reqbuf, (ssize_t)len);
 
 	/* Along with whatever a STARTDTLS request set up */
 	esdm_rpcs_conn_close(&rpc_conn, false);
@@ -1177,6 +1470,9 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 static void esdm_rpcs_end_conn(struct esdm_rpcs_connection *rpc_conn)
 {
 	esdm_rpcs_conn_close(rpc_conn, true);
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	esdm_rpcs_tx_drop(rpc_conn);
+#endif
 	if (rpc_conn->peer_counted) {
 		esdm_peer_limit_put(&esdm_rpcs_peer_limit,
 				    rpc_conn->peer_account);
@@ -1364,6 +1660,9 @@ static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 	return false;
 }
 
+static bool
+esdm_rpcs_uring_input_queued(const struct esdm_rpcs_connection *rpc_conn);
+
 /* Where the client of a connection is in a call, see esdm_rpcs_conn_state() */
 enum esdm_rpcs_conn_state {
 	esdm_rpcs_conn_idle,
@@ -1387,10 +1686,16 @@ esdm_rpcs_conn_state(const struct esdm_rpcs_connection *rpc_conn)
 	 * ESDM_RPC_PROTO_STARTDTLS.
 	 */
 	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) || inq > 0 ||
-	    (rpc_conn->dtls && esdm_dtls_pending(rpc_conn->dtls)))
+	    (rpc_conn->dtls && esdm_dtls_pending(rpc_conn->dtls)) ||
+	    esdm_rpcs_uring_input_queued(rpc_conn))
 		return esdm_rpcs_conn_requested;
 	if (ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq) || outq > 0)
 		return esdm_rpcs_conn_answered;
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* An answer the ring did not send yet */
+	if (rpc_conn->tx_head)
+		return esdm_rpcs_conn_answered;
+#endif
 
 	return esdm_rpcs_conn_idle;
 }
@@ -1530,6 +1835,55 @@ static void esdm_rpcs_conn_put(struct esdm_rpc_thread *thread,
  * poll, which carries the address of the connection, cancelled by the next
  * submission; the ring's teardown takes the remaining ones along at the exit.
  *
+ * io_uring receiving and sending (the default for io_uring where the kernel -
+ * Linux 6.0 - and liburing 2.4 have it, see
+ * esdm_rpc_server_set_io_uring_multishot()): a connection in the clear is not
+ * polled, the ring reads and writes it. The worker registers a ring of
+ * ESDM_RPCS_URING_BUFS buffers of ESDM_RPC_MAX_MSG_SIZE bytes - the request
+ * buffer the read takes a request into -, and each connection has a multishot
+ * IORING_OP_RECV selecting from them: one completion per message of the
+ * SOCK_SEQPACKET socket, with the buffer that holds it, for as long as the
+ * receive stays armed. A round serves the request from the buffer, wipes it
+ * and hands it back to the ring right away, so no buffer is held from one
+ * round to the next. A receive finding no buffer - more requests arrived since
+ * the last round than there are buffers - ends with ENOBUFS, leaving the
+ * request in the socket, and is armed again with the next wait, which finds
+ * the buffers of the round given back. MSG_TRUNC has a message larger than a
+ * buffer reported with its size, which ends the connection, as the read does.
+ *
+ * The answers leave by the ring as well, packed into a buffer the connection
+ * holds until it is sent (esdm_rpcs_tx) and submitted as IORING_OP_SEND
+ * together with the wait for the next round: the answers of a round and the
+ * wait are one system call. A connection has at most one send in flight, the
+ * next answer - of a client that sent a request before it read the answer of
+ * the one before - waits for its completion, so the answers leave in order.
+ * MSG_DONTWAIT: an answer that does not fit into the socket fails at once, and
+ * the connection is closed, as with the write - see esdm_rpcs_write_data(). An
+ * answer is one message, which SOCK_SEQPACKET takes whole or not at all:
+ * there is no short send to continue and no parts of an answer to link or to
+ * bundle; a send shorter than the answer all the same ends the connection.
+ *
+ * A request the ring received is no longer in the socket: whether a connection
+ * has one not served yet - see esdm_rpcs_input_queued() - is told by the
+ * completions of its receive, those of the round counted and those still in
+ * the completion queue looked up. A connection closed while it has events left
+ * in the round has them voided, its buffers given back.
+ *
+ * A round serves one request per connection, as with the poll: a multishot
+ * receive takes what the socket holds into as many buffers as it finds, and a
+ * client sending requests without waiting for the answers would otherwise
+ * have all of them served in one round and leave no buffer to the others. See
+ * esdm_rpcs_rx and esdm_rpcs_uring_recv().
+ *
+ * Connections with DTLS - from the answer to the probe that follows STARTDTLS
+ * on - are polled as above: the TLS stack reads and writes their socket
+ * itself. The receive of a connection switching to DTLS is cancelled, in the
+ * submission ahead of the send of the answer to the probe, so that none of the
+ * records of the handshake the client starts once it has the answer ends up
+ * in a buffer of the ring. Where the kernel has no buffer rings, the worker
+ * polls all of its connections; where it has no multishot receive (Linux
+ * 5.19), each receive takes one request.
+ *
  * The listening socket is not polled while the worker takes no new connection,
  * see esdm_rpcs_handler(). With epoll, it is taken out of the epoll instance;
  * with io_uring, its poll is not armed again - one armed already completes
@@ -1565,10 +1919,68 @@ struct esdm_rpcs_loop {
 	 */
 	struct esdm_rpcs_connection_list closed;
 #endif
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/* Receiving and sending through the ring, see above */
+	bool multishot;
+	/*
+	 * Does the kernel take multishot receives (Linux 6.0)? Has one
+	 * delivered a request? Without, the receives take one request each.
+	 */
+	bool mshot_ok;
+	bool mshot_seen;
+	struct io_uring_buf_ring *br;
+	uint8_t *bufs;
+	unsigned int nbufs;
+	/*
+	 * Sends submitted since the last wait, see esdm_rpcs_uring_wait() -
+	 * counted where the ring submits all entries whatever fails
+	 * (IORING_SETUP_SUBMIT_ALL)
+	 */
+	unsigned int sends;
+	bool submit_all;
+	/* Connections with an answer to be sent with the next wait */
+	struct esdm_rpcs_connection_list txq;
+	/* Connections with requests deferred, see esdm_rpcs_rx */
+	struct esdm_rpcs_connection_list deferq;
+	size_t defer_bytes;
+	/* The rounds of the loop, counted */
+	uint64_t round;
+	/*
+	 * The events of the current round, those from ev_next on still to be
+	 * served, and of each request received its buffer of the ring - or,
+	 * -1 there, the one deferred - and its size
+	 */
+	struct epoll_event *events;
+	int ev_next, ev_num;
+	int32_t rx_buf[512];
+	uint32_t rx_len[512];
+	struct esdm_rpcs_rx *rx_deferred[512];
+#endif
 };
 
 /* Events a worker takes per round of its event loop */
 #define ESDM_RPCS_MAX_EVENTS 512
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+/*
+ * What else an event of a connection served through the ring can be, next to
+ * EPOLLERR: a request received into the buffer rx_buf[] of its index, the end
+ * of its receive - the client is gone, or the server's own SHUT_RD drained
+ * it -, the last of the answers of a connection left to drain sent. None of
+ * them is an event of epoll.
+ */
+#define ESDM_RPCS_EV_RX (1U << 26)
+#define ESDM_RPCS_EV_EOF (1U << 25)
+#define ESDM_RPCS_EV_TXDONE (1U << 24)
+
+/*
+ * The data of the completions of a connection: its address, tagged with what
+ * completed - its poll (none), its receive or its send
+ */
+#define ESDM_RPCS_TAG_RECV 1
+#define ESDM_RPCS_TAG_SEND 2
+#define ESDM_RPCS_TAG_MASK 3
+#endif
 
 /*
  * The data of the events of a round but those of the connections - no address
@@ -1595,7 +2007,14 @@ static void esdm_rpcs_loop_init(struct esdm_rpcs_loop *loop)
 	TAILQ_INIT(&loop->rearm);
 	TAILQ_INIT(&loop->closed);
 #endif
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	TAILQ_INIT(&loop->txq);
+	TAILQ_INIT(&loop->deferq);
+#endif
 }
+
+/* The loop of the calling worker, for the answers it queues - see esdm_rpcs_tx */
+static __thread struct esdm_rpcs_loop *esdm_rpcs_cur_loop;
 
 static int esdm_rpcs_epoll_open(struct esdm_rpcs_loop *loop)
 {
@@ -1672,18 +2091,153 @@ static int esdm_rpcs_epoll_open(struct esdm_rpcs_loop *loop)
 #endif
 
 /*
- * Size of the rings. A round re-arms the polls of at most ESDM_RPCS_MAX_EVENTS
- * connections; should the submission queue run full all the same, what it
- * holds is submitted on the way. Completions are in flight for at most one poll
+ * Size of the rings. A round re-arms the polls or receives of at most
+ * ESDM_RPCS_MAX_EVENTS connections and sends as many answers; should the
+ * submission queue run full all the same, what it holds is submitted on the
+ * way. Completions are in flight for at most one poll or receive and one send
  * per connection, a worker holding ESDM_RPCS_MAX_WORKER_CONNECTIONS, and for
- * the cancellations of polls - the kernel keeps what does not fit in the queue
- * (IORING_FEAT_NODROP, which is required).
+ * the cancellations - the kernel keeps what does not fit in the queue
+ * (IORING_FEAT_NODROP, which is required), as it does the further requests of
+ * a client sending them without reading its answers.
  */
 #define ESDM_RPCS_URING_SQ_ENTRIES ESDM_RPCS_MAX_EVENTS
-#define ESDM_RPCS_URING_CQ_ENTRIES (2 * ESDM_RPCS_MAX_WORKER_CONNECTIONS)
+#define ESDM_RPCS_URING_CQ_ENTRIES (4 * ESDM_RPCS_MAX_WORKER_CONNECTIONS)
 
 /* The fallback, or the ring, is reported once per process */
 static atomic_flag esdm_rpcs_uring_reported = ATOMIC_FLAG_INIT;
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+
+/*
+ * Buffers of the ring of a worker, see esdm_rpcs_loop: a client has one
+ * request in flight, so as many connections of a worker can have theirs
+ * received between two rounds before a receive runs out of buffers and waits
+ * for the next round. Of each, only what the requests took up is touched: 4
+ * MiB of address space per worker, a page per buffer of it in memory for
+ * requests of up to a page - the largest, of write_data, take more.
+ */
+#define ESDM_RPCS_URING_BUFS 64
+
+/* The buffers of the rings set up from now on, a power of 2 */
+static unsigned int esdm_rpcs_uring_bufs = ESDM_RPCS_URING_BUFS;
+
+#ifdef ESDM_FUZZING
+void esdm_rpcs_fuzz_uring_bufs(unsigned int bufs)
+{
+	if (bufs && !(bufs & (bufs - 1)) && bufs <= ESDM_RPCS_URING_BUFS)
+		esdm_rpcs_uring_bufs = bufs;
+}
+#endif
+#define ESDM_RPCS_URING_BGID 0
+
+/* Polling instead of receiving through the ring is reported once per process */
+static atomic_flag esdm_rpcs_multishot_reported = ATOMIC_FLAG_INIT;
+
+static void esdm_rpcs_uring_no_multishot(int err)
+{
+	if (!atomic_flag_test_and_set(&esdm_rpcs_multishot_reported))
+		esdm_logger(
+			LOGGER_STATUS, LOGGER_C_RPC,
+			"io_uring of the RPC worker threads cannot receive multishot, polling the connections: %s\n",
+			strerror(err));
+}
+
+static uint8_t *esdm_rpcs_uring_buf(struct esdm_rpcs_loop *loop,
+				    unsigned int bid)
+{
+	return loop->bufs + (size_t)bid * ESDM_RPC_MAX_MSG_SIZE;
+}
+
+/* Wipe the first @used bytes of buffer @bid and hand it back to the ring */
+static void esdm_rpcs_uring_buf_put(struct esdm_rpcs_loop *loop,
+				    unsigned int bid, size_t used)
+{
+	uint8_t *buf = esdm_rpcs_uring_buf(loop, bid);
+
+	if (used)
+		memset_secure(buf, 0, min_size(used, ESDM_RPC_MAX_MSG_SIZE));
+	io_uring_buf_ring_add(loop->br, buf, ESDM_RPC_MAX_MSG_SIZE,
+			      (unsigned short)bid,
+			      io_uring_buf_ring_mask(loop->nbufs), 0);
+	io_uring_buf_ring_advance(loop->br, 1);
+}
+
+/* Register the buffers to receive into - polling the connections without */
+static void esdm_rpcs_uring_bufs_open(struct esdm_rpcs_loop *loop)
+{
+	const unsigned int nbufs = esdm_rpcs_uring_bufs;
+	const size_t size = (size_t)nbufs * ESDM_RPC_MAX_MSG_SIZE;
+	unsigned int i;
+	int ret = 0;
+
+	BUILD_BUG_ON(ARRAY_SIZE(loop->rx_buf) < ESDM_RPCS_MAX_EVENTS ||
+		     ARRAY_SIZE(loop->rx_len) < ESDM_RPCS_MAX_EVENTS ||
+		     ESDM_RPCS_URING_BUFS > 65536 ||
+		     (ESDM_RPCS_URING_BUFS & (ESDM_RPCS_URING_BUFS - 1)));
+
+	if (!atomic_load(&esdm_rpcs_io_uring_multishot))
+		return;
+
+	loop->bufs = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+	if (loop->bufs == MAP_FAILED) {
+		loop->bufs = NULL;
+		esdm_rpcs_uring_no_multishot(errno);
+		return;
+	}
+
+	/* Buffer rings came with Linux 5.19 */
+	loop->br = io_uring_setup_buf_ring(&loop->ring, nbufs,
+					   ESDM_RPCS_URING_BGID, 0, &ret);
+	if (!loop->br) {
+		munmap(loop->bufs, size);
+		loop->bufs = NULL;
+		esdm_rpcs_uring_no_multishot(-ret);
+		return;
+	}
+
+	loop->nbufs = nbufs;
+	for (i = 0; i < nbufs; i++) {
+		io_uring_buf_ring_add(
+			loop->br, esdm_rpcs_uring_buf(loop, i),
+			ESDM_RPC_MAX_MSG_SIZE, (unsigned short)i,
+			io_uring_buf_ring_mask(nbufs), (int)i);
+	}
+	io_uring_buf_ring_advance(loop->br, (int)nbufs);
+
+	loop->multishot = true;
+	loop->mshot_ok = true;
+}
+
+static void esdm_rpcs_uring_bufs_close(struct esdm_rpcs_loop *loop)
+{
+	if (loop->br) {
+		io_uring_free_buf_ring(&loop->ring, loop->br,
+				       loop->nbufs,
+				       ESDM_RPCS_URING_BGID);
+		loop->br = NULL;
+	}
+	if (loop->bufs) {
+		munmap(loop->bufs,
+		       (size_t)loop->nbufs * ESDM_RPC_MAX_MSG_SIZE);
+		loop->bufs = NULL;
+	}
+	loop->multishot = false;
+}
+
+#else /* ESDM_RPC_IO_URING_MULTISHOT */
+
+static void esdm_rpcs_uring_bufs_open(struct esdm_rpcs_loop *loop)
+{
+	(void)loop;
+}
+
+static void esdm_rpcs_uring_bufs_close(struct esdm_rpcs_loop *loop)
+{
+	(void)loop;
+}
+
+#endif /* ESDM_RPC_IO_URING_MULTISHOT */
 
 static int esdm_rpcs_uring_open(struct esdm_rpcs_loop *loop)
 {
@@ -1744,10 +2298,23 @@ static int esdm_rpcs_uring_open(struct esdm_rpcs_loop *loop)
 
 	loop->uring = true;
 	loop->timer_multishot = true;
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	loop->submit_all = IORING_SETUP_SUBMIT_ALL &&
+			   (params.flags & IORING_SETUP_SUBMIT_ALL);
+#endif
 
-	if (!atomic_flag_test_and_set(&esdm_rpcs_uring_reported))
+	esdm_rpcs_uring_bufs_open(loop);
+
+	if (!atomic_flag_test_and_set(&esdm_rpcs_uring_reported)) {
+		const char *how = "polling the connections";
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		if (loop->multishot)
+			how = "receiving and sending through it";
+#endif
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-			    "RPC worker threads wait with io_uring\n");
+			    "RPC worker threads wait with io_uring, %s\n", how);
+	}
 
 	return 0;
 }
@@ -1785,11 +2352,21 @@ static bool esdm_rpcs_uring_poll(struct esdm_rpcs_loop *loop, int fd,
 	return true;
 }
 
-/* Have the poll of @rpc_conn armed with the next wait */
+/* Is @rpc_conn polled, or received from by the ring? */
+static bool esdm_rpcs_uring_armed(const struct esdm_rpcs_connection *rpc_conn)
+{
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	if (rpc_conn->ring_io)
+		return rpc_conn->recv_armed;
+#endif
+	return rpc_conn->poll_armed;
+}
+
+/* Have the poll, or the receive, of @rpc_conn armed with the next wait */
 static void esdm_rpcs_uring_rearm(struct esdm_rpcs_loop *loop,
 				  struct esdm_rpcs_connection *rpc_conn)
 {
-	if (rpc_conn->poll_armed || rpc_conn->poll_queued)
+	if (rpc_conn->poll_queued || esdm_rpcs_uring_armed(rpc_conn))
 		return;
 
 	TAILQ_INSERT_TAIL(&loop->rearm, rpc_conn, poll_entry);
@@ -1797,15 +2374,594 @@ static void esdm_rpcs_uring_rearm(struct esdm_rpcs_loop *loop,
 }
 
 /*
- * Submit what is to be polled - every descriptor without a poll in flight but
- * the listening socket while it is not to be - and the cancellations of the
- * polls of closed connections. What finds no room in the submission queue is
- * submitted with the next wait.
+ * Have the receive of @rpc_conn, which found no buffer, armed with the next
+ * wait ahead of those that had their requests - it waited longer
+ */
+static void esdm_rpcs_uring_rearm_first(struct esdm_rpcs_loop *loop,
+					struct esdm_rpcs_connection *rpc_conn)
+{
+	if (rpc_conn->poll_queued || esdm_rpcs_uring_armed(rpc_conn))
+		return;
+
+	TAILQ_INSERT_HEAD(&loop->rearm, rpc_conn, poll_entry);
+	rpc_conn->poll_queued = true;
+}
+
+/*
+ * May a closed connection be freed - is none of its operations in flight any
+ * more? Then it is.
+ */
+static void esdm_rpcs_uring_release(struct esdm_rpcs_loop *loop,
+				    struct esdm_rpcs_connection *rpc_conn)
+{
+	if (rpc_conn->poll_armed)
+		return;
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	if (rpc_conn->recv_armed || rpc_conn->tx_inflight)
+		return;
+#endif
+
+	TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
+	free(rpc_conn);
+}
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+
+/* Submit a cancellation of the operation of the ring with data @data */
+static bool esdm_rpcs_uring_cancel(struct esdm_rpcs_loop *loop, uint64_t data)
+{
+	struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+
+	if (!sqe)
+		return false;
+
+	io_uring_prep_cancel64(sqe, data, 0);
+	io_uring_sqe_set_data64(sqe, ESDM_RPCS_EVENT_CANCEL);
+
+	return true;
+}
+
+/*
+ * Submit the receive of @rpc_conn: a multishot one, which stays armed, as a
+ * client that waits for each answer has it - or one taking a single request
+ * where more than one may wait in the socket: on a new connection, after a
+ * receive that found no buffer or left more in the socket
+ * (IORING_CQE_F_SOCK_NONEMPTY), after a client sent requests without waiting
+ * for the answers, see esdm_rpcs_rx. A multishot receive takes what the socket
+ * holds into as many buffers of the ring as it finds - leaving none to the
+ * receives of the other connections of the worker, which then wait for the
+ * next round, and the round to the requests of that one connection; a single
+ * receive per round has those of each connection take their turn, as with
+ * the poll.
+ */
+static bool esdm_rpcs_uring_recv(struct esdm_rpcs_loop *loop,
+				 struct esdm_rpcs_connection *rpc_conn)
+{
+	struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+
+	if (!sqe)
+		return false;
+
+	/* The full size of a message cut short - see esdm_rpcs_process() */
+	rpc_conn->recv_multishot = loop->mshot_ok && !rpc_conn->recv_single;
+	if (rpc_conn->recv_multishot)
+		io_uring_prep_recv_multishot(sqe, rpc_conn->child_fd, NULL, 0,
+					     MSG_TRUNC);
+	else
+		io_uring_prep_recv(sqe, rpc_conn->child_fd, NULL, 0,
+				   MSG_TRUNC);
+	sqe->flags |= IOSQE_BUFFER_SELECT;
+	sqe->buf_group = ESDM_RPCS_URING_BGID;
+	io_uring_sqe_set_data64(sqe, (uint64_t)(uintptr_t)rpc_conn |
+					     ESDM_RPCS_TAG_RECV);
+	rpc_conn->recv_armed = true;
+
+	return true;
+}
+
+/* Submit the send of the first answer of @rpc_conn */
+static bool esdm_rpcs_uring_send(struct esdm_rpcs_loop *loop,
+				 struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpcs_tx *tx = rpc_conn->tx_head;
+	struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+
+	if (!sqe)
+		return false;
+
+	io_uring_prep_send(sqe, rpc_conn->child_fd, tx->buf, tx->len,
+			   MSG_NOSIGNAL | MSG_DONTWAIT);
+	io_uring_sqe_set_data64(sqe, (uint64_t)(uintptr_t)rpc_conn |
+					     ESDM_RPCS_TAG_SEND);
+	rpc_conn->tx_inflight = true;
+	loop->sends++;
+
+	return true;
+}
+
+/* Have the first answer of @rpc_conn sent with the next wait */
+static void esdm_rpcs_uring_txq_add(struct esdm_rpcs_loop *loop,
+				    struct esdm_rpcs_connection *rpc_conn)
+{
+	if (rpc_conn->tx_queued || rpc_conn->tx_inflight || !rpc_conn->tx_head)
+		return;
+
+	TAILQ_INSERT_TAIL(&loop->txq, rpc_conn, tx_entry);
+	rpc_conn->tx_queued = true;
+}
+
+static void esdm_rpcs_uring_txq_del(struct esdm_rpcs_loop *loop,
+				    struct esdm_rpcs_connection *rpc_conn)
+{
+	if (!rpc_conn->tx_queued)
+		return;
+
+	TAILQ_REMOVE(&loop->txq, rpc_conn, tx_entry);
+	rpc_conn->tx_queued = false;
+}
+
+/*
+ * Cancel the receive of a connection going over to the poll, ahead of the send
+ * of its answer, see esdm_rpcs_loop. The entries of a submission are issued in
+ * their order, and the cancellation of a receive waiting for the socket is
+ * done once it is issued - no record the client sends once it has the answer
+ * reaches the receive. Not linked to the send: the send would be issued by the
+ * task work of the cancellation, which a ring with IORING_SETUP_DEFER_TASKRUN
+ * runs only once the worker waits for more than the completions already
+ * posted - not while a client waits for the answer.
+ */
+static void esdm_rpcs_uring_recv_cancel(struct esdm_rpcs_loop *loop,
+					struct esdm_rpcs_connection *rpc_conn)
+{
+	rpc_conn->recv_cancel = false;
+	if (!rpc_conn->recv_armed || rpc_conn->recv_cancelled)
+		return;
+
+	if (esdm_rpcs_uring_cancel(loop,
+				   (uint64_t)(uintptr_t)rpc_conn |
+					   ESDM_RPCS_TAG_RECV))
+		rpc_conn->recv_cancelled = true;
+}
+
+/*
+ * Requests of @rpc_conn the ring received and the worker did not serve yet,
+ * among the events of the round or still in the completion queue?
+ */
+static bool
+esdm_rpcs_uring_input_queued(const struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpcs_loop *loop = esdm_rpcs_cur_loop;
+	const uint64_t data = (uint64_t)(uintptr_t)rpc_conn |
+			      ESDM_RPCS_TAG_RECV;
+	struct io_uring_cqe *cqe;
+	unsigned int head;
+
+	if (rpc_conn->rx_pending || rpc_conn->rx_defer_head)
+		return true;
+	if (!loop || !loop->multishot)
+		return false;
+
+	io_uring_for_each_cqe(&loop->ring, head, cqe)
+	{
+		if (io_uring_cqe_get_data64(cqe) == data && cqe->res > 0)
+			return true;
+	}
+
+	return false;
+}
+
+/* Give back the request of event @i of the round, wiping it */
+static void esdm_rpcs_uring_rx_put(struct esdm_rpcs_loop *loop, int i)
+{
+	if (loop->rx_buf[i] >= 0) {
+		esdm_rpcs_uring_buf_put(loop, (unsigned int)loop->rx_buf[i],
+					loop->rx_len[i]);
+	} else {
+		loop->defer_bytes -= loop->rx_deferred[i]->len;
+		esdm_rpcs_rx_free(loop->rx_deferred[i]);
+	}
+}
+
+/*
+ * Arm the receive of @rpc_conn again with the next wait, unless it has
+ * requests deferred - see esdm_rpcs_rx - or its receive is being cancelled
+ */
+static void esdm_rpcs_uring_recv_again(struct esdm_rpcs_loop *loop,
+				       struct esdm_rpcs_connection *rpc_conn)
+{
+	if (rpc_conn->rx_defer_head || rpc_conn->recv_cancel)
+		return;
+
+	esdm_rpcs_uring_rearm(loop, rpc_conn);
+}
+
+/*
+ * Defer a request of @len bytes in @buf of @rpc_conn, which has one in the
+ * round already, see esdm_rpcs_rx. Returns false if it cannot take it.
+ */
+static bool esdm_rpcs_uring_defer(struct esdm_rpcs_loop *loop,
+				  struct esdm_rpcs_connection *rpc_conn,
+				  const uint8_t *buf, size_t len)
+{
+	struct esdm_rpcs_rx *rx;
+
+	len = min_size(len, ESDM_RPC_MAX_MSG_SIZE + 1);
+	if (rpc_conn->rx_defer_num >= ESDM_RPCS_RX_DEFER_MAX ||
+	    loop->defer_bytes + len > ESDM_RPCS_RX_DEFER_BYTES) {
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Client FD %d sends requests without reading the answers\n",
+			rpc_conn->child_fd);
+		return false;
+	}
+
+	rx = malloc(sizeof(*rx) + len);
+	if (!rx)
+		return false;
+	rx->next = NULL;
+	rx->len = len;
+	/*
+	 * A message cut short keeps a size beyond the buffer, which
+	 * esdm_rpcs_process() refuses - one byte stands for the rest.
+	 */
+	memcpy(rx->data, buf, min_size(len, ESDM_RPC_MAX_MSG_SIZE));
+	if (len > ESDM_RPC_MAX_MSG_SIZE)
+		rx->data[ESDM_RPC_MAX_MSG_SIZE] = 0;
+
+	if (rpc_conn->rx_defer_tail)
+		rpc_conn->rx_defer_tail->next = rx;
+	else
+		rpc_conn->rx_defer_head = rx;
+	rpc_conn->rx_defer_tail = rx;
+	rpc_conn->rx_defer_num++;
+	loop->defer_bytes += len;
+
+	if (!rpc_conn->deferred) {
+		TAILQ_INSERT_TAIL(&loop->deferq, rpc_conn, defer_entry);
+		rpc_conn->deferred = true;
+	}
+
+	/* No more until they are served, and then one at a time */
+	rpc_conn->recv_single = true;
+	if (rpc_conn->recv_armed && !rpc_conn->recv_cancelled &&
+	    !rpc_conn->recv_cancel) {
+		rpc_conn->recv_cancel = true;
+		if (!rpc_conn->poll_queued) {
+			TAILQ_INSERT_TAIL(&loop->rearm, rpc_conn, poll_entry);
+			rpc_conn->poll_queued = true;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * The requests deferred as events of the round, one per connection without one
+ * in the round, as far as @maxevents allows
+ */
+static void esdm_rpcs_uring_undefer(struct esdm_rpcs_loop *loop,
+				    struct epoll_event *events, int *n,
+				    int maxevents)
+{
+	struct esdm_rpcs_connection *rpc_conn, *tmp;
+
+	TAILQ_FOREACH_SAFE(rpc_conn, &loop->deferq, defer_entry, tmp)
+	{
+		struct esdm_rpcs_rx *rx = rpc_conn->rx_defer_head;
+
+		if (*n >= maxevents)
+			break;
+		if (rpc_conn->rx_round == loop->round)
+			continue;
+
+		rpc_conn->rx_defer_head = rx->next;
+		if (!rpc_conn->rx_defer_head)
+			rpc_conn->rx_defer_tail = NULL;
+		rpc_conn->rx_defer_num--;
+
+		rpc_conn->rx_round = loop->round;
+		rpc_conn->rx_pending++;
+		events[*n].events = ESDM_RPCS_EV_RX;
+		events[*n].data.u64 = 0;
+		events[*n].data.ptr = rpc_conn;
+		loop->rx_buf[*n] = -1;
+		loop->rx_len[*n] = (uint32_t)rx->len;
+		loop->rx_deferred[*n] = rx;
+		(*n)++;
+
+		if (!rpc_conn->rx_defer_head) {
+			TAILQ_REMOVE(&loop->deferq, rpc_conn, defer_entry);
+			rpc_conn->deferred = false;
+			/* Received from again, once its receive ended */
+			if (!rpc_conn->recv_armed)
+				esdm_rpcs_uring_recv_again(loop, rpc_conn);
+		}
+	}
+}
+
+/*
+ * Void the events of the round left for @rpc_conn, which is closed, giving
+ * back the buffers of the requests among them
+ */
+static void esdm_rpcs_uring_void(struct esdm_rpcs_loop *loop,
+				 struct esdm_rpcs_connection *rpc_conn)
+{
+	int i;
+
+	for (i = loop->ev_next; i < loop->ev_num; i++) {
+		struct epoll_event *ev = &loop->events[i];
+
+		if (ev->data.u64 <= ESDM_RPCS_EVENT_CANCEL ||
+		    ev->data.ptr != rpc_conn)
+			continue;
+		if (ev->events & ESDM_RPCS_EV_RX) {
+			esdm_rpcs_uring_rx_put(loop, i);
+			rpc_conn->rx_pending--;
+		}
+		ev->data.u64 = ESDM_RPCS_EVENT_STALE;
+	}
+}
+
+/*
+ * A connection served through the ring is to be polled from now on - it
+ * switched to DTLS, see esdm_rpcs_serve_ring()
+ */
+static void esdm_rpcs_uring_to_poll(struct esdm_rpcs_loop *loop,
+				    struct esdm_rpcs_connection *rpc_conn)
+{
+	rpc_conn->ring_io = false;
+	if (rpc_conn->recv_armed && !rpc_conn->recv_cancelled)
+		rpc_conn->recv_cancel = true;
+
+	/* Taken off the queue to arm its receive, if it was, to be polled */
+	if (rpc_conn->poll_queued) {
+		TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
+		rpc_conn->poll_queued = false;
+	}
+	esdm_rpcs_uring_rearm(loop, rpc_conn);
+}
+
+/*
+ * The completion of the receive of @rpc_conn: a request into a buffer of the
+ * ring - an event of the round -, or the end of the receive.
+ */
+static void esdm_rpcs_uring_recv_done(struct esdm_rpcs_loop *loop,
+				      struct esdm_rpcs_connection *rpc_conn,
+				      const struct io_uring_cqe *cqe,
+				      struct epoll_event *events, int *n)
+{
+	int bid = (cqe->flags & IORING_CQE_F_BUFFER) ?
+			  (int)(cqe->flags >> IORING_CQE_BUFFER_SHIFT) :
+			  -1;
+	int res = cqe->res;
+
+	/* Without IORING_CQE_F_MORE, the receive ended */
+	if (!(cqe->flags & IORING_CQE_F_MORE)) {
+		rpc_conn->recv_armed = false;
+		rpc_conn->recv_cancelled = false;
+	}
+
+	if (res > 0 && bid >= 0 && !rpc_conn->closed) {
+		if (rpc_conn->recv_multishot) {
+			loop->mshot_seen = true;
+		} else {
+			/* More in the socket: one request at a time */
+			rpc_conn->recv_single =
+				!!(cqe->flags & IORING_CQE_F_SOCK_NONEMPTY);
+		}
+
+		/*
+		 * A request in the clear after STARTDTLS: the client did not
+		 * wait for its answer, which is no client of the protocol.
+		 */
+		if (!rpc_conn->ring_io) {
+			esdm_rpcs_uring_buf_put(loop, (unsigned int)bid,
+						(size_t)res);
+			events[*n].events = EPOLLERR;
+		} else if (rpc_conn->rx_round == loop->round ||
+			   rpc_conn->rx_defer_head) {
+			/* One per round, see esdm_rpcs_rx */
+			bool deferred = esdm_rpcs_uring_defer(
+				loop, rpc_conn,
+				esdm_rpcs_uring_buf(loop, (unsigned int)bid),
+				(size_t)res);
+
+			esdm_rpcs_uring_buf_put(loop, (unsigned int)bid,
+						(size_t)res);
+			if (deferred)
+				return;
+			events[*n].events = EPOLLERR;
+		} else {
+			/* Armed again for the next requests, if it ended */
+			if (!rpc_conn->recv_armed)
+				esdm_rpcs_uring_recv_again(loop, rpc_conn);
+			rpc_conn->rx_round = loop->round;
+			events[*n].events = ESDM_RPCS_EV_RX;
+			loop->rx_buf[*n] = bid;
+			loop->rx_len[*n] = (uint32_t)res;
+			rpc_conn->rx_pending++;
+		}
+		events[*n].data.u64 = 0;
+		events[*n].data.ptr = rpc_conn;
+		(*n)++;
+		return;
+	}
+
+	if (bid >= 0)
+		esdm_rpcs_uring_buf_put(loop, (unsigned int)bid,
+					res > 0 ? (size_t)res : 0);
+
+	if (rpc_conn->closed) {
+		esdm_rpcs_uring_release(loop, rpc_conn);
+		return;
+	}
+
+	/* Going over to the poll, which tells the rest */
+	if (!rpc_conn->ring_io)
+		return;
+
+	switch (res) {
+	case -ENOBUFS:
+		/* Left in the socket for the next round, see esdm_rpcs_loop */
+#ifdef ESDM_FUZZING
+		atomic_fetch_add(&esdm_rpcs_enobufs, 1);
+#endif
+		rpc_conn->recv_single = true;
+		if (!rpc_conn->rx_defer_head && !rpc_conn->recv_cancel)
+			esdm_rpcs_uring_rearm_first(loop, rpc_conn);
+		return;
+	case -ECANCELED:
+		/* Cancelled for the requests deferred, see esdm_rpcs_rx */
+		esdm_rpcs_uring_recv_again(loop, rpc_conn);
+		return;
+	case -EINVAL:
+		/*
+		 * The kernel has buffer rings but no multishot receive (Linux
+		 * 5.19) - unless one delivered a request before: the receives
+		 * take one request each from now on.
+		 */
+		if (!rpc_conn->recv_multishot || loop->mshot_seen)
+			break;
+		if (loop->mshot_ok) {
+			loop->mshot_ok = false;
+			esdm_logger(
+				LOGGER_STATUS, LOGGER_C_RPC,
+				"io_uring of the RPC worker threads cannot receive multishot, receiving one request at a time\n");
+		}
+		esdm_rpcs_uring_recv_again(loop, rpc_conn);
+		return;
+	case 0:
+		/* The end of the stream - or an empty message, no request */
+		events[*n].events = ESDM_RPCS_EV_EOF;
+		events[*n].data.u64 = 0;
+		events[*n].data.ptr = rpc_conn;
+		(*n)++;
+		return;
+	default:
+		break;
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Receiving on client FD %d failed: %s\n", rpc_conn->child_fd,
+		    strerror(res < 0 ? -res : EIO));
+	events[*n].events = EPOLLERR;
+	events[*n].data.u64 = 0;
+	events[*n].data.ptr = rpc_conn;
+	(*n)++;
+}
+
+/* The completion of the send of the first answer of @rpc_conn */
+static void esdm_rpcs_uring_send_done(struct esdm_rpcs_loop *loop,
+				      struct esdm_rpcs_connection *rpc_conn,
+				      int res, struct epoll_event *events,
+				      int *n)
+{
+	struct esdm_rpcs_tx *tx = rpc_conn->tx_head;
+	size_t len = 0;
+
+	rpc_conn->tx_inflight = false;
+	if (tx) {
+		len = tx->len;
+		rpc_conn->tx_head = tx->next;
+		if (!rpc_conn->tx_head)
+			rpc_conn->tx_tail = NULL;
+		rpc_conn->tx_num--;
+		esdm_rpcs_tx_put(tx);
+	}
+
+	if (rpc_conn->closed) {
+		esdm_rpcs_uring_release(loop, rpc_conn);
+		return;
+	}
+
+	/* See esdm_rpcs_write_data() */
+	if (res < 0 || (size_t)res != len) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "Writing of data to file descriptor %d failed: %s\n",
+			    rpc_conn->child_fd,
+			    res >= 0 ? "partial send on SEQPACKET socket" :
+			    (res == -EAGAIN || res == -EWOULDBLOCK) ?
+				       "the client does not read its answers" :
+				       strerror(-res));
+		events[*n].events = EPOLLERR;
+	} else if (rpc_conn->tx_head) {
+		esdm_rpcs_uring_txq_add(loop, rpc_conn);
+		return;
+	} else if (rpc_conn->closing) {
+		/* Left to drain, which it may be now */
+		events[*n].events = ESDM_RPCS_EV_TXDONE;
+	} else {
+		esdm_logger(LOGGER_DEBUG2, LOGGER_C_ANY, "%zu bytes written\n",
+			    len);
+		return;
+	}
+
+	events[*n].data.u64 = 0;
+	events[*n].data.ptr = rpc_conn;
+	(*n)++;
+}
+
+/*
+ * Queue the answer @tx of @len bytes of a connection served through the ring,
+ * see esdm_rpcs_loop. @tx is the connection's from now on, whatever the
+ * outcome. A connection that cannot take it is closed, as by a write that
+ * fails - see esdm_rpcs_write_data().
+ */
+static int esdm_rpcs_tx_queue(struct esdm_rpcs_connection *rpc_conn,
+			      struct esdm_rpcs_tx *tx, size_t len)
+{
+	struct esdm_rpcs_loop *loop = esdm_rpcs_cur_loop;
+
+	tx->len = len;
+	tx->next = NULL;
+
+	if (!loop || rpc_conn->child_fd < 0 ||
+	    rpc_conn->tx_num >= ESDM_RPCS_TX_MAX) {
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Writing of data to file descriptor %d failed: %s\n",
+			rpc_conn->child_fd,
+			rpc_conn->tx_num >= ESDM_RPCS_TX_MAX ?
+				"the client does not read its answers" :
+				"the connection is closed");
+		esdm_rpcs_tx_put(tx);
+		esdm_rpcs_conn_close(rpc_conn, false);
+		return -EAGAIN;
+	}
+
+	if (rpc_conn->tx_tail)
+		rpc_conn->tx_tail->next = tx;
+	else
+		rpc_conn->tx_head = tx;
+	rpc_conn->tx_tail = tx;
+	rpc_conn->tx_num++;
+
+	esdm_rpcs_uring_txq_add(loop, rpc_conn);
+
+	return 0;
+}
+
+#else /* ESDM_RPC_IO_URING_MULTISHOT */
+
+static bool
+esdm_rpcs_uring_input_queued(const struct esdm_rpcs_connection *rpc_conn)
+{
+	(void)rpc_conn;
+	return false;
+}
+
+#endif /* ESDM_RPC_IO_URING_MULTISHOT */
+
+/*
+ * Submit what is to be polled or received from - every descriptor without a
+ * poll in flight but the listening socket while it is not to be -, the answers
+ * to be sent and the cancellations of the polls and receives of closed
+ * connections. What finds no room in the submission queue is submitted with
+ * the next wait.
  */
 static void esdm_rpcs_uring_arm(struct esdm_rpcs_loop *loop)
 {
 	struct esdm_rpcs_connection *rpc_conn, *tmp;
-	struct io_uring_sqe *sqe;
 
 	if (loop->listen_armed && !loop->listen_polled)
 		loop->listen_polled =
@@ -1823,6 +2979,27 @@ static void esdm_rpcs_uring_arm(struct esdm_rpcs_loop *loop)
 
 	TAILQ_FOREACH_SAFE(rpc_conn, &loop->rearm, poll_entry, tmp)
 	{
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		/* Ahead of its poll and of the sends below */
+		if (rpc_conn->recv_cancel) {
+			esdm_rpcs_uring_recv_cancel(loop, rpc_conn);
+			/* Received from again once its requests are served */
+			if (rpc_conn->ring_io) {
+				TAILQ_REMOVE(&loop->rearm, rpc_conn,
+					     poll_entry);
+				rpc_conn->poll_queued = false;
+				continue;
+			}
+		}
+
+		if (rpc_conn->ring_io) {
+			if (!esdm_rpcs_uring_recv(loop, rpc_conn))
+				break;
+			TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
+			rpc_conn->poll_queued = false;
+			continue;
+		}
+#endif
 		if (!esdm_rpcs_uring_poll(loop, rpc_conn->child_fd,
 					  POLLIN | POLLRDHUP,
 					  (uint64_t)(uintptr_t)rpc_conn, false))
@@ -1832,24 +3009,46 @@ static void esdm_rpcs_uring_arm(struct esdm_rpcs_loop *loop)
 		rpc_conn->poll_armed = true;
 	}
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	TAILQ_FOREACH_SAFE(rpc_conn, &loop->txq, tx_entry, tmp)
+	{
+		if (!esdm_rpcs_uring_send(loop, rpc_conn))
+			break;
+		esdm_rpcs_uring_txq_del(loop, rpc_conn);
+	}
+#endif
+
 	TAILQ_FOREACH(rpc_conn, &loop->closed, tailq)
 	{
-		if (rpc_conn->poll_cancelled)
-			continue;
-		sqe = esdm_rpcs_uring_sqe(loop);
-		if (!sqe)
-			break;
-		io_uring_prep_cancel64(sqe, (uint64_t)(uintptr_t)rpc_conn, 0);
-		io_uring_sqe_set_data64(sqe, ESDM_RPCS_EVENT_CANCEL);
-		rpc_conn->poll_cancelled = true;
+		if (rpc_conn->poll_armed && !rpc_conn->poll_cancelled) {
+			struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+
+			if (!sqe)
+				break;
+			io_uring_prep_cancel64(sqe,
+					       (uint64_t)(uintptr_t)rpc_conn,
+					       0);
+			io_uring_sqe_set_data64(sqe, ESDM_RPCS_EVENT_CANCEL);
+			rpc_conn->poll_cancelled = true;
+		}
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		if (rpc_conn->recv_armed && !rpc_conn->recv_cancelled) {
+			if (!esdm_rpcs_uring_cancel(
+				    loop, (uint64_t)(uintptr_t)rpc_conn |
+						  ESDM_RPCS_TAG_RECV))
+				break;
+			rpc_conn->recv_cancelled = true;
+		}
+#endif
 	}
 }
 
 /*
- * Wait for the completions of the polls, at most @maxevents of which are taken
- * as the events of the round - the others stay in the completion queue for the
- * next one. Returns the number of events, a negative errno if the wait failed,
- * or a poll of a descriptor but a connection did.
+ * Wait for the completions of the polls, receives and sends, at most
+ * @maxevents of which are taken as the events of the round - the others stay
+ * in the completion queue for the next one. Returns the number of events, a
+ * negative errno if the wait failed, or a poll of a descriptor but a
+ * connection did.
  */
 static int esdm_rpcs_uring_wait(struct esdm_rpcs_loop *loop,
 				struct epoll_event *events, int maxevents)
@@ -1861,7 +3060,26 @@ static int esdm_rpcs_uring_wait(struct esdm_rpcs_loop *loop,
 
 	esdm_rpcs_uring_arm(loop);
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	/*
+	 * With requests deferred, the round has events already. Otherwise,
+	 * the wait is for one completion beyond those of the sends submitted
+	 * with it: a send with MSG_DONTWAIT completes as it is submitted, and
+	 * waiting for one completion only would have the worker go through a
+	 * round of nothing but the completions of its sends - another system
+	 * call per answer. No more than those is counted, so the wait never
+	 * waits for a completion that does not come.
+	 */
+	loop->round++;
+	ret = io_uring_submit_and_wait(
+		&loop->ring,
+		!TAILQ_EMPTY(&loop->deferq) ? 0 :
+		loop->submit_all	    ? 1 + loop->sends :
+					      1);
+	loop->sends = 0;
+#else
 	ret = io_uring_submit_and_wait(&loop->ring, 1);
+#endif
 	/*
 	 * Completions the kernel could not post yet, see IORING_FEAT_NODROP:
 	 * those posted are taken first, which makes room.
@@ -1900,14 +3118,30 @@ static int esdm_rpcs_uring_wait(struct esdm_rpcs_loop *loop,
 			loop->exit_polled = false;
 			break;
 		default:
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+			rpc_conn = (struct esdm_rpcs_connection *)(uintptr_t)(
+				data & ~(uint64_t)ESDM_RPCS_TAG_MASK);
+			switch (data & ESDM_RPCS_TAG_MASK) {
+			case ESDM_RPCS_TAG_RECV:
+				esdm_rpcs_uring_recv_done(loop, rpc_conn, cqe,
+							  events, &n);
+				continue;
+			case ESDM_RPCS_TAG_SEND:
+				esdm_rpcs_uring_send_done(loop, rpc_conn, res,
+							  events, &n);
+				continue;
+			default:
+				break;
+			}
+#else
 			rpc_conn = (struct esdm_rpcs_connection *)(uintptr_t)
 				data;
+#endif
 			rpc_conn->poll_armed = false;
 
-			/* The poll was the last reference to it */
+			/* The poll was the last reference to it, maybe */
 			if (rpc_conn->closed) {
-				TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
-				free(rpc_conn);
+				esdm_rpcs_uring_release(loop, rpc_conn);
 				continue;
 			}
 
@@ -1936,7 +3170,21 @@ static int esdm_rpcs_uring_wait(struct esdm_rpcs_loop *loop,
 	}
 	io_uring_cq_advance(&loop->ring, seen);
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	if (!ret)
+		esdm_rpcs_uring_undefer(loop, events, &n, maxevents);
+#endif
+
 	return ret ? ret : n;
+}
+
+#else /* ESDM_RPC_IO_URING */
+
+static bool
+esdm_rpcs_uring_input_queued(const struct esdm_rpcs_connection *rpc_conn)
+{
+	(void)rpc_conn;
+	return false;
 }
 
 #endif /* ESDM_RPC_IO_URING */
@@ -2010,6 +3258,14 @@ static int esdm_rpcs_loop_add(struct esdm_rpcs_loop *loop,
 #ifdef ESDM_RPC_IO_URING
 	/* From the end of this round on, like a connection whose event it served */
 	if (loop->uring) {
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		/*
+		 * Received from by the ring - until it switches to DTLS -, a
+		 * single request first, which it may have sent already
+		 */
+		rpc_conn->ring_io = loop->multishot;
+		rpc_conn->recv_single = true;
+#endif
 		esdm_rpcs_uring_rearm(loop, rpc_conn);
 		return 0;
 	}
@@ -2036,8 +3292,22 @@ static bool esdm_rpcs_loop_del(struct esdm_rpcs_loop *loop,
 			TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
 			rpc_conn->poll_queued = false;
 		}
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		esdm_rpcs_uring_txq_del(loop, rpc_conn);
+		if (rpc_conn->deferred) {
+			TAILQ_REMOVE(&loop->deferq, rpc_conn, defer_entry);
+			rpc_conn->deferred = false;
+		}
+		esdm_rpcs_rx_drop(rpc_conn, &loop->defer_bytes);
+		if (loop->multishot)
+			esdm_rpcs_uring_void(loop, rpc_conn);
+		if (!rpc_conn->poll_armed && !rpc_conn->recv_armed &&
+		    !rpc_conn->tx_inflight)
+			return true;
+#else
 		if (!rpc_conn->poll_armed)
 			return true;
+#endif
 
 		rpc_conn->closed = true;
 		TAILQ_INSERT_TAIL(&loop->closed, rpc_conn, tailq);
@@ -2058,15 +3328,23 @@ static void esdm_rpcs_loop_close(struct esdm_rpcs_loop *loop)
 		struct esdm_rpcs_connection *rpc_conn, *tmp;
 
 		/* No completion comes any more, nothing refers to them */
+		esdm_rpcs_uring_bufs_close(loop);
 		io_uring_queue_exit(&loop->ring);
 		loop->uring = false;
 
 		TAILQ_FOREACH_SAFE(rpc_conn, &loop->closed, tailq, tmp)
 		{
 			TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+			/* The answer whose send was in flight */
+			esdm_rpcs_tx_put(rpc_conn->tx_head);
+#endif
 			free(rpc_conn);
 		}
 	}
+#endif
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	esdm_rpcs_tx_cache_free();
 #endif
 
 	if (loop->epfd >= 0) {
@@ -2099,16 +3377,19 @@ static void esdm_rpcs_conn_drop(struct esdm_rpc_thread *thread,
  * Did the client send something the server has not read yet? It waits in the
  * socket's receive queue until the event loop takes it - in the next round if
  * it came after the events of this one were collected, or was not among them.
- * Nothing counts as sent if the queue cannot be told.
+ * Nothing counts as sent if the queue cannot be told. With the ring receiving,
+ * it may have been taken off the socket already, waiting as a completion -
+ * looked at after the socket, so that one the kernel takes off the socket
+ * meanwhile is found there.
  */
 static bool esdm_rpcs_input_queued(const struct esdm_rpcs_connection *rpc_conn)
 {
 	int inq = 0;
 
-	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq))
-		return false;
+	if (!ioctl(rpc_conn->child_fd, SIOCINQ, &inq) && inq > 0)
+		return true;
 
-	return inq > 0;
+	return esdm_rpcs_uring_input_queued(rpc_conn);
 }
 
 /*
@@ -2183,7 +3464,16 @@ static bool esdm_rpcs_make_room(struct esdm_rpc_thread *thread,
 		    victim->child_fd, (unsigned int)victim->peer_uid,
 		    (unsigned int)victim->peer_account);
 
+	/*
+	 * Not those of one served through the ring: they are not reported
+	 * again - and one with a request among them is no victim. Closed, its
+	 * events are voided as it is, see esdm_rpcs_loop_del().
+	 */
 	for (i = 0; i < num; i++) {
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		if (victim->ring_io)
+			break;
+#endif
 		if (pending[i].data.ptr == victim)
 			pending[i].data.u64 = ESDM_RPCS_EVENT_STALE;
 	}
@@ -2226,19 +3516,132 @@ static bool esdm_rpcs_idle_reapable(struct esdm_rpcs_connection *rpc_conn,
  */
 #define ESDM_RPCS_MAX_ACCEPTS ESDM_RPCS_MAX_EVENTS
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+/*
+ * esdm_rpcs_serve() for a connection served through the ring, or with an event
+ * of the ring left: answer the request the ring received, as event @ev of the
+ * round, and close the connection if its client is gone or it failed - or, left
+ * to drain, once the server's own SHUT_RD ended its receive and its last answer
+ * is sent.
+ */
+static void esdm_rpcs_serve_ring(struct esdm_rpc_thread *thread,
+				 struct esdm_rpcs_loop *loop,
+				 struct esdm_rpcs_connection_list *list,
+				 struct esdm_rpcs_connection *rpc_conn,
+				 uint32_t revents, int ev, size_t *num,
+				 bool *accept_paused)
+{
+	int ret = 0;
+
+	if (revents & ESDM_RPCS_EV_RX) {
+		int32_t bid = loop->rx_buf[ev];
+		uint8_t *buf = bid >= 0 ?
+			esdm_rpcs_uring_buf(loop, (unsigned int)bid) :
+			loop->rx_deferred[ev]->data;
+		ssize_t received = (ssize_t)loop->rx_len[ev];
+
+		rpc_conn->rx_pending--;
+
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Received %zd bytes\n",
+			    received);
+
+		/*
+		 * After the probe, the client sends no request in the clear
+		 * - its handshake follows the answer to the probe
+		 */
+		if (!rpc_conn->ring_io || rpc_conn->child_fd < 0) {
+			memset_secure(buf, 0,
+				      min_size((size_t)received,
+					       ESDM_RPC_MAX_MSG_SIZE));
+			ret = -EPROTO;
+		} else {
+			bool probe = rpc_conn->dtls_state ==
+				     esdm_rpcs_dtls_probe;
+
+			ret = esdm_rpcs_process(rpc_conn, buf, received);
+
+			/* See esdm_rpcs_read() */
+			if (!ret && probe)
+				rpc_conn->dtls_state = esdm_rpcs_dtls_handshake;
+
+			/* Idle from the answer on, see esdm_rpcs_read() */
+			clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		}
+		/* Wiped by esdm_rpcs_process() */
+		if (bid >= 0) {
+			esdm_rpcs_uring_buf_put(loop, (unsigned int)bid, 0);
+		} else {
+			loop->defer_bytes -= loop->rx_deferred[ev]->len;
+			free(loop->rx_deferred[ev]);
+		}
+
+		/*
+		 * The probe answered: the handshake follows, which the DTLS
+		 * reads off the socket itself. Both answers leave by the ring,
+		 * in order, after the cancellation of the receive.
+		 */
+		if (!ret && rpc_conn->ring_io &&
+		    rpc_conn->dtls_state == esdm_rpcs_dtls_handshake)
+			esdm_rpcs_uring_to_poll(loop, rpc_conn);
+	}
+
+	if (revents & ESDM_RPCS_EV_EOF)
+		rpc_conn->rx_eof = true;
+
+	if (ret || (revents & (EPOLLERR | EPOLLHUP)) ||
+	    (rpc_conn->rx_eof && !rpc_conn->closing)) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+			    "Closing client FD %d\n", rpc_conn->child_fd);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
+		*accept_paused = false;
+		return;
+	}
+
+	if (rpc_conn->closing && rpc_conn->rx_eof && !rpc_conn->rx_pending &&
+	    !rpc_conn->rx_defer_head && !rpc_conn->tx_head) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+			    "Closing drained connection for FD %d\n",
+			    rpc_conn->child_fd);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
+		*accept_paused = false;
+		return;
+	}
+
+	if (revents & ESDM_RPCS_EV_RX) {
+		/* Keep the list in the order of use */
+		TAILQ_REMOVE(list, rpc_conn, tailq);
+		TAILQ_INSERT_TAIL(list, rpc_conn, tailq);
+	}
+}
+#endif
+
 /*
  * Serve an event of a connection of @thread, its connections @list: read and
  * answer the request of its client, or close it if its client is gone or it
- * failed. @revents are the events of the connection, 0 for one just accepted.
+ * failed. @revents are the events of the connection, 0 for one just accepted,
+ * @ev the index of the event in the round, -1 for one just accepted.
  * @accept_paused is cleared when the connection is closed.
  */
 static void esdm_rpcs_serve(struct esdm_rpc_thread *thread,
 			    struct esdm_rpcs_loop *loop,
 			    struct esdm_rpcs_connection_list *list,
 			    struct esdm_rpcs_connection *rpc_conn,
-			    uint32_t revents, size_t *num, bool *accept_paused)
+			    uint32_t revents, int ev, size_t *num,
+			    bool *accept_paused)
 {
 	int read_ret;
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	if (rpc_conn->ring_io ||
+	    (revents & (ESDM_RPCS_EV_RX | ESDM_RPCS_EV_EOF |
+			ESDM_RPCS_EV_TXDONE))) {
+		esdm_rpcs_serve_ring(thread, loop, list, rpc_conn, revents, ev,
+				     num, accept_paused);
+		return;
+	}
+#else
+	(void)ev;
+#endif
 
 	/*
 	 * The server's own shutdown of the reading side of a connection left to
@@ -2511,6 +3914,7 @@ static int esdm_rpcs_handler(void *args)
 				  tfd, thread->eventfd);
 	if (ret)
 		goto out;
+	esdm_rpcs_cur_loop = &loop;
 
 	while (atomic_load(&server_exit) == 0) {
 		int nfds;
@@ -2557,8 +3961,17 @@ static int esdm_rpcs_handler(void *args)
 
 		bool do_cleanup = false;
 
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		loop.events = events;
+		loop.ev_num = nfds;
+#endif
 		for (int i = 0; i < nfds; i++) {
 			struct esdm_rpcs_connection *rpc_conn = NULL;
+
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+			/* Those left to a connection closed are voided */
+			loop.ev_next = i + 1;
+#endif
 
 			if (events[i].data.u64 == ESDM_RPCS_EVENT_STALE)
 				continue;
@@ -2612,7 +4025,7 @@ static int esdm_rpcs_handler(void *args)
 						esdm_rpcs_serve(
 							thread, &loop,
 							&rpc_conn_list,
-							rpc_conn, 0,
+							rpc_conn, 0, -1,
 							&num_connections,
 							&accept_paused);
 				}
@@ -2621,9 +4034,12 @@ static int esdm_rpcs_handler(void *args)
 
 			rpc_conn = events[i].data.ptr;
 			esdm_rpcs_serve(thread, &loop, &rpc_conn_list, rpc_conn,
-					events[i].events, &num_connections,
+					events[i].events, i, &num_connections,
 					&accept_paused);
 		}
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		loop.ev_num = 0;
+#endif
 
 		if (do_cleanup) {
 			struct timespec timeout_threshold;
@@ -2674,6 +4090,7 @@ out:
 	}
 
 	esdm_rpcs_loop_close(&loop);
+	esdm_rpcs_cur_loop = NULL;
 	if (tfd >= 0) {
 		close(tfd);
 	}

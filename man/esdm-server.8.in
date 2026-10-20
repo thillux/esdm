@@ -207,6 +207,14 @@ that is what the daemon does anyway. See
 .B RPC EVENT LOOP
 below.
 .TP
+.B \-\-no_io_uring_multishot
+With io_uring, poll the RPC connections with the ring and read the requests
+and write the answers as with
+.BR epoll (7),
+rather than receive and send them through the ring. See
+.B RPC EVENT LOOP
+below.
+.TP
 .B \-\-no_fixed_drng_mapping
 Serve the random numbers the workers of the unprivileged RPC interface and
 of the EGD interface hand out from the first free DRNG of a node each, as
@@ -428,9 +436,19 @@ instance. A daemon built with io_uring (meson option
 .BR rpc\-io\-uring ,
 disabled by default) waits with an io_uring of each worker instead, unless
 .B \-\-no_io_uring
-is given: every connection has a poll there, armed again in the same system
-call that waits for the next round. Requests and answers are read and written
-as with epoll either way.
+is given. Where the kernel has multishot receives into buffer rings (Linux
+6.0) and the build has liburing 2.4 or later, the ring receives the requests of
+the connections in the clear itself, into buffers of the ring, and sends their
+answers, submitted together with the wait for the next round: one system call
+per round rather than a read and a write per request and the wait. A client
+sending requests without waiting for the answers has them served one per
+round, as everybody else, and a message larger than a request ends its
+connection. Connections with DTLS, which the TLS stack reads and writes
+itself, have a poll of the ring, armed again in the same system call that waits
+for the next round, as do all connections with
+.B \-\-no_io_uring_multishot
+or where the kernel has no buffer rings (before Linux 5.19); without multishot
+receives (Linux 5.19) the ring takes one request per receive.
 .PP
 A worker that cannot set up its io_uring waits with epoll: on a kernel without
 io_uring, with
@@ -450,6 +468,10 @@ set contains
 .BR io_uring_enter (2)
 and
 .BR io_uring_register (2).
+.PP
+Receiving through the ring, each worker registers 64 buffers of 64 KiB, the
+largest request: 4 MiB of address space per worker, of which the pages the
+requests take up are in memory.
 .SH DRNG MAPPING
 The ESDM keeps a DRNG per node \- the one of node 0 being the initial DRNG \-
 and one for prediction resistance. A request is served by the first node DRNG
