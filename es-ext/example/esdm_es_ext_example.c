@@ -27,6 +27,11 @@
  * of its noise source supports. The ESDM shows it under its name, and its
  * status, which names the device and counts the reads.
  *
+ * A request of the ESDM must not block for long - a DRNG waits for its seed,
+ * and the ESDM gives a provider 2 seconds per request - so the device is read
+ * without blocking, a device that stalls given EXAMPLE_READ_TIMEOUT_MS to
+ * deliver, as the hwrng source of the ESDM does.
+ *
  * Build it as a shared library:
  *
  *	cc -shared -fPIC -fvisibility=hidden -o esdm_es_ext_example.so \
@@ -41,8 +46,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Where the ESDM installs it, as a plugin built on its own includes it */
@@ -51,6 +59,10 @@
 #ifndef ESDM_ES_EXT_EXAMPLE_DEVICE
 #define ESDM_ES_EXT_EXAMPLE_DEVICE "/dev/hwrng"
 #endif
+
+/* How long one request waits for the device, and for how long at a time */
+#define EXAMPLE_READ_TIMEOUT_MS 1000
+#define EXAMPLE_POLL_SLICE_MS 100
 
 struct example_ctx {
 	int fd;
@@ -71,7 +83,8 @@ static int example_init(void **ctx)
 
 	c->reads = 0;
 	c->failures = 0;
-	c->fd = open(ESDM_ES_EXT_EXAMPLE_DEVICE, O_RDONLY | O_CLOEXEC);
+	c->fd = open(ESDM_ES_EXT_EXAMPLE_DEVICE,
+		     O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (c->fd < 0) {
 		int ret = -errno;
 
@@ -91,23 +104,56 @@ static void example_fini(void *ctx)
 	free(c);
 }
 
+/* The milliseconds since @start */
+static int64_t example_ms_since(const struct timespec *start)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (int64_t)(now.tv_sec - start->tv_sec) * 1000 +
+	       (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
 static int example_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 			       uint32_t *entropy_bits)
 {
+	/* A pause after a device reported ready that had nothing to read */
+	const struct timespec pace = { .tv_sec = 0, .tv_nsec = 10000000 };
 	struct example_ctx *c = ctx;
+	struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
+	struct timespec start;
 	size_t done = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
 	/* All of the buffer, or a failure: a short block is no block */
 	while (done < buflen) {
 		ssize_t ret = read(c->fd, buf + done, buflen - done);
 
+		if (ret > 0) {
+			done += (size_t)ret;
+			continue;
+		}
 		if (ret < 0 && errno == EINTR)
 			continue;
-		if (ret <= 0) {
+		if (!ret || (errno != EAGAIN && errno != EWOULDBLOCK)) {
 			c->failures++;
 			return ret < 0 ? -errno : -EIO;
 		}
-		done += (size_t)ret;
+
+		/*
+		 * Nothing to read yet: wait for it, within the time a request
+		 * has. The clock keeps that time, not poll(2) - the hwrng
+		 * device has no poll operation, and is reported ready at once
+		 * whatever it holds; the pause keeps such a device from
+		 * spinning.
+		 */
+		if (example_ms_since(&start) >= EXAMPLE_READ_TIMEOUT_MS) {
+			c->failures++;
+			return -ETIMEDOUT;
+		}
+		if (poll(&pfd, 1, EXAMPLE_POLL_SLICE_MS) > 0)
+			nanosleep(&pace, NULL);
 	}
 
 	c->reads++;

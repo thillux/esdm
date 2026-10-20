@@ -51,6 +51,16 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		include_directories: include_directories('include'),
 		implicit_include_directories: false,
 	)
+	# The example once more, reading a FIFO the test creates and leaves
+	# empty: a device that stalls
+	es_ext_example_fifo = meson.current_build_dir() / 'es_ext_example.fifo'
+	es_ext_example_fifo_plugin = shared_module('esdm_es_ext_example_fifo',
+		'../../es-ext/example/esdm_es_ext_example.c',
+		c_args: [ '-DESDM_ES_EXT_EXAMPLE_DEVICE="' +
+			  es_ext_example_fifo + '"' ],
+		include_directories: include_directories('include'),
+		implicit_include_directories: false,
+	)
 	# Copies of the test plugin, each a library with a control of its own:
 	# a plugin library serves one source, and a build with several sources
 	# of a kind tests them with plugins of their own.
@@ -106,7 +116,10 @@ if get_option('esdm-es-ext').enabled()
 		dependencies: [ dependency('threads'), dl_dep, json_c_dep ],
 	)
 	test('External ES library', es_ext_lib_test,
-		args: es_ext_plugin_args, depends: es_ext_plugins,
+		args: es_ext_plugin_args +
+		      [ es_ext_example_fifo_plugin.full_path(),
+			es_ext_example_fifo ],
+		depends: es_ext_plugins + [ es_ext_example_fifo_plugin ],
 		suite: 'es_ext')
 
 	# A client of its own, with the DTLS of the common library

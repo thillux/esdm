@@ -20,16 +20,20 @@
 /*
  * libesdm_es_ext: the plugin loader against good and broken plugin libraries,
  * and the provider server against a client speaking the protocol by hand -
- * correctly and not.
+ * correctly and not - and the example plugin, reading a device that delivers
+ * and one that stalls.
  *
  * Usage: es_ext_lib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> <example plugin> <bare test plugin>
+ *	  <no plugin> <example plugin> <bare test plugin> <rated test plugin>
+ *	  <example plugin reading a FIFO> <the FIFO>
  */
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -895,10 +899,106 @@ static void test_example(const char *path)
 	esdm_es_ext_plugin_unload(handle);
 }
 
+struct test_example_get {
+	const struct esdm_es_ext_plugin *plugin;
+	void *ctx;
+	uint8_t buf[32];
+	uint32_t bits;
+	int ret;
+	atomic_bool done;
+};
+
+static void *test_example_get_thread(void *arg)
+{
+	struct test_example_get *get = arg;
+
+	get->ret = get->plugin->get_entropy(get->ctx, get->buf,
+					    sizeof(get->buf), &get->bits);
+	atomic_store(&get->done, true);
+	return NULL;
+}
+
+/*
+ * Read the example, built to read @fifo, in a thread of its own: whether it
+ * returned within @ms
+ */
+static bool test_example_get(struct test_example_get *get, unsigned int ms)
+{
+	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
+	pthread_t thread;
+	unsigned int i;
+
+	atomic_store(&get->done, false);
+	if (pthread_create(&thread, NULL, test_example_get_thread, get))
+		return false;
+	for (i = 0; i < ms / 10 && !atomic_load(&get->done); i++)
+		nanosleep(&ts, NULL);
+	if (!atomic_load(&get->done)) {
+		/* Left blocked: the process ends with it */
+		pthread_detach(thread);
+		return false;
+	}
+	pthread_join(thread, NULL);
+	return true;
+}
+
+/*
+ * The example plugin reading a device that stalls - a FIFO the test keeps
+ * open and writes nothing to, @path built into the copy of the example: a
+ * request gives up within the time it has, rather than block the seeding
+ * that asked for ever, and is served once the device delivers again
+ */
+static void test_example_stalled(const char *path, const char *fifo)
+{
+	struct esdm_es_ext_plugin_handle *handle;
+	struct test_example_get get = { 0 };
+	const struct esdm_es_ext_plugin *plugin;
+	uint8_t data[32];
+	int fd;
+
+	unlink(fifo);
+	CHECK(!mkfifo(fifo, 0600), "cannot create %s: %s", fifo,
+	      strerror(errno));
+	/* Read and written: the example finds a writer that writes nothing */
+	fd = open(fifo, O_RDWR | O_CLOEXEC);
+	CHECK(fd >= 0, "cannot open %s: %s", fifo, strerror(errno));
+	if (fd < 0)
+		goto out;
+
+	CHECK_EQ(esdm_es_ext_plugin_load(path, &handle, &plugin), 0);
+	if (!plugin)
+		goto out;
+	CHECK_EQ(plugin->init(&get.ctx), 0);
+	get.plugin = plugin;
+
+	CHECK(test_example_get(&get, 5000),
+	      "the example blocks on a device that stalls");
+	if (!atomic_load(&get.done))
+		goto out;
+	CHECK_EQ(get.ret, -ETIMEDOUT);
+
+	/* The device delivers again */
+	memset(data, 0x42, sizeof(data));
+	CHECK_EQ(write(fd, data, sizeof(data)), (ssize_t)sizeof(data));
+	CHECK(test_example_get(&get, 5000),
+	      "the example blocks on a device that delivers");
+	CHECK_EQ(get.ret, 0);
+	CHECK_EQ(get.bits, sizeof(get.buf));
+	CHECK_MEM_EQ(get.buf, data, sizeof(data));
+
+	plugin->fini(get.ctx);
+	esdm_es_ext_plugin_unload(handle);
+
+out:
+	if (fd >= 0)
+		close(fd);
+	unlink(fifo);
+}
+
 int main(int argc, char *argv[])
 {
-	if (argc < 7) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <bare test plugin>\n",
+	if (argc < 10) {
+		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <bare test plugin> <rated test plugin> <example plugin reading a FIFO> <the FIFO>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -920,6 +1020,7 @@ int main(int argc, char *argv[])
 	test_server_slots(argv[1]);
 	test_server_startdtls(argv[1]);
 	test_example(argv[5]);
+	test_example_stalled(argv[8], argv[9]);
 
 	unlink(test_socket);
 	rmdir(test_dir);
