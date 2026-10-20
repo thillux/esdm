@@ -349,8 +349,12 @@ static void test_auth(void)
 			close(lfd);
 	}
 
-	/* IPv6, where the host has it */
-	if (!pair_open_on(&p, "::1", sctx, cctx, "::1")) {
+	/*
+	 * IPv6, where the host has it - with its address as the name of the
+	 * server where the TLS stack checks one, see esdm_tls_ip6_name()
+	 */
+	if (!pair_open_on(&p, "::1", sctx, cctx,
+			  esdm_tls_ip6_name() ? "::1" : "localhost")) {
 		CHECK(!pair_handshake(&p), "handshake on IPv6: %s / %s",
 		      esdm_tls_error(p.s), esdm_tls_error(p.c));
 		check_keys(p.sfd, "server on IPv6");

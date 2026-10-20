@@ -752,6 +752,12 @@ const char *esdm_tls_backend_mlkem_group(void)
  * built with leancrypto, 3.8.9 and later -, for the handshake of TLS from
  * 3.8.10 on
  */
+/* The name check of GnuTLS takes an address of either family */
+bool esdm_tls_backend_ip6_name(void)
+{
+	return true;
+}
+
 unsigned int esdm_tls_backend_mldsa(void)
 {
 	if (!esdm_tls_gnutls_has_pk("ML-DSA-87"))

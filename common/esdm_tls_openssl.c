@@ -1377,6 +1377,12 @@ const char *esdm_tls_backend_mlkem_group(void)
  * handshake where the signature schemes of ESDM_TLS_OPENSSL_SIGALGS are taken
  * as well - both from 3.5 on
  */
+/* X509_VERIFY_PARAM_set1_ip_asc() takes either family */
+bool esdm_tls_backend_ip6_name(void)
+{
+	return true;
+}
+
 unsigned int esdm_tls_backend_mldsa(void)
 {
 	unsigned int ret = ESDM_TLS_MLDSA_CA;

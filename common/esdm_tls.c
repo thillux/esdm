@@ -1001,6 +1001,11 @@ unsigned int esdm_tls_mldsa(void)
 	return esdm_tls_backend_mldsa();
 }
 
+bool esdm_tls_ip6_name(void)
+{
+	return esdm_tls_backend_ip6_name();
+}
+
 const char *esdm_tls_error(struct esdm_tls *tls)
 {
 	const char *err;

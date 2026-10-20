@@ -255,6 +255,19 @@ static ssize_t recv_result(struct pair *p, struct esdm_tls *t)
 	return n;
 }
 
+
+/*
+ * A server name to try: an IPv6 address only where the TLS stack checks one,
+ * see esdm_tls_ip6_name()
+ */
+static bool name_usable(const char *name)
+{
+	if (!strchr(name, ':') || esdm_tls_ip6_name())
+		return true;
+	printf("  %s: no IPv6 address as server name with this TLS stack - skipped\n",
+	       name);
+	return false;
+}
 static void test_mutual(void)
 {
 	struct esdm_tls_config scfg = cfg_of(PKI("server.crt"),
@@ -275,6 +288,8 @@ static void test_mutual(void)
 	printf("TLS (%s): mutual authentication\n", esdm_tls_stack());
 
 	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (!name_usable(names[i]))
+			continue;
 		CHECK(!pair_open(&p, sctx, cctx1, names[i]), "pair");
 		CHECK(!pair_handshake(&p),
 		      "handshake with server name %s: server %d (%s), client %d (%s)",
@@ -442,6 +457,8 @@ static void test_server_name(void)
 	pair_close(&p);
 
 	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		if (!name_usable(bad[i]))
+			continue;
 		CHECK(!pair_open(&p, sctx, cctx, bad[i]), "pair");
 		pair_handshake(&p);
 		CHECK(p.cret == -EACCES,
@@ -1042,6 +1059,8 @@ static int test_mldsa(void)
 	sctx = server_ctx(&scfg);
 	cctx = client_ctx(&ccfg);
 	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (!name_usable(names[i]))
+			continue;
 		CHECK(!pair_open(&p, sctx, cctx, names[i]), "pair");
 		CHECK(!pair_handshake(&p),
 		      "handshake with server name %s: server %d (%s), client %d (%s)",

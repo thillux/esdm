@@ -426,7 +426,8 @@ void esdm_tls_ctx_crl_report(struct esdm_tls_ctx *ctx, bool all);
  *		  or listened. It stays owned by the caller and must stay open
  *		  until esdm_tls_free().
  * @param [in] server_name A client's expectation of the server's name: a DNS
- *			   name, or an IPv4 or IPv6 address literal. Mandatory
+ *			   name, or an IPv4 or IPv6 address literal - the
+ *			   latter where esdm_tls_ip6_name() says so. Mandatory
  *			   for a client - a client that does not check the name
  *			   would be served by any server the trust anchors
  *			   vouch for. Ignored by a server.
@@ -608,6 +609,14 @@ const char *esdm_tls_mlkem_group(void);
  *	   has no ML-DSA
  */
 unsigned int esdm_tls_mldsa(void);
+
+/**
+ * @brief Whether the TLS stack of the build checks a server name that is an
+ *	  IPv6 address literal against the certificate of the server: OpenSSL
+ *	  and GnuTLS do, Botan from 3.13 on. A client handed one by a stack
+ *	  that does not fails its handshake rather than skip the check.
+ */
+bool esdm_tls_ip6_name(void);
 
 /**
  * @brief Why the connection failed, for logging; "none" if it did not
@@ -805,6 +814,11 @@ static inline const char *esdm_tls_mlkem_group(void)
 static inline unsigned int esdm_tls_mldsa(void)
 {
 	return 0;
+}
+
+static inline bool esdm_tls_ip6_name(void)
+{
+	return false;
 }
 
 static inline const char *esdm_tls_error(struct esdm_tls *tls)

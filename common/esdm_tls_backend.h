@@ -237,6 +237,9 @@ const char *esdm_tls_backend_mlkem_group(void);
 /* ESDM_TLS_MLDSA_CA and ESDM_TLS_MLDSA_AUTH - see esdm_tls_mldsa() */
 unsigned int esdm_tls_backend_mldsa(void);
 
+/* An IPv6 address as server name is checked, see esdm_tls_ip6_name() */
+bool esdm_tls_backend_ip6_name(void);
+
 /*
  * The keying material exporter of RFC 5705 - DTLS 1.2 - with the label @label
  * of @label_len bytes and no context, into @out of @out_len bytes. Called on

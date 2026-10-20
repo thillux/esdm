@@ -1689,6 +1689,16 @@ unsigned int esdm_tls_backend_mldsa(void)
 	return ret;
 }
 
+/* From 3.13 on, see esdm_tls_botan_name_matches() */
+bool esdm_tls_backend_ip6_name(void)
+{
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 13, 0)
+	return true;
+#else
+	return false;
+#endif
+}
+
 const char *esdm_tls_backend_error(void *conn)
 {
 	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
