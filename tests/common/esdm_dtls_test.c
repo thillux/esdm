@@ -31,7 +31,9 @@
  * - an error the application left with the TLS stack is none of the DTLS;
  * - what the TLS stack frees holds no plaintext;
  * - the handshake, read off the wire, is ECDHE-PSK with the suites and the
- *   curves of the backend, with Encrypt-then-MAC for CBC, and no certificate.
+ *   curves of the backend, with Encrypt-then-MAC for CBC, and no certificate;
+ * - a record sent again - a replay - is dropped by the replay detection of
+ *   DTLS, also after a newer one: the message comes once.
  */
 
 #define _GNU_SOURCE
@@ -444,7 +446,8 @@ static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
 	int cs[2] = { -1, -1 }, ss[2] = { -1, -1 };
 	int c = -EAGAIN, s = -EAGAIN;
 	unsigned int i;
-	uint8_t got[16];
+	uint8_t got[16], rec[512];
+	ssize_t n;
 
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
 		       0, cs) ||
@@ -508,6 +511,36 @@ static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
 	test_wire_move(cs[1], ss[0], &hello);
 	CHECK_EQ(test_recv(server, ss[1], got, sizeof(got)), 4);
 	CHECK_MEM_EQ(got, "wire", 4);
+
+	/*
+	 * The record of a message moved twice, as one recorded on the way and
+	 * sent again: the replay detection of DTLS drops the second one. It is
+	 * taken off the socket all the same, the message comes once.
+	 */
+	CHECK_EQ(esdm_dtls_send(client, "once", 4), 0);
+	n = recv(cs[1], rec, sizeof(rec), MSG_DONTWAIT);
+	CHECK(n > 0, "no record of the message: %zd", n);
+	if (n <= 0)
+		goto out;
+	CHECK_EQ(send(ss[0], rec, (size_t)n, MSG_NOSIGNAL), n);
+	CHECK_EQ(send(ss[0], rec, (size_t)n, MSG_NOSIGNAL), n);
+	CHECK_EQ(test_recv(server, ss[1], got, sizeof(got)), 4);
+	CHECK_MEM_EQ(got, "once", 4);
+	CHECK_EQ(esdm_dtls_recv(server, got, sizeof(got)), -EAGAIN);
+	CHECK(recv(ss[1], got, sizeof(got), MSG_DONTWAIT | MSG_PEEK) < 0,
+	      "the replayed record is left on the socket");
+
+	/* Sent again after a newer one, and the connection goes on */
+	CHECK_EQ(esdm_dtls_send(client, "next", 4), 0);
+	test_wire_move(cs[1], ss[0], &hello);
+	CHECK_EQ(test_recv(server, ss[1], got, sizeof(got)), 4);
+	CHECK_MEM_EQ(got, "next", 4);
+	CHECK_EQ(send(ss[0], rec, (size_t)n, MSG_NOSIGNAL), n);
+	CHECK_EQ(esdm_dtls_recv(server, got, sizeof(got)), -EAGAIN);
+	CHECK_EQ(esdm_dtls_send(client, "last", 4), 0);
+	test_wire_move(cs[1], ss[0], &hello);
+	CHECK_EQ(test_recv(server, ss[1], got, sizeof(got)), 4);
+	CHECK_MEM_EQ(got, "last", 4);
 
 out:
 	esdm_dtls_free(client);
@@ -704,7 +737,7 @@ static void test_dtls(void)
 	 */
 	test_split(cctx, sctx, ESDM_DTLS_PART_SIZE + 100, -EMSGSIZE);
 
-	/* The suite, the curve and Encrypt-then-MAC on the wire */
+	/* The suite, the curve and Encrypt-then-MAC on the wire, and replays */
 	test_wire(cctx, sctx);
 
 out:
