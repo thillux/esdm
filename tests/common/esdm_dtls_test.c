@@ -29,7 +29,9 @@
  * - a message whose records arrive apart is kept until it is complete - in
  *   the room the call receiving its start had;
  * - an error the application left with the TLS stack is none of the DTLS;
- * - what the TLS stack frees holds no plaintext.
+ * - what the TLS stack frees holds no plaintext;
+ * - the handshake, read off the wire, is ECDHE-PSK with the suites and the
+ *   curves of the backend, with Encrypt-then-MAC for CBC, and no certificate.
  */
 
 #define _GNU_SOURCE
@@ -45,6 +47,7 @@
 
 #include "common_test.h"
 #include "esdm_dtls.h"
+#include "helper.h"
 
 #ifdef ESDM_DTLS
 
@@ -56,6 +59,37 @@
 #endif
 
 #define TEST_MAX_MSG (64 * 1024)
+
+/*
+ * What the handshake of each backend offers and takes, see the backends:
+ * ECDHE-PSK with AES-256 - GCM, then CBC for Botan, CBC for the others - on
+ * brainpoolP512r1, then secp521r1 for Botan, on secp521r1 for the others.
+ * Against itself, Botan takes GCM, which has no Encrypt-then-MAC.
+ */
+#define TEST_SUITE_GCM 0xD002 /* TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 */
+#define TEST_SUITE_CBC 0xC038 /* TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 */
+#define TEST_GROUP_BP512 28 /* brainpoolP512r1 */
+#define TEST_GROUP_P521 25 /* secp521r1 */
+
+#if defined(ESDM_BOTAN)
+static const uint16_t test_suites[] = { TEST_SUITE_GCM, TEST_SUITE_CBC };
+static const uint16_t test_groups[] = { TEST_GROUP_BP512, TEST_GROUP_P521 };
+#define TEST_SUITE TEST_SUITE_GCM
+#define TEST_GROUP TEST_GROUP_BP512
+#define TEST_ETM false
+#define TEST_CIPHER "ECDHE_PSK_WITH_AES_256_GCM_SHA384"
+#else
+static const uint16_t test_suites[] = { TEST_SUITE_CBC };
+static const uint16_t test_groups[] = { TEST_GROUP_P521 };
+#define TEST_SUITE TEST_SUITE_CBC
+#define TEST_GROUP TEST_GROUP_P521
+#define TEST_ETM true
+#if defined(ESDM_OPENSSL)
+#define TEST_CIPHER "ECDHE-PSK-AES256-CBC-SHA384"
+#else
+#define TEST_CIPHER "ECDHE_PSK_AES_256_CBC_SHA384"
+#endif
+#endif
 
 /*
  * What the TLS stack frees must not hold the plaintext of a record: the test
@@ -197,6 +231,293 @@ static bool test_has_run(const uint8_t *buf, size_t len)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * The handshake on the wire, which is in the clear up to the ChangeCipherSpec:
+ * the suites and groups a ClientHello offers, the suite and the group the
+ * server takes, Encrypt-then-MAC offered and agreed to, and any certificate.
+ */
+#define TEST_HS_CLIENT_HELLO 1
+#define TEST_HS_SERVER_HELLO 2
+#define TEST_HS_CERTIFICATE 11
+#define TEST_HS_SERVER_KEY_EXCHANGE 12
+#define TEST_EXT_GROUPS 10
+#define TEST_EXT_ETM 22
+#define TEST_SCSV 0x00ff
+
+struct test_wire {
+	uint16_t suites[16];
+	unsigned int nsuites;
+	uint16_t groups[16];
+	unsigned int ngroups;
+	/* Of the ServerHello and the ServerKeyExchange, 0 without */
+	uint16_t suite;
+	uint16_t group;
+	bool etm;
+	bool certificate;
+	bool malformed;
+};
+
+struct test_reader {
+	const uint8_t *p;
+	size_t len, off;
+	bool bad;
+};
+
+/* A big-endian number of @n bytes, 0 and bad past the end */
+static uint32_t test_get(struct test_reader *r, size_t n)
+{
+	uint32_t v = 0;
+
+	if (r->bad || n > r->len - r->off) {
+		r->bad = true;
+		return 0;
+	}
+	while (n--)
+		v = (v << 8) | r->p[r->off++];
+	return v;
+}
+
+static void test_skip(struct test_reader *r, size_t n)
+{
+	if (r->bad || n > r->len - r->off)
+		r->bad = true;
+	else
+		r->off += n;
+}
+
+/* The extensions of a hello, the rest of @r */
+static void test_wire_exts(struct test_reader *r, struct test_wire *w)
+{
+	struct test_reader exts = { .p = r->p + r->off };
+
+	/* A hello without any */
+	if (r->off == r->len)
+		return;
+	exts.len = test_get(r, 2);
+	test_skip(r, exts.len);
+	if (r->bad)
+		return;
+	exts.p += 2;
+
+	while (!exts.bad && exts.off < exts.len) {
+		uint32_t type = test_get(&exts, 2);
+		struct test_reader ext = { .len = test_get(&exts, 2) };
+
+		ext.p = exts.p + exts.off;
+		test_skip(&exts, ext.len);
+
+		if (type == TEST_EXT_ETM)
+			w->etm = true;
+		if (type != TEST_EXT_GROUPS || exts.bad)
+			continue;
+
+		/* The list of the groups is all of the extension */
+		if (test_get(&ext, 2) + 2 != ext.len || ext.len % 2) {
+			w->malformed = true;
+			continue;
+		}
+		while (ext.off < ext.len && w->ngroups < ARRAY_SIZE(w->groups))
+			w->groups[w->ngroups++] = (uint16_t)test_get(&ext, 2);
+	}
+	w->malformed |= exts.bad;
+}
+
+/* A handshake message of @type, its body in @r */
+static void test_wire_hs(uint8_t type, struct test_reader *r,
+			 struct test_wire *w)
+{
+	uint32_t n;
+
+	switch (type) {
+	case TEST_HS_CLIENT_HELLO:
+		/* version, random, session ID, cookie */
+		test_skip(r, 34);
+		test_skip(r, test_get(r, 1));
+		test_skip(r, test_get(r, 1));
+		n = test_get(r, 2);
+		if (n % 2)
+			r->bad = true;
+		for (; n >= 2 && !r->bad; n -= 2) {
+			uint16_t suite = (uint16_t)test_get(r, 2);
+
+			if (suite != TEST_SCSV &&
+			    w->nsuites < ARRAY_SIZE(w->suites))
+				w->suites[w->nsuites++] = suite;
+		}
+		test_skip(r, test_get(r, 1));
+		test_wire_exts(r, w);
+		break;
+	case TEST_HS_SERVER_HELLO:
+		/* version, random, session ID */
+		test_skip(r, 34);
+		test_skip(r, test_get(r, 1));
+		w->suite = (uint16_t)test_get(r, 2);
+		test_skip(r, 1);
+		test_wire_exts(r, w);
+		break;
+	case TEST_HS_CERTIFICATE:
+		w->certificate = true;
+		break;
+	case TEST_HS_SERVER_KEY_EXCHANGE:
+		/* The PSK identity hint, then a named curve (3) and its ID */
+		test_skip(r, test_get(r, 2));
+		if (test_get(r, 1) == 3)
+			w->group = (uint16_t)test_get(r, 2);
+		else
+			r->bad = true;
+		break;
+	default:
+		break;
+	}
+	w->malformed |= r->bad;
+}
+
+/* The records of one message of the socket */
+static void test_wire_parse(const uint8_t *msg, size_t len, struct test_wire *w)
+{
+	struct test_reader rec = { .p = msg, .len = len };
+
+	while (!rec.bad && rec.off < rec.len) {
+		/* type, version, epoch, sequence number, length */
+		uint32_t ctype = test_get(&rec, 1), epoch;
+		struct test_reader frag = { 0 };
+
+		test_skip(&rec, 2);
+		epoch = test_get(&rec, 2);
+		test_skip(&rec, 6);
+		frag.len = test_get(&rec, 2);
+		frag.p = rec.p + rec.off;
+		test_skip(&rec, frag.len);
+		if (rec.bad || ctype != 22 || epoch)
+			continue;
+
+		while (!frag.bad && frag.off < frag.len) {
+			/* type, length, sequence, fragment offset and length */
+			uint8_t type = (uint8_t)test_get(&frag, 1);
+			uint32_t hlen = test_get(&frag, 3), foff, flen;
+			struct test_reader body = { 0 };
+
+			test_skip(&frag, 2);
+			foff = test_get(&frag, 3);
+			flen = test_get(&frag, 3);
+			body.p = frag.p + frag.off;
+			body.len = flen;
+			test_skip(&frag, flen);
+			/* Nothing is fragmented with the MTU of the backends */
+			if (frag.bad || foff || flen != hlen) {
+				w->malformed = true;
+				break;
+			}
+			test_wire_hs(type, &body, w);
+		}
+		w->malformed |= frag.bad;
+	}
+	w->malformed |= rec.bad;
+}
+
+/* Move what @from has to @to, reading it into @w; @return the messages */
+static unsigned int test_wire_move(int from, int to, struct test_wire *w)
+{
+	static uint8_t buf[32 * 1024];
+	unsigned int moved = 0;
+	ssize_t n;
+
+	while ((n = recv(from, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+		test_wire_parse(buf, (size_t)n, w);
+		CHECK_EQ(send(to, buf, (size_t)n, MSG_NOSIGNAL), n);
+		moved++;
+	}
+
+	return moved;
+}
+
+/*
+ * A handshake through the test, which reads it off the wire: the client on
+ * cs[0], the server on ss[1], and every message moved between cs[1] and ss[0].
+ */
+static void test_wire(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
+{
+	struct test_wire hello = { 0 }, reply = { 0 };
+	struct esdm_dtls *client = NULL, *server = NULL;
+	int cs[2] = { -1, -1 }, ss[2] = { -1, -1 };
+	int c = -EAGAIN, s = -EAGAIN;
+	unsigned int i;
+	uint8_t got[16];
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+		       0, cs) ||
+	    socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+		       0, ss)) {
+		CHECK(0, "socketpair: %s", strerror(errno));
+		goto out;
+	}
+	CHECK_EQ(esdm_dtls_alloc(cctx, cs[0], TEST_MAX_MSG, &client), 0);
+	CHECK_EQ(esdm_dtls_alloc(sctx, ss[1], TEST_MAX_MSG, &server), 0);
+	if (!client || !server)
+		goto out;
+
+	for (i = 0; i < 1000 && (c || s); i++) {
+		struct pollfd pfd[2] = { { .fd = cs[1], .events = POLLIN },
+					 { .fd = ss[0], .events = POLLIN } };
+		unsigned int moved;
+
+		if (c == -EAGAIN)
+			c = esdm_dtls_handshake(client);
+		if (s == -EAGAIN)
+			s = esdm_dtls_handshake(server);
+		if ((c && c != -EAGAIN) || (s && s != -EAGAIN))
+			break;
+		moved = test_wire_move(cs[1], ss[0], &hello);
+		moved += test_wire_move(ss[0], cs[1], &reply);
+		if (!moved && (c || s))
+			poll(pfd, 2, 100);
+	}
+	CHECK_EQ(c, 0);
+	CHECK_EQ(s, 0);
+	printf("handshake on the wire: suite 0x%04x, group %u, "
+	       "Encrypt-then-MAC %s, %s\n",
+	       reply.suite, reply.group, reply.etm ? "yes" : "no",
+	       esdm_dtls_cipher(client));
+
+	CHECK(!hello.malformed && !reply.malformed,
+	      "a handshake message not understood");
+	/* The client offers what its backend has, and Encrypt-then-MAC */
+	CHECK_EQ(hello.nsuites, ARRAY_SIZE(test_suites));
+	for (i = 0; i < hello.nsuites && i < ARRAY_SIZE(test_suites); i++)
+		CHECK_EQ(hello.suites[i], test_suites[i]);
+	CHECK_EQ(hello.ngroups, ARRAY_SIZE(test_groups));
+	for (i = 0; i < hello.ngroups && i < ARRAY_SIZE(test_groups); i++)
+		CHECK_EQ(hello.groups[i], test_groups[i]);
+	CHECK(hello.etm, "the client does not offer Encrypt-then-MAC");
+	/* The server takes the first of them */
+	CHECK_EQ(reply.suite, TEST_SUITE);
+	CHECK_EQ(reply.group, TEST_GROUP);
+	CHECK_EQ(reply.etm, TEST_ETM);
+	/* The pre-shared key, no certificate of either side */
+	CHECK(!hello.certificate && !reply.certificate,
+	      "a certificate was sent");
+	CHECK_STR_EQ(esdm_dtls_cipher(client), TEST_CIPHER);
+	CHECK_STR_EQ(esdm_dtls_cipher(server), TEST_CIPHER);
+
+	/* And the connection works through the test */
+	if (c || s)
+		goto out;
+	CHECK_EQ(esdm_dtls_send(client, "wire", 4), 0);
+	test_wire_move(cs[1], ss[0], &hello);
+	CHECK_EQ(test_recv(server, ss[1], got, sizeof(got)), 4);
+	CHECK_MEM_EQ(got, "wire", 4);
+
+out:
+	esdm_dtls_free(client);
+	esdm_dtls_free(server);
+	for (i = 0; i < 2; i++) {
+		if (cs[i] >= 0)
+			close(cs[i]);
+		if (ss[i] >= 0)
+			close(ss[i]);
+	}
 }
 
 /*
@@ -382,6 +703,9 @@ static void test_dtls(void)
 	 * does not fit there, larger as the buffer of the call taking it is
 	 */
 	test_split(cctx, sctx, ESDM_DTLS_PART_SIZE + 100, -EMSGSIZE);
+
+	/* The suite, the curve and Encrypt-then-MAC on the wire */
+	test_wire(cctx, sctx);
 
 out:
 	CHECK_EQ(esdm_dtls_busy(), false);
