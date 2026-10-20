@@ -1077,7 +1077,12 @@ static int test_mldsa(void)
 		     PKI("mldsa-ca.crt"));
 	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
 	      "an ML-DSA key not belonging to the certificate was accepted");
-	cfg.key_file = PKI("server.key");
+	cfg = cfg_of(PKI("mldsa-client.crt"), PKI("mldsa-client-revoked.key"),
+		     PKI("mldsa-ca.crt"));
+	CHECK(esdm_tls_ctx_alloc(false, &cfg, &ctx) == -EINVAL,
+	      "a key of the parameter set of the certificate, not its own, was accepted");
+	cfg = cfg_of(PKI("mldsa-server.crt"), PKI("server.key"),
+		     PKI("mldsa-ca.crt"));
 	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
 	      "an ECDSA key for an ML-DSA certificate was accepted");
 	cfg = cfg_of(PKI("mldsa-server.crt"), PKI("mldsa-server.key"),

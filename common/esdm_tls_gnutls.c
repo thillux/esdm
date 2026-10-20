@@ -49,6 +49,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <gnutls/abstract.h>
 #include <gnutls/dtls.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
@@ -647,6 +648,73 @@ static int esdm_tls_gnutls_check_dtls_key(struct esdm_tls_gnutls_ctx *c,
 	return ret;
 }
 
+/*
+ * Does the key of the credentials belong to their certificate, when that is
+ * one of ML-DSA? GnuTLS checks a key by a signature of it the certificate
+ * verifies, but finds no signature algorithm of ML-DSA for that check (3.8.13)
+ * and takes any key of the algorithm of the certificate then: the check is
+ * made here, with the signature algorithm of the name of the key's.
+ *
+ * @return 0, -EINVAL if it does not belong
+ */
+static int esdm_tls_gnutls_check_match(struct esdm_tls_gnutls_ctx *c,
+				       const struct esdm_tls_config *cfg)
+{
+	static const char text[] = "a key of esdm_tls and its certificate";
+	gnutls_datum_t data = { (unsigned char *)text, sizeof(text) - 1 };
+	gnutls_datum_t sig = { NULL, 0 };
+	gnutls_x509_privkey_t x509key = NULL;
+	gnutls_x509_crt_t *crts = NULL;
+	gnutls_privkey_t key = NULL;
+	gnutls_pubkey_t pub = NULL;
+	gnutls_sign_algorithm_t sign;
+	unsigned int num = 0, i;
+	const char *name = NULL;
+	int pk, ret = -EINVAL;
+
+	if (gnutls_certificate_get_x509_crt(c->cred, 0, &crts, &num) < 0 ||
+	    !num)
+		return -EINVAL;
+
+	pk = gnutls_x509_crt_get_pk_algorithm(crts[0], NULL);
+	if (pk > 0)
+		name = gnutls_pk_get_name((gnutls_pk_algorithm_t)pk);
+	if (!name || strncasecmp(name, "ML-DSA", 6)) {
+		ret = 0;
+		goto out;
+	}
+
+	sign = gnutls_sign_get_id(name);
+	if (sign == GNUTLS_SIGN_UNKNOWN ||
+	    gnutls_certificate_get_x509_key(c->cred, 0, &x509key) < 0 ||
+	    gnutls_privkey_init(&key) < 0 ||
+	    gnutls_privkey_import_x509(key, x509key, 0) < 0 ||
+	    gnutls_pubkey_init(&pub) < 0 ||
+	    gnutls_pubkey_import_x509(pub, crts[0], 0) < 0 ||
+	    gnutls_privkey_sign_data2(key, sign, 0, &data, &sig) < 0 ||
+	    gnutls_pubkey_verify_data2(pub, sign, 0, &data, &sig) < 0) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "TLS: the key %s does not belong to the certificate %s\n",
+			    cfg->key_file, cfg->cert_file);
+		goto out;
+	}
+	ret = 0;
+
+out:
+	gnutls_free(sig.data);
+	if (pub)
+		gnutls_pubkey_deinit(pub);
+	if (key)
+		gnutls_privkey_deinit(key);
+	if (x509key)
+		gnutls_x509_privkey_deinit(x509key);
+	for (i = 0; i < num; i++)
+		gnutls_x509_crt_deinit(crts[i]);
+	gnutls_free(crts);
+
+	return ret;
+}
+
 /******************************************************************************
  * esdm_tls_backend.h
  ******************************************************************************/
@@ -750,6 +818,9 @@ static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
 			if (ret)
 				return ret;
 		}
+		ret = esdm_tls_gnutls_check_match(c, cfg);
+		if (ret)
+			return ret;
 		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
 						cfg->ca_file);
 		if (ret)
