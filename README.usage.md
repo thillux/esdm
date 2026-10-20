@@ -399,7 +399,10 @@ There are two modes:
   private CA, the clients are identified by the fingerprint of theirs, and
   CRLs are checked the same way with every TLS stack. Certificates, trust
   anchors and CRLs are taken up while the daemons run. The TLS stack is that
-  of the crypto backend - OpenSSL, GnuTLS or Botan.
+  of the crypto backend - OpenSSL, GnuTLS or Botan. The key exchange prefers
+  the post-quantum hybrids of ML-KEM (SecP384r1MLKEM1024 first) to (EC)DHE,
+  and certificates and CAs may be on ML-DSA, as far as the TLS stack has them -
+  see `esdm-egd-net-server(8)`.
 
 * Plain TCP, neither encrypted nor authenticated. It is meant only for
   networks that protect the traffic underneath - IPsec, WireGuard - and has to

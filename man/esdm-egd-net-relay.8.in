@@ -66,6 +66,11 @@ the server's chain is checked exactly as the server checks the clients', see
 .B REVOCATION
 in
 .BR esdm\-egd\-net\-server (8).
+The key exchange by ML\-KEM and the certificates on ML\-DSA are those of the
+server, see
+.B TLS
+in
+.BR esdm\-egd\-net\-server (8).
 .TP
 .B plain TCP
 Neither encrypted nor authenticated: only for a network whose transport is

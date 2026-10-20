@@ -1427,6 +1427,12 @@ verification of the TLS stack with the code of the EGD protocol over the
 network: the TLS with certificates, its rotation on SIGHUP and when the files
 change, and its revocation checks are one implementation for TLS over TCP and
 DTLS over SCTP, for every TLS stack, the transport an option of the context.
+The post-quantum algorithms are those of TLS 1.3 only: over TCP, the key
+exchange prefers the groups of ML-KEM - SecP384r1MLKEM1024, X25519MLKEM768,
+SecP256r1MLKEM768, MLKEM1024 - to (EC)DHE, and certificates may be on ML-DSA,
+as far as the TLS stack has them; DTLS 1.2 over SCTP keeps to ECDHE with
+ECDSA or RSA certificates, which a CA on ML-DSA may issue, as none of the TLS
+stacks implements DTLS 1.3.
 
 #par(first-line-indent: 0pt)[The SCTP association authenticates its DATA and
 FORWARD-TSN chunks with SCTP-AUTH (RFC 4895): both ends require it with
