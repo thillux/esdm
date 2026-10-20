@@ -17,6 +17,7 @@
 #include <linux/random.h>
 #include <linux/suspend.h>
 #include <linux/reboot.h>
+#include <linux/slab.h>
 #include <linux/version.h>
 
 #include "esdm_es_ioctl.h"
@@ -64,28 +65,60 @@ void esdm_reset_state(enum esdm_internal_es es)
 		esdm_es_mgr_sched_reset();
 }
 
+/*
+ * The configuration of the entropy sources a descriptor of the device holds,
+ * its file->private_data. The requested entropy and the entropy rate belong to
+ * the ESDM that sets them: one ESDM crediting a source with nothing - as the
+ * ESDM does with the scheduler ES by default - must not have the source deliver
+ * nothing to another ESDM crediting it, nor have it credited for another one
+ * that does not. The events the sources collected are one pool all the same,
+ * which every descriptor reads from and a reset clears for all of them.
+ */
+struct esdm_es_file {
+	struct esdm_es_conf irq;
+	struct esdm_es_conf sched;
+};
+
 /* Module init: allocate memory, register the device file */
 static int esdm_cdev_open(struct inode *inode, struct file *file)
 {
+	struct esdm_es_file *f;
 	unsigned m = iminor(inode);
-	/* optionally set file->private_data here */
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	if (m >= ESDM_MAX_MINORS)
 		return -EINVAL;
-	return nonseekable_open(inode, file);
+
+	ret = nonseekable_open(inode, file);
+	if (ret)
+		return ret;
+
+	/* Last, as a failing open is not released */
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f)
+		return -ENOMEM;
+
+	esdm_es_mgr_irq_conf_init(&f->irq);
+	esdm_es_mgr_sched_conf_init(&f->sched);
+	file->private_data = f;
+
+	return 0;
 }
 
 static int esdm_cdev_release(struct inode *inode, struct file *file)
 {
+	kfree(file->private_data);
+	file->private_data = NULL;
 	return 0;
 }
 
 static long esdm_cdev_ioctl(struct file *filp, unsigned int cmd,
 			    unsigned long arg)
 {
+	struct esdm_es_file __maybe_unused *f = filp->private_data;
 	int ret = -ENODEV;
 
 	/*
@@ -93,6 +126,9 @@ static long esdm_cdev_ioctl(struct file *filp, unsigned int cmd,
 	 * node can only be opened with CAP_SYS_ADMIN. This allows the
 	 * restriction of the access to the IOCTLs to root, but the calling
 	 * service can drop its privileges after opening the device.
+	 *
+	 * The lock serializes the IOCTLs on the entropy sources, the
+	 * configuration of the descriptor among them.
 	 */
 
 	mutex_lock(&esdm_cdev_lock);
@@ -105,7 +141,7 @@ static long esdm_cdev_ioctl(struct file *filp, unsigned int cmd,
 	case ESDM_IRQ_CONF:
 	case ESDM_IRQ_STATUS:
 	case ESDM_IRQ_STATUS_JSON:
-		ret = esdm_es_mgr_irq_ioctl(cmd, arg);
+		ret = esdm_es_mgr_irq_ioctl(cmd, arg, &f->irq);
 		break;
 #endif /* ESDM_ES_IRQ */
 #ifdef ESDM_ES_SCHED
@@ -115,7 +151,7 @@ static long esdm_cdev_ioctl(struct file *filp, unsigned int cmd,
 	case ESDM_SCHED_CONF:
 	case ESDM_SCHED_STATUS:
 	case ESDM_SCHED_STATUS_JSON:
-		ret = esdm_es_mgr_sched_ioctl(cmd, arg);
+		ret = esdm_es_mgr_sched_ioctl(cmd, arg, &f->sched);
 		break;
 #endif /* ESDM_ES_SCHED */
 	default:

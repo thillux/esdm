@@ -90,9 +90,9 @@ static u32 esdm_sched_avail_pool_size(void)
 }
 
 /* Return entropy of unused scheduler events present in all per-CPU pools. */
-static u32 esdm_sched_avail_entropy(u32 __unused)
+static u32 esdm_sched_avail_entropy(u32 entropy_rate)
 {
-	return esdm_es_drbg_avail_entropy(&esdm_sched_drbg);
+	return esdm_es_drbg_avail_entropy(&esdm_sched_drbg, entropy_rate);
 }
 
 /*
@@ -110,9 +110,11 @@ static void esdm_sched_reset(void)
 	 * as the counters were set to zero */
 }
 
-static void esdm_sched_pool_extract(struct entropy_buf *eb, u32 requested_bits)
+static void esdm_sched_pool_extract(struct entropy_buf *eb, u32 requested_bits,
+				    u32 entropy_rate)
 {
-	esdm_es_drbg_pool_extract(&esdm_sched_drbg, eb, requested_bits);
+	esdm_es_drbg_pool_extract(&esdm_sched_drbg, eb, requested_bits,
+				  entropy_rate);
 }
 
 static void esdm_sched_randomness(const struct task_struct *p, int cpu)
@@ -139,7 +141,8 @@ static void esdm_sched_randomness(const struct task_struct *p, int cpu)
 	local_irq_restore(flags);
 }
 
-static void esdm_sched_es_state(unsigned char *buf, size_t buflen)
+static void esdm_sched_es_state(unsigned char *buf, size_t buflen,
+				u32 entropy_rate)
 {
 	snprintf(buf, buflen,
 		 " DRBG for operating entropy pool: %s\n"
@@ -150,8 +153,8 @@ static void esdm_sched_es_state(unsigned char *buf, size_t buflen)
 		 " FIPS mode enabled: %i\n"
 #endif /* CONFIG_CRYPTO_FIPS */
 		 " High-resolution timer: %s\n",
-		 esdm_drbg_cb->drbg_name(), esdm_sched_avail_entropy(0),
-		 ESDM_DATA_NUM_VALUES,
+		 esdm_drbg_cb->drbg_name(),
+		 esdm_sched_avail_entropy(entropy_rate), ESDM_DATA_NUM_VALUES,
 		 esdm_sp80090b_compliant(esdm_int_es_sched) ? "SP800-90B" : "",
 #ifdef CONFIG_CRYPTO_FIPS
 		 fips_enabled,
@@ -164,7 +167,8 @@ static void esdm_sched_es_state(unsigned char *buf, size_t buflen)
  * inserted strings are compile-time constants of this module and the DRBG
  * name, none of which contains a character JSON would require to be escaped.
  */
-static void esdm_sched_es_state_json(unsigned char *buf, size_t buflen)
+static void esdm_sched_es_state_json(unsigned char *buf, size_t buflen,
+				     u32 entropy_rate)
 {
 	snprintf(buf, buflen,
 		 "{"
@@ -177,19 +181,13 @@ static void esdm_sched_es_state_json(unsigned char *buf, size_t buflen)
 #endif /* CONFIG_CRYPTO_FIPS */
 		 "\"high_resolution_timer\":%s"
 		 "}",
-		 esdm_drbg_cb->drbg_name(), esdm_sched_avail_entropy(0),
-		 ESDM_DATA_NUM_VALUES,
+		 esdm_drbg_cb->drbg_name(),
+		 esdm_sched_avail_entropy(entropy_rate), ESDM_DATA_NUM_VALUES,
 		 esdm_sp80090b_compliant(esdm_int_es_sched) ? "SP800-90B" : "",
 #ifdef CONFIG_CRYPTO_FIPS
 		 fips_enabled,
 #endif /* CONFIG_CRYPTO_FIPS */
 		 esdm_highres_timer() ? "true" : "false");
-}
-
-static void esdm_sched_set_entropy_rate(u32 rate)
-{
-	/* never credit more than the rate configured at load time */
-	esdm_sched_drbg.entropy_bits = max_t(u32, sched_entropy, rate);
 }
 
 struct esdm_es_cb esdm_es_sched = {
@@ -200,7 +198,6 @@ struct esdm_es_cb esdm_es_sched = {
 	.state = esdm_sched_es_state,
 	.state_json = esdm_sched_es_state_json,
 	.reset = esdm_sched_reset,
-	.set_entropy_rate = esdm_sched_set_entropy_rate,
 };
 
 /************************** Registration with Kernel **************************/

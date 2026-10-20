@@ -172,6 +172,20 @@ if get_option('es_irq').enabled()
 	test('ES Interrupt', es_irq_tester, timeout: 300)
 endif
 
+# The configuration of the kernel add-on per descriptor of /dev/esdm_es, which
+# the ESDMs of the tests running in parallel each open - talking to the device
+# directly, so no source is compiled in.
+if get_option('es_irq').enabled() or get_option('es_sched').enabled()
+	es_kernel_conf_tester = executable(
+		'es_kernel_conf_tester',
+		[ 'es_kernel_conf_test.c' ],
+		include_directories: include_dirs_server,
+	)
+
+	test('ES kernel configuration per descriptor', es_kernel_conf_tester,
+	     timeout: 120)
+endif
+
 # The interrupt and the scheduler source compiled into the test, which fills
 # their block cache by hand - see the file header. No kernel support needed.
 foreach es_reset : [ [ 'es_irq', 'interrupt', [] ],

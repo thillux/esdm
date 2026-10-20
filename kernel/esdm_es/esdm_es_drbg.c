@@ -19,10 +19,20 @@
 #include "esdm_drbg_kcapi.h"
 #include "esdm_health.h"
 
-/* Return entropy of unused events present in all per-CPU pools. */
-u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg)
+/*
+ * The rate to credit the events by: the one the caller asks for, but never more
+ * entropy per event than the module was loaded with.
+ */
+static u32 esdm_es_drbg_rate(const struct esdm_es_drbg *drbg, u32 entropy_rate)
 {
-	u32 events;
+	return max_t(u32, drbg->entropy_bits, entropy_rate);
+}
+
+/* Return entropy of unused events present in all per-CPU pools. */
+u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg,
+			       u32 entropy_rate)
+{
+	u32 events, rate = esdm_es_drbg_rate(drbg, entropy_rate);
 
 	/* Only deliver entropy when SP800-90B self test is completed */
 	if (!esdm_sp80090b_startup_complete_es(drbg->es))
@@ -39,10 +49,10 @@ u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg)
 		 * reading >= 256 bit will use two DRBG extractions
 		 * with ESDM_OVERSAMPLE_ES_BITS additionally used in each
 		 */
-		return esdm_reduce_by_osr(esdm_reduce_by_osr(
-			esdm_data_to_entropy(events, drbg->entropy_bits)));
+		return esdm_reduce_by_osr(
+			esdm_reduce_by_osr(esdm_data_to_entropy(events, rate)));
 	} else {
-		return esdm_data_to_entropy(events, drbg->entropy_bits);
+		return esdm_data_to_entropy(events, rate);
 	}
 }
 
@@ -51,7 +61,7 @@ u32 esdm_es_drbg_avail_entropy(const struct esdm_es_drbg *drbg)
  * Length is capped with DRBG's security strength */
 static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 					    void *drbg_state, uint8_t *block,
-					    size_t partial_len,
+					    size_t partial_len, u32 rate,
 					    u32 *returned_bits)
 {
 	u32 collected_events, collected_ent_bits, requested_events,
@@ -73,18 +83,16 @@ static bool esdm_es_drbg_pool_extract_block(const struct esdm_es_drbg *drbg,
 	requested_bits = esdm_drbg_cb->drbg_sec_strength(drbg_state);
 	if (!esdm_drbg_cb->drbg_is_initialized(drbg_state)) {
 		requested_events = esdm_entropy_to_data(
-			requested_bits + esdm_init_osr(), drbg->entropy_bits);
+			requested_bits + esdm_init_osr(), rate);
 	} else {
 		requested_events = esdm_entropy_to_data(
-			requested_bits + esdm_compress_osr(),
-			drbg->entropy_bits);
+			requested_bits + esdm_compress_osr(), rate);
 	}
 
 	collected_events =
 		esdm_es_ring_collect(drbg->ring, requested_events, &seedlist);
 
-	collected_ent_bits =
-		esdm_data_to_entropy(collected_events, drbg->entropy_bits);
+	collected_ent_bits = esdm_data_to_entropy(collected_events, rate);
 	/* Apply oversampling: discount requested oversampling rate */
 	if (!esdm_drbg_cb->drbg_is_initialized(drbg_state)) {
 		returned_ent_bits = esdm_reduce_by_init_osr(collected_ent_bits);
@@ -150,9 +158,12 @@ out:
  * @drbg: description of the source's ring and DRBG post-processing
  * @eb: entropy buffer to store entropy
  * @requested_bits: Requested amount of entropy
+ * @entropy_rate: events per security strength bits of entropy the caller
+ *		  credits, see esdm_es_drbg_rate()
  */
 void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
-			       struct entropy_buf *eb, u32 requested_bits)
+			       struct entropy_buf *eb, u32 requested_bits,
+			       u32 entropy_rate)
 {
 	/*
 	 * The DRBG is published by the deferred registration work, which may
@@ -160,7 +171,8 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	 * smp_store_release().
 	 */
 	void *drbg_state = smp_load_acquire(&drbg->drbg_state);
-	u32 esdm_security_strength, full_blocks, done, gen;
+	u32 esdm_security_strength, full_blocks, done, gen,
+		rate = esdm_es_drbg_rate(drbg, entropy_rate);
 
 	/* only set entropy, when generate was successful */
 	eb->e_bits = 0;
@@ -212,7 +224,7 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	 * default case (no initialize with additional 64 Bit) is already counted in esdm_es_drbg_avail_entropy()
 	 * add additional 64 bit in order to match 128 extra bit on full init
 	 */
-	if (esdm_es_drbg_avail_entropy(drbg) <
+	if (esdm_es_drbg_avail_entropy(drbg, rate) <
 	    full_blocks * esdm_security_strength +
 		    full_blocks * esdm_compress_osr()) {
 		return;
@@ -224,7 +236,7 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 		bool ok = esdm_es_drbg_pool_extract_block(
 			drbg, drbg_state, eb->e + (done >> 3),
 			min(esdm_security_strength, requested_bits - done) >> 3,
-			&bits_returned);
+			rate, &bits_returned);
 		if (!ok) {
 			pr_warn("DRBG block extract failed, bits returned: %u!\n",
 				bits_returned);

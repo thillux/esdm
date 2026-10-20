@@ -211,6 +211,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: The OpenSSL RAND providers stored a new context lock over the old one when locking was enabled twice, leaking it and leaving the users of the shared context locking different things (found by the new fuzz harnesses)
 
+* fix: Linux kernel addon: the requested entropy and the entropy rate set with ESDM_IRQ_CONF / ESDM_SCHED_CONF belong to the descriptor of /dev/esdm_es they are set on. Kept for the whole module, an ESDM crediting a source with nothing - the default for the scheduler ES - had the source deliver nothing to every other ESDM, and one crediting it had the source credited for the others
+
 * Add fuzz harnesses for the RPC requests, responses and wire codec, the server as a client reaches it, both sides of the EGD interface and the library API (build option 'fuzzing', see tests/fuzz/README.md); beyond crashes they check what the code promised, and when building with -Dfuzzing=enabled their seeds are additionally replayed as regression tests by the ordinary test suite (meson test), also without libFuzzer
 
 * Add a fuzz harness per shipped OpenSSL RAND provider module (build option 'openssl-rand-provider'), each loading its provider the way libcrypto does and holding it to the contract of <openssl/core_dispatch.h>

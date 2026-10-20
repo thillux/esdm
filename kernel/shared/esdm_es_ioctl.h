@@ -52,6 +52,14 @@
  *
  * A requested entropy that is none of the seed sizes fails with -EINVAL
  * before anything is carried out, the reset included.
+ *
+ * The requested entropy and the entropy rate belong to the file descriptor
+ * they are set on, which starts out with ESDM_DRNG_INIT_SEED_SIZE_BITS and the
+ * rate the module was loaded with. The available entropy, the entropy buffer
+ * and the status read on a descriptor follow its settings, whatever those of
+ * other descriptors are. The events collected are shared by all descriptors:
+ * what one of them reads is gone for the others, and the reset discards them
+ * for every descriptor.
  */
 #define ESDM_IRQ_CONF _IOW(ESDMIO, 0x03, __u32[2])
 

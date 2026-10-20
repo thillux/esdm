@@ -30,15 +30,37 @@ struct entropy_buf {
 void esdm_reset_state(enum esdm_internal_es es);
 
 /*
+ * struct esdm_es_conf - configuration of an entropy source by one opener of
+ *			 /dev/esdm_es, set with ESDM_IRQ_CONF / ESDM_SCHED_CONF
+ * @requested_bits: The entropy in bits a read of the entropy buffer asks for.
+ * @entropy_rate: The number of events credited with
+ *		  ESDM_DRNG_SECURITY_STRENGTH_BITS of entropy, 0 for the rate
+ *		  the module was loaded with. The entropy source never credits
+ *		  more than that, whatever is set here.
+ *
+ * Every descriptor of the device holds its own: the ESDMs that open it, e.g.
+ * a server and a test program, or two test programs, may credit the same
+ * source differently, and one of them configuring the source must not change
+ * what the others read from it.
+ */
+struct esdm_es_conf {
+	u32 requested_bits;
+	u32 entropy_rate;
+};
+
+/*
  * struct esdm_es_cb - callback defining an entropy source
  * @name: Name of the entropy source.
- * @get_ent: Fetch entropy into the entropy_buf. The ES shall only deliver
- *	     data if its internal initialization is complete, including any
- *	     SP800-90B startup testing or similar.
- * @curr_entropy: Return amount of currently available entropy.
+ * @get_ent: Fetch entropy into the entropy_buf, credited by the given entropy
+ *	     rate (see struct esdm_es_conf). The ES shall only deliver data if
+ *	     its internal initialization is complete, including any SP800-90B
+ *	     startup testing or similar.
+ * @curr_entropy: Return amount of currently available entropy, credited by the
+ *		  given entropy rate.
  * @max_entropy: Maximum amount of entropy the entropy source is able to
  *		 maintain.
- * @state: Buffer with human-readable ES state.
+ * @state: Buffer with human-readable ES state, the available entropy credited
+ *	   by the given entropy rate.
  * @state_json: Buffer with the ES state as a JSON object. The member names are
  *		the labels of @state, lower-cased with every run of
  *		non-alphanumeric characters replaced by one underscore, so that
@@ -50,13 +72,13 @@ void esdm_reset_state(enum esdm_internal_es es);
  */
 struct esdm_es_cb {
 	const char *name;
-	void (*get_ent)(struct entropy_buf *eb, u32 requested_bits);
-	u32 (*curr_entropy)(u32 requested_bits);
+	void (*get_ent)(struct entropy_buf *eb, u32 requested_bits,
+			u32 entropy_rate);
+	u32 (*curr_entropy)(u32 entropy_rate);
 	u32 (*max_entropy)(void);
-	void (*state)(unsigned char *buf, size_t buflen);
-	void (*state_json)(unsigned char *buf, size_t buflen);
+	void (*state)(unsigned char *buf, size_t buflen, u32 entropy_rate);
+	void (*state_json)(unsigned char *buf, size_t buflen, u32 entropy_rate);
 	void (*reset)(void);
-	void (*set_entropy_rate)(u32 rate);
 };
 
 /* Cap to maximum entropy that can ever be generated with given DRBG */

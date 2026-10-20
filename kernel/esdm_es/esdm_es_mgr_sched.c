@@ -15,15 +15,20 @@
 #include "esdm_es_mgr_sched.h"
 #include "esdm_es_sched.h"
 
-static u32 esdm_requested_sched_bits = ESDM_DRNG_INIT_SEED_SIZE_BITS;
-
-/* Available entropy in the scheduler ES considering all per-CPU pools */
-static u32 esdm_avail_entropy_sched(u32 requested_bits)
+/* The configuration a newly opened descriptor starts out with */
+void esdm_es_mgr_sched_conf_init(struct esdm_es_conf *conf)
 {
-	return esdm_es_sched.curr_entropy(requested_bits);
+	conf->requested_bits = ESDM_DRNG_INIT_SEED_SIZE_BITS;
+	/* the rate the module was loaded with */
+	conf->entropy_rate = 0;
 }
 
-int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg)
+/*
+ * @conf: the configuration of the scheduler ES by the descriptor the IOCTL is
+ *	  issued on, serialized by the caller
+ */
+int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg,
+			    struct esdm_es_conf *conf)
 {
 	struct entropy_buf eb __aligned(ESDM_KCAPI_ALIGN);
 	char status[250];
@@ -34,7 +39,7 @@ int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case ESDM_SCHED_AVAIL_ENTROPY:
-		data = esdm_avail_entropy_sched(esdm_requested_sched_bits);
+		data = esdm_es_sched.curr_entropy(conf->entropy_rate);
 		if (put_user(data, p))
 			return -EFAULT;
 		return 0;
@@ -50,7 +55,8 @@ int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg)
 
 	case ESDM_SCHED_ENT_BUF:
 		memset(&eb, 0, sizeof(eb));
-		esdm_es_sched.get_ent(&eb, esdm_requested_sched_bits);
+		esdm_es_sched.get_ent(&eb, conf->requested_bits,
+				      conf->entropy_rate);
 		if (copy_to_user(argp, &eb, sizeof(eb)))
 			ret = -EFAULT;
 		memzero_explicit(&eb, sizeof(eb));
@@ -77,22 +83,27 @@ int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg)
 		if (data & ESDM_ES_MGR_RESET_BIT)
 			esdm_es_mgr_sched_reset();
 
+		/*
+		 * Both settings belong to this descriptor: the other ESDMs
+		 * reading the entropy source keep theirs.
+		 */
 		if (bits)
-			esdm_requested_sched_bits = bits;
+			conf->requested_bits = bits;
 
 		/*
-		 * Events per 256 bits of entropy: the setter keeps it from
-		 * going below the default, i.e. from crediting more entropy,
-		 * and every larger value is valid - U32_MAX credits none.
+		 * Events per 256 bits of entropy: the entropy source keeps it
+		 * from going below the default, i.e. from crediting more
+		 * entropy, and every larger value is valid - U32_MAX credits
+		 * none.
 		 */
 		if (data2 > 0)
-			esdm_es_sched.set_entropy_rate(data2);
+			conf->entropy_rate = data2;
 
 		break;
 
 	case ESDM_SCHED_STATUS:
 		memset(status, 0, sizeof(status));
-		esdm_es_sched.state(status, sizeof(status));
+		esdm_es_sched.state(status, sizeof(status), conf->entropy_rate);
 		if (copy_to_user(argp, &status, sizeof(status)))
 			ret = -EFAULT;
 
@@ -103,7 +114,8 @@ int esdm_es_mgr_sched_ioctl(unsigned int cmd, unsigned long arg)
 			return -EOPNOTSUPP;
 
 		memset(status_json, 0, sizeof(status_json));
-		esdm_es_sched.state_json(status_json, sizeof(status_json));
+		esdm_es_sched.state_json(status_json, sizeof(status_json),
+					 conf->entropy_rate);
 		if (copy_to_user(argp, &status_json, sizeof(status_json)))
 			ret = -EFAULT;
 
