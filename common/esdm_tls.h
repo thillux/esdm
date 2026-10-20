@@ -84,10 +84,15 @@
  * The check runs within the verification of the TLS stack, so a peer it
  * refuses fails the handshake as one the TLS stack refuses, with an alert
  * telling why: certificate_revoked, certificate_expired for an expired CRL,
- * unknown_ca for a missing one. The chain checked ends in one of the own trust
- * anchors - never in a certificate the peer sent claiming to be one. With CRLs
- * configured, for the certificate of the peer and each CA certificate above it
- * up to - not including - the trust anchor:
+ * unknown_ca for a missing one. Not so a server of Botan on DTLS 1.2 - a
+ * provider on the network: Botan 3 replaces whatever the verification of a
+ * client certificate throws in its DTLS 1.2 server with bad_certificate, and
+ * offers no earlier point to verify it. Its clients are told bad_certificate
+ * for each of these refusals; the log of the server tells why. The chain
+ * checked ends in one of the own trust anchors - never in a certificate the
+ * peer sent claiming to be one. With CRLs configured, for the certificate of
+ * the peer and each CA certificate above it up to - not including - the trust
+ * anchor:
  *
  *  - the CRL of a certificate is a CRL whose issuer is the subject of the next
  *    certificate of the chain and whose signature verifies with that

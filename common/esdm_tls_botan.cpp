@@ -625,7 +625,10 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 
 	/*
 	 * The revocation policy on the path Botan verified, which ends in a
-	 * trust anchor: a refusal is an exception whose alert Botan sends.
+	 * trust anchor: a refusal is an exception whose alert Botan sends -
+	 * but for the DTLS 1.2 server, which Botan has send bad_certificate
+	 * for whatever the verification throws, see "Revocation" in
+	 * esdm_tls.h.
 	 */
 	void check(const std::vector<Botan::X509_Certificate> &path)
 	{

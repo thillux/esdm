@@ -267,7 +267,10 @@ only, no delta CRLs nor ones with an issuing distribution point. The checks are
 those of
 .B REVOCATION
 in
-.BR esdm\-egd\-net\-server (8).
+.BR esdm\-egd\-net\-server (8),
+and so are the alerts a refused client is told \- but by a provider of the
+Botan backend, whose DTLS 1.2 server tells every client whose certificate it
+refuses bad_certificate. Its log tells why.
 .TP
 .B \-\-crl_check_all
 Require a CRL for every CA certificate of a client's chain as well, not only
