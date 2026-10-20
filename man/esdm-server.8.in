@@ -206,6 +206,14 @@ rather than with io_uring. Without io_uring in the build (meson option
 that is what the daemon does anyway. See
 .B RPC EVENT LOOP
 below.
+.TP
+.B \-\-no_fixed_drng_mapping
+Serve the random numbers the workers of the unprivileged RPC interface and
+of the EGD interface hand out from the first free DRNG of a node each, as
+every other caller of the ESDM is served, rather than from the node DRNG each
+worker is mapped to. See
+.B DRNG MAPPING
+below.
 .SH EXTERNAL ENTROPY SOURCES
 Noise sources that are not part of the ESDM are served to the daemon by a
 provider: a process of its own, written against
@@ -442,6 +450,31 @@ set contains
 .BR io_uring_enter (2)
 and
 .BR io_uring_register (2).
+.SH DRNG MAPPING
+The ESDM keeps a DRNG per node \- the one of node 0 being the initial DRNG \-
+and one for prediction resistance. A request is served by the first node DRNG
+that is fully seeded and not busy, probed under a lock over all of them,
+starting at the one of the CPU the request runs on. Unless
+.B \-\-no_fixed_drng_mapping
+is given, each worker of the unprivileged RPC interface and of the EGD
+interface is mapped to a node DRNG instead and goes to it straight away,
+taking no lock another worker takes: RPC worker
+.I i
+to node
+.IR i "+1,"
+EGD worker
+.I i
+to the last node minus
+.IR i ,
+wrapping around past node 0, whose initial DRNG every request falls back to.
+With a worker per node, the last RPC worker shares node 1 with the first,
+and the others have their node DRNG to themselves. The privileged RPC interface has no call generating random
+numbers, and its worker no mapping. The prediction resistant requests stay
+with the prediction resistance DRNG. While the node DRNG of a worker is being
+reseeded, is not fully seeded, or reached its maximum output without full
+reseed, the requests of the worker are served as without the mapping. The node
+DRNGs are seeded, reseeded and reported as without it. With verbose logging,
+the daemon logs which node each worker is mapped to.
 .SH EGD OVER THE NETWORK
 The EGD socket is a local one. To hosts without an ESDM, the EGD protocol of
 this daemon is served by

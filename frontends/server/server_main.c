@@ -166,6 +166,10 @@ static void usage(void)
 		"\t   --no_io_uring\tWait for the RPC connections with epoll, not\n");
 	fprintf(stderr,
 		"\t\t\twith io_uring (used by default where built and available)\n");
+	fprintf(stderr,
+		"\t   --no_fixed_drng_mapping\tServe the RPC and EGD workers from\n");
+	fprintf(stderr,
+		"\t\t\tthe first free node DRNG rather than one node DRNG each\n");
 	exit(1);
 }
 
@@ -368,6 +372,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "es_jent_kernel_name", 1, 0, 0 },
 			{ "no_dtls", 0, 0, 0 },
 			{ "no_io_uring", 0, 0, 0 },
+			{ "no_fixed_drng_mapping", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
@@ -482,6 +487,10 @@ static void parse_opts(int argc, char *argv[])
 			case 24:
 				/* no_io_uring */
 				esdm_rpc_server_set_io_uring(false);
+				break;
+			case 25:
+				/* no_fixed_drng_mapping */
+				esdm_rpc_server_set_drng_mapping(false);
 				break;
 
 			default:

@@ -726,6 +726,30 @@ If no such DRNG instance is found, it falls back to using the DRNG for node
 zero - the implementation is provided with the function
 `esdm_drng_get_sleep`.
 
+A thread serving requests one after the other may be mapped to a node DRNG of
+its own (`esdm_drng_node_bind`): the `esdm-server` maps each worker of its
+unprivileged RPC interface and of its EGD interface to one, unless it is
+started with `--no_fixed_drng_mapping`. The node DRNGs stay what they are -
+seeded, reseeded and reported as before, no instance is added; the mapping
+only says which one a thread goes to. Worker $i$ of the RPC interface goes to
+node $i + 1$ and worker $i$ of the EGD interface to the last node minus $i$,
+wrapping around past node 0: the DRNG of node 0 is the initial one, which
+every request falls back to and which reseeds in the request rather than by
+the reseed worker, so no thread is mapped to it. There is one RPC worker per
+node, so the last one shares node 1 with the first and the others have their
+node DRNG to themselves, the EGD workers sharing theirs with the RPC workers
+of the last nodes. The privileged RPC
+interface has no call generating random numbers, and its worker no mapping.
+A mapped thread goes to its node DRNG straight away, without the lock over
+the node array and without probing the other DRNGs - the locks the worker
+threads of a busy server otherwise contend for. While its node DRNG is not
+fully seeded, while its lock is taken - by a seeding collecting from the
+entropy sources, or by a request of another thread mapped to it - and once it
+reached its maximum output without full reseed, the request is served as
+without the mapping: by another node DRNG, and by the initial DRNG only if
+none is fully seeded. `esdm_fini` frees the node array only once the threads
+mapped to it unbound.
+
 === Flexible Design <sec:flexible-design>
 
 Albeit the preceding sections look like the DRNG and the management logic are

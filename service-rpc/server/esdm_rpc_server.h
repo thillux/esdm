@@ -107,6 +107,21 @@ void esdm_rpc_server_set_dtls(bool enable);
 void esdm_rpc_server_set_io_uring(bool enable);
 
 /**
+ * @brief Map each worker to a node DRNG of its own, or not
+ *
+ * By default, each worker of the unprivileged RPC interface, and of the EGD
+ * interface (see esdm_egd_server_set_drng_mapping()), serves the random numbers
+ * its clients ask for - all but the prediction resistant ones - from a node
+ * DRNG it is mapped to, see esdm_drng_node_bind(): neither the lock of the node
+ * array nor that of a DRNG another worker uses is taken on the way. Switched
+ * off, they are served by the first free node DRNG they find, as every other
+ * caller is. To be called before esdm_rpc_server_init().
+ *
+ * @param [in] enable Each worker its node DRNG (true), or not (false)
+ */
+void esdm_rpc_server_set_drng_mapping(bool enable);
+
+/**
  * @brief Remove a left-over Unix domain socket of a previous server instance
  *
  * The socket is only removed when nothing is listening on it, probed by

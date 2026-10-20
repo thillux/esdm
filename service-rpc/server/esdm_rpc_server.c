@@ -55,6 +55,7 @@
 #include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
+#include "esdm_drng_mgr.h"
 #include "esdm_dtls.h"
 #include "esdm_egd_server.h"
 #include "esdm_peer_account.h"
@@ -407,6 +408,18 @@ static atomic_bool esdm_rpcs_io_uring_enabled = true;
 void esdm_rpc_server_set_io_uring(bool enable)
 {
 	atomic_store(&esdm_rpcs_io_uring_enabled, enable);
+}
+
+/*
+ * Is each worker of the unprivileged interface mapped to a node DRNG of its
+ * own? See esdm_rpc_server_set_drng_mapping()
+ */
+static atomic_bool esdm_rpcs_drng_mapping = true;
+
+void esdm_rpc_server_set_drng_mapping(bool enable)
+{
+	atomic_store(&esdm_rpcs_drng_mapping, enable);
+	esdm_egd_server_set_drng_mapping(enable);
 }
 
 /*
@@ -2447,6 +2460,32 @@ static int esdm_rpcs_handler(void *args)
 	max_connections = thread->max_connections;
 	evict = !thread->proto->privileged;
 
+	/*
+	 * The random numbers this worker hands out from a node DRNG of its own -
+	 * worker i from node i + 1, the DRNG of node 0 being the initial one -
+	 * rather than from whichever node DRNG it finds free, probing them
+	 * under the lock of the node array like every other worker: see
+	 * esdm_drng_node_bind(). There is a worker per node, so the last one
+	 * wraps around to node 1 with worker 0 and the others have their node
+	 * to themselves; the EGD workers take theirs from the last node
+	 * downwards. Not the privileged interface, none of whose calls
+	 * generates random numbers. The prediction resistant calls stay on the
+	 * prediction resistance DRNG.
+	 */
+	if (!thread->proto->privileged && atomic_load(&esdm_rpcs_drng_mapping)) {
+		ret = esdm_drng_node_bind(thread->id, false);
+		if (ret < 0) {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+				    "Unprivileged RPC worker %u is mapped to no node DRNG: %s\n",
+				    thread->id, strerror(-ret));
+		} else {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+				    "Unprivileged RPC worker %u is mapped to node DRNG %d\n",
+				    thread->id, ret);
+		}
+		ret = 0;
+	}
+
 	/* cleanup timer */
 	tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 	struct itimerspec its = {
@@ -2638,6 +2677,8 @@ out:
 	if (tfd >= 0) {
 		close(tfd);
 	}
+
+	esdm_drng_node_unbind();
 
 	/*
 	 * A worker that gives up leaves its share of the clients unserved, and

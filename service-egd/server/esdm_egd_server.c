@@ -39,6 +39,7 @@
 #include "build_bug_on.h"
 #include "esdm.h"
 #include "esdm_config.h"
+#include "esdm_drng_mgr.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
@@ -488,6 +489,14 @@ static bool esdm_egd_server_active(void)
 	}
 
 	return false;
+}
+
+/* Is each worker mapped to a node DRNG? See esdm_egd_handler() */
+static atomic_bool esdm_egd_drng_mapping = true;
+
+void esdm_egd_server_set_drng_mapping(bool enable)
+{
+	atomic_store(&esdm_egd_drng_mapping, enable);
 }
 
 bool esdm_egd_server_enabled(void)
@@ -2373,6 +2382,30 @@ static int esdm_egd_handler(void *args)
 	thread_set_name(egd_server, id);
 	TAILQ_INIT(&conn_list);
 
+	/*
+	 * The reads of the clients of this worker from a node DRNG of its own
+	 * rather than from whichever node DRNG it finds free, see
+	 * esdm_drng_node_bind(). From the last node downwards: the workers of
+	 * the RPC interface take theirs from the first node upwards, one per
+	 * node, the one node left over for two of them being the first. The
+	 * prediction resistant reads stay on the prediction resistance DRNG,
+	 * and an unseeded read is served by the node DRNG only while it is
+	 * fully seeded, as by any DRNG.
+	 */
+	if (atomic_load(&esdm_egd_drng_mapping)) {
+		ret = esdm_drng_node_bind(id, true);
+		if (ret < 0) {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
+				    "EGD server: worker %u is mapped to no node DRNG: %s\n",
+				    id, strerror(-ret));
+		} else {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
+				    "EGD server: worker %u is mapped to node DRNG %d\n",
+				    id, ret);
+		}
+		ret = 0;
+	}
+
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		ret = -errno;
@@ -2747,6 +2780,8 @@ out:
 
 	if (epfd >= 0)
 		close(epfd);
+
+	esdm_drng_node_unbind();
 
 	atomic_fetch_sub(&esdm_egd_workers_running, 1);
 

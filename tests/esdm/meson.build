@@ -262,6 +262,20 @@ if get_option('esdm-server').enabled()
 
 		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
 
+		# Threads mapped to a node DRNG each, as the server's workers
+		# are: waits for the reseed worker to bring DRNGs back, which
+		# may take a while under a sanitizer.
+		esdm_drng_node_bind_test = executable(
+			'esdm_drng_node_bind_test',
+			[ esdm_ipc_ns, 'esdm_drng_node_bind_test.c' ],
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+			dependencies: dependencies_server,
+		)
+
+		test('ESDM threads mapped to a node DRNG each',
+			esdm_drng_node_bind_test, timeout: 180)
+
 		esdm_node_alloc_seeding_test = executable(
 			'esdm_node_alloc_seeding_test',
 			[ esdm_ipc_ns, 'esdm_node_alloc_seeding_test.c' ],

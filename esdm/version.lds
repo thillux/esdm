@@ -157,6 +157,13 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_shm_status_cleanup_ipc;
 
 		/*
+		 * esdm_drng_mgr.h - the node DRNG each worker of the RPC and
+		 * the EGD interface of the server is mapped to.
+		 */
+		esdm_drng_node_bind;
+		esdm_drng_node_unbind;
+
+		/*
 		 * esdm_drng_mgr.h / esdm_es_mgr.h - the self tests the server
 		 * runs on demand for its privileged RPC endpoint, and the
 		 * states it reports back.

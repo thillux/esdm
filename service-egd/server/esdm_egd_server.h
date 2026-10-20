@@ -103,6 +103,19 @@ int esdm_egd_server_socket_init(void);
 int esdm_egd_server_start(void);
 
 /**
+ * @brief Map each EGD worker to a node DRNG of its own, or not
+ *
+ * By default, each worker thread serves the reads of its clients - all but the
+ * prediction resistant ones - from a node DRNG it is mapped to, see
+ * esdm_drng_node_bind(). Switched off, they are served by the first free node
+ * DRNG they find, as every other caller is. To be called before
+ * esdm_egd_server_start().
+ *
+ * @param [in] enable Each worker its node DRNG (true), or not (false)
+ */
+void esdm_egd_server_set_drng_mapping(bool enable);
+
+/**
  * @brief Async-signal-safe shutdown trigger for the EGD worker
  *
  * Only performs an atomic store; the worker observes it within the bounded

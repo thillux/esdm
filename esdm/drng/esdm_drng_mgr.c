@@ -212,6 +212,13 @@ static bool esdm_drng_stagger_avail = false;
 static pthread_once_t esdm_drng_atfork_once = PTHREAD_ONCE_INIT;
 static void esdm_drng_atfork_register(void);
 
+/*
+ * The node DRNG the calling thread is mapped to - NULL for a thread that is
+ * not - and its node, see esdm_drng_node_bind()
+ */
+static __thread struct esdm_drng *esdm_drng_node_mine = NULL;
+static __thread uint32_t esdm_drng_node_mine_idx = 0;
+
 /********************************** Helper ************************************/
 
 bool esdm_get_available(void)
@@ -2587,22 +2594,70 @@ out:
 	return processed;
 }
 
+/*
+ * The node DRNG the calling thread is mapped to, if it may serve a request -
+ * NULL otherwise: no thread mapped, its DRNG not fully seeded - not brought up
+ * yet, spent, or reset -, or its lock taken. The lock is held by a seeding of
+ * the DRNG while it collects from the entropy sources, which takes
+ * milliseconds with the oversampling of SP800-90C, and by a request of
+ * another thread mapped to the same node, should there be one: a request
+ * waiting for it would wait for that. The request is served the way it would
+ * be without the mapping then, which skips a busy node DRNG just the same, see
+ * esdm_drng_get_sleep(). Nobody but the threads mapped to the node and the
+ * seedings take the lock, so trying it costs no cache line shared with the
+ * other threads.
+ */
+static struct esdm_drng *esdm_drng_node_serving(void)
+{
+	struct esdm_drng *drng = esdm_drng_node_mine;
+
+	if (!drng || !atomic_load(&drng->fully_seeded))
+		return NULL;
+
+	if (mutex_w_trylock(&drng->lock))
+		return NULL;
+	mutex_w_unlock(&drng->lock);
+
+	return drng;
+}
+
 static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr)
 {
-	struct esdm_drng **esdm_drng = esdm_drng_get_instances();
-	struct esdm_drng *drng = &esdm_drng_init;
+	struct esdm_drng **esdm_drng;
+	struct esdm_drng *drng = pr ? NULL : esdm_drng_node_serving();
+	uint32_t num_nodes, node;
+	bool found_drng = false;
+	ssize_t ret;
+	uint32_t i;
+	uint32_t j;
+
+	/*
+	 * The node DRNG of the thread: neither the node array is taken nor the
+	 * DRNGs probed. If it reached its maximum output without full reseed
+	 * before it generated anything, the request is served as without the
+	 * mapping - by another node DRNG, and by the initial DRNG only if none
+	 * is fully seeded: under sustained load in a build capping the output
+	 * of a seed, the node DRNG is spent time and again while it waits for
+	 * its reseed, and sending each of those requests to the initial DRNG
+	 * would spend that one in turn and have the requests wait for its
+	 * reseed.
+	 */
+	if (drng) {
+		ret = esdm_drng_get(drng, outbuf, outbuflen);
+		if (ret != -EAGAIN)
+			return ret;
+	}
+
+	esdm_drng = esdm_drng_get_instances();
+	drng = &esdm_drng_init;
 	/*
 	 * Bound by the published array size, not only the live config:
 	 * raising max_nodes via the public API after allocation grows
 	 * esdm_config_online_nodes() but never the array.
 	 */
-	uint32_t num_nodes = min_uint32(esdm_config_online_nodes(),
-					esdm_drng_node_count_get());
-	uint32_t node = esdm_config_curr_node();
-	bool found_drng = false;
-	ssize_t ret;
-	uint32_t i;
-	uint32_t j;
+	num_nodes = min_uint32(esdm_config_online_nodes(),
+			       esdm_drng_node_count_get());
+	node = esdm_config_curr_node();
 
 	if (pr) {
 		esdm_logger(
@@ -2678,6 +2733,62 @@ static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr)
 
 	esdm_drng_put_instances();
 	return ret;
+}
+
+DSO_PUBLIC
+int esdm_drng_node_bind(uint32_t worker, bool from_last)
+{
+	struct esdm_drng **drngs;
+	uint32_t nodes, node;
+
+	if (esdm_drng_node_mine)
+		return (int)esdm_drng_node_mine_idx;
+
+	/*
+	 * Held until the thread unbinds: esdm_fini() frees the node array only
+	 * once no thread is mapped to a node any more, see esdm_node_fini().
+	 * The lock is reader-preferring, so neither the requests of this thread
+	 * nor those of others wait for a finalization waiting for it.
+	 */
+	drngs = esdm_drng_get_instances();
+	nodes = esdm_drng_node_count_get();
+
+	/*
+	 * Not the initial DRNG, which serves node 0: it is the one every
+	 * request falls back to, it reseeds in the request rather than by the
+	 * reseed worker, and spending it takes the ESDM out of operation - so
+	 * the requests reach it last, see esdm_drng_get_sleep(). The nodes
+	 * past it are taken in turn, from the first or from the last, and
+	 * wrapped around when there are more threads than nodes.
+	 */
+	if (!drngs || nodes < 2) {
+		esdm_drng_put_instances();
+		return -ENODEV;
+	}
+
+	node = worker % (nodes - 1);
+	node = from_last ? nodes - 1 - node : node + 1;
+
+	if (!drngs[node] || drngs[node] == &esdm_drng_init) {
+		esdm_drng_put_instances();
+		return -ENODEV;
+	}
+
+	esdm_drng_node_mine = drngs[node];
+	esdm_drng_node_mine_idx = node;
+
+	return (int)node;
+}
+
+DSO_PUBLIC
+void esdm_drng_node_unbind(void)
+{
+	if (!esdm_drng_node_mine)
+		return;
+
+	esdm_drng_node_mine = NULL;
+	esdm_drng_node_mine_idx = 0;
+	esdm_drng_put_instances();
 }
 
 /*

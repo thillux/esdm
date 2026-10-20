@@ -219,6 +219,10 @@ void esdm_node_fini(void)
 {
 	struct esdm_drng **drngs;
 
+	/*
+	 * Also waits for the threads mapped to a node DRNG, which hold the read
+	 * side until they unbind - see esdm_drng_node_bind().
+	 */
 	mutex_lock(&esdm_node_cleanup_lock);
 	drngs = atomic_exchange_explicit(&esdm_drng, NULL, memory_order_acquire);
 	esdm_drngs_node_dealloc(drngs, esdm_drng_node_count_get());

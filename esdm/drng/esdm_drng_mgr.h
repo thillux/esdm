@@ -199,6 +199,38 @@ void esdm_drng_stats_pr(esdm_drng_stats_cb_t cb, void *priv);
 struct esdm_drng *esdm_drng_init_instance(void);
 struct esdm_drng *esdm_drng_node_instance(void);
 
+/**
+ * @brief Map the calling thread to a node DRNG of its own
+ *
+ * For a thread serving requests one after the other - a worker of the RPC or
+ * the EGD interface of the esdm-server. Its non-prediction resistant requests
+ * (esdm_get_random_bytes*() other than _pr) go to the node DRNG it is mapped to
+ * directly, without the node array and without probing the other node DRNGs
+ * and their locks - as long as that DRNG is fully seeded and not busy: while it
+ * is being reseeded, or after it reached its maximum output without full
+ * reseed, they are served as without the mapping. The node DRNGs, their
+ * seeding and their reporting stay what they are; the mapping only says which
+ * one a thread goes to.
+ *
+ * The threads are spread over the nodes past node 0, whose DRNG is the initial
+ * one: thread @worker is mapped to node 1 + @worker, or to the last node minus
+ * @worker with @from_last - wrapping around where there are more threads than
+ * nodes. To be called after esdm_init(); the thread unbinds before it ends, and
+ * esdm_fini() waits for it.
+ *
+ * @param [in] worker Number of the thread among those mapped in the same order
+ * @param [in] from_last Map from the last node downwards rather than from the
+ *			 first node upwards
+ * @return the node the thread is mapped to, -ENODEV if there is no node DRNG
+ *	   but the initial one - the thread is served as without the mapping
+ */
+int esdm_drng_node_bind(uint32_t worker, bool from_last);
+
+/**
+ * @brief Take back the mapping of the calling thread, see esdm_drng_node_bind()
+ */
+void esdm_drng_node_unbind(void);
+
 void esdm_reset(void);
 int esdm_drng_alloc_common(struct esdm_drng *drng,
 			   const struct esdm_drng_cb *crypto_cb);
