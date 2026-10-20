@@ -192,25 +192,6 @@ static void test_single_thread(unsigned int before)
 static pthread_barrier_t test_barrier;
 static atomic_uint test_max_sockets;
 
-/*
- * Requests the ESDM refused, which the library handed to the kernel - where
- * the seccomp filter refuses them with ENOSYS. With the reseeding caps of an
- * sp80090c, fips140 or ais2031_drg4 build, the node DRNGs of an ESDM served on
- * many connections at once run dry before their reseed lands and stay
- * unseeded, and a blocking request is answered -EOPNOTSUPP instead of waiting
- * for them - review finding core-1, a bug of the DRNG manager. Until its fix
- * lands, such requests are counted there, not failed.
- *
- * core-1: remove TEST_CAPPED and the fallback branch in test_thread() once
- * the fix of core-1 is in, making the test strict for every build.
- */
-#if ESDM_DRNG_MAX_RESEED_BITS != 4294967295
-#define TEST_CAPPED 1
-#else
-#define TEST_CAPPED 0
-#endif
-static atomic_uint test_kernel_fallbacks;
-
 static void *test_thread(void *arg)
 {
 	static const size_t sizes[] = { 16, 300, 4096, 70000 };
@@ -238,11 +219,6 @@ static void *test_thread(void *arg)
 		memset(buf, 0, len);
 		errno = 0;
 		rc = getrandom(buf, len, 0);
-		/* core-1: an ESDM that gave up, see TEST_CAPPED */
-		if (TEST_CAPPED && rc < 0 && errno == ENOSYS) {
-			atomic_fetch_add(&test_kernel_fallbacks, 1);
-			continue;
-		}
 		CHECK(test_filled(buf, len, rc),
 		      "getrandom of %zu bytes returned %zd (%s)", len, rc,
 		      rc < 0 ? strerror(errno) : "short");
@@ -278,9 +254,6 @@ static void test_threads(void)
 	printf("%u threads: up to %u connection(s), at most %u allowed\n",
 	       TEST_THREADS, atomic_load(&test_max_sockets),
 	       test_max_connections());
-	if (atomic_load(&test_kernel_fallbacks))
-		printf("%u requests refused by the ESDM, left to the kernel (core-1)\n",
-		       atomic_load(&test_kernel_fallbacks));
 	CHECK(atomic_load(&test_max_sockets) <= test_max_connections(),
 	      "%u connections, more than the %u allowed",
 	      atomic_load(&test_max_sockets), test_max_connections());
