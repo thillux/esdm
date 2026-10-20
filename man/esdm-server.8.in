@@ -546,7 +546,10 @@ file descriptor limit of the daemon; it is logged at startup. A connection that 
 .B esdm\-server\-rpc\-idle\-timeout\-usec
 build option (2 seconds by default) is closed;
 .BR libesdm_rpc_client (3)
-reconnects transparently.
+reconnects transparently. A connection with a request waiting to be read is not
+idle. Whatever the client of a connection closed by the server \- idle, or to
+make room as below \- sent before is still answered; a request sent after that
+fails to go out, and the library sends it on a new connection.
 The unprivileged connections of all UIDs together leave 2560 descriptors, but
 at most half of the limit, to the EGD and privileged interfaces. This bound is
 split evenly over the server threads, at most 1024 connections each, and logged
