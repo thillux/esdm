@@ -28,12 +28,30 @@
  * Botan. The builtin and the leancrypto backend have none, so a build with
  * them has no DTLS, and every function here reports -EOPNOTSUPP.
  *
- * It is DTLS 1.2 with an ephemeral ECDH key exchange and AEAD ciphers only,
- * unauthenticated: the server presents an ephemeral self-signed certificate
- * the client does not verify. What a peer is trusted for is what the kernel
- * says about the other end of the Unix domain socket (SO_PEERCRED), as without
- * DTLS. The DTLS keeps the data - random numbers and seed material - from
- * being read off the connection by whoever can observe it.
+ * It is DTLS 1.2 with an ephemeral ECDH key exchange keyed with a pre-shared
+ * key (ECDHE-PSK) and no certificate on either side, on curves of 256 bits of
+ * security and with AES-256, in suites NIST SP 800-52r2 and BSI TR-02102-2
+ * both allow:
+ *
+ *  - Botan: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 of RFC 8442 on
+ *    brainpoolP512r1, preferably; TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 and
+ *    secp521r1 with a peer of OpenSSL or GnuTLS.
+ *  - OpenSSL and GnuTLS: TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 on secp521r1 -
+ *    neither has an ECDHE-PSK suite with AES-GCM.
+ *
+ * The CBC suite goes with Encrypt-then-MAC (RFC 7366): every backend offers
+ * and agrees to it, a Botan or GnuTLS peer refuses a session without it, and
+ * so does an OpenSSL server - an OpenSSL client cannot tell. There is no
+ * post-quantum key exchange: ML-KEM is a key exchange of TLS 1.3 only, and
+ * none of the TLS stacks has DTLS 1.3.
+ *
+ * The pre-shared key and its identity are constants compiled into the ESDM,
+ * the same in every build, and no secret - see esdm_dtls_backend.h. Anybody
+ * can run the key exchange with them, so the DTLS is unauthenticated: what a
+ * peer is trusted for is what the kernel says about the other end of the Unix
+ * domain socket (SO_PEERCRED), as without DTLS. The DTLS keeps the data -
+ * random numbers and seed material - from being read off the connection by
+ * whoever can observe it.
  *
  * Messages: SOCK_SEQPACKET keeps message boundaries, and every DTLS record
  * travels as one message of the socket. A message of the protocol on top may
@@ -91,9 +109,10 @@ struct esdm_dtls;
 /**
  * @brief Set up the DTLS of one side
  *
- * A server context generates its ephemeral key and certificate. Contexts are
- * meant to be allocated once and shared by the connections of a process; they
- * are not freed while a connection uses them.
+ * A context holds the pre-shared key of its side; the ephemeral keys of the key
+ * exchange are generated for each handshake. Contexts are meant to be
+ * allocated once and shared by the connections of a process; they are not
+ * freed while a connection uses them.
  *
  * @param [in] server true for the server side, false for the client side
  * @param [out] ctx The context

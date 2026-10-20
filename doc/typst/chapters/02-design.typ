@@ -1825,12 +1825,20 @@ OpenSSL, GnuTLS or Botan - as depicted in figure @fig:dtls
 every new connection, followed by a probe request which changes nothing, and
 goes on in the clear with a server that does not know or refuses DTLS (ESDM
 1.2.3 and before, or a server started with `--no_dtls`). The DTLS uses an
-ephemeral ECDH key exchange and AEAD ciphers only, with an ephemeral
-self-signed server certificate the client does not verify: what a peer is
-trusted for is what `SO_PEERCRED` says, as without DTLS. The DTLS keeps the
-data from being read off the connection. One DTLS record is sent per message
-of the socket. The same DTLS protects the connection of the ExternalSocket
-entropy source to its provider.]
+ephemeral ECDH key exchange keyed with a pre-shared key, without
+certificates, on curves of 256 bits of security and with AES-256, in cipher
+suites NIST SP 800-52r2 and BSI TR-02102-2 both allow:
+`TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384` on brainpoolP512r1 with Botan, and
+`TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384` with Encrypt-then-MAC (RFC 7366) on
+secp521r1 with OpenSSL and GnuTLS, which have no ECDHE-PSK suite with
+AES-GCM, and between them and Botan. As none of the TLS stacks has DTLS 1.3,
+the key exchange is not post-quantum: ML-KEM is defined for TLS 1.3 only.
+The pre-shared key and its identity are constants of the ESDM and no secret:
+the DTLS is unauthenticated, and what a peer is trusted for is what
+`SO_PEERCRED` says, as without DTLS. The DTLS keeps the data from being read
+off the connection. One DTLS record is sent per message of the socket. The
+same DTLS protects the connection of the ExternalSocket entropy source to its
+provider.]
 
 #figure(
   image("../figures/dtls-handshake.svg", width: 85%),

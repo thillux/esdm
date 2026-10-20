@@ -360,11 +360,14 @@ struct esdm_es_ext_plugin {
  * unencrypted. A provider that does not know STARTDTLS closes the connection,
  * and the ESDM connects again without asking - so do a failed handshake.
  *
- * The DTLS is opportunistic and unauthenticated: the provider presents an
- * ephemeral self-signed certificate the ESDM does not verify. What the ESDM
- * trusts the provider for are the credentials of the process on the other end
- * of the Unix domain socket. The DTLS keeps the data from being read off the
- * channel by whoever can observe it.
+ * The DTLS is opportunistic and unauthenticated: an ephemeral ECDH key
+ * exchange keyed with a pre-shared key that is a constant of the ESDM and no
+ * secret, without certificates - ECDHE-PSK with AES-256-GCM on
+ * brainpoolP512r1 between two builds with Botan, with AES-256-CBC and
+ * Encrypt-then-MAC on secp521r1 otherwise. What the ESDM trusts the provider
+ * for are the credentials of the process on the other end of the Unix domain
+ * socket. The DTLS keeps the data from being read off the channel by whoever
+ * can observe it.
  *
  * Network: a provider on another host (meson option es-ext-net) is served on
  * SCTP by the provider server of libesdm_es_ext, see

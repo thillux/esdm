@@ -550,10 +550,13 @@ DTLS answers
 and the connection goes on unencrypted; one that does not know STARTDTLS closes
 the connection, and the ESDM connects again without asking.
 .PP
-The DTLS is opportunistic and unauthenticated: the provider presents an
-ephemeral self-signed certificate that is not verified. What the ESDM trusts
-the provider for remains the credentials of the process on the other end of
-the socket; the DTLS keeps the data from being read off the channel.
+The DTLS is opportunistic and unauthenticated: an ephemeral ECDH key exchange
+keyed with a pre\-shared key that is a constant of the ESDM and no secret,
+without certificates \- the cipher suites are those of
+.BR esdm\-server (8).
+What the ESDM trusts the provider for remains the credentials of the process
+on the other end of the socket; the DTLS keeps the data from being read off
+the channel.
 .SS Network
 A provider on another host is read through the
 .BR esdm\-es\-ext\-relay (8)

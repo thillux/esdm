@@ -1196,6 +1196,12 @@ the credentials of the peer on the Unix domain socket remain what it is trusted
 for - and keeps random numbers and seed material from being read off the
 connection.
 
+The key exchange is ECDHE keyed with a pre-shared key that is a constant of
+the ESDM and no secret, without certificates, on curves of 256 bits of
+security: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 on brainpoolP512r1 with Botan,
+TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with Encrypt-then-MAC on secp521r1 with
+OpenSSL and GnuTLS and between them and Botan.
+
 The DTLS is provided by the TLS stack of the crypto backend: crypto_backend
 openssl, gnutls or botan. The builtin and the leancrypto backend have none.
 ''')

@@ -352,9 +352,11 @@ not asked on the connection made next.
 A daemon built with DTLS (meson option
 .BR dtls )
 asks the provider to encrypt the connection with DTLS, and uses it unencrypted
-if the provider cannot; the status of the source says which. The DTLS is
+if the provider cannot; the status of the source says which. The DTLS is the
+one of the RPC connections, see
+.BR ENCRYPTION :
 unauthenticated \- the credentials of the provider remain what it is trusted
-for \- and keeps the data credited as entropy from being read off the channel.
+for \- it keeps the data credited as entropy from being read off the channel.
 .SS PKCS#11 tokens
 The random number generator of a PKCS#11 token is read by
 .BR esdm\-es\-pkcs11 (8),
@@ -415,15 +417,24 @@ in the clear, and the DTLS 1.2 handshake follows when the daemon agrees. The
 DTLS is opportunistic: a client not asking for it, such as one of ESDM 1.2.3
 or before, is served in the clear as before, and a client whose daemon does not
 agree \- or does not know STARTDTLS, as ESDM 1.2.3 and before \- goes on in the
-clear. The DTLS is unauthenticated as well: the daemon presents an ephemeral
-self\-signed certificate the client does not verify, and what it trusts a
-client for are its credentials on the UNIX domain socket, as without DTLS. It
-keeps the random numbers and the data the clients contribute from being read
-off the connections by whoever can observe them.
+clear. The DTLS is unauthenticated as well: an ephemeral ECDH key exchange
+keyed with a pre\-shared key that is a constant of the ESDM, the same in every
+build and no secret, without certificates; what the daemon trusts a client for
+are its credentials on the UNIX domain socket, as without DTLS. It keeps the
+random numbers and the data the clients contribute from being read off the
+connections by whoever can observe them.
 .PP
-The DTLS context with its ephemeral key is set up at start up, before the
-privileges are dropped; should that fail, the daemon logs it and serves in the
-clear. A handshake costs the daemon a fraction of a millisecond, so a server
+The cipher suites are ECDHE\-PSK with AES\-256 on curves of 256 bits of
+security, which NIST SP 800\-52r2 and BSI TR\-02102\-2 both allow: with Botan,
+TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 on brainpoolP512r1; with OpenSSL and
+GnuTLS, which have no ECDHE\-PSK suite with AES\-GCM, and between Botan and
+either of them, TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with \%Encrypt\-then\-MAC
+on secp521r1. The key exchange is not post\-quantum: ML\-KEM is defined for
+TLS 1.3 only, and none of the TLS stacks has DTLS 1.3.
+.PP
+The DTLS context is set up at start up, before the privileges are dropped;
+should that fail, the daemon logs it and serves in the clear. A handshake
+costs the daemon less than a millisecond of CPU time, so a server
 thread spends at most 10 ms per round of its event loop on handshakes and goes
 on with the others in its next round, after the requests of the other
 connections. An idle encrypted connection holds some 130 KiB of memory of the

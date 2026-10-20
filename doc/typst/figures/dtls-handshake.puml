@@ -21,7 +21,7 @@ C -> S: probe request without waiting\n(GetPoolsize / RndAddEntropy without data
 alt server with DTLS
   S --> C: SUCCESS, message "DTLS"
   S --> C: answer to the probe
-  C <-> S: DTLS 1.2 handshake\n(ephemeral ECDH, AEAD, self-signed\nserver certificate not verified)
+  C <-> S: DTLS 1.2 handshake\n(ECDHE with the built-in, public\npre-shared key, no certificates)
   C -> S: request in DTLS records\n(one record per socket message)
   S --> C: answer in DTLS records
 else server without DTLS, or --no_dtls

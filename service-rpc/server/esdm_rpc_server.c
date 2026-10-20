@@ -326,18 +326,19 @@ static atomic_int esdm_rpc_unpriv_ret = 0;
 
 /*
  * The DTLS of the RPC interfaces, see ESDM_RPC_PROTO_STARTDTLS in
- * esdm_rpc_protocol.h: one context for both, holding the ephemeral key and
- * certificate of this server process.
+ * esdm_rpc_protocol.h: one context for both, holding the pre-shared key of
+ * esdm_dtls.h.
  *
  * esdm_rpc_server_init() sets it up before the privileges are dropped and
  * before the first worker serves a connection. What the TLS stack loads for it
  * - its configuration, its providers - is thus read with the privileges of the
  * starting server rather than with those of the user it drops to, and a
  * failure shows at startup rather than at the first client. Nothing of the
- * context depends on the privileges: the key is ephemeral, and nobody verifies
- * the certificate. The context is shared by all workers of both interfaces and
- * kept for the lifetime of the process, as the TLS stack keeps its own state:
- * a worker may still be serving a connection while the server shuts down.
+ * context depends on the privileges: the key is a constant of the ESDM, and
+ * there is no certificate. The context is shared by all workers of both
+ * interfaces and kept for the lifetime of the process, as the TLS stack keeps
+ * its own state: a worker may still be serving a connection while the server
+ * shuts down.
  *
  * Without it - not built, switched off, or failing to set up - STARTDTLS is
  * refused, and every connection served in the clear.

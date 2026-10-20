@@ -106,11 +106,15 @@ library sends right behind it is waited for a second at the most \- the time
 asking for DTLS and the handshake may take together \-, and the call goes on in
 the clear on a new connection then, as it does should the handshake fail. A
 connection whose server did not agree or did not complete the handshake does
-not ask again for a minute. The DTLS is unauthenticated, as described in
+not ask again for a minute. The DTLS is unauthenticated, keyed with a
+pre\-shared key that is a constant of the ESDM and no secret; it and its cipher
+suites are described in
+.B ENCRYPTION
+of
 .BR esdm\-server (8).
 With debug logging, every connection is logged with whether it is encrypted.
 .PP
-A new connection costs the handshake, a fraction of a millisecond, and the first
+A new connection costs the handshake, one to two milliseconds, and the first
 one of a process a few milliseconds more to set up the TLS stack. As the server
 closes idle connections and the library reconnects after half of that time,
 this cost comes once per call after a second of idleness at the most.

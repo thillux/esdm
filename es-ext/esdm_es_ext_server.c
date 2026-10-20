@@ -217,7 +217,7 @@ struct esdm_es_ext_server {
 	unsigned int max_clients;
 	struct pollfd *pfd;
 
-	/* The DTLS context with the ephemeral key, NULL while not offered */
+	/* The DTLS context, NULL while not offered */
 	struct esdm_dtls_ctx *dtls_ctx;
 
 	/* Clients accepted next to root; none set accepts any client */
