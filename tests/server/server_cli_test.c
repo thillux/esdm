@@ -156,6 +156,10 @@ static void test_options_accepted(void)
 		"--username",    "nobody",        "--groupname",
 		"nogroup",       NULL
 	};
+	/* The switches of the RPC server, taken whatever the build */
+	static const char *const rpc_switches[] = {
+		"--no_dtls", "--no_io_uring", "--no_fixed_drng_mapping", NULL
+	};
 	static const char *const short_form[] = { "-v", "-f",       "-i", "-s",
 						  "-m", "-M",       "-P", "-u",
 						  "nobody", "-g",   "nogroup",
@@ -181,6 +185,11 @@ static void test_options_accepted(void)
 	CHECK_EQ(test_run(&r, long_form, NULL), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the long options were not all accepted (output: %.300s)", r.err);
+
+	CHECK_EQ(test_run(&r, rpc_switches, NULL), 1);
+	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+	      "the RPC server switches were not all accepted (output: %.300s)",
+	      r.err);
 
 	CHECK_EQ(test_run(&r, short_form, NULL), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,

@@ -126,7 +126,8 @@ static inline void test_run_slurp(const char *path, char *buf, size_t buflen,
 static inline int test_run_start(struct test_run *r, const char *const opts[],
 				 const char *stdin_data)
 {
-	char *argv[TEST_RUN_ARGS_MAX + 1];
+	/* argv[0], the options and the terminating NULL */
+	char *argv[TEST_RUN_ARGS_MAX + 2];
 	unsigned int id = test_run_seq++;
 	int i, fd_out, fd_err, fd_in;
 

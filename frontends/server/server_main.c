@@ -484,11 +484,11 @@ static void parse_opts(int argc, char *argv[])
 				/* no_dtls */
 				esdm_rpc_server_set_dtls(false);
 				break;
-			case 24:
+			case 22:
 				/* no_io_uring */
 				esdm_rpc_server_set_io_uring(false);
 				break;
-			case 25:
+			case 23:
 				/* no_fixed_drng_mapping */
 				esdm_rpc_server_set_drng_mapping(false);
 				break;
