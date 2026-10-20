@@ -29,26 +29,31 @@
 #include <errno.h>
 #include <gnutls/dtls.h>
 #include <gnutls/gnutls.h>
-#include <gnutls/x509.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 
 #include "esdm_dtls.h"
 #include "esdm_dtls_backend.h"
 #include "memset_secure.h"
 
-/* DTLS 1.2 exactly, ECDHE with ECDSA, AEAD ciphers only, no tickets */
+/*
+ * DTLS 1.2 exactly, TLS_ECDHE_PSK_AES_256_CBC_SHA384 on P-521, no tickets.
+ * GnuTLS has no ECDHE-PSK suite with AES-GCM - RFC 8442's - and its one with
+ * an AEAD cipher is ChaCha20-Poly1305, which neither NIST SP 800-52r2 nor
+ * BSI TR-02102-2 allows. Encrypt-then-MAC is on by default, and required:
+ * see esdm_dtls_backend_handshake(). Nothing is signed - GnuTLS only wants a
+ * signature algorithm in the priorities, and the hello carries it.
+ */
 #define ESDM_DTLS_GNUTLS_PRIORITY                                              \
-	"NONE:+VERS-DTLS1.2:+ECDHE-ECDSA:+AES-256-GCM:+CHACHA20-POLY1305:"     \
-	"+AES-128-GCM:+AEAD:+SIGN-ECDSA-SECP256R1-SHA256:+SIGN-ECDSA-SHA256:"  \
-	"+GROUP-SECP256R1:+GROUP-X25519:+COMP-NULL:+CTYPE-X509:%NO_TICKETS"
+	"NONE:+VERS-DTLS1.2:+ECDHE-PSK:+AES-256-CBC:+SHA384:"                  \
+	"+GROUP-SECP521R1:+SIGN-ECDSA-SHA512:+COMP-NULL:%NO_TICKETS"
 
 struct esdm_dtls_gnutls_ctx {
-	gnutls_certificate_credentials_t cred;
+	gnutls_psk_client_credentials_t client_cred;
+	gnutls_psk_server_credentials_t server_cred;
 	gnutls_priority_t prio;
 };
 
@@ -132,64 +137,51 @@ const char *esdm_dtls_backend_name(void)
 }
 
 /*
- * An ephemeral key and a self-signed certificate for it: the DTLS is
- * unauthenticated - see esdm_dtls.h - so the certificate is only what DTLS
- * needs to carry the key, and nobody verifies it.
+ * The pre-shared key of a server, see esdm_dtls_backend.h: it knows no other
+ * identity, and refuses a client with another one.
  */
-static int esdm_dtls_gnutls_server_key(gnutls_certificate_credentials_t cred)
+static int esdm_dtls_gnutls_psk_server(gnutls_session_t session,
+				       const char *username,
+				       gnutls_datum_t *key)
 {
-	gnutls_x509_privkey_t key = NULL;
-	gnutls_x509_crt_t crt = NULL;
-	const unsigned char serial = 1;
-	time_t now = time(NULL);
-	int ret = -ENOMEM;
+	(void)session;
 
-	if (gnutls_x509_privkey_init(&key) < 0 ||
-	    gnutls_x509_privkey_generate(
-		    key, GNUTLS_PK_ECDSA,
-		    GNUTLS_CURVE_TO_BITS(GNUTLS_ECC_CURVE_SECP256R1), 0) < 0 ||
-	    gnutls_x509_crt_init(&crt) < 0)
-		goto out;
+	if (!username || strcmp(username, ESDM_DTLS_PSK_IDENTITY))
+		return -1;
 
-	if (gnutls_x509_crt_set_version(crt, 3) < 0 ||
-	    gnutls_x509_crt_set_serial(crt, &serial, sizeof(serial)) < 0 ||
-	    gnutls_x509_crt_set_activation_time(crt, now - 3600) < 0 ||
-	    gnutls_x509_crt_set_expiration_time(crt, now + 3600L * 24 * 3650) <
-		    0 ||
-	    gnutls_x509_crt_set_key(crt, key) < 0 ||
-	    gnutls_x509_crt_set_dn(crt, "CN=esdm", NULL) < 0 ||
-	    gnutls_x509_crt_set_issuer_dn(crt, "CN=esdm", NULL) < 0 ||
-	    gnutls_x509_crt_sign2(crt, crt, key, GNUTLS_DIG_SHA256, 0) < 0 ||
-	    /* Copied into the credentials */
-	    gnutls_certificate_set_x509_key(cred, &crt, 1, key) < 0)
-		goto out;
-
-	ret = 0;
-
-out:
-	if (crt)
-		gnutls_x509_crt_deinit(crt);
-	if (key)
-		gnutls_x509_privkey_deinit(key);
-	return ret;
+	/* GnuTLS frees it */
+	key->data = gnutls_malloc(sizeof(esdm_dtls_psk));
+	if (!key->data)
+		return -1;
+	memcpy(key->data, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	key->size = sizeof(esdm_dtls_psk);
+	return 0;
 }
 
 int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 {
 	struct esdm_dtls_gnutls_ctx *c = calloc(1, sizeof(*c));
+	/* Copied into the credentials */
+	const gnutls_datum_t key = { .data = (unsigned char *)esdm_dtls_psk,
+				     .size = sizeof(esdm_dtls_psk) };
 
 	if (!c)
 		return -ENOMEM;
 
-	if (gnutls_certificate_allocate_credentials(&c->cred) < 0) {
-		free(c);
-		return -ENOMEM;
+	if (server) {
+		if (gnutls_psk_allocate_server_credentials(&c->server_cred) < 0)
+			goto err;
+		gnutls_psk_set_server_credentials_function(
+			c->server_cred, esdm_dtls_gnutls_psk_server);
+	} else {
+		if (gnutls_psk_allocate_client_credentials(&c->client_cred) <
+			    0 ||
+		    gnutls_psk_set_client_credentials(
+			    c->client_cred, ESDM_DTLS_PSK_IDENTITY, &key,
+			    GNUTLS_PSK_KEY_RAW) < 0)
+			goto err;
 	}
 	if (gnutls_priority_init(&c->prio, ESDM_DTLS_GNUTLS_PRIORITY, NULL) < 0)
-		goto err;
-
-	/* A client verifies nothing: unauthenticated, see esdm_dtls.h */
-	if (server && esdm_dtls_gnutls_server_key(c->cred))
 		goto err;
 
 	*ctx = c;
@@ -208,8 +200,10 @@ void esdm_dtls_backend_ctx_free(void *ctx)
 		return;
 	if (c->prio)
 		gnutls_priority_deinit(c->prio);
-	if (c->cred)
-		gnutls_certificate_free_credentials(c->cred);
+	if (c->server_cred)
+		gnutls_psk_free_server_credentials(c->server_cred);
+	if (c->client_cred)
+		gnutls_psk_free_client_credentials(c->client_cred);
 	free(c);
 }
 
@@ -230,8 +224,9 @@ int esdm_dtls_backend_conn_new(void *ctx, bool server, int fd, void **conn)
 	}
 
 	if (gnutls_priority_set(d->session, c->prio) < 0 ||
-	    gnutls_credentials_set(d->session, GNUTLS_CRD_CERTIFICATE,
-				   c->cred) < 0) {
+	    gnutls_credentials_set(d->session, GNUTLS_CRD_PSK,
+				   server ? (void *)c->server_cred :
+					    (void *)c->client_cred) < 0) {
 		esdm_dtls_backend_conn_free(d);
 		return -ENOMEM;
 	}
@@ -259,12 +254,21 @@ void esdm_dtls_backend_conn_free(void *conn)
 	free(d);
 }
 
+/*
+ * A session without Encrypt-then-MAC (RFC 7366) is refused: MAC-then-encrypt
+ * of CBC is what Lucky Thirteen reads records from, and DTLS lets an attacker
+ * try again after every record it broke. Every peer of the ESDM offers and
+ * agrees to it, whichever its TLS stack.
+ */
 int esdm_dtls_backend_handshake(void *conn)
 {
 	struct esdm_dtls_gnutls_conn *d = conn;
 	int ret = gnutls_handshake(d->session);
 
-	return ret == GNUTLS_E_SUCCESS ? 0 : esdm_dtls_gnutls_error(ret);
+	if (ret != GNUTLS_E_SUCCESS)
+		return esdm_dtls_gnutls_error(ret);
+
+	return gnutls_session_etm_status(d->session) ? 0 : -EPROTO;
 }
 
 int esdm_dtls_backend_send(void *conn, const uint8_t *buf, size_t len)
@@ -322,7 +326,9 @@ const char *esdm_dtls_backend_cipher(void *conn)
 {
 	struct esdm_dtls_gnutls_conn *d = conn;
 	const char *name =
-		gnutls_cipher_get_name(gnutls_cipher_get(d->session));
+		gnutls_cipher_suite_get_name(gnutls_kx_get(d->session),
+					     gnutls_cipher_get(d->session),
+					     gnutls_mac_get(d->session));
 
 	return name ? name : "unknown";
 }
