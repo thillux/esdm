@@ -794,6 +794,20 @@ static void test_contexts(void)
 	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
 	      "a certificate not chaining to the trust anchors was accepted");
 
+	/*
+	 * An intermediate CA alone is no trust anchor, with any TLS stack: a
+	 * chain ends in a self-issued one. Next to the root, it is an
+	 * intermediate one.
+	 */
+	cfg = cfg_of(PKI("client1.crt"), PKI("client1.key"), PKI("int.crt"));
+	CHECK(esdm_tls_ctx_alloc(false, &cfg, &ctx) == -EINVAL,
+	      "an intermediate CA alone was taken for a trust anchor");
+	cfg.ca_file = PKI("ca-int.crt");
+	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &ctx),
+	      "the intermediate CA next to the root was refused");
+	esdm_tls_ctx_put(ctx);
+	ctx = NULL;
+
 	cfg = cfg_of(missing, PKI("server.key"), PKI("ca.crt"));
 	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -ENOENT,
 	      "a missing certificate was not reported as such");

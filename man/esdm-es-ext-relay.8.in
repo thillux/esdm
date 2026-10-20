@@ -181,7 +181,11 @@ as well: the relay and the providers are issued in one trust domain.
 Its private key, PEM, unencrypted, PKCS#8.
 .TP
 .BI \-\-ca " FILE"
-Trust anchors the provider's certificate has to chain to, PEM.
+Trust anchors the provider's certificate has to chain to, PEM. A chain ends in
+a self\-signed one, see
+.B \-\-ca
+in
+.BR esdm\-egd\-net\-server (8).
 .TP
 .BI \-\-server_name " NAME"
 Name the provider's certificate has to be issued for, when it is not the host

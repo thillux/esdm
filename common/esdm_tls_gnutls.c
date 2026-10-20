@@ -422,14 +422,22 @@ static int esdm_tls_gnutls_load_crls(struct esdm_tls_gnutls_ctx *c,
 	return 0;
 }
 
-/* Does the own certificate chain to the trust anchors? */
+static int esdm_tls_gnutls_walk(struct esdm_tls_gnutls_ctx *ctx,
+				gnutls_x509_crt_t *given, unsigned int given_num,
+				gnutls_x509_crt_t *certs, unsigned int *num);
+
+/*
+ * Does the own certificate chain to the trust anchors - to a self-issued one,
+ * see esdm_tls_gnutls_walk()?
+ */
 static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 				     const char *cert_file,
 				     const char *ca_file)
 {
+	gnutls_x509_crt_t chain[ESDM_TLS_MAX_CHAIN];
 	gnutls_x509_trust_list_t tl;
 	gnutls_x509_crt_t *crts = NULL;
-	unsigned int num = 0, verify = 0, i;
+	unsigned int num = 0, verify = 0, n = 0, i;
 	gnutls_datum_t out;
 	int ret;
 
@@ -458,6 +466,12 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 				"TLS: the certificate %s does not chain to the trust anchors %s\n",
 				cert_file, ca_file);
 		}
+		ret = -EINVAL;
+	} else if (esdm_tls_gnutls_walk(c, crts, num, chain, &n)) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"TLS: the certificate %s does not chain to a self-issued trust anchor of %s - a CA certificate that is not self-issued needs the one that issued it there as well\n",
+			cert_file, ca_file);
 		ret = -EINVAL;
 	} else {
 		ret = 0;
@@ -767,17 +781,87 @@ static bool esdm_tls_gnutls_in_chain(gnutls_x509_crt_t *certs, unsigned int n,
 }
 
 /*
- * The chain GnuTLS verified, for the revocation policy - which GnuTLS does not
- * hand out. Rebuilt as GnuTLS builds it, with the signature of each issuer
- * checked: the issuer of a certificate is looked for among the own trust
- * anchors first, among what the peer sent only if none of them signed it.
- * Once at a trust anchor, the chain goes on through the trust anchors only, up
- * to a self-issued one - an intermediate CA among the trust anchors is checked
- * against the CRL of its own issuer just as with the other TLS stacks. A
- * certificate the peer sent is never taken for a trust anchor, whatever its
- * name: a chain that does not end in one of the own ones is refused.
+ * The chain of @given[0] - the certificates of the peer, or the own ones - as
+ * GnuTLS builds it, into @certs of ESDM_TLS_MAX_CHAIN, with the signature of
+ * each issuer checked: the issuer of a certificate is looked for among the
+ * own trust anchors first, among the others of @given only if none of them
+ * signed it. Once at a trust anchor, the chain goes on through the trust
+ * anchors only, up to a self-issued one - an intermediate CA among the trust
+ * anchors is checked against the CRL of its own issuer just as with the other
+ * TLS stacks. A certificate of @given is never taken for a trust anchor,
+ * whatever its name: a chain that does not end in one of the own ones is
+ * refused.
  *
- * @return 0, -EINVAL if the chain does not end in a trust anchor, -ENOMEM
+ * Nor is one that ends in a trust anchor that is not self-issued, which GnuTLS
+ * alone takes for an anchor: OpenSSL and Botan take a CA certificate of the
+ * trust anchors that is not self-issued for an intermediate one, which has to
+ * chain on to a self-issued one. So a file of trust anchors holding an
+ * intermediate CA without its issuer serves no chain through it, on every TLS
+ * stack, rather than one whose intermediate CA no CRL covers on one of them.
+ *
+ * @return 0, -EINVAL if the chain does not end in a self-issued trust anchor
+ */
+static int esdm_tls_gnutls_walk(struct esdm_tls_gnutls_ctx *ctx,
+				gnutls_x509_crt_t *given, unsigned int given_num,
+				gnutls_x509_crt_t *certs, unsigned int *num)
+{
+	unsigned int n = 0, i;
+	bool anchored = false;
+
+	certs[n++] = given[0];
+	while (n < ESDM_TLS_MAX_CHAIN) {
+		gnutls_x509_crt_t cur = certs[n - 1], iss = NULL;
+
+		for (i = 0; i < ctx->ca_num && !iss; i++) {
+			if (!esdm_tls_gnutls_in_chain(certs, n, ctx->cas[i]) &&
+			    esdm_tls_gnutls_signed_by(cur, ctx->cas[i]))
+				iss = ctx->cas[i];
+		}
+		if (iss) {
+			certs[n++] = iss;
+			anchored = true;
+			if (gnutls_x509_crt_check_issuer(iss, iss) == 1) {
+				*num = n;
+				return 0;
+			}
+			continue;
+		}
+		if (anchored)
+			break;
+
+		for (i = 1; i < given_num && !iss; i++) {
+			if (!esdm_tls_gnutls_in_chain(certs, n, given[i]) &&
+			    esdm_tls_gnutls_signed_by(cur, given[i]))
+				iss = given[i];
+		}
+		if (!iss)
+			break;
+		certs[n++] = iss;
+	}
+
+	/*
+	 * Not anchored, which GnuTLS still verified: the certificate is a
+	 * trust anchor itself - a self-issued one, see above -, or the chain
+	 * is not the one GnuTLS verified, which is refused.
+	 */
+	if (!anchored && gnutls_x509_crt_check_issuer(given[0], given[0]) == 1) {
+		for (i = 0; i < ctx->ca_num; i++) {
+			if (gnutls_x509_crt_equals(given[0], ctx->cas[i])) {
+				*num = 1;
+				return 0;
+			}
+		}
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * The chain GnuTLS verified, for the revocation policy - which GnuTLS does not
+ * hand out. Rebuilt as GnuTLS builds it, see esdm_tls_gnutls_walk().
+ *
+ * @return 0, -EINVAL if the chain does not end in a self-issued trust anchor,
+ *	   -ENOMEM
  */
 static int esdm_tls_gnutls_chain(struct esdm_tls_gnutls_conn *d,
 				 struct esdm_tls_der **chain, size_t *num)
@@ -788,7 +872,6 @@ static int esdm_tls_gnutls_chain(struct esdm_tls_gnutls_conn *d,
 	const gnutls_datum_t *raw;
 	struct esdm_tls_der *ders = NULL;
 	unsigned int raw_num = 0, peer_num = 0, n = 0, i;
-	bool anchored = false;
 	int ret = 0;
 
 	*chain = NULL;
@@ -810,50 +893,9 @@ static int esdm_tls_gnutls_chain(struct esdm_tls_gnutls_conn *d,
 		peer_num++;
 	}
 
-	certs[n++] = peers[0];
-	while (n < ESDM_TLS_MAX_CHAIN) {
-		gnutls_x509_crt_t cur = certs[n - 1], iss = NULL;
-
-		for (i = 0; i < ctx->ca_num && !iss; i++) {
-			if (!esdm_tls_gnutls_in_chain(certs, n, ctx->cas[i]) &&
-			    esdm_tls_gnutls_signed_by(cur, ctx->cas[i]))
-				iss = ctx->cas[i];
-		}
-		if (iss) {
-			certs[n++] = iss;
-			anchored = true;
-			if (gnutls_x509_crt_check_issuer(iss, iss) == 1)
-				break;
-			continue;
-		}
-		if (anchored)
-			break;
-
-		for (i = 1; i < peer_num && !iss; i++) {
-			if (!esdm_tls_gnutls_in_chain(certs, n, peers[i]) &&
-			    esdm_tls_gnutls_signed_by(cur, peers[i]))
-				iss = peers[i];
-		}
-		if (!iss)
-			break;
-		certs[n++] = iss;
-	}
-
-	/*
-	 * Not anchored, which GnuTLS still verified: the certificate of the
-	 * peer is a trust anchor itself, or the chain is not the one GnuTLS
-	 * verified - which is refused.
-	 */
-	if (!anchored) {
-		for (i = 0; i < ctx->ca_num && !anchored; i++)
-			anchored = gnutls_x509_crt_equals(peers[0],
-							  ctx->cas[i]);
-		if (!anchored) {
-			ret = -EINVAL;
-			goto out;
-		}
-		n = 1;
-	}
+	ret = esdm_tls_gnutls_walk(ctx, peers, peer_num, certs, &n);
+	if (ret)
+		goto out;
 
 	ders = calloc(n, sizeof(*ders));
 	if (!ders) {
@@ -945,7 +987,7 @@ static int esdm_tls_gnutls_verify(gnutls_session_t session)
 			 "certificate verify failed: %s",
 			 ret == -ENOMEM ?
 				 "out of memory" :
-				 "the chain does not end in a trust anchor");
+				 "the chain does not end in a self-issued trust anchor");
 		return esdm_tls_gnutls_refuse(
 			d,
 			ret == -ENOMEM ? GNUTLS_A_INTERNAL_ERROR :

@@ -117,7 +117,10 @@ writes; Botan reads no other.
 .TP
 .BI \-\-ca " FILE"
 Trust anchors the certificates of the clients have to chain to, PEM, one or
-more certificates.
+more certificates. A chain ends in a self\-signed one, with every TLS stack: a
+CA certificate of the file that is not self\-signed is an intermediate one,
+which needs the one that issued it in the file as well \- an intermediate CA
+alone is no trust anchor, and the server does not start with it.
 .TP
 .BI \-\-crl " FILE"
 CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
@@ -290,7 +293,8 @@ to one of the trust anchors of
 and up to a self\-signed one if
 .B \-\-ca
 holds a CA certificate that is not: such a CA certificate is checked against
-the CRL of its issuer as any other. A certificate the client sends along
+the CRL of its issuer as any other, and a chain that does not end in a
+self\-signed trust anchor is refused. A certificate the client sends along
 claiming to be a trust anchor is never taken for one. For each certificate of
 the chain but the trust anchor:
 .IP \(bu 2

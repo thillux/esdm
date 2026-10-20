@@ -65,12 +65,16 @@
  * them as a whole: the certificate and the key parse, the key belongs to the
  * certificate, the certificate chains to one of the trust anchors - the own
  * certificate and the certificates of the peers are issued in one trust domain
- * - and every CRL parses. The own certificate is not checked for its time: an
- * expired one is the peers' to refuse. A context is shared by the connections made with it,
- * each holding a reference: a server that takes up renewed files builds a new
- * context, and only once that succeeded, it replaces its own reference to the
- * old one - which the connections still using it keep until they close. A
- * rotation that went wrong thus leaves the old context in service.
+ * - and every CRL parses. A chain ends in a self-issued trust anchor, on every
+ * TLS stack: a CA certificate of the trust anchors that is not self-issued is
+ * an intermediate one, which needs the one that issued it among them as well -
+ * an intermediate CA alone is no trust anchor. The own certificate is not
+ * checked for its time: an expired one is the peers' to refuse. A context is
+ * shared by the connections made with it, each holding a reference: a server
+ * that takes up renewed files builds a new context, and only once that
+ * succeeded, it replaces its own reference to the old one - which the
+ * connections still using it keep until they close. A rotation that went
+ * wrong thus leaves the old context in service.
  *
  * Revocation
  * ----------
@@ -274,7 +278,10 @@ struct esdm_tls_config {
 	 * no other format. NULL if and only if cert_file is NULL.
 	 */
 	const char *key_file;
-	/* Trust anchors the certificate of the peer has to chain to */
+	/*
+	 * Trust anchors the certificate of the peer has to chain to - to a
+	 * self-issued one of them, see "Contexts" above
+	 */
 	const char *ca_file;
 	/* CRLs in PEM, each file may hold several - see "Revocation" above */
 	const char *crl_files[ESDM_TLS_MAX_CRL_FILES];

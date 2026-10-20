@@ -255,7 +255,11 @@ as well: the provider and its clients are issued in one trust domain.
 Its private key, PEM, unencrypted, PKCS#8.
 .TP
 .BI \-\-ca " FILE"
-Trust anchors the certificates of the clients have to chain to, PEM.
+Trust anchors the certificates of the clients have to chain to, PEM. A chain
+ends in a self\-signed one, see
+.B \-\-ca
+in
+.BR esdm\-egd\-net\-server (8).
 .TP
 .BI \-\-crl " FILE"
 CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
