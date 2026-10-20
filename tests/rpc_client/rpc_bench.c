@@ -32,7 +32,10 @@
  * figure comes with the CPU time a request took as well, in the processes of
  * the bench and - for a server it started - in the esdm-server: what a change
  * of either saves shows there even on a busy machine. Next to it, the
- * connections a process of the bench held, and those the server held.
+ * connections a process of the bench held, and those the server held. A
+ * second line has the latency of a request as its caller sees it, the median
+ * and the 99th percentile of all requests of a run, and the requests per
+ * second: the mean over the runs and their standard deviation.
  *
  * Each figure is taken by processes of its own, forked for it: a process sets
  * up its connections to the ESDM - and its DTLS - with one request of every
@@ -47,11 +50,13 @@
  * serves the RPC socket already, which is what a profiler attached to that
  * server wants.
  *
- *	rpc_bench [-x] [-S server option] [-s sizes] [-t threads]
+ *	rpc_bench [-x] [-v] [-S server option] [-s sizes] [-t threads]
  *		  [-p processes] [-r runs] [-m ms] [path ...]
  *
  * The lists are comma separated. -S hands an option to the server it starts,
- * e.g. --no_dtls, and may be repeated. The paths are full, pr, unseeded,
+ * e.g. --no_dtls or --no_io_uring, and may be repeated. -v prints every run of
+ * a figure as well, for figures to be put together from several invocations
+ * - to compare two servers in turns, say. The paths are full, pr, unseeded,
  * getrandom and kernel; all but pr are taken without any - see bench_paths.
  * The getrandom(2) of libesdm-getrandom is looked up in the library named by
  * ESDM_GETRANDOM_LIB, and skipped without it.
@@ -61,6 +66,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -161,6 +167,8 @@ static size_t bench_procs[BENCH_MAX_LIST] = { 1, 4 };
 static unsigned int bench_nprocs = 2;
 static unsigned int bench_runs = 5;
 static unsigned int bench_run_ms = 400;
+/* Print every run, see -v */
+static bool bench_verbose = false;
 
 static uint64_t bench_now_ns(void)
 {
@@ -168,6 +176,68 @@ static uint64_t bench_now_ns(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/*
+ * The latencies of the requests of a run, in a histogram of nanoseconds: the
+ * values below BENCH_LAT_SUB each in a bucket of their own, above in
+ * BENCH_LAT_SUB buckets per power of two - some 3% wide -, up to 2^40 ns.
+ */
+#define BENCH_LAT_SUB_BITS 5
+#define BENCH_LAT_SUB (1U << BENCH_LAT_SUB_BITS)
+#define BENCH_LAT_MAX_BITS 40
+#define BENCH_LAT_BUCKETS                                                      \
+	((BENCH_LAT_MAX_BITS - BENCH_LAT_SUB_BITS + 1) * BENCH_LAT_SUB)
+
+static unsigned int bench_lat_bucket(uint64_t ns)
+{
+	unsigned int msb;
+
+	if (ns < BENCH_LAT_SUB)
+		return (unsigned int)ns;
+
+	msb = 63U - (unsigned int)__builtin_clzll(ns);
+	if (msb >= BENCH_LAT_MAX_BITS)
+		return BENCH_LAT_BUCKETS - 1;
+
+	return (msb - BENCH_LAT_SUB_BITS + 1) * BENCH_LAT_SUB +
+	       (unsigned int)(ns >> (msb - BENCH_LAT_SUB_BITS)) - BENCH_LAT_SUB;
+}
+
+/* The middle of bucket @i in nanoseconds */
+static double bench_lat_value(unsigned int i)
+{
+	unsigned int group = i / BENCH_LAT_SUB;
+
+	if (!group)
+		return (double)i;
+
+	return ((double)(BENCH_LAT_SUB + i % BENCH_LAT_SUB) + 0.5) *
+	       (double)(1ULL << (group - 1));
+}
+
+/* The latency at quantile @q of histogram @lat, in microseconds */
+static double bench_lat_quantile(const uint64_t *lat, double q)
+{
+	uint64_t total = 0, sum = 0, rank;
+	unsigned int i;
+
+	for (i = 0; i < BENCH_LAT_BUCKETS; i++)
+		total += lat[i];
+	if (!total)
+		return 0;
+
+	rank = (uint64_t)(q * (double)total);
+	if (rank >= total)
+		rank = total - 1;
+
+	for (i = 0; i < BENCH_LAT_BUCKETS; i++) {
+		sum += lat[i];
+		if (sum > rank)
+			break;
+	}
+
+	return bench_lat_value(i) / 1000.0;
 }
 
 /* What a process reports of a run */
@@ -182,6 +252,8 @@ struct bench_result {
 	uint64_t sockets;
 	/* A request failed: its -errno */
 	int64_t error;
+	/* The latencies of its requests, see bench_lat_bucket() */
+	uint64_t lat[BENCH_LAT_BUCKETS];
 };
 
 /* The esdm-server the bench started, 0 for none */
@@ -279,6 +351,7 @@ static void *bench_thread_main(void *arg)
 {
 	struct bench_thread *t = arg;
 	uint8_t *buf = malloc(t->len);
+	uint64_t prev = 0;
 	ssize_t ret;
 
 	if (!buf) {
@@ -289,8 +362,11 @@ static void *bench_thread_main(void *arg)
 
 	/* The connection, its DTLS and the DRNG are there before the runs */
 	ret = t->path->fn(buf, t->len);
-	if (ret < 0)
+	if (ret < 0) {
 		t->result.error = ret;
+		printf("The first request of a thread failed: %s\n",
+		       strerror((int)-ret));
+	}
 	pthread_barrier_wait(t->start);
 
 	for (;;) {
@@ -302,7 +378,8 @@ static void *bench_thread_main(void *arg)
 			break;
 
 		r->bytes = r->requests = 0;
-		while (!r->error && bench_now_ns() < t->go->start_ns)
+		memset(r->lat, 0, sizeof(r->lat));
+		while (!r->error && (prev = bench_now_ns()) < t->go->start_ns)
 			;
 		while (!r->error) {
 			uint64_t now;
@@ -310,11 +387,17 @@ static void *bench_thread_main(void *arg)
 			ret = t->path->fn(buf, t->len);
 			if (ret < 0) {
 				r->error = ret;
+				printf("A request failed after %llu of the run: %s\n",
+				       (unsigned long long)r->requests,
+				       strerror((int)-ret));
 				break;
 			}
 			r->bytes += (uint64_t)ret;
 			r->requests++;
+			/* The requests follow each other, one starts as the last ended */
 			now = bench_now_ns();
+			r->lat[bench_lat_bucket(now - prev)]++;
+			prev = now;
 			if (now >= t->go->end_ns) {
 				r->end_ns = now;
 				break;
@@ -426,6 +509,7 @@ static int bench_process(const struct bench_path *path, size_t len,
 		sum.sockets = bench_sockets(0);
 		for (i = 0; i < nthreads; i++) {
 			struct bench_result *r = &threads[i].result;
+			unsigned int b;
 
 			sum.bytes += r->bytes;
 			sum.requests += r->requests;
@@ -433,6 +517,8 @@ static int bench_process(const struct bench_path *path, size_t len,
 				sum.end_ns = r->end_ns;
 			if (r->error)
 				sum.error = r->error;
+			for (b = 0; b < BENCH_LAT_BUCKETS; b++)
+				sum.lat[b] += r->lat[b];
 		}
 		if (bench_write_full(res_fd, &sum, sizeof(sum)))
 			ret = 1;
@@ -455,13 +541,31 @@ static int bench_cmp(const void *a, const void *b)
 	return (x > y) - (x < y);
 }
 
+/* Mean and sample standard deviation of @n values */
+static void bench_mean_sd(const double *v, unsigned int n, double *mean,
+			  double *sd)
+{
+	double sum = 0, sq = 0;
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		sum += v[i];
+	*mean = sum / n;
+
+	for (i = 0; i < n; i++)
+		sq += (v[i] - *mean) * (v[i] - *mean);
+	*sd = n > 1 ? sqrt(sq / (n - 1)) : 0;
+}
+
 static unsigned int failures = 0;
 
 /* One figure: @path with requests of @len from @nprocs x @nthreads */
 static void bench(const struct bench_path *path, size_t len, size_t nprocs,
 		  size_t nthreads)
 {
-	double mbs[64], reqs[64], cli_us[64], srv_us[64];
+	double mbs[64], reqs[64], cli_us[64], srv_us[64], p50[64], p99[64];
+	double reqs_mean, reqs_sd, p50_mean, p50_sd, p99_mean, p99_sd;
+	uint64_t lat[BENCH_LAT_BUCKETS];
 	unsigned int max_sockets = 0, srv_sockets = 0;
 	pid_t pids[BENCH_MAX_THREADS];
 	int go_fd[BENCH_MAX_THREADS], res_fd[BENCH_MAX_THREADS];
@@ -507,10 +611,13 @@ static void bench(const struct bench_path *path, size_t len, size_t nprocs,
 	for (p = 0; p < started; p++) {
 		struct bench_result r;
 
-		if (bench_read_full(res_fd[p], &r, sizeof(r)))
+		if (bench_read_full(res_fd[p], &r, sizeof(r))) {
 			error = -EIO;
-		else if (r.error)
+			printf("Process %zu of the figure ended before its first request\n",
+			       p);
+		} else if (r.error) {
 			error = r.error;
+		}
 	}
 	if (error)
 		goto out;
@@ -527,14 +634,20 @@ static void bench(const struct bench_path *path, size_t len, size_t nprocs,
 		go.end_ns = go.start_ns + (uint64_t)bench_run_ms * 1000000ULL;
 
 		for (p = 0; p < started; p++) {
-			if (bench_write_full(go_fd[p], &go, sizeof(go)))
+			if (bench_write_full(go_fd[p], &go, sizeof(go))) {
 				error = -EIO;
+				printf("Process %zu of the figure is gone\n", p);
+			}
 		}
+		memset(lat, 0, sizeof(lat));
 		for (p = 0; p < started; p++) {
 			struct bench_result r;
+			unsigned int b;
 
 			if (bench_read_full(res_fd[p], &r, sizeof(r))) {
 				error = -EIO;
+				printf("Process %zu of the figure ended without its result\n",
+				       p);
 				continue;
 			}
 			if (r.error)
@@ -546,6 +659,8 @@ static void bench(const struct bench_path *path, size_t len, size_t nprocs,
 				max_sockets = (unsigned int)r.sockets;
 			if (r.end_ns > end)
 				end = r.end_ns;
+			for (b = 0; b < BENCH_LAT_BUCKETS; b++)
+				lat[b] += r.lat[b];
 		}
 		if (error)
 			break;
@@ -565,6 +680,13 @@ static void bench(const struct bench_path *path, size_t len, size_t nprocs,
 			       ((double)(end - go.start_ns) / 1e9) / 1e6;
 		reqs[ok_runs] = (double)requests /
 				((double)(end - go.start_ns) / 1e9);
+		p50[ok_runs] = bench_lat_quantile(lat, 0.50);
+		p99[ok_runs] = bench_lat_quantile(lat, 0.99);
+		if (bench_verbose)
+			printf("run %-6s %8zu %3zux%-3zu %11.0f req/s  latency p50 %.2f us p99 %.2f us  cpu/req server %.2f us\n",
+			       path->name, len, nprocs, nthreads,
+			       reqs[ok_runs], p50[ok_runs], p99[ok_runs],
+			       srv_us[ok_runs]);
 		ok_runs++;
 	}
 
@@ -584,6 +706,11 @@ out:
 		return;
 	}
 
+	/* Before the sorting, which takes the values apart from their runs */
+	bench_mean_sd(reqs, ok_runs, &reqs_mean, &reqs_sd);
+	bench_mean_sd(p50, ok_runs, &p50_mean, &p50_sd);
+	bench_mean_sd(p99, ok_runs, &p99_mean, &p99_sd);
+
 	qsort(mbs, ok_runs, sizeof(mbs[0]), bench_cmp);
 	qsort(reqs, ok_runs, sizeof(reqs[0]), bench_cmp);
 	qsort(cli_us, ok_runs, sizeof(cli_us[0]), bench_cmp);
@@ -593,6 +720,13 @@ out:
 	       reqs[ok_runs / 2], mbs[0], mbs[ok_runs - 1],
 	       cli_us[ok_runs / 2], srv_us[ok_runs / 2], max_sockets,
 	       srv_sockets);
+	/*
+	 * The latency of a request, as its caller sees it, over the runs: the
+	 * mean of their medians and 99th percentiles, and the spread of them.
+	 */
+	printf("%-10s %8zu %3zux%-3zu %11.0f req/s sd %.0f  latency p50 %.2f us sd %.2f  p99 %.2f us sd %.2f  (mean of %u runs)\n",
+	       path->name, len, nprocs, nthreads, reqs_mean, reqs_sd, p50_mean,
+	       p50_sd, p99_mean, p99_sd, ok_runs);
 }
 
 /* A comma separated list of numbers into @list, at most BENCH_MAX_LIST */
@@ -752,9 +886,10 @@ static long bench_wait_seeded(unsigned int max_ms)
 static void bench_usage(const char *name)
 {
 	fprintf(stderr,
-		"Usage: %s [-x] [-S server option] [-s sizes] [-t threads] [-p processes] [-r runs] [-m ms] [path ...]\n"
+		"Usage: %s [-x] [-v] [-S server option] [-s sizes] [-t threads] [-p processes] [-r runs] [-m ms] [path ...]\n"
 		"\tpaths: full pr unseeded getrandom kernel\n"
-		"\t-x: use the esdm-server running already\n",
+		"\t-x: use the esdm-server running already\n"
+		"\t-v: print every run\n",
 		name);
 }
 
@@ -768,10 +903,13 @@ int main(int argc, char *argv[])
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
-	while ((opt = getopt(argc, argv, "xS:s:t:p:r:m:h")) != -1) {
+	while ((opt = getopt(argc, argv, "xvS:s:t:p:r:m:h")) != -1) {
 		switch (opt) {
 		case 'x':
 			external = true;
+			break;
+		case 'v':
+			bench_verbose = true;
 			break;
 		case 'S':
 			if (bench_nserver_args >= BENCH_MAX_SERVER_ARGS)

@@ -271,7 +271,8 @@ if get_option('esdm-server').enabled()
 			include_directories: include_dirs_client,
 			dependencies: [ dependencies_client,
 					dependency('threads'),
-					cc.find_library('dl', required: false) ],
+					cc.find_library('dl', required: false),
+					cc.find_library('m', required: false) ],
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
