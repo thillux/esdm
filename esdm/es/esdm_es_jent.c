@@ -150,7 +150,9 @@ int esdm_jent_status(char *buf, size_t buf_length)
 	}
 	mutex_w_unlock(&esdm_jent_lock);
 #else
+	/* jitterentropy before 3.7.0 has no jent_status(): an empty report */
 	snprintf(buf, buf_length, "{}");
+	ret = 0;
 #endif
 
 	return ret;
