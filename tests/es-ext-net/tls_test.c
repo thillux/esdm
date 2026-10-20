@@ -18,7 +18,7 @@
  */
 
 /*
- * The messages of common/esdm_dtls.h on the TLS of common/esdm_tls.h over TCP,
+ * The messages of common/tls/esdm_dtls.h on the TLS of common/tls/esdm_tls.h over TCP,
  * for the TLS stack of the build, on loopback - what the external entropy
  * sources on the network speak. Both ends run in this one thread, each step of
  * the one made whenever the other waits, so no timing decides anything.

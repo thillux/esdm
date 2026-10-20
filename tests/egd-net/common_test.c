@@ -19,7 +19,7 @@
 
 /*
  * The addresses of the network as the esdm-egd-net-server sees them, from
- * common/esdm_net.c: the source a connection is accounted to - an IPv6 /64 is
+ * common/tls/esdm_net.c: the source a connection is accounted to - an IPv6 /64 is
  * one, which the loopback interface cannot show end to end -, the allowlist,
  * the --listen syntax and the keyed bounds.
  */

@@ -182,7 +182,7 @@ test('common threading support', threading_support_test,
 	is_parallel: false)
 
 # The DTLS of the connections, by the TLS stack of the crypto backend - see
-# common/esdm_dtls.h. Skips (77) in a build without DTLS.
+# common/tls/esdm_dtls.h. Skips (77) in a build without DTLS.
 esdm_dtls_test = executable(
 		'esdm_dtls_test',
 		[ 'esdm_dtls_test.c' ],

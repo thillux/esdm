@@ -23,7 +23,7 @@ ccflags-y += -DESDM_ES_OSR=$(ESDM_ES_OSR)
 # comes first, so that its esdm_definitions.h is the one the shared code uses.
 #
 ccflags-y += -I$(src) -I$(src)/../shared -I$(src)/../../esdm/crypto	\
-	     -I$(src)/../../common
+	     -I$(src)/../../common/util
 
 obj-m				+= esdm_es.o
 esdm_es-y			= esdm_es_mgr.o esdm_es_timer_common.o 	\

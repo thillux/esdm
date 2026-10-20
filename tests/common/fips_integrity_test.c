@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/fips_integrity.c - the power-on self test that verifies the
+ * Tests for common/sys/fips_integrity.c - the power-on self test that verifies the
  * HMAC of the running binary against the .<name>.hmac file next to it.
  *
  * The point of this code is to say no, so the tests concentrate on the failure

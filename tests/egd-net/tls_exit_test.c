@@ -18,7 +18,7 @@
  */
 
 /*
- * The TLS layer of common/esdm_tls.h released at the exit of the process, as
+ * The TLS layer of common/tls/esdm_tls.h released at the exit of the process, as
  * libesdm_egd_client uses it in TLS mode: from its module, esdm-egd-tls.so,
  * loaded with the TLS stack once the first client in TLS mode is allocated.
  * A program that releases its client at the exit, with an atexit handler it

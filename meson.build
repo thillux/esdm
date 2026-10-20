@@ -162,6 +162,8 @@ pkgconfig = import('pkgconfig')
 
 include_user_files = [ ]
 
+# The code shared by the ESDM, its libraries and frontends is sorted into the
+# subfolders of common/ by type; its headers are included by their names.
 include_dirs_server = include_directories([ 'esdm',
 					    'esdm/crypto',
 					    'esdm/drng',
@@ -172,6 +174,12 @@ include_dirs_server = include_directories([ 'esdm',
 					    'kernel/shared',
 					    'crypto',
 					    'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
 					    'es-ext',
 					    'service-egd',
 					    'service-egd/server',
@@ -180,6 +188,12 @@ include_dirs_server = include_directories([ 'esdm',
 dependencies_server = dependencies + [ json_c_dep ]
 
 include_dirs_client = include_directories([ 'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
 					    'service-egd',
 					    'service-egd/client',
 					    'service-rpc/service',
@@ -189,6 +203,12 @@ dependencies_client = dependencies
 # The external entropy source library needs the common code and the socket
 # creation of the servers - see es-ext/meson.build.
 include_dirs_es_ext = include_directories([ 'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
 					    'es-ext',
 					    'service-egd/server' ])
 
@@ -199,6 +219,12 @@ dl_dep = dependency('dl')
 # The EGD client needs nothing but the common code - keep it that way by not
 # handing it the RPC service includes.
 include_dirs_egd_client = include_directories([ 'common',
+						'common/log',
+						'common/sys',
+						'common/testmode',
+						'common/threading',
+						'common/tls',
+						'common/util',
 						'service-egd',
 						'service-egd/client' ])
 
@@ -321,7 +347,7 @@ if get_option('crypto_backend') == 'openssl' or get_option('openssl-rand-provide
 endif
 
 # The DTLS of the connections is provided by the TLS stack of the crypto
-# backend - see common/esdm_dtls.h. Everything speaking to another process
+# backend - see common/tls/esdm_dtls.h. Everything speaking to another process
 # is built with dependencies_client or dependencies_server, so the stack is
 # handed to all of them; one not using it is not linked against it
 # (b_asneeded).
@@ -363,7 +389,7 @@ if not get_option('rpc-io-uring').disabled()
 	endif
 endif
 
-# The EGD protocol over the network - see common/esdm_tls.h. Plain TCP needs
+# The EGD protocol over the network - see common/tls/esdm_tls.h. Plain TCP needs
 # nothing; the TLS mode is provided by the TLS stack of the crypto backend.
 # The TLS layer is built into the static common library only, from where the
 # EGD client library and the daemons take it.
@@ -424,7 +450,7 @@ endif
 dependencies_client += es_ext_net_deps
 dependencies_server += es_ext_net_deps
 
-# The TLS layer with certificates, common/esdm_tls.h, for either of the two
+# The TLS layer with certificates, common/tls/esdm_tls.h, for either of the two
 tls_auth = egd_net_tls or es_ext_net
 
 if get_option('openssl-rand-provider').enabled()

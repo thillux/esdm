@@ -389,7 +389,7 @@ struct esdm_es_ext_plugin {
  * protocol. The TLS is TLS 1.3 - with the algorithms of BSI TR-02102-2, the
  * hybrid key exchange of ML-KEM where both TLS stacks have it -, both sides
  * authenticate with a certificate, and the
- * client checks the name of the server - see common/esdm_tls.h:
+ * client checks the name of the server - see common/tls/esdm_tls.h:
  *
  *	relay (TLS client)                               provider (TLS server)
  *	  |-- TCP connection ---------------------------------------------->|

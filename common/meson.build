@@ -2,30 +2,29 @@
 # share it with libesdm, so it takes them from the library instead of linking
 # copies of its own - see esdm_server_common_static_lib.
 common_state_src = files([
-	'esdm_logger.c',
-	'threading_support.c',
+	'log/esdm_logger.c',
+	'threading/threading_support.c',
 ])
 
-# for i in $(ls *.c | sort); do echo "'$i',"; done
 common_src = files([
-	'binhexbin.c',
-	'buffer.c',
-	'helper.c',
-	'linux_support.c',
-	'os_random.c',
-	'xoshiro_prng.c',
+	'sys/linux_support.c',
+	'sys/os_random.c',
+	'util/binhexbin.c',
+	'util/buffer.c',
+	'util/helper.c',
+	'util/xoshiro_prng.c',
 ])
 
 if get_option('systemd').enabled()
-	common_src += files(['systemd_support.c'])
+	common_src += files(['sys/systemd_support.c'])
 endif
 
 if get_option('testmode').enabled()
-	common_src += files(['test_pertubation.c'])
+	common_src += files(['testmode/test_pertubation.c'])
 endif
 
 if get_option('fips140')
-	common_src += files(['fips_integrity.c'])
+	common_src += files(['sys/fips_integrity.c'])
 endif
 
 # The backend of the TLS stack of the crypto backend, see esdm_tls_backend.h:
@@ -35,7 +34,7 @@ endif
 tls_backend_src = []
 if get_option('crypto_backend') in [ 'openssl', 'gnutls', 'botan' ]
 	tls_backend_src = files([
-		'esdm_tls_' + get_option('crypto_backend') +
+		'tls/esdm_tls_' + get_option('crypto_backend') +
 			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
 	])
 endif
@@ -47,7 +46,7 @@ endif
 # calls them. The messages on top of the records are there for the TLS with
 # certificates of es-ext-net as well.
 if get_option('dtls').enabled() or es_ext_net
-	common_src += files([ 'esdm_dtls.c' ])
+	common_src += files([ 'tls/esdm_dtls.c' ])
 endif
 if get_option('dtls').enabled()
 	common_src += tls_backend_src
@@ -61,19 +60,19 @@ endif
 # it in common_src already.
 common_tls_src = []
 if tls_auth
-	common_tls_src += files([ 'esdm_tls.c' ])
+	common_tls_src += files([ 'tls/esdm_tls.c' ])
 	if not get_option('dtls').enabled()
 		common_tls_src += tls_backend_src
 	endif
 endif
 if es_ext_net
-	common_tls_src += files([ 'esdm_dtls_tls.c' ])
+	common_tls_src += files([ 'tls/esdm_dtls_tls.c' ])
 endif
 
 # What the daemons serving the network share - see esdm_net.h. Into the static
 # common library only, as the TLS layer.
 if egd_net or es_ext_net
-	common_tls_src += files([ 'esdm_net.c' ])
+	common_tls_src += files([ 'tls/esdm_net.c' ])
 endif
 
 common_stateless_src = common_src

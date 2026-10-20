@@ -99,7 +99,7 @@ static const uint16_t test_groups[] = { TEST_GROUP_P521 };
 
 /*
  * The secure minimal mode as each backend can have it, see
- * common/esdm_tls_backend.h: a client of Botan sends an empty session_ticket
+ * common/tls/esdm_tls_backend.h: a client of Botan sends an empty session_ticket
  * extension, which asks for no ticket a server would send without the
  * extension of its ServerHello - and a server of GnuTLS or Botan a session ID
  * of 32 bytes, which no session cache keeps.

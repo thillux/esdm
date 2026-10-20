@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/threading_support.c - the worker pool the server, the RPC
+ * Tests for common/threading/threading_support.c - the worker pool the server, the RPC
  * services and the entropy source monitor all run on.
  *
  * Covered are the properties the pool promises and its users would silently

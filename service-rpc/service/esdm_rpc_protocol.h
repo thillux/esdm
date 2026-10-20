@@ -74,7 +74,7 @@ typedef enum {
 
 /*
  * STARTDTLS: switching a connection to DTLS, opportunistically - see
- * common/esdm_dtls.h on the DTLS itself.
+ * common/tls/esdm_dtls.h on the DTLS itself.
  *
  * Request: a client built with DTLS sends, as the first message of a new
  * connection and in the clear, a request header alone: method_index

@@ -2765,7 +2765,7 @@
             # loaded - the jitter RNG and the crypto backend - against a
             # reference HMAC in .<name>.hmac next to each file, which whoever
             # builds and installs the module provides. The key and format are
-            # those of common/fips_integrity.c (fipscheck).
+            # those of common/sys/fips_integrity.c (fipscheck).
             #
             # A file is checked under the name it was loaded by, so a library
             # symlink needs a reference value of its own.

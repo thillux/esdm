@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests of the getrandom(2) readers in common/os_random.c, which the kernel RNG
+ * Tests of the getrandom(2) readers in common/sys/os_random.c, which the kernel RNG
  * entropy source and the seeding of the xoshiro generator share.
  */
 

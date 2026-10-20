@@ -403,7 +403,7 @@ The following compile-time settings must be observed:
     its oversampling and reseeding limits.
 
   - The FIPS mode support including the power-on self tests and the
-    integrity test is compiled in (`esdm/fips.c`, `common/fips_integrity.c`).
+    integrity test is compiled in (`esdm/fips.c`, `common/sys/fips_integrity.c`).
 
 #par(first-line-indent: 0pt)[The following requirements apply to the runtime
 configuration:]

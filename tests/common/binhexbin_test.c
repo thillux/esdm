@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/binhexbin.c - the hex/binary converters and the RFC 3986
+ * Tests for common/util/binhexbin.c - the hex/binary converters and the RFC 3986
  * percent encoder.
  *
  * Besides the round trips these cover the documented corner cases nothing else

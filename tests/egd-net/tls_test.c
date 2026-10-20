@@ -18,7 +18,7 @@
  */
 
 /*
- * The TLS layer of the EGD network mode, common/esdm_tls.h, against the test
+ * The TLS layer of the EGD network mode, common/tls/esdm_tls.h, against the test
  * PKI of tests/egd-net/pki - for whichever TLS stack the build uses: the
  * mutual authentication, several CAs trusted for their rollover, the server
  * name, the revocation policy, the transfers and the end of a connection, and
@@ -660,7 +660,7 @@ out:
 }
 
 /*
- * The secure minimal mode on the wire, see common/esdm_tls_backend.h: the
+ * The secure minimal mode on the wire, see common/tls/esdm_tls_backend.h: the
  * client on cs[0], the server on ss[1], and every byte moved by the test
  * between cs[1] and ss[0], read on the way - see tests/test_tls_wire.h.
  */

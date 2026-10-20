@@ -1444,11 +1444,11 @@ below the 2 seconds the ESDM gives a request. Accepting the user of the relay
 means trusting the rate every holder of a certificate the relay accepts for
 the provider declares, unless a rate is configured for the source.]
 
-The transport is TCP with TLS 1.3 (`common/esdm_tls.h`), and every message is
+The transport is TCP with TLS 1.3 (`common/tls/esdm_tls.h`), and every message is
 TLS from the first one on - the STARTDTLS of the Unix domain socket has no
 place there. The messages are those of the Unix domain socket, cut into the
 same parts with the byte in front; as TCP keeps no boundaries, each part
-travels with its length in front, two bytes (`common/esdm_dtls_tls.c`). Both
+travels with its length in front, two bytes (`common/tls/esdm_dtls_tls.c`). Both
 sides authenticate with certificates, the client checks the name of the
 server, and CRLs are checked within the verification of the TLS stack with the
 code of the EGD protocol over the network: the TLS with certificates, its
@@ -1846,7 +1846,7 @@ cannot set up its io\_uring falls back to epoll: on a kernel without it, with
 default), the connections between the processes of the ESDM are protected
 with opportunistic DTLS 1.2 provided by the TLS stack of the crypto backend -
 OpenSSL, GnuTLS or Botan - as depicted in figure @fig:dtls
-(`common/esdm_dtls.h`): the client asks for it with a `STARTDTLS` request on
+(`common/tls/esdm_dtls.h`): the client asks for it with a `STARTDTLS` request on
 every new connection, followed by a probe request which changes nothing, and
 goes on in the clear with a server that does not know or refuses DTLS (ESDM
 1.2.3 and before, or a server started with `--no_dtls`). The DTLS uses an
@@ -1865,7 +1865,7 @@ off the connection. One DTLS record is sent per message of the socket. The
 same DTLS protects the connection of the ExternalSocket entropy source to its
 provider. The DTLS and the TLS with certificates on the network - of the
 external entropy sources (section @sec:ext-es-net) and of the EGD protocol -
-share one backend per TLS stack (`common/esdm_tls_backend.h`): one set-up of
+share one backend per TLS stack (`common/tls/esdm_tls_backend.h`): one set-up of
 the library, one error mapping and one connection, which differ per transport
 only in the protocol, the suites, the groups and the way the socket is
 reached. Both run in a secure minimal mode, set up in one place per TLS

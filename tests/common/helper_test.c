@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/helper.c and the macros of common/helper.h.
+ * Tests for common/util/helper.c and the macros of common/util/helper.h.
  *
  * The interesting part is esdm_safe_read()/esdm_safe_write(), the short
  * read/write loops every pipe and socket consumer in the tree relies on. Both

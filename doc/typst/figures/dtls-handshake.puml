@@ -1,6 +1,6 @@
 @startuml
 ' Opportunistic DTLS of an RPC connection - see the STARTDTLS description in
-' service-rpc/service/esdm_rpc_protocol.h and common/esdm_dtls.h
+' service-rpc/service/esdm_rpc_protocol.h and common/tls/esdm_dtls.h
 skinparam defaultFontName "Liberation Sans"
 skinparam defaultFontSize 12
 skinparam shadowing false

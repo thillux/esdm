@@ -4,6 +4,12 @@
 include_dirs_egd_net = include_directories([
 	'.',
 	'../../common',
+	'../../common/log',
+	'../../common/sys',
+	'../../common/testmode',
+	'../../common/threading',
+	'../../common/tls',
+	'../../common/util',
 	'../../service-egd',
 	'../../service-egd/client',
 	'../../service-egd/serve',

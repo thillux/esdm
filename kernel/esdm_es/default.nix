@@ -36,8 +36,8 @@ stdenv.mkDerivation rec {
       ../../esdm/crypto/esdm_xdrbg.c
       ../../esdm/crypto/esdm_xdrbg.h
       ../../esdm/crypto/esdm_xof.h
-      ../../common/esdm_portable.h
-      ../../common/selftest_kat.h
+      ../../common/util/esdm_portable.h
+      ../../common/util/selftest_kat.h
     ];
   };
   sourceRoot = "${src.name}/kernel/esdm_es";

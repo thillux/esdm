@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/systemd_support.c - the sd_notify protocol and the socket
+ * Tests for common/sys/systemd_support.c - the sd_notify protocol and the socket
  * activation handover, both reimplemented here rather than taken from libsystemd.
  *
  * The notification side is driven against a real AF_UNIX datagram socket this
