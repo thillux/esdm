@@ -197,6 +197,15 @@ refused, and goes on unencrypted on the same connection. Without DTLS in the
 build, that is what the daemon does anyway. See
 .B ENCRYPTION
 below.
+.TP
+.B \-\-no_io_uring
+Wait for the events of the RPC connections with
+.BR epoll (7)
+rather than with io_uring. Without io_uring in the build (meson option
+.BR rpc\-io\-uring ),
+that is what the daemon does anyway. See
+.B RPC EVENT LOOP
+below.
 .SH EXTERNAL ENTROPY SOURCES
 Noise sources that are not part of the ESDM are served to the daemon by a
 provider: a process of its own, written against
@@ -400,6 +409,39 @@ on at most 256; a client beyond is refused DTLS and served in the clear.
 Processes running as root are exempt from the bound per user. With debug
 logging, the daemon logs every connection switching to DTLS with its cipher
 suite.
+.SH RPC EVENT LOOP
+The RPC interfaces are served by worker threads, one for the privileged
+interface and one per DRNG node for the unprivileged one, each accepting
+connections on the socket of its interface and serving the requests of its
+connections in rounds of an event loop of its own. A worker waits for the
+events of a round with an
+.BR epoll (7)
+instance. A daemon built with io_uring (meson option
+.BR rpc\-io\-uring ,
+disabled by default) waits with an io_uring of each worker instead, unless
+.B \-\-no_io_uring
+is given: every connection has a poll there, armed again in the same system
+call that waits for the next round. Requests and answers are read and written
+as with epoll either way.
+.PP
+A worker that cannot set up its io_uring waits with epoll: on a kernel without
+io_uring, with
+.I kernel.io_uring_disabled
+set, or under a seccomp filter refusing it, as that of a container. The daemon
+logs once that its workers wait with io_uring, or why they do not. The rings
+are set up after the privileges are dropped: with
+.I kernel.io_uring_disabled=1
+only where the user the daemon drops to is a member of
+.IR kernel.io_uring_group .
+The system call filter of the shipped
+.B esdm\-server.service
+allows io_uring: its
+.B @system\-service
+set contains
+.BR io_uring_setup (2),
+.BR io_uring_enter (2)
+and
+.BR io_uring_register (2).
 .SH EGD OVER THE NETWORK
 The EGD socket is a local one. To hosts without an ESDM, the EGD protocol of
 this daemon is served by

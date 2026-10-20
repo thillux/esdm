@@ -1801,6 +1801,23 @@ the method index, the message length and a request identifier
   PKCS\#11 entropy source of earlier development versions is kept, answered
   with `-EOPNOTSUPP`, so that the calls after it keep their index on the wire.
 
+#par(first-line-indent: 0pt)[Each interface is served by worker threads - one
+for the privileged interface, one per DRNG node for the unprivileged one -,
+each accepting connections on the socket of its interface and serving the
+requests of its connections one after the other, in rounds of an event loop of
+its own (`service-rpc/server/esdm_rpc_server.c`). A worker waits for the events
+of a round with an epoll instance, level triggered: what a round leaves
+unread, a request put off for the budget of the round or a connection left to
+drain, is reported again in the next one. With the meson option `rpc-io-uring`
+(disabled per default), a worker waits with an io\_uring of its own instead:
+every connection has a one-shot poll there, armed again in the same system call
+that waits for the next round, and a poll armed on a socket that is ready
+completes at once, so what a round leaves unread is reported again, as by
+epoll. Either way the worker reads the requests and writes the answers itself,
+as the DTLS of a connection reads and writes its socket itself. A worker that
+cannot set up its io\_uring falls back to epoll: on a kernel without it, with
+`kernel.io_uring_disabled` set, or under a seccomp filter refusing it.]
+
 #par(first-line-indent: 0pt)[With the meson option `dtls` (disabled per
 default), the connections between the processes of the ESDM are protected
 with opportunistic DTLS 1.2 provided by the TLS stack of the crypto backend -
