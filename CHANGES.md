@@ -538,6 +538,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * DTLS: a message wipes what it took of the record buffers instead of all of them, and the buffer of the records received is not zeroed for every receive - 16 to 33 KiB of memset on either side per message, also for every look at an empty socket
 
+* RPC client: waits for the answer before reading it rather than first finding the socket empty, which took a system call - and on an encrypted connection the receive path of the DTLS - per request
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

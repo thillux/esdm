@@ -953,6 +953,28 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 
 		retries++;
 
+		/*
+		 * The answer is hardly ever there yet when the request just
+		 * went out: the server has to be woken for it first. So the
+		 * first round waits until it is, rather than find the socket
+		 * empty with a read of its own - on an encrypted connection the
+		 * whole receive path of the DTLS layer. It is the round of
+		 * waiting the poll after an empty read below is, ended by the
+		 * same timeout, and the interrupt function was asked before it,
+		 * as before every round. A record the DTLS holds already is not
+		 * signalled by the socket any more.
+		 */
+		if (retries == 1 &&
+		    !(rpc_conn->dtls && esdm_dtls_pending(rpc_conn->dtls))) {
+			struct pollfd pfd = { .fd = rpc_conn->fd,
+					      .events = POLLIN };
+
+			if (!poll(&pfd, 1, CLIENT_RX_TIMEOUT_MS)) {
+				received = -1;
+				continue;
+			}
+		}
+
 		if (rpc_conn->dtls) {
 			received = esdm_rpcc_dtls_recv(rpc_conn, tbuf->reqbuf,
 						       sizeof(tbuf->reqbuf),
