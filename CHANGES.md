@@ -546,7 +546,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC client: a call served in several parts - a read beyond 64 KiB, or of prediction resistant data - puts its connection back between them, so that the other threads of the process are not held up for the length of the call
 
-* fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK or GRND_INSECURE waited for as long as requests of other threads held the connections - minutes, with several threads reading prediction resistant data -; it gives up after half a second now, with EAGAIN or the data of the kernel
+* fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK or GRND_INSECURE waited for as long as requests of other threads held the connections - minutes, with several threads reading prediction resistant data -; it waits 20 ms at most now, and is then answered by the kernel as without an ESDM - a prediction resistant or seed read with GRND_NONBLOCK fails with EAGAIN
 
 * libesdm_getrandom: up to four connections per process (meson option linux-getrandom-num-nodes, which was 1), opened as concurrent requests need them, so the threads of a process are served in parallel
 

@@ -91,7 +91,8 @@ static unsigned int stub_full_calls, stub_pr_calls, stub_pr_nonblock_calls,
  */
 static const struct timespec *stub_checkout_deadline;
 static bool stub_seeded_bounded, stub_insecure_bounded, stub_pr_nonblock_bounded,
-	stub_seed_bounded, stub_full_bounded, stub_pr_bounded;
+	stub_seed_bounded, stub_full_bounded, stub_pr_bounded,
+	stub_full_timeout_bounded;
 
 const struct timespec *
 esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline)
@@ -167,6 +168,7 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
 {
 	ssize_t rc = 0;
 
+	stub_full_timeout_bounded = !!stub_checkout_deadline;
 	stub_full_timeout_ts = *ts;
 	if (stub_full_timeout_calls < stub_full_timeout_len)
 		rc = stub_full_timeout[stub_full_timeout_calls];
@@ -409,10 +411,11 @@ static void test_nonblock_no_esdm(void)
  * The connections of the process are shared by its threads, and a request of
  * another one may hold them for seconds - prediction resistant data comes 32
  * bytes per round trip. A request that must not block waits for a connection
- * no longer than for an unseeded ESDM: the RPC client gives up the checkout at
- * the deadline the library sets, with -ETIMEDOUT, which the library answers
- * as it would a request it cannot serve without waiting. A blocking request
- * sets no deadline.
+ * a moment at most: the RPC client gives up the checkout at the deadline the
+ * library sets, with -EBUSY. The ESDM did not answer then, so the kernel
+ * does, as without an ESDM - except for the prediction resistant and the seed
+ * reads, which only the ESDM may answer and which fail with EAGAIN. A blocking
+ * request sets no deadline.
  */
 static void test_nonblock_connections_busy(void)
 {
@@ -422,18 +425,39 @@ static void test_nonblock_connections_busy(void)
 	stub_full_calls = stub_pr_calls = stub_pr_nonblock_calls = 0;
 	stub_full_timeout_len = stub_full_timeout_calls = 0;
 
-	/* The check whether the ESDM is seeded: EAGAIN, no data asked for */
-	stub_seeded_ret = -ETIMEDOUT;
-	errno = 0;
-	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK), -1);
-	CHECK_EQ(errno, EAGAIN);
+	/* The check whether the ESDM is seeded: the kernel decides */
+	stub_seeded_ret = -EBUSY;
+	stub_kernel[0] = sizeof(buf);
+	stub_kernel_len = 1;
+	stub_kernel_calls = 0;
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK),
+		 (ssize_t)sizeof(buf));
+	CHECK_EQ(stub_kernel_calls, 1);
+	CHECK(buf[0] == 0x17, "the kernel did not serve the request");
 	CHECK(stub_seeded_bounded, "the seeding check waits for a connection");
 	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
 	CHECK_EQ(stub_full_timeout_calls, 0);
 	stub_seeded_ret = 0;
 
+	/* Seeded, but busy by the time the data is asked for: the same */
+	stub_full_timeout_set(-EBUSY, 0);
+	stub_kernel[0] = sizeof(buf);
+	stub_kernel_len = 1;
+	stub_kernel_calls = 0;
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK),
+		 (ssize_t)sizeof(buf));
+	CHECK_EQ(stub_full_timeout_calls, 1);
+	CHECK_EQ(stub_kernel_calls, 1);
+	CHECK(buf[0] == 0x17, "the kernel did not serve the request");
+	CHECK(stub_full_timeout_bounded,
+	      "the non-blocking read waits for a connection");
+	CHECK(!stub_checkout_deadline, "the deadline outlives the call");
+	stub_full_timeout_len = 0;
+
 	/* Insecure data: the kernel's, as without an ESDM */
-	stub_insecure_ret = -ETIMEDOUT;
+	stub_insecure_ret = -EBUSY;
 	stub_kernel[0] = sizeof(buf);
 	stub_kernel_len = 1;
 	stub_kernel_calls = 0;
@@ -449,7 +473,7 @@ static void test_nonblock_connections_busy(void)
 	stub_insecure_ret = 0;
 
 	/* Prediction resistance without waiting: EAGAIN, as for a busy DRNG */
-	stub_pr_nonblock_ret = -ETIMEDOUT;
+	stub_pr_nonblock_ret = -EBUSY;
 	errno = 0;
 	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_RANDOM), -1);
 	CHECK_EQ(errno, EAGAIN);
@@ -459,7 +483,7 @@ static void test_nonblock_connections_busy(void)
 	stub_pr_nonblock_ret = 0;
 
 	/* Seed material without waiting: EAGAIN as well */
-	stub_seed_ret = -ETIMEDOUT;
+	stub_seed_ret = -EBUSY;
 	errno = 0;
 	CHECK_EQ(getrandom(buf, sizeof(buf), GRND_NONBLOCK | GRND_SEED), -1);
 	CHECK_EQ(errno, EAGAIN);

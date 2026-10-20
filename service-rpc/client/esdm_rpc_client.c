@@ -1828,6 +1828,9 @@ out:
  * connection until it is put back, see esdm_rpcc_get_unpriv_service_deadline();
  * @checkout_deadline only the wait for a connection, should all of them be
  * busy. Either may be NULL for none.
+ *
+ * @return 0, -ETIMEDOUT if @deadline passed while waiting for a connection,
+ *	   -EBUSY if @checkout_deadline - another one - did, < 0 on other errors
  */
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
@@ -1957,7 +1960,8 @@ static int esdm_rpcc_get_service(
 
 		if (lock_ret) {
 			*ret_rpc_conn = NULL;
-			return -ETIMEDOUT;
+			return checkout_deadline == deadline ? -ETIMEDOUT :
+							       -EBUSY;
 		}
 	} else {
 		mutex_reader_unlock(&esdm_rpcc_conn_lock);
@@ -2024,13 +2028,34 @@ esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline)
 }
 
 /*
- * How long a checkout may wait: until the deadline of the call, without one
- * until the checkout deadline of the thread, if any.
+ * How long a call waits for the ESDM to become able to serve: until its
+ * deadline, without one until the checkout deadline of the thread, if any.
+ */
+static const struct timespec *
+esdm_rpcc_unpriv_pause_until(const struct timespec *deadline)
+{
+	return deadline ? deadline : unpriv_rpc_checkout_deadline;
+}
+
+/*
+ * How long a checkout waits for a connection: until the earlier of the
+ * deadline of the call and the checkout deadline of the thread, if any.
  */
 static const struct timespec *
 esdm_rpcc_unpriv_checkout_by(const struct timespec *deadline)
 {
-	return deadline ? deadline : unpriv_rpc_checkout_deadline;
+	const struct timespec *thread = unpriv_rpc_checkout_deadline;
+
+	if (!deadline)
+		return thread;
+	if (!thread)
+		return deadline;
+
+	return (thread->tv_sec < deadline->tv_sec ||
+		(thread->tv_sec == deadline->tv_sec &&
+		 thread->tv_nsec < deadline->tv_nsec)) ?
+		       thread :
+		       deadline;
 }
 
 DSO_PUBLIC
@@ -2058,7 +2083,7 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   void *int_data,
 				   const struct timespec *deadline)
 {
-	const struct timespec *until = esdm_rpcc_unpriv_checkout_by(deadline);
+	const struct timespec *until = esdm_rpcc_unpriv_pause_until(deadline);
 	struct timespec sleep_ts = esdm_client_poll_ts;
 
 	esdm_rpcc_put_unpriv_service(*rpc_conn);

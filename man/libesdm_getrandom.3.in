@@ -72,16 +72,21 @@ Nor does a call with
 .B GRND_NONBLOCK
 or
 .B GRND_INSECURE
-wait longer than about half a second for a connection that requests of other
+wait longer than a moment, 20 ms, for a connection that requests of other
 threads of the process hold \- see
 .BR CONNECTIONS :
 then
 .B GRND_NONBLOCK
-fails with
-.BR EAGAIN ,
 and
 .B GRND_INSECURE
-is answered by the kernel.
+are answered by the kernel, as without an ESDM, and
+.B GRND_NONBLOCK
+together with
+.B GRND_RANDOM
+or
+.B GRND_SEED
+fails with
+.BR EAGAIN .
 .B GRND_RANDOM
 selects the prediction\-resistance generator, and
 .B GRND_INSECURE
