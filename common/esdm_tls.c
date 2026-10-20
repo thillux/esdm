@@ -225,7 +225,12 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 	c->crl_allow_expired = cfg->crl_allow_expired;
 	atomic_init(&c->refcnt, 1);
 
-	ret = esdm_tls_backend_ctx_new(server, cfg, &c->backend);
+	ret = esdm_tls_backend_ctx_new(server, cfg->transport, &c->backend);
+	if (!ret) {
+		ret = esdm_tls_backend_ctx_files(c->backend, server, cfg);
+		if (ret)
+			esdm_tls_backend_ctx_free(c->backend);
+	}
 	if (ret) {
 		free(c);
 		return ret;

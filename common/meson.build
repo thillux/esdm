@@ -28,32 +28,43 @@ if get_option('fips140')
 	common_src += files(['fips_integrity.c'])
 endif
 
-# The DTLS of the connections, by the TLS stack of the crypto backend - see
-# esdm_dtls.h and the dtls option in the top-level meson.build. The messages
-# on top of the records are there for the TLS with certificates of es-ext-net
-# as well.
-if get_option('dtls').enabled() or es_ext_net
-	common_src += files([ 'esdm_dtls.c' ])
-endif
-if get_option('dtls').enabled()
-	common_src += files([
-		'esdm_dtls_' + get_option('crypto_backend') +
+# The backend of the TLS stack of the crypto backend, see esdm_tls_backend.h:
+# the (D)TLS of both the local DTLS of the connections and the TLS with
+# certificates. The builtin and the leancrypto backend have no TLS stack, and
+# neither the one nor the other.
+tls_backend_src = []
+if get_option('crypto_backend') in [ 'openssl', 'gnutls', 'botan' ]
+	tls_backend_src = files([
+		'esdm_tls_' + get_option('crypto_backend') +
 			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
 	])
 endif
 
+# The DTLS of the connections - see esdm_dtls.h and the dtls option in the
+# top-level meson.build: the core of the backend, which is all a library with
+# the local DTLS alone links - the functions of the certificates, compiled
+# with the TLS with certificates only, are dropped by the linker where nothing
+# calls them. The messages on top of the records are there for the TLS with
+# certificates of es-ext-net as well.
+if get_option('dtls').enabled() or es_ext_net
+	common_src += files([ 'esdm_dtls.c' ])
+endif
+if get_option('dtls').enabled()
+	common_src += tls_backend_src
+endif
+
 # The TLS with certificates of the EGD protocol and of the external entropy
-# sources over the network, by the TLS stack of the crypto backend - see
-# esdm_tls.h and the egd-net and es-ext-net options in the top-level
-# meson.build. Built into the static common library only: libesdm has no use
-# for it, and would only depend on the TLS stack for it.
+# sources over the network - see esdm_tls.h and the egd-net and es-ext-net
+# options in the top-level meson.build. Built into the static common library
+# only: libesdm has no use for it, and would only depend on the TLS stack for
+# it. The backend comes along with it, unless the DTLS of the connections has
+# it in common_src already.
 common_tls_src = []
 if tls_auth
-	common_tls_src += files([
-		'esdm_tls.c',
-		'esdm_tls_' + get_option('crypto_backend') +
-			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
-	])
+	common_tls_src += files([ 'esdm_tls.c' ])
+	if not get_option('dtls').enabled()
+		common_tls_src += tls_backend_src
+	endif
 endif
 if es_ext_net
 	common_tls_src += files([ 'esdm_dtls_tls.c' ])

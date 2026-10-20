@@ -19,8 +19,9 @@
 
 /*
  * The backend independent part of esdm_dtls.h: messages of any size on top of
- * the records of the backend - or of the TLS with certificates, see
- * esdm_dtls_tls.c -, and the busy marker of the thread.
+ * records - those of the core functions of esdm_tls_backend.h for the local
+ * DTLS, those of the TLS with certificates for es-ext-net, see esdm_dtls_tls.c
+ * -, and the busy marker of the thread, set for every call into the TLS stack.
  */
 
 #include <errno.h>
@@ -32,7 +33,7 @@
 #include <string.h>
 
 #include "esdm_dtls.h"
-#include "esdm_dtls_backend.h"
+#include "esdm_tls_backend.h"
 #include "leak_check.h"
 #include "memset_secure.h"
 #include "visibility.h"
@@ -59,13 +60,15 @@ struct esdm_dtls_ctx {
 };
 
 struct esdm_dtls {
-	void *backend;
+	/* The records of the connection, and what they are on */
+	const struct esdm_dtls_ops *ops;
+	void *conn;
+
+	/* What a step that returned -EAGAIN waits for */
+	short want;
 
 	/* The next one left behind at the exit, see esdm_dtls_exiting() */
 	struct esdm_dtls *left_next;
-
-	/* The records of the connection, NULL for the ones of the backend */
-	const struct esdm_dtls_ops *ops;
 
 	/* The largest message the peer may send */
 	size_t max_msg;
@@ -82,11 +85,25 @@ struct esdm_dtls {
 };
 
 #ifdef ESDM_DTLS
-/* The SHA-256 of ESDM_DTLS_PSK_IDENTITY - no secret, see esdm_dtls_backend.h */
+/* The SHA-256 of ESDM_DTLS_PSK_IDENTITY - no secret, see esdm_tls_backend.h */
 const uint8_t esdm_dtls_psk[ESDM_DTLS_PSK_LEN] = {
 	0x32, 0x52, 0x2e, 0xf0, 0x0e, 0x7d, 0x1c, 0x0f, 0xda, 0x13, 0x6e,
 	0xaf, 0xe7, 0x41, 0xe1, 0x8e, 0x6d, 0x6d, 0x2c, 0xec, 0xee, 0xf1,
 	0x74, 0xd6, 0x0e, 0x17, 0x55, 0xea, 0x6e, 0xb0, 0x66, 0xf5
+};
+
+/*
+ * The records of the local DTLS: the core functions of the backend
+ * themselves, on SOCK_SEQPACKET
+ */
+static const struct esdm_dtls_ops esdm_dtls_local_ops = {
+	.handshake = esdm_tls_backend_handshake,
+	.send = esdm_tls_backend_send,
+	.flush = esdm_tls_backend_flush,
+	.recv = esdm_tls_backend_recv,
+	.pending = esdm_tls_backend_pending,
+	.cipher = esdm_tls_backend_cipher,
+	.free = esdm_tls_backend_conn_free,
 };
 #endif
 
@@ -122,11 +139,12 @@ bool esdm_dtls_busy(void)
  * released then wipes what this file holds of it, and leaves the objects of the
  * TLS stack to the end of the process - kept reachable on the lists below for
  * leak checkers, and LeakSanitizer is told, as the lists go with the library
- * when it is unloaded at the exit. The exit is told by an atexit handler, registered once the
- * first context of the TLS stack exists: the handlers of the exit run in the
- * reverse order of their registration, so the static destructors the TLS stack
- * registered while the backend set up the context - it sets up what it frees
- * at the exit, see esdm_dtls_botan.cpp - run after the handler.
+ * when it is unloaded at the exit. The exit is told by an atexit handler,
+ * registered once the first context of the TLS stack exists: the handlers of
+ * the exit run in the reverse order of their registration, so the static
+ * destructors the TLS stack registered while the backend set up the context -
+ * it sets up what it frees at the exit, see esdm_tls_botan.cpp - run after the
+ * handler.
  */
 static atomic_bool esdm_dtls_exit_started = false;
 static _Atomic(struct esdm_dtls *) esdm_dtls_left = NULL;
@@ -199,7 +217,8 @@ int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 	c->server = server;
 
 	esdm_dtls_enter();
-	ret = esdm_dtls_backend_ctx_new(server, &c->backend);
+	ret = esdm_tls_backend_ctx_new(server, ESDM_TLS_TRANSPORT_SEQPACKET,
+				       &c->backend);
 	esdm_dtls_leave();
 	if (ret) {
 		free(c);
@@ -227,7 +246,7 @@ void esdm_dtls_ctx_free(struct esdm_dtls_ctx *ctx)
 	}
 
 	esdm_dtls_enter();
-	esdm_dtls_backend_ctx_free(ctx->backend);
+	esdm_tls_backend_ctx_free(ctx->backend);
 	esdm_dtls_leave();
 #endif
 	free(ctx);
@@ -252,11 +271,14 @@ int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 	d = calloc(1, sizeof(*d));
 	if (!d)
 		return -ENOMEM;
+	d->ops = &esdm_dtls_local_ops;
+	d->want = POLLIN;
 	d->max_msg = max_msg;
 
+	/* No server name, and no certificate to check */
 	esdm_dtls_enter();
-	ret = esdm_dtls_backend_conn_new(ctx->backend, ctx->server, fd,
-					 &d->backend);
+	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, fd, NULL,
+					NULL, NULL, &d->conn);
 	esdm_dtls_leave();
 	if (ret) {
 		free(d);
@@ -278,7 +300,8 @@ int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
 		return -ENOMEM;
 	}
 	d->ops = ops;
-	d->backend = conn;
+	d->conn = conn;
+	d->want = POLLIN;
 	d->max_msg = max_msg;
 
 	*dtls = d;
@@ -288,43 +311,35 @@ int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
 void *esdm_dtls_ops_conn(struct esdm_dtls *dtls,
 			 const struct esdm_dtls_ops *ops)
 {
-	return (dtls && dtls->ops == ops) ? dtls->backend : NULL;
+	return (dtls && dtls->ops == ops) ? dtls->conn : NULL;
 }
 
-/* The records of the connection, of the backend or of its ops */
-static int esdm_dtls_rec_handshake(struct esdm_dtls *dtls)
-{
-	if (dtls->ops)
-		return dtls->ops->handshake(dtls->backend);
-#ifdef ESDM_DTLS
-	return esdm_dtls_backend_handshake(dtls->backend);
-#else
-	return -EOPNOTSUPP;
-#endif
-}
-
+/* One record of @len bytes, taken whole: 0 or a negative errno */
 static int esdm_dtls_rec_send(struct esdm_dtls *dtls, const uint8_t *buf,
 			      size_t len)
 {
-	if (dtls->ops)
-		return dtls->ops->send(dtls->backend, buf, len);
-#ifdef ESDM_DTLS
-	return esdm_dtls_backend_send(dtls->backend, buf, len);
-#else
-	return -EOPNOTSUPP;
-#endif
+	ssize_t n = dtls->ops->send(dtls->conn, buf, len, &dtls->want);
+
+	if (n < 0)
+		return (int)n;
+	return (size_t)n == len ? 0 : -EIO;
 }
 
+/*
+ * One record: its size, -EAGAIN if none is there yet, -ECONNRESET at the end of
+ * the connection - with a closing alert or without -, -EPROTO for a record
+ * larger than any of ours, another negative errno
+ */
 static ssize_t esdm_dtls_rec_recv(struct esdm_dtls *dtls, uint8_t *buf,
 				  size_t len)
 {
-	if (dtls->ops)
-		return dtls->ops->recv(dtls->backend, buf, len);
-#ifdef ESDM_DTLS
-	return esdm_dtls_backend_recv(dtls->backend, buf, len);
-#else
-	return -EOPNOTSUPP;
-#endif
+	ssize_t n = dtls->ops->recv(dtls->conn, buf, len, &dtls->want);
+
+	if (n == 0)
+		return -ECONNRESET;
+	if (n == -EMSGSIZE)
+		return -EPROTO;
+	return n;
 }
 
 static void esdm_dtls_drop_partial(struct esdm_dtls *dtls)
@@ -353,12 +368,7 @@ void esdm_dtls_free(struct esdm_dtls *dtls)
 	}
 
 	esdm_dtls_enter();
-	if (dtls->ops)
-		dtls->ops->free(dtls->backend);
-#ifdef ESDM_DTLS
-	else
-		esdm_dtls_backend_conn_free(dtls->backend);
-#endif
+	dtls->ops->free(dtls->conn);
 	esdm_dtls_leave();
 	free(dtls);
 }
@@ -372,7 +382,7 @@ int esdm_dtls_handshake(struct esdm_dtls *dtls)
 		return -EINVAL;
 
 	esdm_dtls_enter();
-	ret = esdm_dtls_rec_handshake(dtls);
+	ret = dtls->ops->handshake(dtls->conn, &dtls->want);
 	esdm_dtls_leave();
 
 	return ret;
@@ -381,9 +391,7 @@ int esdm_dtls_handshake(struct esdm_dtls *dtls)
 DSO_PUBLIC
 short esdm_dtls_want(struct esdm_dtls *dtls)
 {
-	if (dtls && dtls->ops)
-		return dtls->ops->want(dtls->backend);
-	return POLLIN;
+	return dtls ? dtls->want : POLLIN;
 }
 
 DSO_PUBLIC
@@ -417,9 +425,9 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 		p += part;
 		len -= part;
 	} while (!ret && len);
-	/* What the records of the ops hold of it goes out now */
-	if (!ret && dtls->ops)
-		ret = dtls->ops->flush(dtls->backend);
+	/* What the records hold of it goes out now */
+	if (!ret)
+		ret = dtls->ops->flush(dtls->conn, &dtls->want);
 	esdm_dtls_leave();
 
 	/*
@@ -523,14 +531,7 @@ bool esdm_dtls_pending(struct esdm_dtls *dtls)
 		return false;
 
 	esdm_dtls_enter();
-	if (dtls->ops)
-		ret = dtls->ops->pending(dtls->backend);
-	else
-#ifdef ESDM_DTLS
-		ret = esdm_dtls_backend_pending(dtls->backend);
-#else
-		ret = false;
-#endif
+	ret = dtls->ops->pending(dtls->conn);
 	esdm_dtls_leave();
 
 	return ret;
@@ -539,13 +540,14 @@ bool esdm_dtls_pending(struct esdm_dtls *dtls)
 DSO_PUBLIC
 const char *esdm_dtls_cipher(struct esdm_dtls *dtls)
 {
+	const char *ret;
+
 	if (!dtls)
 		return "none";
-	if (dtls->ops)
-		return dtls->ops->cipher(dtls->backend);
-#ifdef ESDM_DTLS
-	return esdm_dtls_backend_cipher(dtls->backend);
-#else
-	return "none";
-#endif
+
+	esdm_dtls_enter();
+	ret = dtls->ops->cipher(dtls->conn);
+	esdm_dtls_leave();
+
+	return ret;
 }

@@ -18,15 +18,41 @@
  */
 
 /*
- * What a crypto backend provides for esdm_tls.h: TLS 1.3 with certificates
- * from PEM files on a connected, non-blocking stream socket, and the parsing
- * of certificates and CRLs the revocation check needs. The reference counting
- * of the contexts, the revocation policy, the fingerprint and the waiting are
- * backend independent - esdm_tls.c.
+ * What a crypto backend provides: the (D)TLS of its TLS stack on each
+ * transport of enum esdm_tls_transport -
+ *
+ *  - TLS 1.3 with certificates from PEM files on a connected, non-blocking
+ *    stream socket: the TLS of esdm_tls.h,
+ *  - DTLS 1.2 with the pre-shared key below on a connected, non-blocking
+ *    SOCK_SEQPACKET socket, one record per message of the socket: the local
+ *    DTLS of esdm_dtls.h, which needs no files -
+ *
+ * and the parsing of certificates and CRLs the revocation check needs. One
+ * backend per TLS stack, with one set-up of the library, one error mapping
+ * and one connection for both: a transport differs in the protocol version,
+ * the ciphers, the groups and the signature schemes it sets up, and in how it
+ * reaches the socket.
+ *
+ * Two layers sit on top, both backend independent: esdm_dtls.c, the messages
+ * of the local DTLS on top of the records of the core functions below, which
+ * it calls with the busy marker of the thread set (esdm_dtls_busy()), so that
+ * the randomness the TLS stack draws cannot loop back into the connection;
+ * and esdm_tls.c, the TLS with certificates: the reference counting of the
+ * contexts, the revocation policy, the fingerprint and the waiting.
+ *
+ * The core functions are all a library with the local DTLS alone needs, and
+ * they reach nothing of the certificates: those are loaded, and the
+ * verification of the peer installed, by esdm_tls_backend_ctx_files(). A build
+ * without esdm_tls.h (ESDM_TLS_AUTH) does not compile the functions of the
+ * certificates, and in a build with it the linker drops them from a library
+ * that does not call them.
  *
  * Every function that has to wait for the socket returns -EAGAIN and stores
  * what it waits for, POLLIN or POLLOUT, in *want. The socket is reached with
- * send(2) with MSG_NOSIGNAL and recv(2) only.
+ * send(2) with MSG_NOSIGNAL and recv(2) only. On SOCK_SEQPACKET, the TLS stack
+ * is told a link MTU no record exceeds, does not retransmit - the connection
+ * is reliable - and has no cookie exchange: a connected Unix domain socket has
+ * no address to spoof.
  *
  * The TLS stack's own revocation checks stay off: the CRLs are loaded into the
  * context next to the TLS configuration, not into it. The revocation policy of
@@ -49,6 +75,8 @@
 extern "C" {
 #endif
 
+struct esdm_dtls;
+
 /*
  * Longest text of an error, a subject or a cipher name kept for the log,
  * terminating NUL included
@@ -57,6 +85,27 @@ extern "C" {
 
 /* Longest chain a peer is held to */
 #define ESDM_TLS_MAX_CHAIN 16
+
+/*
+ * The local DTLS: DTLS 1.2, ECDHE-PSK with AES-256 on curves of 256 bits of
+ * security or more, see esdm_dtls.h.
+ *
+ * The pre-shared key and its identity are constants of the ESDM, the same in
+ * every build and every process, and no secret: the key is the SHA-256 of the
+ * identity, printf %s esdm-opportunistic-dtls | sha256sum. They only let the
+ * TLS stacks run the key exchange without a certificate - what a peer is
+ * trusted for is still what the kernel says about it.
+ */
+#define ESDM_DTLS_PSK_IDENTITY "esdm-opportunistic-dtls"
+#define ESDM_DTLS_PSK_LEN 32
+extern const uint8_t esdm_dtls_psk[ESDM_DTLS_PSK_LEN];
+
+/*
+ * The link MTU of the local DTLS: a record of ESDM_DTLS_PART_SIZE + 1 bytes
+ * plus its overhead fits without fragmentation. A SOCK_SEQPACKET message is not
+ * bound by an MTU, the DTLS layer would not know that.
+ */
+#define ESDM_DTLS_LINK_MTU 16700
 
 /* A certificate in DER */
 struct esdm_tls_der {
@@ -136,17 +185,91 @@ enum esdm_tls_verdict {
 typedef enum esdm_tls_verdict (*esdm_tls_backend_check)(
 	void *arg, struct esdm_tls_der *chain, size_t num);
 
+/******************************************************************************
+ * The core: either transport
+ ******************************************************************************/
+
 /* Name of the TLS stack, for logging */
 const char *esdm_tls_backend_name(void);
 
 /*
- * @return 0 or a negative errno; *ctx is the context of one side, see
- *	   esdm_tls_ctx_alloc(). A failure is logged here, with what the TLS
- *	   stack said about it.
+ * The context of one side for @transport, its protocol set up: complete for
+ * the local DTLS, to be completed with esdm_tls_backend_ctx_files() for the
+ * TLS with certificates.
+ *
+ * @return 0 or a negative errno
  */
-int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
+int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
 			     void **ctx);
 void esdm_tls_backend_ctx_free(void *ctx);
+
+/*
+ * @return 0 or a negative errno; *conn is the (D)TLS of the connection on @fd.
+ *	   A client of the TLS with certificates is handed the name it expects
+ *	   the server to have, which the backend keeps a copy of, and @check
+ *	   with @arg is run on the chain of the peer, see esdm_tls_backend_check
+ *	   - a peer whose chain is not handed to it is refused. The local DTLS
+ *	   has neither: NULL.
+ */
+int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      const char *server_name,
+			      esdm_tls_backend_check check, void *arg,
+			      void **conn);
+void esdm_tls_backend_conn_free(void *conn);
+
+/* @return 0 when complete, -EAGAIN while waiting, a negative errno */
+int esdm_tls_backend_handshake(void *conn, short *want);
+
+/*
+ * On SOCK_SEQPACKET, @len bytes are one record, taken whole or not at all.
+ *
+ * @return bytes taken, -EAGAIN if none, a negative errno
+ */
+ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
+			      short *want);
+
+/* @return 0 when everything is out, -EAGAIN while not, a negative errno */
+int esdm_tls_backend_flush(void *conn, short *want);
+
+/*
+ * On SOCK_SEQPACKET, one record, whole - a record larger than @len is
+ * -EMSGSIZE.
+ *
+ * @return bytes received, 0 after a closing alert, -EAGAIN if none yet,
+ *	   -ECONNRESET at the end of the connection without a closing alert,
+ *	   another negative errno
+ */
+ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
+			      short *want);
+
+/* Is data decrypted already that the socket will not signal any more? */
+bool esdm_tls_backend_pending(void *conn);
+
+/* Send the closing alert if the socket takes it right away */
+void esdm_tls_backend_close_notify(void *conn);
+
+/* Name of the cipher suite in use */
+const char *esdm_tls_backend_cipher(void *conn);
+
+/* Name of the key exchange group in use, NULL if there is none yet */
+const char *esdm_tls_backend_group(void *conn);
+
+/* Why the connection failed, NULL or empty if the backend does not know */
+const char *esdm_tls_backend_error(void *conn);
+
+/******************************************************************************
+ * The certificates: the TLS of esdm_tls.h alone
+ ******************************************************************************/
+
+/*
+ * The files of @cfg into a context of esdm_tls_backend_ctx_new(), and the
+ * verification of the peer, see esdm_tls_ctx_alloc().
+ *
+ * @return 0 or a negative errno - a failure is logged here, with what the TLS
+ *	   stack said about it
+ */
+int esdm_tls_backend_ctx_files(void *ctx, bool server,
+			       const struct esdm_tls_config *cfg);
 
 /* Number of CRLs the context loaded */
 size_t esdm_tls_backend_crl_count(void *ctx);
@@ -172,49 +295,6 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 			       struct esdm_tls_cert_info *info);
 
 /*
- * @return 0 or a negative errno; *conn is the TLS of the connection on @fd. A
- *	   client is handed the name it expects the server to have, which the
- *	   backend keeps a copy of. @check with @arg is run on the chain of the
- *	   peer, see esdm_tls_backend_check - a peer whose chain is not handed
- *	   to it is refused.
- */
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
-			      const char *server_name,
-			      esdm_tls_backend_check check, void *arg,
-			      void **conn);
-void esdm_tls_backend_conn_free(void *conn);
-
-/* @return 0 when complete, -EAGAIN while waiting, a negative errno */
-int esdm_tls_backend_handshake(void *conn, short *want);
-
-/* @return bytes taken, -EAGAIN if none, a negative errno */
-ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
-			      short *want);
-
-/* @return 0 when everything is out, -EAGAIN while not, a negative errno */
-int esdm_tls_backend_flush(void *conn, short *want);
-
-/*
- * @return bytes received, 0 after a closing alert, -EAGAIN if none yet,
- *	   -ECONNRESET at the end of the connection without a closing alert,
- *	   another negative errno
- */
-ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
-			      short *want);
-
-/* Is data decrypted already that the socket will not signal any more? */
-bool esdm_tls_backend_pending(void *conn);
-
-/* Send the closing alert if the socket takes it right away */
-void esdm_tls_backend_close_notify(void *conn);
-
-/* Name of the cipher suite in use */
-const char *esdm_tls_backend_cipher(void *conn);
-
-/* Name of the key exchange group in use, NULL if there is none yet */
-const char *esdm_tls_backend_group(void *conn);
-
-/*
  * The ML-KEM group of TLS 1.3 two sides of the TLS stack agree on, NULL if it
  * has none - see esdm_tls_mlkem_group()
  */
@@ -226,8 +306,38 @@ unsigned int esdm_tls_backend_mldsa(void);
 /* An IPv6 address as server name is checked, see esdm_tls_ip6_name() */
 bool esdm_tls_backend_ip6_name(void);
 
-/* Why the connection failed, NULL or empty if the backend does not know */
-const char *esdm_tls_backend_error(void *conn);
+/******************************************************************************
+ * The records under the messages of esdm_dtls.h
+ ******************************************************************************/
+
+/*
+ * The records of a connection of esdm_dtls.h: those of the core functions
+ * above for the local DTLS - the very functions -, those of the TLS of
+ * esdm_tls.h on TCP for es-ext-net, see esdm_dtls_tls.c. Each is the core
+ * function of its name; free releases the connection.
+ */
+struct esdm_dtls_ops {
+	int (*handshake)(void *conn, short *want);
+	ssize_t (*send)(void *conn, const uint8_t *buf, size_t len,
+			short *want);
+	int (*flush)(void *conn, short *want);
+	ssize_t (*recv)(void *conn, uint8_t *buf, size_t len, short *want);
+	bool (*pending)(void *conn);
+	const char *(*cipher)(void *conn);
+	void (*free)(void *conn);
+};
+
+/*
+ * A connection of the records of @ops on @conn, which it takes over.
+ *
+ * @return 0, or -ENOMEM - @conn is released then
+ */
+int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
+		      size_t max_msg, struct esdm_dtls **dtls);
+
+/* The connection of @dtls if its records are those of @ops, NULL otherwise */
+void *esdm_dtls_ops_conn(struct esdm_dtls *dtls,
+			 const struct esdm_dtls_ops *ops);
 
 #ifdef __cplusplus
 }

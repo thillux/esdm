@@ -1817,7 +1817,12 @@ the DTLS is unauthenticated, and what a peer is trusted for is what
 `SO_PEERCRED` says, as without DTLS. The DTLS keeps the data from being read
 off the connection. One DTLS record is sent per message of the socket. The
 same DTLS protects the connection of the ExternalSocket entropy source to its
-provider.]
+provider. The DTLS and the TLS with certificates on the network - of the
+external entropy sources (section @sec:ext-es-net) and of the EGD protocol -
+share one backend per TLS stack (`common/esdm_tls_backend.h`): one set-up of
+the library, one error mapping and one connection, which differ per transport
+only in the protocol, the suites, the groups and the way the socket is
+reached.]
 
 #figure(
   image("../figures/dtls-handshake.svg", width: 85%),

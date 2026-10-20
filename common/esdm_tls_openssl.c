@@ -18,19 +18,22 @@
  */
 
 /*
- * TLS of esdm_tls_backend.h by OpenSSL, for crypto_backend=openssl: TLS 1.3 on
- * a stream socket, with the files, the verification and the revocation policy
- * of esdm_tls_openssl_files() and esdm_tls_openssl_verify().
+ * (D)TLS of esdm_tls_backend.h by OpenSSL, for crypto_backend=openssl: TLS 1.3
+ * on a stream socket, with the files, the verification and the revocation
+ * policy of esdm_tls_openssl_files() and esdm_tls_openssl_verify(), and the
+ * DTLS 1.2 with the pre-shared key of the local DTLS on SOCK_SEQPACKET.
  *
- * The socket is reached through a BIO of its own, as the one of OpenSSL
- * write(2)s - and with that raises SIGPIPE in the process the client library is
- * linked into for a peer that went away: one send(2) with MSG_NOSIGNAL or one
- * recv(2) per call, on the non-blocking socket.
+ * The socket is reached through a BIO of its own: the one of OpenSSL
+ * write(2)s - and with that raises SIGPIPE in the process the library is
+ * linked into for a peer that went away -, and OpenSSL's datagram BIO expects
+ * an address family of the Internet. One send(2) with MSG_NOSIGNAL or one
+ * recv(2) per call, on the non-blocking socket - on SOCK_SEQPACKET a message
+ * of the socket each.
  *
- * Everything is created in a library context of its own with the default
- * provider, like the DTLS - see esdm_dtls_openssl.c: the TLS must not take its
- * random numbers from a RAND provider the application configured, which may be
- * the ESDM's own.
+ * Everything is created in one library context of its own with the default
+ * provider: the (D)TLS must not take its random numbers from a RAND provider
+ * the application configured - which in a client of the ESDM may well be the
+ * ESDM's own OpenSSL provider, asking over the connection being set up.
  *
  * The revocation policy of esdm_tls.c runs in the verify callback, on the
  * chain OpenSSL verified - see esdm_tls_openssl_verify().
@@ -101,13 +104,36 @@
 	"rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:"            \
 	"rsa_pkcs1_sha384:rsa_pkcs1_sha512"
 
+/*
+ * The local DTLS: TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 on P-521. OpenSSL has
+ * no ECDHE-PSK suite with AES-GCM - RFC 8442's - and its one with an AEAD
+ * cipher is ChaCha20-Poly1305, which neither NIST SP 800-52r2 nor BSI
+ * TR-02102-2 allows. Encrypt-then-MAC is on by default, and required, see
+ * esdm_tls_openssl_client_hello().
+ */
+#define ESDM_TLS_OPENSSL_PSK_CIPHERS "ECDHE-PSK-AES256-CBC-SHA384"
+#define ESDM_TLS_OPENSSL_PSK_GROUPS "secp521r1"
+
+/*
+ * The timer of the DTLS handshake, in microseconds: long enough to never run
+ * out - the connection is reliable, and the callers bound the handshake
+ * themselves
+ */
+#define ESDM_TLS_OPENSSL_DTLS_TIMER_US 600000000U
+
 struct esdm_tls_openssl_ctx {
 	SSL_CTX *ssl_ctx;
+	enum esdm_tls_transport transport;
+#ifdef ESDM_TLS_AUTH
 	STACK_OF(X509_CRL) *crls;
+#endif
 };
 
 struct esdm_tls_openssl_conn {
 	SSL *ssl;
+	int fd;
+	/* SOCK_SEQPACKET: a record of the connection is a message of its own */
+	bool dgram;
 	esdm_tls_backend_check check;
 	void *check_arg;
 	char error[ESDM_TLS_TEXT_LEN];
@@ -121,18 +147,13 @@ static OSSL_LIB_CTX *esdm_tls_openssl_libctx = NULL;
 static BIO_METHOD *esdm_tls_openssl_bio_meth = NULL;
 static pthread_once_t esdm_tls_openssl_once = PTHREAD_ONCE_INIT;
 
-static int esdm_tls_openssl_bio_fd(BIO *bio)
-{
-	return (int)(intptr_t)BIO_get_data(bio);
-}
-
 static int esdm_tls_openssl_bio_write(BIO *bio, const char *buf, int len)
 {
+	struct esdm_tls_openssl_conn *c = BIO_get_data(bio);
 	ssize_t n;
 
 	BIO_clear_retry_flags(bio);
-	n = send(esdm_tls_openssl_bio_fd(bio), buf, (size_t)len,
-		 MSG_DONTWAIT | MSG_NOSIGNAL);
+	n = send(c->fd, buf, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL);
 	if (n < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 			BIO_set_retry_write(bio);
@@ -144,23 +165,28 @@ static int esdm_tls_openssl_bio_write(BIO *bio, const char *buf, int len)
 
 static int esdm_tls_openssl_bio_read(BIO *bio, char *buf, int len)
 {
+	struct esdm_tls_openssl_conn *c = BIO_get_data(bio);
 	ssize_t n;
 
 	BIO_clear_retry_flags(bio);
-	n = recv(esdm_tls_openssl_bio_fd(bio), buf, (size_t)len, MSG_DONTWAIT);
+	n = recv(c->fd, buf, (size_t)len, MSG_DONTWAIT);
 	if (n < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 			BIO_set_retry_read(bio);
 		return -1;
 	}
 
-	/* 0: the end of the stream, which OpenSSL tells by the retry flags */
+	/*
+	 * 0: the end of the stream, which OpenSSL tells by the retry flags -
+	 * on SOCK_SEQPACKET the peer gone, not an empty record
+	 */
 	return (int)n;
 }
 
 static long esdm_tls_openssl_bio_ctrl(BIO *bio, int cmd, long num, void *ptr)
 {
-	(void)bio;
+	struct esdm_tls_openssl_conn *c = BIO_get_data(bio);
+
 	(void)num;
 	(void)ptr;
 
@@ -168,8 +194,14 @@ static long esdm_tls_openssl_bio_ctrl(BIO *bio, int cmd, long num, void *ptr)
 	case BIO_CTRL_FLUSH:
 		/* Everything is sent as it is written */
 		return 1;
+	case BIO_CTRL_DGRAM_GET_FALLBACK_MTU:
+	case BIO_CTRL_DGRAM_QUERY_MTU:
+		return (c && c->dgram) ? ESDM_DTLS_LINK_MTU : 0;
 	default:
-		/* Nothing else is buffered here, and nothing else is known */
+		/*
+		 * Peer addresses, timers, MTU overhead: nothing a connected
+		 * socket has
+		 */
 		return 0;
 	}
 }
@@ -193,7 +225,7 @@ static void esdm_tls_openssl_init(void)
 	}
 
 	meth = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK,
-			    "esdm_tls_stream");
+			    "esdm_tls_socket");
 	if (!meth || !BIO_meth_set_write(meth, esdm_tls_openssl_bio_write) ||
 	    !BIO_meth_set_read(meth, esdm_tls_openssl_bio_read) ||
 	    !BIO_meth_set_ctrl(meth, esdm_tls_openssl_bio_ctrl) ||
@@ -205,6 +237,13 @@ static void esdm_tls_openssl_init(void)
 
 	esdm_tls_openssl_bio_meth = meth;
 	esdm_tls_openssl_libctx = libctx;
+}
+
+/* The library context of this file, NULL if it cannot be set up */
+static OSSL_LIB_CTX *esdm_tls_openssl_lib(void)
+{
+	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
+	return esdm_tls_openssl_libctx;
 }
 
 /* The last error on the queue of the thread as text, the queue cleared */
@@ -249,7 +288,13 @@ static bool esdm_tls_openssl_cert_reason(int reason)
  * send(2) or recv(2) telling so -, -EACCES for a certificate that was refused,
  * -EIO for another error of the socket, -EPROTO for anything else. The error
  * queue of the thread is cleared - errors are per connection here, not per
- * thread, and the client runs on the threads of the application.
+ * thread.
+ *
+ * SSL_get_error() reports any error on the queue of the thread as one of the
+ * operation it is asked about. The handshake clears the queue as it starts, a
+ * read or a write does not: every SSL operation below starts on an empty queue,
+ * as a client runs on the threads of the application, which may have left an
+ * error there, and a read waiting for the peer would fail with -EPROTO.
  */
 static int esdm_tls_openssl_error(struct esdm_tls_openssl_conn *c, int ret,
 				  short *want)
@@ -311,6 +356,436 @@ static int esdm_tls_openssl_error(struct esdm_tls_openssl_conn *c, int ret,
 	}
 }
 
+/******************************************************************************
+ * The transports
+ ******************************************************************************/
+
+/*
+ * Everything of a context but the files, the same on either transport:
+ * neither tickets nor a session cache nor renegotiation - a connection lives as
+ * long as it does, with the one handshake it started with. A server holds many
+ * connections, most of them idle between the requests: no record buffers for
+ * those. A record is decrypted in place, in the read buffer: wipe what was
+ * handed out, and the buffer as it is released or freed.
+ */
+static void esdm_tls_openssl_common(SSL_CTX *c)
+{
+	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION |
+				       SSL_OP_CLEANSE_PLAINTEXT);
+	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+	SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
+}
+
+#ifdef ESDM_TLS_AUTH
+/*
+ * TLS 1.3 exactly on a stream socket, without its tickets either. A write the
+ * socket only took part of is continued with the rest, from wherever the
+ * caller keeps it.
+ */
+static int esdm_tls_openssl_stream(SSL_CTX *c)
+{
+	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
+	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
+	    !SSL_CTX_set_num_tickets(c, 0))
+		return -ENOMEM;
+	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
+				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+
+	/* ML-KEM first, as far as OpenSSL has it, see above */
+	if (SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_GROUPS) != 1) {
+		ERR_clear_error();
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_ANY,
+			"TLS: OpenSSL %s refused the groups of ML-KEM, its default groups serve\n",
+			OpenSSL_version(OPENSSL_VERSION_STRING));
+	}
+
+	/* ML-DSA-87 alone of ML-DSA, see above */
+	if (SSL_CTX_set1_sigalgs_list(c, ESDM_TLS_OPENSSL_SIGALGS) != 1) {
+		ERR_clear_error();
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_ANY,
+			"TLS: OpenSSL %s refused the signature schemes with ML-DSA-87, its default ones serve\n",
+			OpenSSL_version(OPENSSL_VERSION_STRING));
+	}
+
+	return 0;
+}
+#else
+static int esdm_tls_openssl_stream(SSL_CTX *c)
+{
+	(void)c;
+	return -EOPNOTSUPP;
+}
+#endif /* ESDM_TLS_AUTH */
+
+#ifdef ESDM_DTLS
+/*
+ * The pre-shared key of either side, see esdm_tls_backend.h. A server knows
+ * no other identity - returning 0 refuses a client with another one.
+ */
+static unsigned int esdm_tls_openssl_psk_client(SSL *ssl, const char *hint,
+						char *identity,
+						unsigned int max_identity_len,
+						unsigned char *psk,
+						unsigned int max_psk_len)
+{
+	(void)ssl;
+	(void)hint;
+
+	/* max_identity_len leaves out the terminating NUL */
+	if (sizeof(ESDM_DTLS_PSK_IDENTITY) - 1 > max_identity_len ||
+	    sizeof(esdm_dtls_psk) > max_psk_len)
+		return 0;
+
+	memcpy(identity, ESDM_DTLS_PSK_IDENTITY,
+	       sizeof(ESDM_DTLS_PSK_IDENTITY));
+	memcpy(psk, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	return sizeof(esdm_dtls_psk);
+}
+
+static unsigned int esdm_tls_openssl_psk_server(SSL *ssl, const char *identity,
+						unsigned char *psk,
+						unsigned int max_psk_len)
+{
+	(void)ssl;
+
+	if (!identity || strcmp(identity, ESDM_DTLS_PSK_IDENTITY) ||
+	    sizeof(esdm_dtls_psk) > max_psk_len)
+		return 0;
+
+	memcpy(psk, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	return sizeof(esdm_dtls_psk);
+}
+
+/*
+ * A client has to offer Encrypt-then-MAC (RFC 7366), which the server agrees
+ * to for a CBC suite: MAC-then-encrypt is what Lucky Thirteen reads records
+ * from, and DTLS lets an attacker try again after every record it broke. A
+ * client of OpenSSL cannot tell whether its server agreed - every server of
+ * the ESDM does, whichever its TLS stack.
+ */
+static int esdm_tls_openssl_client_hello(SSL *ssl, int *alert, void *arg)
+{
+	const unsigned char *ext;
+	size_t len;
+
+	(void)arg;
+
+	if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_encrypt_then_mac, &ext,
+				      &len))
+		return SSL_CLIENT_HELLO_SUCCESS;
+
+	*alert = SSL_AD_INSUFFICIENT_SECURITY;
+	return SSL_CLIENT_HELLO_ERROR;
+}
+
+/*
+ * DTLS 1.2 exactly on SOCK_SEQPACKET, the one suite of ECDHE with the
+ * pre-shared key on the one curve. No MTU is queried: the link MTU is set per
+ * connection.
+ */
+static int esdm_tls_openssl_seqpacket(SSL_CTX *c, bool server)
+{
+	if (!SSL_CTX_set_min_proto_version(c, DTLS1_2_VERSION) ||
+	    !SSL_CTX_set_max_proto_version(c, DTLS1_2_VERSION) ||
+	    !SSL_CTX_set_cipher_list(c, ESDM_TLS_OPENSSL_PSK_CIPHERS) ||
+	    !SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_PSK_GROUPS))
+		return -ENOMEM;
+	SSL_CTX_set_options(c, SSL_OP_NO_QUERY_MTU);
+
+	if (server) {
+		SSL_CTX_set_psk_server_callback(c, esdm_tls_openssl_psk_server);
+		SSL_CTX_set_client_hello_cb(c, esdm_tls_openssl_client_hello,
+					    NULL);
+	} else {
+		SSL_CTX_set_psk_client_callback(c, esdm_tls_openssl_psk_client);
+	}
+	return 0;
+}
+#else
+static int esdm_tls_openssl_seqpacket(SSL_CTX *c, bool server)
+{
+	(void)c;
+	(void)server;
+	return -EOPNOTSUPP;
+}
+#endif /* ESDM_DTLS */
+
+/* The timer of the DTLS handshake, never to run out - see above */
+static unsigned int esdm_tls_openssl_dtls_timer(SSL *ssl, unsigned int timer_us)
+{
+	(void)ssl;
+	(void)timer_us;
+	return ESDM_TLS_OPENSSL_DTLS_TIMER_US;
+}
+
+/******************************************************************************
+ * esdm_tls_backend.h: the core
+ ******************************************************************************/
+
+const char *esdm_tls_backend_name(void)
+{
+	return "OpenSSL";
+}
+
+void esdm_tls_backend_ctx_free(void *ctx)
+{
+	struct esdm_tls_openssl_ctx *c = ctx;
+
+	if (!c)
+		return;
+	SSL_CTX_free(c->ssl_ctx);
+#ifdef ESDM_TLS_AUTH
+	sk_X509_CRL_pop_free(c->crls, X509_CRL_free);
+#endif
+	free(c);
+}
+
+int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
+			     void **ctx)
+{
+	OSSL_LIB_CTX *libctx = esdm_tls_openssl_lib();
+	bool stream = transport == ESDM_TLS_TRANSPORT_STREAM;
+	struct esdm_tls_openssl_ctx *oc;
+	int ret;
+
+	if (!libctx)
+		return -ENOMEM;
+
+	oc = calloc(1, sizeof(*oc));
+	if (!oc)
+		return -ENOMEM;
+	oc->transport = transport;
+
+	if (stream)
+		oc->ssl_ctx = SSL_CTX_new_ex(libctx, NULL,
+					     server ? TLS_server_method() :
+						      TLS_client_method());
+	else
+		oc->ssl_ctx = SSL_CTX_new_ex(libctx, NULL,
+					     server ? DTLS_server_method() :
+						      DTLS_client_method());
+	if (!oc->ssl_ctx) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	esdm_tls_openssl_common(oc->ssl_ctx);
+	ret = stream ? esdm_tls_openssl_stream(oc->ssl_ctx) :
+		       esdm_tls_openssl_seqpacket(oc->ssl_ctx, server);
+	if (ret)
+		goto err;
+
+	*ctx = oc;
+	return 0;
+
+err:
+	ERR_clear_error();
+	esdm_tls_backend_ctx_free(oc);
+	return ret;
+}
+
+int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      const char *server_name,
+			      esdm_tls_backend_check check, void *arg,
+			      void **conn)
+{
+	struct esdm_tls_openssl_ctx *oc = ctx;
+	struct esdm_tls_openssl_conn *c = calloc(1, sizeof(*c));
+	unsigned char addr[sizeof(struct in6_addr)];
+	BIO *bio;
+
+	if (!c)
+		return -ENOMEM;
+	c->fd = fd;
+	c->check = check;
+	c->check_arg = arg;
+	c->dgram = oc->transport == ESDM_TLS_TRANSPORT_SEQPACKET;
+
+	c->ssl = SSL_new(oc->ssl_ctx);
+	if (!c->ssl)
+		goto err;
+	/* For esdm_tls_openssl_verify() */
+	SSL_set_app_data(c->ssl, c);
+
+	bio = BIO_new(esdm_tls_openssl_bio_meth);
+	if (!bio)
+		goto err;
+	BIO_set_data(bio, c);
+	/* The SSL owns the BIO from here on, for reading and writing */
+	SSL_set_bio(c->ssl, bio, bio);
+
+	/*
+	 * No MTU to discover and no record to fragment on SOCK_SEQPACKET, and
+	 * no retransmission of DTLS
+	 */
+	if (c->dgram) {
+		if (!DTLS_set_link_mtu(c->ssl, ESDM_DTLS_LINK_MTU))
+			goto err;
+		DTLS_set_timer_cb(c->ssl, esdm_tls_openssl_dtls_timer);
+	}
+
+	if (server) {
+		SSL_set_accept_state(c->ssl);
+	} else {
+		/*
+		 * The name the certificate of the server has to be issued for:
+		 * an address literal is checked against the IP addresses of
+		 * its subject alternative name, and is no server name to
+		 * indicate - only a DNS name is. The local DTLS has none.
+		 */
+		if (!server_name) {
+		} else if (inet_pton(AF_INET, server_name, addr) == 1 ||
+			   inet_pton(AF_INET6, server_name, addr) == 1) {
+			if (X509_VERIFY_PARAM_set1_ip_asc(
+				    SSL_get0_param(c->ssl), server_name) != 1)
+				goto err;
+		} else {
+			if (SSL_set1_host(c->ssl, server_name) != 1 ||
+			    SSL_set_tlsext_host_name(c->ssl, server_name) != 1)
+				goto err;
+		}
+		SSL_set_connect_state(c->ssl);
+	}
+
+	*conn = c;
+	return 0;
+
+err:
+	ERR_clear_error();
+	SSL_free(c->ssl);
+	free(c);
+	return -ENOMEM;
+}
+
+void esdm_tls_backend_conn_free(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+
+	if (!c)
+		return;
+	SSL_free(c->ssl);
+	free(c);
+}
+
+int esdm_tls_backend_handshake(void *conn, short *want)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int ret;
+
+	ERR_clear_error();
+	ret = SSL_do_handshake(c->ssl);
+
+	return ret == 1 ? 0 : esdm_tls_openssl_error(c, ret, want);
+}
+
+ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
+			      short *want)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int ret;
+
+	if (len > INT32_MAX)
+		len = INT32_MAX;
+
+	ERR_clear_error();
+	ret = SSL_write(c->ssl, buf, (int)len);
+
+	return ret > 0 ? ret : esdm_tls_openssl_error(c, ret, want);
+}
+
+/* A record is written to the socket as a whole before SSL_write() returns */
+int esdm_tls_backend_flush(void *conn, short *want)
+{
+	(void)conn;
+	(void)want;
+	return 0;
+}
+
+ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
+			      short *want)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int ret;
+
+	if (len > INT32_MAX)
+		len = INT32_MAX;
+
+	ERR_clear_error();
+	ret = SSL_read(c->ssl, buf, (int)len);
+
+	/* A record of SOCK_SEQPACKET whole: what is left of it is none of ours */
+	if (c->dgram && ret > 0 && (size_t)ret == len &&
+	    SSL_pending(c->ssl) > 0) {
+		snprintf(c->error, sizeof(c->error),
+			 "a record larger than %zu bytes", len);
+		return -EMSGSIZE;
+	}
+	if (ret > 0)
+		return ret;
+
+	/* The closing alert is the end of the stream, not an error */
+	if (SSL_get_error(c->ssl, ret) == SSL_ERROR_ZERO_RETURN) {
+		ERR_clear_error();
+		return 0;
+	}
+
+	return esdm_tls_openssl_error(c, ret, want);
+}
+
+bool esdm_tls_backend_pending(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+
+	/*
+	 * On a stream socket, decrypted data only - a record not yet complete
+	 * is in the socket. On SOCK_SEQPACKET, OpenSSL reads a message whole,
+	 * which may hold several records: those not yet decrypted as well.
+	 */
+	if (c->dgram)
+		return SSL_has_pending(c->ssl) == 1;
+	return SSL_pending(c->ssl) > 0;
+}
+
+void esdm_tls_backend_close_notify(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+
+	ERR_clear_error();
+	SSL_shutdown(c->ssl);
+	ERR_clear_error();
+}
+
+const char *esdm_tls_backend_cipher(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+
+	return SSL_get_cipher_name(c->ssl);
+}
+
+const char *esdm_tls_backend_group(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int nid = (int)SSL_get_negotiated_group(c->ssl);
+
+	/* A NID, or the id of TLS of a group of a provider, as OpenSSL has it */
+	return nid ? SSL_group_to_name(c->ssl, nid) : NULL;
+}
+
+const char *esdm_tls_backend_error(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+
+	return c->error;
+}
+
+#ifdef ESDM_TLS_AUTH
+
+/******************************************************************************
+ * The certificates
+ ******************************************************************************/
+
 /*
  * @t in seconds since the epoch, 0 if it cannot be told. Counted from the
  * epoch by OpenSSL rather than converted with timegm(3): a time_t of 32 bits
@@ -359,7 +834,7 @@ static void esdm_tls_openssl_name(const X509_NAME *name, char *buf, size_t len)
 static X509 *esdm_tls_openssl_x509(const struct esdm_tls_der *der)
 {
 	const unsigned char *p = der->data;
-	X509 *x = X509_new_ex(esdm_tls_openssl_libctx, NULL);
+	X509 *x = X509_new_ex(esdm_tls_openssl_lib(), NULL);
 
 	if (!x)
 		return NULL;
@@ -418,8 +893,8 @@ static int esdm_tls_openssl_verify(int ok, X509_STORE_CTX *store)
 	if (!ok || X509_STORE_CTX_get_error_depth(store) != 0)
 		return ok;
 
-	/* No connection of ours: fail closed */
-	if (!c)
+	/* No connection of ours, or one without a policy: fail closed */
+	if (!c || !c->check)
 		goto refuse;
 
 	sk = X509_STORE_CTX_get0_chain(store);
@@ -487,7 +962,7 @@ static int esdm_tls_openssl_load_crls(STACK_OF(X509_CRL) *crls,
 
 	ERR_clear_error();
 	for (;;) {
-		X509_CRL *crl = X509_CRL_new_ex(esdm_tls_openssl_libctx, NULL);
+		X509_CRL *crl = X509_CRL_new_ex(esdm_tls_openssl_lib(), NULL);
 
 		if (!crl) {
 			BIO_free(bio);
@@ -562,7 +1037,7 @@ static const char *esdm_tls_openssl_mldsa_key(const EVP_PKEY *key)
 static int esdm_tls_openssl_check_own(SSL_CTX *c, const char *cert_file,
 				      const char *ca_file)
 {
-	X509_STORE_CTX *sctx = X509_STORE_CTX_new_ex(esdm_tls_openssl_libctx,
+	X509_STORE_CTX *sctx = X509_STORE_CTX_new_ex(esdm_tls_openssl_lib(),
 						     NULL);
 	STACK_OF(X509) *chain = NULL;
 	int ret = -EINVAL;
@@ -598,30 +1073,10 @@ out:
 	return ret;
 }
 
-/******************************************************************************
- * esdm_tls_backend.h
- ******************************************************************************/
-
-const char *esdm_tls_backend_name(void)
-{
-	return "OpenSSL";
-}
-
-void esdm_tls_backend_ctx_free(void *ctx)
-{
-	struct esdm_tls_openssl_ctx *c = ctx;
-
-	if (!c)
-		return;
-	SSL_CTX_free(c->ssl_ctx);
-	sk_X509_CRL_pop_free(c->crls, X509_CRL_free);
-	free(c);
-}
-
 /*
- * The files of one side, the same on either transport: the trust anchors, the
- * own certificate with its key - which has to chain to them - and the CRLs,
- * and the verification of the peer - see "Contexts" in esdm_tls.h.
+ * The files of one side: the trust anchors, the own certificate with its key -
+ * which has to chain to them - and the CRLs, and the verification of the peer
+ * - see "Contexts" in esdm_tls.h.
  */
 static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 				  const struct esdm_tls_config *cfg)
@@ -690,7 +1145,7 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 
 	if (server) {
 		STACK_OF(X509_NAME) *names = SSL_load_client_CA_file_ex(
-			cfg->ca_file, esdm_tls_openssl_libctx, NULL);
+			cfg->ca_file, esdm_tls_openssl_lib(), NULL);
 
 		/* The CAs the client may choose its certificate by */
 		if (names)
@@ -710,92 +1165,22 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 	return 0;
 }
 
-/*
- * TLS 1.3 exactly on a stream socket, and neither tickets nor a session cache:
- * a connection lives as long as it does, with the one handshake it started
- * with.
- */
-static int esdm_tls_openssl_stream(SSL_CTX *c)
+/******************************************************************************
+ * esdm_tls_backend.h: the certificates
+ ******************************************************************************/
+
+int esdm_tls_backend_ctx_files(void *ctx, bool server,
+			       const struct esdm_tls_config *cfg)
 {
-	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_num_tickets(c, 0))
-		return -ENOMEM;
-	SSL_CTX_set_options(c, SSL_OP_NO_TICKET | SSL_OP_NO_RENEGOTIATION);
-	SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
-
-	/*
-	 * A write the socket only took part of is continued with the rest, from
-	 * wherever the caller keeps it. A server holds many connections, most
-	 * of them idle between the requests: no record buffers for those.
-	 */
-	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
-				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
-				    SSL_MODE_RELEASE_BUFFERS);
-	/* Wipe the plaintext of a record once it is handed out */
-	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
-
-	/* ML-KEM first, as far as OpenSSL has it, see above */
-	if (SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_GROUPS) != 1) {
-		ERR_clear_error();
-		esdm_logger(
-			LOGGER_DEBUG, LOGGER_C_ANY,
-			"TLS: OpenSSL %s refused the groups of ML-KEM, its default groups serve\n",
-			OpenSSL_version(OPENSSL_VERSION_STRING));
-	}
-
-	/* ML-DSA-87 alone of ML-DSA, see above */
-	if (SSL_CTX_set1_sigalgs_list(c, ESDM_TLS_OPENSSL_SIGALGS) != 1) {
-		ERR_clear_error();
-		esdm_logger(
-			LOGGER_DEBUG, LOGGER_C_ANY,
-			"TLS: OpenSSL %s refused the signature schemes with ML-DSA-87, its default ones serve\n",
-			OpenSSL_version(OPENSSL_VERSION_STRING));
-	}
-
-	return 0;
-}
-
-int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
-			     void **ctx)
-{
-	struct esdm_tls_openssl_ctx *oc;
-	SSL_CTX *c;
+	struct esdm_tls_openssl_ctx *oc = ctx;
 	int ret;
 
-	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
-	if (!esdm_tls_openssl_libctx)
-		return -ENOMEM;
-
-	oc = calloc(1, sizeof(*oc));
-	if (!oc)
-		return -ENOMEM;
 	oc->crls = sk_X509_CRL_new_null();
-	if (!oc->crls) {
-		free(oc);
+	if (!oc->crls)
 		return -ENOMEM;
-	}
 
-	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL,
-			   server ? TLS_server_method() : TLS_client_method());
-	if (!c) {
-		ret = -ENOMEM;
-		goto err;
-	}
-	oc->ssl_ctx = c;
-
-	ret = esdm_tls_openssl_stream(c);
-	if (!ret)
-		ret = esdm_tls_openssl_files(oc, server, cfg);
-	if (ret)
-		goto err;
-
-	*ctx = oc;
-	return 0;
-
-err:
+	ret = esdm_tls_openssl_files(oc, server, cfg);
 	ERR_clear_error();
-	esdm_tls_backend_ctx_free(oc);
 	return ret;
 }
 
@@ -896,8 +1281,6 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 	char *hex;
 	int n;
 
-	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
-
 	x = esdm_tls_openssl_x509(cert);
 	if (!x)
 		return -EINVAL;
@@ -930,166 +1313,6 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 	return 0;
 }
 
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
-			      const char *server_name,
-			      esdm_tls_backend_check check, void *arg,
-			      void **conn)
-{
-	struct esdm_tls_openssl_ctx *oc = ctx;
-	struct esdm_tls_openssl_conn *c = calloc(1, sizeof(*c));
-	unsigned char addr[sizeof(struct in6_addr)];
-	BIO *bio;
-
-	if (!c)
-		return -ENOMEM;
-	c->check = check;
-	c->check_arg = arg;
-
-	c->ssl = SSL_new(oc->ssl_ctx);
-	if (!c->ssl)
-		goto err;
-	/* For esdm_tls_openssl_verify() */
-	SSL_set_app_data(c->ssl, c);
-
-	bio = BIO_new(esdm_tls_openssl_bio_meth);
-	if (!bio)
-		goto err;
-	BIO_set_data(bio, (void *)(intptr_t)fd);
-	/* The SSL owns the BIO from here on, for reading and writing */
-	SSL_set_bio(c->ssl, bio, bio);
-
-	if (server) {
-		SSL_set_accept_state(c->ssl);
-	} else {
-		/*
-		 * The name the certificate of the server has to be issued for:
-		 * an address literal is checked against the IP addresses of
-		 * its subject alternative name, and is no server name to
-		 * indicate - only a DNS name is.
-		 */
-		if (inet_pton(AF_INET, server_name, addr) == 1 ||
-		    inet_pton(AF_INET6, server_name, addr) == 1) {
-			if (X509_VERIFY_PARAM_set1_ip_asc(
-				    SSL_get0_param(c->ssl), server_name) != 1)
-				goto err;
-		} else {
-			if (SSL_set1_host(c->ssl, server_name) != 1 ||
-			    SSL_set_tlsext_host_name(c->ssl, server_name) != 1)
-				goto err;
-		}
-		SSL_set_connect_state(c->ssl);
-	}
-
-	*conn = c;
-	return 0;
-
-err:
-	ERR_clear_error();
-	SSL_free(c->ssl);
-	free(c);
-	return -ENOMEM;
-}
-
-void esdm_tls_backend_conn_free(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-
-	if (!c)
-		return;
-	SSL_free(c->ssl);
-	free(c);
-}
-
-int esdm_tls_backend_handshake(void *conn, short *want)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-	int ret;
-
-	ERR_clear_error();
-	ret = SSL_do_handshake(c->ssl);
-
-	return ret == 1 ? 0 : esdm_tls_openssl_error(c, ret, want);
-}
-
-ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
-			      short *want)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-	int ret;
-
-	if (len > INT32_MAX)
-		len = INT32_MAX;
-
-	ERR_clear_error();
-	ret = SSL_write(c->ssl, buf, (int)len);
-
-	return ret > 0 ? ret : esdm_tls_openssl_error(c, ret, want);
-}
-
-/* A record is written to the socket as a whole before SSL_write() returns */
-int esdm_tls_backend_flush(void *conn, short *want)
-{
-	(void)conn;
-	(void)want;
-	return 0;
-}
-
-ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
-			      short *want)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-	int ret;
-
-	if (len > INT32_MAX)
-		len = INT32_MAX;
-
-	ERR_clear_error();
-	ret = SSL_read(c->ssl, buf, (int)len);
-	if (ret > 0)
-		return ret;
-
-	/* The closing alert is the end of the stream, not an error */
-	if (SSL_get_error(c->ssl, ret) == SSL_ERROR_ZERO_RETURN) {
-		ERR_clear_error();
-		return 0;
-	}
-
-	return esdm_tls_openssl_error(c, ret, want);
-}
-
-bool esdm_tls_backend_pending(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-
-	/* Decrypted data only - a record not yet complete is in the socket */
-	return SSL_pending(c->ssl) > 0;
-}
-
-void esdm_tls_backend_close_notify(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-
-	ERR_clear_error();
-	SSL_shutdown(c->ssl);
-	ERR_clear_error();
-}
-
-const char *esdm_tls_backend_cipher(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-
-	return SSL_get_cipher_name(c->ssl);
-}
-
-const char *esdm_tls_backend_group(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-	int nid = (int)SSL_get_negotiated_group(c->ssl);
-
-	/* A NID, or the id of TLS of a group of a provider, as OpenSSL has it */
-	return nid ? SSL_group_to_name(c->ssl, nid) : NULL;
-}
-
 /* The groups of ML-KEM of ESDM_TLS_OPENSSL_GROUPS, in its order */
 static const char *const esdm_tls_openssl_mlkem[] = {
 	"SecP384r1MLKEM1024",
@@ -1099,15 +1322,15 @@ static const char *const esdm_tls_openssl_mlkem[] = {
 /* The first of them OpenSSL takes, in the library context of this file */
 const char *esdm_tls_backend_mlkem_group(void)
 {
+	OSSL_LIB_CTX *libctx = esdm_tls_openssl_lib();
 	const char *group = NULL;
 	SSL_CTX *c;
 	size_t i;
 
-	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
-	if (!esdm_tls_openssl_libctx)
+	if (!libctx)
 		return NULL;
 
-	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL, TLS_method());
+	c = SSL_CTX_new_ex(libctx, NULL, TLS_method());
 	if (!c) {
 		ERR_clear_error();
 		return NULL;
@@ -1122,35 +1345,35 @@ const char *esdm_tls_backend_mlkem_group(void)
 	return group;
 }
 
-/*
- * ML-DSA-87 for certificates and CRLs where its signatures are there, for the
- * handshake where the signature schemes of ESDM_TLS_OPENSSL_SIGALGS are taken
- * as well - both from 3.5 on
- */
 /* X509_VERIFY_PARAM_set1_ip_asc() takes either family */
 bool esdm_tls_backend_ip6_name(void)
 {
 	return true;
 }
 
+/*
+ * ML-DSA-87 for certificates and CRLs where its signatures are there, for the
+ * handshake where the signature schemes of ESDM_TLS_OPENSSL_SIGALGS are taken
+ * as well - both from 3.5 on
+ */
 unsigned int esdm_tls_backend_mldsa(void)
 {
+	OSSL_LIB_CTX *libctx = esdm_tls_openssl_lib();
 	unsigned int ret = ESDM_TLS_MLDSA_CA;
 	EVP_SIGNATURE *sig;
 	SSL_CTX *c;
 
-	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
-	if (!esdm_tls_openssl_libctx)
+	if (!libctx)
 		return 0;
 
-	sig = EVP_SIGNATURE_fetch(esdm_tls_openssl_libctx, "ML-DSA-87", NULL);
+	sig = EVP_SIGNATURE_fetch(libctx, "ML-DSA-87", NULL);
 	if (!sig) {
 		ERR_clear_error();
 		return 0;
 	}
 	EVP_SIGNATURE_free(sig);
 
-	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL, TLS_method());
+	c = SSL_CTX_new_ex(libctx, NULL, TLS_method());
 	if (c && SSL_CTX_set1_sigalgs_list(c, ESDM_TLS_OPENSSL_SIGALGS) == 1)
 		ret |= ESDM_TLS_MLDSA_AUTH;
 	SSL_CTX_free(c);
@@ -1159,9 +1382,4 @@ unsigned int esdm_tls_backend_mldsa(void)
 	return ret;
 }
 
-const char *esdm_tls_backend_error(void *conn)
-{
-	struct esdm_tls_openssl_conn *c = conn;
-
-	return c->error;
-}
+#endif /* ESDM_TLS_AUTH */

@@ -56,7 +56,8 @@
  * The TLS is provided by the TLS stack of the crypto backend the ESDM is built
  * with: OpenSSL, GnuTLS or Botan. The builtin and the leancrypto backend have
  * none, a build with them has no egd-net-tls and no es-ext-net, and every
- * function here reports -EOPNOTSUPP.
+ * function here reports -EOPNOTSUPP. It is the backend of the TLS stack the
+ * local DTLS of esdm_dtls.h uses as well, see esdm_tls_backend.h.
  *
  * Post-quantum algorithms
  * -----------------------
@@ -217,6 +218,12 @@ struct esdm_tls;
 enum esdm_tls_transport {
 	/* TLS 1.3 on a connected stream socket */
 	ESDM_TLS_TRANSPORT_STREAM = 0,
+	/*
+	 * DTLS 1.2 with the pre-shared key of the ESDM on a connected
+	 * SOCK_SEQPACKET socket: the local DTLS of esdm_dtls.h, which takes no
+	 * certificates and no context of esdm_tls_ctx_alloc()
+	 */
+	ESDM_TLS_TRANSPORT_SEQPACKET = 1,
 };
 
 /**
@@ -246,7 +253,7 @@ struct esdm_tls_config {
 	bool crl_check_all;
 	/* A CRL past its nextUpdate only causes a warning */
 	bool crl_allow_expired;
-	/* ESDM_TLS_TRANSPORT_STREAM, the default and the only one */
+	/* ESDM_TLS_TRANSPORT_STREAM, the default and the only one taken */
 	enum esdm_tls_transport transport;
 };
 

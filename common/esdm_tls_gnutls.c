@@ -18,13 +18,17 @@
  */
 
 /*
- * TLS of esdm_tls_backend.h by GnuTLS, for crypto_backend=gnutls: TLS 1.3 on a
- * stream socket, with the files, the verification and the revocation policy of
- * esdm_tls_gnutls_files() and esdm_tls_gnutls_verify().
+ * (D)TLS of esdm_tls_backend.h by GnuTLS, for crypto_backend=gnutls: TLS 1.3
+ * on a stream socket, with the files, the verification and the revocation
+ * policy of esdm_tls_gnutls_files() and esdm_tls_gnutls_verify(), and the
+ * DTLS 1.2 with the pre-shared key of the local DTLS on SOCK_SEQPACKET.
  *
  * GnuTLS reaches the socket through push and pull functions of its own, one
- * send(2) with MSG_NOSIGNAL or recv(2) each on the non-blocking socket, which
- * makes every call return GNUTLS_E_AGAIN rather than wait for the peer.
+ * send(2) with MSG_NOSIGNAL or recv(2) each on the non-blocking socket - a
+ * message of the socket each on SOCK_SEQPACKET -, which makes every call
+ * return GNUTLS_E_AGAIN rather than wait for the peer. The session of the
+ * local DTLS is a datagram one with the replay detection of DTLS, and with
+ * timeouts too long to ever retransmit: the connection is reliable.
  *
  * GnuTLS decrypts a record into a buffer of its own, which gnutls_record_recv()
  * frees without wiping it: the packet is taken from GnuTLS instead, handed out
@@ -46,6 +50,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <gnutls/abstract.h>
+#include <gnutls/dtls.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <poll.h>
@@ -74,44 +79,52 @@
 #define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
 
 /*
- * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them -
- * not its hybrids X25519-MLKEM768 and SECP256R1-MLKEM768, of 128 bits. GnuTLS
- * 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid, and
- * leaves it out of what it offers - until it does.
+ * The local DTLS: DTLS 1.2 exactly, TLS_ECDHE_PSK_AES_256_CBC_SHA384 on P-521.
+ * GnuTLS has no ECDHE-PSK suite with AES-GCM - RFC 8442's - and its one with
+ * an AEAD cipher is ChaCha20-Poly1305, which neither NIST SP 800-52r2 nor
+ * BSI TR-02102-2 allows. Encrypt-then-MAC is on by default, and required:
+ * see esdm_tls_backend_handshake(). Nothing is signed - GnuTLS only wants a
+ * signature algorithm in the priorities, and the hello carries it.
  */
-static const char *const esdm_tls_gnutls_mlkem[] = {
-	"SECP384R1-MLKEM1024",
-	"MLKEM1024",
-};
+#define ESDM_TLS_GNUTLS_PSK_PRIORITY                                           \
+	"NONE:+VERS-DTLS1.2:+ECDHE-PSK:+AES-256-CBC:+SHA384:"                  \
+	"+GROUP-SECP521R1:+SIGN-ECDSA-SHA512:+COMP-NULL"
 
 /*
- * The signature algorithms of ML-DSA in the priority: ML-DSA-87 alone, see
- * esdm_tls.h - the NORMAL of 3.8.13 lists the others as well
+ * The retransmission and the total timeout of the DTLS handshake, in
+ * milliseconds: long enough to never run out - the connection is reliable, and
+ * the callers bound the handshake themselves
  */
-static const char *const esdm_tls_gnutls_mldsa[] = {
-	"-SIGN-ML-DSA-44",
-	"-SIGN-ML-DSA-65",
-	"+SIGN-ML-DSA-87",
-};
+#define ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS (600 * 1000)
 
 /* The extensions of a CRL that is no complete one, see esdm_tls_crl_info */
 #define ESDM_TLS_GNUTLS_OID_DELTA_CRL "2.5.29.27"
 #define ESDM_TLS_GNUTLS_OID_IDP "2.5.29.28"
 
 struct esdm_tls_gnutls_ctx {
-	gnutls_certificate_credentials_t cred;
 	gnutls_priority_t prio;
+	enum esdm_tls_transport transport;
+#ifdef ESDM_DTLS
+	/* The pre-shared key of the local DTLS */
+	gnutls_psk_client_credentials_t psk_client;
+	gnutls_psk_server_credentials_t psk_server;
+#endif
+#ifdef ESDM_TLS_AUTH
+	gnutls_certificate_credentials_t cred;
 	gnutls_x509_crl_t *crls;
 	unsigned int crl_num;
 	/* The trust anchors of cred, for esdm_tls_gnutls_chain() */
 	gnutls_x509_crt_t *cas;
 	unsigned int ca_num;
+#endif
 };
 
 struct esdm_tls_gnutls_conn {
 	gnutls_session_t session;
 	struct esdm_tls_gnutls_ctx *ctx;
 	int fd;
+	/* SOCK_SEQPACKET: a record of the connection is a message of its own */
+	bool dgram;
 
 	/* The packet being handed out, and how much of it is */
 	gnutls_packet_t pkt;
@@ -132,8 +145,12 @@ struct esdm_tls_gnutls_conn {
 	char error[ESDM_TLS_TEXT_LEN];
 };
 
-static ssize_t esdm_tls_gnutls_push(gnutls_transport_ptr_t ptr,
-				    const void *buf, size_t len)
+/******************************************************************************
+ * The transports
+ ******************************************************************************/
+
+static ssize_t esdm_tls_gnutls_push(gnutls_transport_ptr_t ptr, const void *buf,
+				    size_t len)
 {
 	struct esdm_tls_gnutls_conn *c = ptr;
 	ssize_t n = send(c->fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -150,12 +167,41 @@ static ssize_t esdm_tls_gnutls_pull(gnutls_transport_ptr_t ptr, void *buf,
 	struct esdm_tls_gnutls_conn *c = ptr;
 	ssize_t n = recv(c->fd, buf, len, MSG_DONTWAIT);
 
-	/* 0 is the end of the stream, which GnuTLS tells apart itself */
+	/*
+	 * 0 is the end of the stream, which GnuTLS tells apart itself - but to
+	 * a datagram session an empty datagram to be waited past: the peer
+	 * gone is an error there
+	 */
+	if (n == 0 && c->dgram) {
+		gnutls_transport_set_errno(c->session, ECONNRESET);
+		return -1;
+	}
 	if (n < 0)
 		gnutls_transport_set_errno(c->session, errno);
 
 	return n;
 }
+
+/*
+ * Is a message there? Always, to the DTLS of GnuTLS - and the pull tells
+ * whether one really is. The answer only decides whether it retransmits its
+ * flight, which it need not on a reliable connection. And it asks before it
+ * reads the Finished of the peer even when it parsed that Finished already,
+ * with the ChangeCipherSpec before it, which a peer may well have sent in a
+ * message of its own: an answer by the socket would have the handshake wait
+ * for a message that is not to come.
+ */
+static int esdm_tls_gnutls_pull_timeout(gnutls_transport_ptr_t ptr,
+					unsigned int ms)
+{
+	(void)ptr;
+	(void)ms;
+	return 1;
+}
+
+/******************************************************************************
+ * The errors
+ ******************************************************************************/
 
 /* An alert that is about a certificate: refused, or not presented */
 static bool esdm_tls_gnutls_cert_alert(gnutls_alert_description_t alert)
@@ -224,7 +270,7 @@ static int esdm_tls_gnutls_error(struct esdm_tls_gnutls_conn *c, int ret,
 		return esdm_tls_gnutls_cert_alert(alert) ? -EACCES : -EPROTO;
 	default:
 		if (!gnutls_error_is_fatal(ret)) {
-			/* A warning alert and the like: try again */
+			/* A warning alert, a datagram dropped: try again */
 			*want = POLLOUT;
 			return -EAGAIN;
 		}
@@ -233,6 +279,534 @@ static int esdm_tls_gnutls_error(struct esdm_tls_gnutls_conn *c, int ret,
 		return -EPROTO;
 	}
 }
+
+/*
+ * Tell the peer why the handshake failed with @ret, best effort: once, and
+ * not for a failure the peer caused by going away or by an alert of its own.
+ */
+static void esdm_tls_gnutls_alert(struct esdm_tls_gnutls_conn *d, int ret)
+{
+	if (d->alert_sent || ret == GNUTLS_E_FATAL_ALERT_RECEIVED ||
+	    ret == GNUTLS_E_PREMATURE_TERMINATION ||
+	    ret == GNUTLS_E_PULL_ERROR || ret == GNUTLS_E_PUSH_ERROR)
+		return;
+	d->alert_sent = true;
+
+	if (d->alert_set)
+		gnutls_alert_send(d->session, GNUTLS_AL_FATAL, d->alert);
+	else
+		gnutls_alert_send_appropriate(d->session, ret);
+}
+
+/******************************************************************************
+ * The contexts of the transports
+ ******************************************************************************/
+
+#ifdef ESDM_DTLS
+/*
+ * The pre-shared key of a server, see esdm_tls_backend.h: it knows no other
+ * identity, and refuses a client with another one.
+ */
+static int esdm_tls_gnutls_psk_server(gnutls_session_t session,
+				      const char *username, gnutls_datum_t *key)
+{
+	(void)session;
+
+	if (!username || strcmp(username, ESDM_DTLS_PSK_IDENTITY))
+		return -1;
+
+	/* GnuTLS frees it */
+	key->data = gnutls_malloc(sizeof(esdm_dtls_psk));
+	if (!key->data)
+		return -1;
+	memcpy(key->data, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	key->size = sizeof(esdm_dtls_psk);
+	return 0;
+}
+
+/* The local DTLS: the pre-shared key of either side */
+static int esdm_tls_gnutls_psk(struct esdm_tls_gnutls_ctx *c, bool server)
+{
+	/* Copied into the credentials */
+	const gnutls_datum_t key = { .data = (unsigned char *)esdm_dtls_psk,
+				     .size = sizeof(esdm_dtls_psk) };
+
+	if (server) {
+		if (gnutls_psk_allocate_server_credentials(&c->psk_server) < 0)
+			return -ENOMEM;
+		gnutls_psk_set_server_credentials_function(
+			c->psk_server, esdm_tls_gnutls_psk_server);
+	} else {
+		if (gnutls_psk_allocate_client_credentials(&c->psk_client) <
+			    0 ||
+		    gnutls_psk_set_client_credentials(
+			    c->psk_client, ESDM_DTLS_PSK_IDENTITY, &key,
+			    GNUTLS_PSK_KEY_RAW) < 0)
+			return -ENOMEM;
+	}
+
+	return gnutls_priority_init(&c->prio, ESDM_TLS_GNUTLS_PSK_PRIORITY,
+				    NULL) < 0 ?
+		       -ENOMEM :
+		       0;
+}
+#else
+static int esdm_tls_gnutls_psk(struct esdm_tls_gnutls_ctx *c, bool server)
+{
+	(void)c;
+	(void)server;
+	return -EOPNOTSUPP;
+}
+#endif /* ESDM_DTLS */
+
+#ifdef ESDM_TLS_AUTH
+
+/*
+ * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them -
+ * not its hybrids X25519-MLKEM768 and SECP256R1-MLKEM768, of 128 bits. GnuTLS
+ * 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid, and
+ * leaves it out of what it offers - until it does.
+ */
+static const char *const esdm_tls_gnutls_mlkem[] = {
+	"SECP384R1-MLKEM1024",
+	"MLKEM1024",
+};
+
+/*
+ * The signature algorithms of ML-DSA in the priority: ML-DSA-87 alone, see
+ * esdm_tls.h - the NORMAL of 3.8.13 lists the others as well
+ */
+static const char *const esdm_tls_gnutls_mldsa[] = {
+	"-SIGN-ML-DSA-44",
+	"-SIGN-ML-DSA-65",
+	"+SIGN-ML-DSA-87",
+};
+
+/* Append ":<what><name>" to the priority @prio of @len bytes so far */
+static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
+				    const char *name)
+{
+	int n = snprintf(prio + *len, ESDM_TLS_GNUTLS_PRIORITY_LEN - *len,
+			 ":%s%s", what, name);
+
+	if (n < 0 || (size_t)n >= ESDM_TLS_GNUTLS_PRIORITY_LEN - *len)
+		return -ENOSPC;
+	*len += (size_t)n;
+	return 0;
+}
+
+/*
+ * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
+ * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL but
+ * any of ML-KEM it may list - for "+" appends, the groups are listed anew.
+ * Of the signature algorithms of ML-DSA, ML-DSA-87 is added where GnuTLS signs
+ * TLS with it, ML-DSA-44 and ML-DSA-65 taken out. GnuTLS refuses a priority
+ * naming a group it does not have, and one built without leancrypto has none
+ * of ML-KEM: the string names only what GnuTLS reports - and should it be
+ * refused nevertheless, NORMAL's groups serve.
+ */
+static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
+{
+	char str[ESDM_TLS_GNUTLS_PRIORITY_LEN];
+	gnutls_priority_t normal;
+	const unsigned int *groups;
+	const char *name;
+	size_t len, i;
+	int n, ret = 0;
+
+	len = (size_t)snprintf(str, sizeof(str), "%s:-GROUP-ALL",
+			       ESDM_TLS_GNUTLS_PRIORITY);
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem) && !ret; i++) {
+		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
+		    GNUTLS_GROUP_INVALID)
+			ret = esdm_tls_gnutls_prio_add(
+				str, &len, "+GROUP-", esdm_tls_gnutls_mlkem[i]);
+	}
+
+	if (gnutls_priority_init(&normal, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
+		return -ENOMEM;
+	n = gnutls_priority_group_list(normal, &groups);
+	for (i = 0; n > 0 && i < (size_t)n && !ret; i++) {
+		name = gnutls_group_get_name((gnutls_group_t)groups[i]);
+		/* Hybrids of 128 bits as well, see esdm_tls_gnutls_mlkem */
+		if (name && !strstr(name, "MLKEM") && !strstr(name, "KYBER"))
+			ret = esdm_tls_gnutls_prio_add(str, &len, "+GROUP-",
+						       name);
+	}
+	gnutls_priority_deinit(normal);
+
+	if (esdm_tls_backend_mldsa() & ESDM_TLS_MLDSA_AUTH) {
+		for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mldsa) && !ret; i++)
+			ret = esdm_tls_gnutls_prio_add(
+				str, &len, "", esdm_tls_gnutls_mldsa[i]);
+	}
+
+	if (!ret) {
+		ret = gnutls_priority_init(prio, str, NULL);
+		if (ret >= 0)
+			return 0;
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+			    "TLS: GnuTLS refused the priority %s: %s\n", str,
+			    gnutls_strerror(ret));
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "TLS: the groups of NORMAL serve, without ML-KEM\n");
+	if (gnutls_priority_init(prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
+		return -ENOMEM;
+	return 0;
+}
+
+/* The TLS with certificates: their credentials, and the priority */
+static int esdm_tls_gnutls_certs(struct esdm_tls_gnutls_ctx *c)
+{
+	if (gnutls_certificate_allocate_credentials(&c->cred) < 0) {
+		c->cred = NULL;
+		return -ENOMEM;
+	}
+	return esdm_tls_gnutls_stream_priority(&c->prio);
+}
+#else
+static int esdm_tls_gnutls_certs(struct esdm_tls_gnutls_ctx *c)
+{
+	(void)c;
+	return -EOPNOTSUPP;
+}
+#endif /* ESDM_TLS_AUTH */
+
+/******************************************************************************
+ * esdm_tls_backend.h: the core
+ ******************************************************************************/
+
+const char *esdm_tls_backend_name(void)
+{
+	return "GnuTLS";
+}
+
+void esdm_tls_backend_ctx_free(void *ctx)
+{
+	struct esdm_tls_gnutls_ctx *c = ctx;
+#ifdef ESDM_TLS_AUTH
+	unsigned int i;
+#endif
+
+	if (!c)
+		return;
+	if (c->prio)
+		gnutls_priority_deinit(c->prio);
+#ifdef ESDM_DTLS
+	if (c->psk_server)
+		gnutls_psk_free_server_credentials(c->psk_server);
+	if (c->psk_client)
+		gnutls_psk_free_client_credentials(c->psk_client);
+#endif
+#ifdef ESDM_TLS_AUTH
+	if (c->cred)
+		gnutls_certificate_free_credentials(c->cred);
+	for (i = 0; i < c->crl_num; i++)
+		gnutls_x509_crl_deinit(c->crls[i]);
+	free(c->crls);
+	for (i = 0; i < c->ca_num; i++)
+		gnutls_x509_crt_deinit(c->cas[i]);
+	free(c->cas);
+#endif
+	free(c);
+}
+
+int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
+			     void **ctx)
+{
+	struct esdm_tls_gnutls_ctx *c = calloc(1, sizeof(*c));
+	int ret;
+
+	if (!c)
+		return -ENOMEM;
+	c->transport = transport;
+
+	ret = transport == ESDM_TLS_TRANSPORT_SEQPACKET ?
+		      esdm_tls_gnutls_psk(c, server) :
+		      esdm_tls_gnutls_certs(c);
+	if (ret) {
+		esdm_tls_backend_ctx_free(c);
+		return ret;
+	}
+
+	*ctx = c;
+	return 0;
+}
+
+int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+			      const char *server_name,
+			      esdm_tls_backend_check check, void *arg,
+			      void **conn)
+{
+	struct esdm_tls_gnutls_ctx *c = ctx;
+	struct esdm_tls_gnutls_conn *d;
+	unsigned char addr[sizeof(struct in6_addr)];
+	bool psk = c->transport == ESDM_TLS_TRANSPORT_SEQPACKET;
+	unsigned int flags = (server ? GNUTLS_SERVER : GNUTLS_CLIENT) |
+			     GNUTLS_NONBLOCK | GNUTLS_NO_TICKETS;
+	void *cred = NULL;
+
+	d = calloc(1, sizeof(*d));
+	if (!d)
+		return -ENOMEM;
+	d->fd = fd;
+	d->ctx = c;
+	d->check = check;
+	d->check_arg = arg;
+	d->dgram = psk;
+
+	/* With the replay detection of DTLS, see the file header */
+	if (d->dgram)
+		flags |= GNUTLS_DATAGRAM;
+
+	if (gnutls_init(&d->session, flags) < 0) {
+		free(d);
+		return -ENOMEM;
+	}
+
+#ifdef ESDM_DTLS
+	if (psk)
+		cred = server ? (void *)c->psk_server : (void *)c->psk_client;
+#endif
+#ifdef ESDM_TLS_AUTH
+	if (!psk)
+		cred = c->cred;
+#endif
+	if (gnutls_priority_set(d->session, c->prio) < 0 ||
+	    gnutls_credentials_set(
+		    d->session, psk ? GNUTLS_CRD_PSK : GNUTLS_CRD_CERTIFICATE,
+		    cred) < 0)
+		goto err;
+
+	if (psk) {
+		/* The local DTLS, which has no certificate */
+	} else if (server) {
+		/* Mutual authentication: no certificate, no connection */
+		gnutls_certificate_server_set_request(d->session,
+						      GNUTLS_CERT_REQUIRE);
+		d->vdata[d->vdata_num].type = GNUTLS_DT_KEY_PURPOSE_OID;
+		d->vdata[d->vdata_num++].data =
+			(unsigned char *)GNUTLS_KP_TLS_WWW_CLIENT;
+	} else {
+		/*
+		 * The name the certificate of the server has to be issued for:
+		 * an address literal is checked against the IP addresses of
+		 * its subject alternative name, and is no server name to
+		 * indicate - only a DNS name is.
+		 */
+		if (!server_name ||
+		    strlen(server_name) >= sizeof(d->server_name))
+			goto err;
+		strcpy(d->server_name, server_name);
+		d->vdata[d->vdata_num].type = GNUTLS_DT_DNS_HOSTNAME;
+		d->vdata[d->vdata_num++].data = (unsigned char *)d->server_name;
+		d->vdata[d->vdata_num].type = GNUTLS_DT_KEY_PURPOSE_OID;
+		d->vdata[d->vdata_num++].data =
+			(unsigned char *)GNUTLS_KP_TLS_WWW_SERVER;
+		if (inet_pton(AF_INET, server_name, addr) != 1 &&
+		    inet_pton(AF_INET6, server_name, addr) != 1 &&
+		    gnutls_server_name_set(d->session, GNUTLS_NAME_DNS,
+					   server_name,
+					   strlen(server_name)) < 0)
+			goto err;
+	}
+
+	/* For the verify function of the credentials */
+	gnutls_session_set_ptr(d->session, d);
+
+	gnutls_transport_set_ptr(d->session, d);
+	gnutls_transport_set_push_function(d->session, esdm_tls_gnutls_push);
+	gnutls_transport_set_pull_function(d->session, esdm_tls_gnutls_pull);
+	if (d->dgram) {
+		/*
+		 * No MTU to discover and no record to fragment, and no
+		 * retransmission of DTLS
+		 */
+		gnutls_transport_set_pull_timeout_function(
+			d->session, esdm_tls_gnutls_pull_timeout);
+		gnutls_dtls_set_mtu(d->session, ESDM_DTLS_LINK_MTU);
+		gnutls_dtls_set_timeouts(d->session,
+					 ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS,
+					 ESDM_TLS_GNUTLS_DTLS_TIMEOUT_MS);
+	}
+
+	*conn = d;
+	return 0;
+
+err:
+	gnutls_deinit(d->session);
+	free(d);
+	return -ENOMEM;
+}
+
+static void esdm_tls_gnutls_drop_pkt(struct esdm_tls_gnutls_conn *d)
+{
+	gnutls_datum_t data;
+
+	if (!d->pkt)
+		return;
+
+	gnutls_packet_get(d->pkt, &data, NULL);
+	memset_secure(data.data, 0, data.size);
+	gnutls_packet_deinit(d->pkt);
+	d->pkt = NULL;
+	d->pkt_off = 0;
+}
+
+void esdm_tls_backend_conn_free(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+
+	if (!d)
+		return;
+	esdm_tls_gnutls_drop_pkt(d);
+	gnutls_deinit(d->session);
+	free(d);
+}
+
+/*
+ * The local DTLS refuses a session without Encrypt-then-MAC (RFC 7366):
+ * MAC-then-encrypt of CBC is what Lucky Thirteen reads records from, and DTLS
+ * lets an attacker try again after every record it broke. Every peer of the
+ * ESDM offers and agrees to it, whichever its TLS stack.
+ */
+int esdm_tls_backend_handshake(void *conn, short *want)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	int ret = gnutls_handshake(d->session), err;
+
+	if (ret != GNUTLS_E_SUCCESS) {
+		err = esdm_tls_gnutls_error(d, ret, want);
+		if (err != -EAGAIN)
+			esdm_tls_gnutls_alert(d, ret);
+		return err;
+	}
+
+	if (d->ctx->transport == ESDM_TLS_TRANSPORT_SEQPACKET &&
+	    !gnutls_session_etm_status(d->session)) {
+		snprintf(d->error, sizeof(d->error),
+			 "CBC without Encrypt-then-MAC");
+		return -EPROTO;
+	}
+	return 0;
+}
+
+ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
+			      short *want)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	ssize_t ret = gnutls_record_send(d->session, buf, len);
+
+	if (ret > 0)
+		return ret;
+	if (ret == 0)
+		return -EIO;
+	return esdm_tls_gnutls_error(d, (int)ret, want);
+}
+
+/* What GnuTLS could not send it keeps until the send is repeated */
+int esdm_tls_backend_flush(void *conn, short *want)
+{
+	(void)conn;
+	(void)want;
+	return 0;
+}
+
+ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len, short *want)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	gnutls_datum_t data;
+	size_t n;
+
+	if (!d->pkt) {
+		ssize_t ret = gnutls_record_recv_packet(d->session, &d->pkt);
+
+		if (ret <= 0) {
+			/* A packet comes with data only */
+			if (d->pkt)
+				esdm_tls_gnutls_drop_pkt(d);
+			/* 0: the closing alert */
+			if (ret == 0)
+				return 0;
+			return esdm_tls_gnutls_error(d, (int)ret, want);
+		}
+		d->pkt_off = 0;
+	}
+
+	gnutls_packet_get(d->pkt, &data, NULL);
+
+	/* A record of SOCK_SEQPACKET whole, or none */
+	if (d->dgram && data.size > len) {
+		esdm_tls_gnutls_drop_pkt(d);
+		snprintf(d->error, sizeof(d->error),
+			 "a record larger than %zu bytes", len);
+		return -EMSGSIZE;
+	}
+	n = data.size - d->pkt_off;
+	if (n > len)
+		n = len;
+	memcpy(buf, data.data + d->pkt_off, n);
+	d->pkt_off += n;
+
+	if (d->pkt_off >= data.size)
+		esdm_tls_gnutls_drop_pkt(d);
+
+	return (ssize_t)n;
+}
+
+bool esdm_tls_backend_pending(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+
+	return d->pkt || gnutls_record_check_pending(d->session) > 0;
+}
+
+void esdm_tls_backend_close_notify(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+
+	gnutls_bye(d->session, GNUTLS_SHUT_WR);
+}
+
+/*
+ * The name of the suite of DTLS 1.2, as the other TLS stacks tell it; TLS 1.3
+ * names the cipher alone
+ */
+const char *esdm_tls_backend_cipher(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	gnutls_cipher_algorithm_t cipher = gnutls_cipher_get(d->session);
+	const char *name = d->dgram ? gnutls_cipher_suite_get_name(
+					      gnutls_kx_get(d->session), cipher,
+					      gnutls_mac_get(d->session)) :
+				      gnutls_cipher_get_name(cipher);
+
+	return name ? name : "unknown";
+}
+
+const char *esdm_tls_backend_group(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	gnutls_group_t group = gnutls_group_get(d->session);
+
+	return group == GNUTLS_GROUP_INVALID ? NULL :
+					       gnutls_group_get_name(group);
+}
+
+const char *esdm_tls_backend_error(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+
+	return d->error;
+}
+
+#ifdef ESDM_TLS_AUTH
+
+/******************************************************************************
+ * The certificates
+ ******************************************************************************/
 
 static void esdm_tls_gnutls_datum_str(const gnutls_datum_t *d, char *buf,
 				      size_t len)
@@ -466,81 +1040,6 @@ static bool esdm_tls_gnutls_has_pk(const char *name)
 	return false;
 }
 
-/* Append ":<what><name>" to the priority @prio of @len bytes so far */
-static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
-				    const char *name)
-{
-	int n = snprintf(prio + *len, ESDM_TLS_GNUTLS_PRIORITY_LEN - *len,
-			 ":%s%s", what, name);
-
-	if (n < 0 || (size_t)n >= ESDM_TLS_GNUTLS_PRIORITY_LEN - *len)
-		return -ENOSPC;
-	*len += (size_t)n;
-	return 0;
-}
-
-/*
- * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
- * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL but
- * any of ML-KEM it may list - for "+" appends, the groups are listed anew.
- * Of the signature algorithms of ML-DSA, ML-DSA-87 is added where GnuTLS signs
- * TLS with it, ML-DSA-44 and ML-DSA-65 taken out. GnuTLS refuses a priority
- * naming a group it does not have, and one built without leancrypto has none
- * of ML-KEM: the string names only what GnuTLS reports - and should it be
- * refused nevertheless, NORMAL's groups serve.
- */
-static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
-{
-	char str[ESDM_TLS_GNUTLS_PRIORITY_LEN];
-	gnutls_priority_t normal;
-	const unsigned int *groups;
-	const char *name;
-	size_t len, i;
-	int n, ret = 0;
-
-	len = (size_t)snprintf(str, sizeof(str), "%s:-GROUP-ALL",
-			       ESDM_TLS_GNUTLS_PRIORITY);
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem) && !ret; i++) {
-		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
-		    GNUTLS_GROUP_INVALID)
-			ret = esdm_tls_gnutls_prio_add(
-				str, &len, "+GROUP-", esdm_tls_gnutls_mlkem[i]);
-	}
-
-	if (gnutls_priority_init(&normal, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
-		return -ENOMEM;
-	n = gnutls_priority_group_list(normal, &groups);
-	for (i = 0; n > 0 && i < (size_t)n && !ret; i++) {
-		name = gnutls_group_get_name((gnutls_group_t)groups[i]);
-		/* Hybrids of 128 bits as well, see esdm_tls_gnutls_mlkem */
-		if (name && !strstr(name, "MLKEM") && !strstr(name, "KYBER"))
-			ret = esdm_tls_gnutls_prio_add(str, &len, "+GROUP-",
-						       name);
-	}
-	gnutls_priority_deinit(normal);
-
-	if (esdm_tls_backend_mldsa() & ESDM_TLS_MLDSA_AUTH) {
-		for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mldsa) && !ret; i++)
-			ret = esdm_tls_gnutls_prio_add(
-				str, &len, "", esdm_tls_gnutls_mldsa[i]);
-	}
-
-	if (!ret) {
-		ret = gnutls_priority_init(prio, str, NULL);
-		if (ret >= 0)
-			return 0;
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-			    "TLS: GnuTLS refused the priority %s: %s\n", str,
-			    gnutls_strerror(ret));
-	}
-
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-		    "TLS: the groups of NORMAL serve, without ML-KEM\n");
-	if (gnutls_priority_init(prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
-		return -ENOMEM;
-	return 0;
-}
-
 /*
  * Of ML-DSA, a certificate on ML-DSA-87 alone, see "Post-quantum algorithms"
  * in esdm_tls.h
@@ -642,306 +1141,6 @@ out:
 	gnutls_free(crts);
 
 	return ret;
-}
-
-/******************************************************************************
- * esdm_tls_backend.h
- ******************************************************************************/
-
-const char *esdm_tls_backend_name(void)
-{
-	return "GnuTLS";
-}
-
-/* The first group of ML-KEM GnuTLS has */
-const char *esdm_tls_backend_mlkem_group(void)
-{
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem); i++) {
-		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
-		    GNUTLS_GROUP_INVALID)
-			return esdm_tls_gnutls_mlkem[i];
-	}
-	return NULL;
-}
-
-/*
- * ML-DSA-87 for certificates and CRLs where GnuTLS has its signatures - when
- * built with leancrypto, 3.8.9 and later -, for the handshake of TLS from
- * 3.8.10 on
- */
-/* The name check of GnuTLS takes an address of either family */
-bool esdm_tls_backend_ip6_name(void)
-{
-	return true;
-}
-
-unsigned int esdm_tls_backend_mldsa(void)
-{
-	if (!esdm_tls_gnutls_has_pk("ML-DSA-87"))
-		return 0;
-
-	return ESDM_TLS_MLDSA_CA |
-	       (gnutls_check_version("3.8.10") ? ESDM_TLS_MLDSA_AUTH : 0);
-}
-
-void esdm_tls_backend_ctx_free(void *ctx)
-{
-	struct esdm_tls_gnutls_ctx *c = ctx;
-	unsigned int i;
-
-	if (!c)
-		return;
-	if (c->prio)
-		gnutls_priority_deinit(c->prio);
-	if (c->cred)
-		gnutls_certificate_free_credentials(c->cred);
-	for (i = 0; i < c->crl_num; i++)
-		gnutls_x509_crl_deinit(c->crls[i]);
-	free(c->crls);
-	for (i = 0; i < c->ca_num; i++)
-		gnutls_x509_crt_deinit(c->cas[i]);
-	free(c->cas);
-	free(c);
-}
-
-/*
- * The files of one side, the same on either transport: the trust anchors, the
- * own certificate with its key - which has to chain to them - and the CRLs -
- * see "Contexts" in esdm_tls.h.
- */
-static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
-				 const struct esdm_tls_config *cfg)
-{
-	unsigned int i;
-	int ret;
-
-	ret = gnutls_certificate_set_x509_trust_file(c->cred, cfg->ca_file,
-						     GNUTLS_X509_FMT_PEM);
-	if (ret <= 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "TLS: cannot load the trust anchors %s: %s\n",
-			    cfg->ca_file,
-			    ret < 0 ? gnutls_strerror(ret) :
-				      "no certificate in it");
-		return -EINVAL;
-	}
-	ret = esdm_tls_gnutls_load_cas(c);
-	if (ret)
-		return ret;
-
-	if (cfg->cert_file) {
-		/* Checks that the key belongs to the certificate as well */
-		ret = gnutls_certificate_set_x509_key_file2(
-			c->cred, cfg->cert_file, cfg->key_file,
-			GNUTLS_X509_FMT_PEM, NULL, 0);
-		if (ret < 0) {
-			esdm_logger(
-				LOGGER_ERR, LOGGER_C_ANY,
-				"TLS: cannot load the certificate %s with the key %s: %s\n",
-				cfg->cert_file, cfg->key_file,
-				gnutls_strerror(ret));
-			return -EINVAL;
-		}
-		ret = esdm_tls_gnutls_check_key(c, cfg->cert_file);
-		if (!ret)
-			ret = esdm_tls_gnutls_check_match(c, cfg);
-		if (ret)
-			return ret;
-		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
-						cfg->ca_file);
-		if (ret)
-			return ret;
-	}
-
-	for (i = 0; i < cfg->crl_files_num; i++) {
-		ret = esdm_tls_gnutls_load_crls(c, cfg->crl_files[i]);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
-			     void **ctx)
-{
-	struct esdm_tls_gnutls_ctx *c = calloc(1, sizeof(*c));
-	int ret;
-
-	(void)server;
-
-	if (!c)
-		return -ENOMEM;
-
-	if (gnutls_certificate_allocate_credentials(&c->cred) < 0) {
-		c->cred = NULL;
-		ret = -ENOMEM;
-		goto err;
-	}
-	ret = esdm_tls_gnutls_stream_priority(&c->prio);
-	if (ret) {
-		c->prio = NULL;
-		goto err;
-	}
-
-	ret = esdm_tls_gnutls_files(c, cfg);
-	if (ret)
-		goto err;
-
-	*ctx = c;
-	return 0;
-
-err:
-	esdm_tls_backend_ctx_free(c);
-	return ret;
-}
-
-size_t esdm_tls_backend_crl_count(void *ctx)
-{
-	struct esdm_tls_gnutls_ctx *c = ctx;
-
-	return c->crl_num;
-}
-
-int esdm_tls_backend_crl_info(void *ctx, size_t idx,
-			      struct esdm_tls_crl_info *info)
-{
-	struct esdm_tls_gnutls_ctx *c = ctx;
-	gnutls_datum_t dn;
-	time_t next;
-
-	if (idx >= c->crl_num)
-		return -ENOENT;
-
-	snprintf(info->issuer, sizeof(info->issuer), "unknown");
-	if (gnutls_x509_crl_get_issuer_dn3(c->crls[idx], &dn, 0) >= 0) {
-		esdm_tls_gnutls_datum_str(&dn, info->issuer,
-					  sizeof(info->issuer));
-		gnutls_free(dn.data);
-	}
-
-	/* None, or none GnuTLS can tell - see esdm_tls_backend_cert_info() */
-	next = gnutls_x509_crl_get_next_update(c->crls[idx]);
-	info->next_update = next < 0 ? 0 : (int64_t)next;
-
-	info->delta = esdm_tls_gnutls_crl_has_ext(c->crls[idx],
-						  ESDM_TLS_GNUTLS_OID_DELTA_CRL);
-	info->scoped = esdm_tls_gnutls_crl_has_ext(c->crls[idx],
-						   ESDM_TLS_GNUTLS_OID_IDP);
-
-	return 0;
-}
-
-int esdm_tls_backend_crl_lookup(void *ctx, const struct esdm_tls_der *cert,
-				const struct esdm_tls_der *issuer,
-				struct esdm_tls_crl_result *res)
-{
-	struct esdm_tls_gnutls_ctx *c = ctx;
-	gnutls_x509_crt_t x = NULL, iss = NULL;
-	gnutls_x509_crl_t best = NULL;
-	time_t best_this = 0, next;
-	unsigned int i;
-	int ret;
-
-	memset(res, 0, sizeof(res[0]));
-
-	ret = esdm_tls_gnutls_import(cert, &x);
-	if (!ret)
-		ret = esdm_tls_gnutls_import(issuer, &iss);
-	if (ret)
-		goto out;
-
-	for (i = 0; i < c->crl_num; i++) {
-		unsigned int verify = 0;
-		time_t this_update;
-
-		if (gnutls_x509_crl_check_issuer(c->crls[i], iss) != 1)
-			continue;
-
-		/*
-		 * The signature only: the times are judged by the policy of
-		 * esdm_tls.c, as with the other TLS stacks. GnuTLS judges
-		 * them all the same, and marks a CRL invalid for them.
-		 */
-		if (gnutls_x509_crl_verify(c->crls[i], &iss, 1,
-					   GNUTLS_VERIFY_DISABLE_TIME_CHECKS,
-					   &verify) < 0 ||
-		    !esdm_tls_gnutls_crl_signed(verify))
-			continue;
-
-		/* Of several, the one issued last */
-		this_update = gnutls_x509_crl_get_this_update(c->crls[i]);
-		if (best && this_update <= best_this)
-			continue;
-		best = c->crls[i];
-		best_this = this_update;
-	}
-
-	if (!best)
-		goto out;
-
-	res->found = true;
-	next = gnutls_x509_crl_get_next_update(best);
-	res->next_update = next < 0 ? 0 : (int64_t)next;
-	ret = gnutls_x509_crt_check_revocation(x, &best, 1);
-	if (ret < 0) {
-		ret = -EINVAL;
-		goto out;
-	}
-	res->revoked = (ret == 1);
-	ret = 0;
-
-out:
-	if (x)
-		gnutls_x509_crt_deinit(x);
-	if (iss)
-		gnutls_x509_crt_deinit(iss);
-	return ret;
-}
-
-int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
-			       struct esdm_tls_cert_info *info)
-{
-	gnutls_x509_crt_t x = NULL;
-	unsigned char serial[40];
-	size_t serial_len = sizeof(serial), oid_len, i;
-	gnutls_datum_t dn;
-	int ret;
-
-	ret = esdm_tls_gnutls_import(cert, &x);
-	if (ret)
-		return ret;
-
-	snprintf(info->subject, sizeof(info->subject), "unknown");
-	if (gnutls_x509_crt_get_dn3(x, &dn, 0) >= 0) {
-		esdm_tls_gnutls_datum_str(&dn, info->subject,
-					  sizeof(info->subject));
-		gnutls_free(dn.data);
-	}
-
-	snprintf(info->serial, sizeof(info->serial), "unknown");
-	if (gnutls_x509_crt_get_serial(x, serial, &serial_len) >= 0 &&
-	    2 * serial_len < sizeof(info->serial)) {
-		for (i = 0; i < serial_len; i++)
-			snprintf(info->serial + 2 * i, 3, "%02X", serial[i]);
-	}
-
-	oid_len = sizeof(info->key_oid);
-	if (gnutls_x509_crt_get_pk_oid(x, info->key_oid, &oid_len) < 0)
-		info->key_oid[0] = '\0';
-
-	/*
-	 * A time_t of 32 bits ends in 2038: what GnuTLS cannot tell beyond is
-	 * no time at all, not one in the past.
-	 */
-	info->not_after = (int64_t)gnutls_x509_crt_get_expiration_time(x);
-	if (info->not_after < 0)
-		info->not_after = 0;
-
-	gnutls_x509_crt_deinit(x);
-	return 0;
 }
 
 /*
@@ -1143,7 +1342,7 @@ static int esdm_tls_gnutls_refuse(struct esdm_tls_gnutls_conn *d,
 }
 
 /*
- * The verify function of the session: the chain and the names and the key
+ * The verify function of the credentials: the chain and the names and the key
  * usage it was asked for, by GnuTLS, then the revocation policy.
  */
 static int esdm_tls_gnutls_verify(gnutls_session_t session)
@@ -1154,6 +1353,10 @@ static int esdm_tls_gnutls_verify(gnutls_session_t session)
 	gnutls_datum_t out;
 	size_t num = 0;
 	int ret;
+
+	/* No connection with a policy: fail closed */
+	if (!d || !d->check)
+		return GNUTLS_E_CERTIFICATE_ERROR;
 
 	ret = gnutls_certificate_verify_peers(session, d->vdata, d->vdata_num,
 					      &status);
@@ -1214,229 +1417,252 @@ static int esdm_tls_gnutls_verify(gnutls_session_t session)
 }
 
 /*
- * Tell the peer why the handshake failed with @ret, best effort: once, and
- * not for a failure the peer caused by going away or by an alert of its own.
+ * The files of one side: the trust anchors, the own certificate with its key -
+ * which has to chain to them - and the CRLs - see "Contexts" in esdm_tls.h.
  */
-static void esdm_tls_gnutls_alert(struct esdm_tls_gnutls_conn *d, int ret)
+static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
+				 const struct esdm_tls_config *cfg)
 {
-	if (d->alert_sent || ret == GNUTLS_E_FATAL_ALERT_RECEIVED ||
-	    ret == GNUTLS_E_PREMATURE_TERMINATION ||
-	    ret == GNUTLS_E_PULL_ERROR || ret == GNUTLS_E_PUSH_ERROR)
-		return;
-	d->alert_sent = true;
+	unsigned int i;
+	int ret;
 
-	if (d->alert_set)
-		gnutls_alert_send(d->session, GNUTLS_AL_FATAL, d->alert);
-	else
-		gnutls_alert_send_appropriate(d->session, ret);
+	ret = gnutls_certificate_set_x509_trust_file(c->cred, cfg->ca_file,
+						     GNUTLS_X509_FMT_PEM);
+	if (ret <= 0) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "TLS: cannot load the trust anchors %s: %s\n",
+			    cfg->ca_file,
+			    ret < 0 ? gnutls_strerror(ret) :
+				      "no certificate in it");
+		return -EINVAL;
+	}
+	ret = esdm_tls_gnutls_load_cas(c);
+	if (ret)
+		return ret;
+
+	if (cfg->cert_file) {
+		/* Checks that the key belongs to the certificate as well */
+		ret = gnutls_certificate_set_x509_key_file2(
+			c->cred, cfg->cert_file, cfg->key_file,
+			GNUTLS_X509_FMT_PEM, NULL, 0);
+		if (ret < 0) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"TLS: cannot load the certificate %s with the key %s: %s\n",
+				cfg->cert_file, cfg->key_file,
+				gnutls_strerror(ret));
+			return -EINVAL;
+		}
+		ret = esdm_tls_gnutls_check_key(c, cfg->cert_file);
+		if (!ret)
+			ret = esdm_tls_gnutls_check_match(c, cfg);
+		if (ret)
+			return ret;
+		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
+						cfg->ca_file);
+		if (ret)
+			return ret;
+	}
+
+	for (i = 0; i < cfg->crl_files_num; i++) {
+		ret = esdm_tls_gnutls_load_crls(c, cfg->crl_files[i]);
+		if (ret)
+			return ret;
+	}
+
+	gnutls_certificate_set_verify_function(c->cred, esdm_tls_gnutls_verify);
+
+	return 0;
 }
 
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
-			      const char *server_name,
-			      esdm_tls_backend_check check, void *arg,
-			      void **conn)
+/******************************************************************************
+ * esdm_tls_backend.h: the certificates
+ ******************************************************************************/
+
+int esdm_tls_backend_ctx_files(void *ctx, bool server,
+			       const struct esdm_tls_config *cfg)
+{
+	(void)server;
+	return esdm_tls_gnutls_files(ctx, cfg);
+}
+
+size_t esdm_tls_backend_crl_count(void *ctx)
 {
 	struct esdm_tls_gnutls_ctx *c = ctx;
-	struct esdm_tls_gnutls_conn *d;
-	unsigned char addr[sizeof(struct in6_addr)];
-	unsigned int flags = (server ? GNUTLS_SERVER : GNUTLS_CLIENT) |
-			     GNUTLS_NONBLOCK | GNUTLS_NO_TICKETS;
 
-	d = calloc(1, sizeof(*d));
-	if (!d)
-		return -ENOMEM;
-	d->fd = fd;
-	d->ctx = c;
-	d->check = check;
-	d->check_arg = arg;
+	return c->crl_num;
+}
 
-	if (gnutls_init(&d->session, flags) < 0) {
-		free(d);
-		return -ENOMEM;
+int esdm_tls_backend_crl_info(void *ctx, size_t idx,
+			      struct esdm_tls_crl_info *info)
+{
+	struct esdm_tls_gnutls_ctx *c = ctx;
+	gnutls_datum_t dn;
+	time_t next;
+
+	if (idx >= c->crl_num)
+		return -ENOENT;
+
+	snprintf(info->issuer, sizeof(info->issuer), "unknown");
+	if (gnutls_x509_crl_get_issuer_dn3(c->crls[idx], &dn, 0) >= 0) {
+		esdm_tls_gnutls_datum_str(&dn, info->issuer,
+					  sizeof(info->issuer));
+		gnutls_free(dn.data);
 	}
 
-	if (gnutls_priority_set(d->session, c->prio) < 0 ||
-	    gnutls_credentials_set(d->session, GNUTLS_CRD_CERTIFICATE,
-				   c->cred) < 0)
-		goto err;
+	/* None, or none GnuTLS can tell - see esdm_tls_backend_cert_info() */
+	next = gnutls_x509_crl_get_next_update(c->crls[idx]);
+	info->next_update = next < 0 ? 0 : (int64_t)next;
 
-	if (server) {
-		/* Mutual authentication: no certificate, no connection */
-		gnutls_certificate_server_set_request(d->session,
-						      GNUTLS_CERT_REQUIRE);
-		d->vdata[d->vdata_num].type = GNUTLS_DT_KEY_PURPOSE_OID;
-		d->vdata[d->vdata_num++].data =
-			(unsigned char *)GNUTLS_KP_TLS_WWW_CLIENT;
-	} else {
-		/*
-		 * The name the certificate of the server has to be issued for:
-		 * an address literal is checked against the IP addresses of
-		 * its subject alternative name, and is no server name to
-		 * indicate - only a DNS name is.
-		 */
-		if (strlen(server_name) >= sizeof(d->server_name))
-			goto err;
-		strcpy(d->server_name, server_name);
-		d->vdata[d->vdata_num].type = GNUTLS_DT_DNS_HOSTNAME;
-		d->vdata[d->vdata_num++].data =
-			(unsigned char *)d->server_name;
-		d->vdata[d->vdata_num].type = GNUTLS_DT_KEY_PURPOSE_OID;
-		d->vdata[d->vdata_num++].data =
-			(unsigned char *)GNUTLS_KP_TLS_WWW_SERVER;
-		if (inet_pton(AF_INET, server_name, addr) != 1 &&
-		    inet_pton(AF_INET6, server_name, addr) != 1 &&
-		    gnutls_server_name_set(d->session, GNUTLS_NAME_DNS,
-					   server_name,
-					   strlen(server_name)) < 0)
-			goto err;
-	}
+	info->delta = esdm_tls_gnutls_crl_has_ext(c->crls[idx],
+						  ESDM_TLS_GNUTLS_OID_DELTA_CRL);
+	info->scoped = esdm_tls_gnutls_crl_has_ext(c->crls[idx],
+						   ESDM_TLS_GNUTLS_OID_IDP);
 
-	gnutls_session_set_ptr(d->session, d);
-	gnutls_session_set_verify_function(d->session, esdm_tls_gnutls_verify);
-
-	gnutls_transport_set_ptr(d->session, d);
-	gnutls_transport_set_push_function(d->session, esdm_tls_gnutls_push);
-	gnutls_transport_set_pull_function(d->session, esdm_tls_gnutls_pull);
-
-	*conn = d;
 	return 0;
-
-err:
-	gnutls_deinit(d->session);
-	free(d);
-	return -ENOMEM;
 }
 
-static void esdm_tls_gnutls_drop_pkt(struct esdm_tls_gnutls_conn *d)
+int esdm_tls_backend_crl_lookup(void *ctx, const struct esdm_tls_der *cert,
+				const struct esdm_tls_der *issuer,
+				struct esdm_tls_crl_result *res)
 {
-	gnutls_datum_t data;
+	struct esdm_tls_gnutls_ctx *c = ctx;
+	gnutls_x509_crt_t x = NULL, iss = NULL;
+	gnutls_x509_crl_t best = NULL;
+	time_t best_this = 0, next;
+	unsigned int i;
+	int ret;
 
-	if (!d->pkt)
-		return;
+	memset(res, 0, sizeof(res[0]));
 
-	gnutls_packet_get(d->pkt, &data, NULL);
-	memset_secure(data.data, 0, data.size);
-	gnutls_packet_deinit(d->pkt);
-	d->pkt = NULL;
-	d->pkt_off = 0;
+	ret = esdm_tls_gnutls_import(cert, &x);
+	if (!ret)
+		ret = esdm_tls_gnutls_import(issuer, &iss);
+	if (ret)
+		goto out;
+
+	for (i = 0; i < c->crl_num; i++) {
+		unsigned int verify = 0;
+		time_t this_update;
+
+		if (gnutls_x509_crl_check_issuer(c->crls[i], iss) != 1)
+			continue;
+
+		/*
+		 * The signature only: the times are judged by the policy of
+		 * esdm_tls.c, as with the other TLS stacks. GnuTLS judges
+		 * them all the same, and marks a CRL invalid for them.
+		 */
+		if (gnutls_x509_crl_verify(c->crls[i], &iss, 1,
+					   GNUTLS_VERIFY_DISABLE_TIME_CHECKS,
+					   &verify) < 0 ||
+		    !esdm_tls_gnutls_crl_signed(verify))
+			continue;
+
+		/* Of several, the one issued last */
+		this_update = gnutls_x509_crl_get_this_update(c->crls[i]);
+		if (best && this_update <= best_this)
+			continue;
+		best = c->crls[i];
+		best_this = this_update;
+	}
+
+	if (!best)
+		goto out;
+
+	res->found = true;
+	next = gnutls_x509_crl_get_next_update(best);
+	res->next_update = next < 0 ? 0 : (int64_t)next;
+	ret = gnutls_x509_crt_check_revocation(x, &best, 1);
+	if (ret < 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+	res->revoked = (ret == 1);
+	ret = 0;
+
+out:
+	if (x)
+		gnutls_x509_crt_deinit(x);
+	if (iss)
+		gnutls_x509_crt_deinit(iss);
+	return ret;
 }
 
-void esdm_tls_backend_conn_free(void *conn)
+int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
+			       struct esdm_tls_cert_info *info)
 {
-	struct esdm_tls_gnutls_conn *d = conn;
+	gnutls_x509_crt_t x = NULL;
+	unsigned char serial[40];
+	size_t serial_len = sizeof(serial), oid_len, i;
+	gnutls_datum_t dn;
+	int ret;
 
-	if (!d)
-		return;
-	esdm_tls_gnutls_drop_pkt(d);
-	gnutls_deinit(d->session);
-	free(d);
+	ret = esdm_tls_gnutls_import(cert, &x);
+	if (ret)
+		return ret;
+
+	snprintf(info->subject, sizeof(info->subject), "unknown");
+	if (gnutls_x509_crt_get_dn3(x, &dn, 0) >= 0) {
+		esdm_tls_gnutls_datum_str(&dn, info->subject,
+					  sizeof(info->subject));
+		gnutls_free(dn.data);
+	}
+
+	snprintf(info->serial, sizeof(info->serial), "unknown");
+	if (gnutls_x509_crt_get_serial(x, serial, &serial_len) >= 0 &&
+	    2 * serial_len < sizeof(info->serial)) {
+		for (i = 0; i < serial_len; i++)
+			snprintf(info->serial + 2 * i, 3, "%02X", serial[i]);
+	}
+
+	oid_len = sizeof(info->key_oid);
+	if (gnutls_x509_crt_get_pk_oid(x, info->key_oid, &oid_len) < 0)
+		info->key_oid[0] = '\0';
+
+	/*
+	 * A time_t of 32 bits ends in 2038: what GnuTLS cannot tell beyond is
+	 * no time at all, not one in the past.
+	 */
+	info->not_after = (int64_t)gnutls_x509_crt_get_expiration_time(x);
+	if (info->not_after < 0)
+		info->not_after = 0;
+
+	gnutls_x509_crt_deinit(x);
+	return 0;
 }
 
-int esdm_tls_backend_handshake(void *conn, short *want)
+/* The first group of ML-KEM GnuTLS has */
+const char *esdm_tls_backend_mlkem_group(void)
 {
-	struct esdm_tls_gnutls_conn *d = conn;
-	int ret = gnutls_handshake(d->session), err;
+	size_t i;
 
-	if (ret == GNUTLS_E_SUCCESS)
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem); i++) {
+		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
+		    GNUTLS_GROUP_INVALID)
+			return esdm_tls_gnutls_mlkem[i];
+	}
+	return NULL;
+}
+
+/* The name check of GnuTLS takes an address of either family */
+bool esdm_tls_backend_ip6_name(void)
+{
+	return true;
+}
+
+/*
+ * ML-DSA-87 for certificates and CRLs where GnuTLS has its signatures - when
+ * built with leancrypto, 3.8.9 and later -, for the handshake of TLS from
+ * 3.8.10 on
+ */
+unsigned int esdm_tls_backend_mldsa(void)
+{
+	if (!esdm_tls_gnutls_has_pk("ML-DSA-87"))
 		return 0;
 
-	err = esdm_tls_gnutls_error(d, ret, want);
-	if (err != -EAGAIN)
-		esdm_tls_gnutls_alert(d, ret);
-	return err;
+	return ESDM_TLS_MLDSA_CA |
+	       (gnutls_check_version("3.8.10") ? ESDM_TLS_MLDSA_AUTH : 0);
 }
 
-ssize_t esdm_tls_backend_send(void *conn, const uint8_t *buf, size_t len,
-			      short *want)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-	ssize_t ret = gnutls_record_send(d->session, buf, len);
-
-	if (ret > 0)
-		return ret;
-	if (ret == 0)
-		return -EIO;
-	return esdm_tls_gnutls_error(d, (int)ret, want);
-}
-
-/* What GnuTLS could not send it keeps until the send is repeated */
-int esdm_tls_backend_flush(void *conn, short *want)
-{
-	(void)conn;
-	(void)want;
-	return 0;
-}
-
-ssize_t esdm_tls_backend_recv(void *conn, uint8_t *buf, size_t len,
-			      short *want)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-	gnutls_datum_t data;
-	size_t n;
-
-	if (!d->pkt) {
-		ssize_t ret = gnutls_record_recv_packet(d->session, &d->pkt);
-
-		if (ret <= 0) {
-			/* A packet comes with data only */
-			if (d->pkt)
-				esdm_tls_gnutls_drop_pkt(d);
-			/* 0: the closing alert */
-			if (ret == 0)
-				return 0;
-			return esdm_tls_gnutls_error(d, (int)ret, want);
-		}
-		d->pkt_off = 0;
-	}
-
-	gnutls_packet_get(d->pkt, &data, NULL);
-	n = data.size - d->pkt_off;
-	if (n > len)
-		n = len;
-	memcpy(buf, data.data + d->pkt_off, n);
-	d->pkt_off += n;
-
-	if (d->pkt_off >= data.size)
-		esdm_tls_gnutls_drop_pkt(d);
-
-	return (ssize_t)n;
-}
-
-bool esdm_tls_backend_pending(void *conn)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-
-	return d->pkt || gnutls_record_check_pending(d->session) > 0;
-}
-
-void esdm_tls_backend_close_notify(void *conn)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-
-	gnutls_bye(d->session, GNUTLS_SHUT_WR);
-}
-
-const char *esdm_tls_backend_cipher(void *conn)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-	const char *name =
-		gnutls_cipher_get_name(gnutls_cipher_get(d->session));
-
-	return name ? name : "unknown";
-}
-
-const char *esdm_tls_backend_group(void *conn)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-	gnutls_group_t group = gnutls_group_get(d->session);
-
-	return group == GNUTLS_GROUP_INVALID ? NULL :
-					       gnutls_group_get_name(group);
-}
-
-const char *esdm_tls_backend_error(void *conn)
-{
-	struct esdm_tls_gnutls_conn *d = conn;
-
-	return d->error;
-}
+#endif /* ESDM_TLS_AUTH */

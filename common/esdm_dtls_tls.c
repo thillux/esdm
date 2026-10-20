@@ -35,8 +35,8 @@
 #include <string.h>
 
 #include "esdm_dtls.h"
-#include "esdm_dtls_backend.h"
 #include "esdm_tls.h"
+#include "esdm_tls_backend.h"
 #include "memset_secure.h"
 
 /* The length in front of a record */
@@ -63,15 +63,25 @@ static void esdm_dtls_tls_drop_rec(struct esdm_dtls_tls *t)
 	t->rec_len = t->rec_got = t->hdr_len = 0;
 }
 
-static int esdm_dtls_tls_handshake(void *conn)
+/* @ret of the TLS connection, and what it waits for if it does */
+static ssize_t esdm_dtls_tls_wait(struct esdm_dtls_tls *t, ssize_t ret,
+				  short *want)
+{
+	if (ret == -EAGAIN)
+		*want = esdm_tls_want(t->tls);
+	return ret;
+}
+
+static int esdm_dtls_tls_handshake(void *conn, short *want)
 {
 	struct esdm_dtls_tls *t = conn;
 
-	return esdm_tls_handshake(t->tls);
+	return (int)esdm_dtls_tls_wait(t, esdm_tls_handshake(t->tls), want);
 }
 
 /* One frame, taken whole - or the connection is no use any more */
-static int esdm_dtls_tls_send(void *conn, const uint8_t *buf, size_t len)
+static ssize_t esdm_dtls_tls_send(void *conn, const uint8_t *buf, size_t len,
+				  short *want)
 {
 	struct esdm_dtls_tls *t = conn;
 	size_t flen = ESDM_DTLS_TLS_HDR + len;
@@ -92,8 +102,8 @@ static int esdm_dtls_tls_send(void *conn, const uint8_t *buf, size_t len)
 	memset_secure(frame, 0, flen);
 	free(frame);
 	if (n == (ssize_t)flen)
-		return 0;
-	return n < 0 ? (int)n : -EIO;
+		return (ssize_t)len;
+	return n < 0 ? esdm_dtls_tls_wait(t, n, want) : -EIO;
 }
 
 /* Receive @len bytes at most, collected in @dst from *@got on */
@@ -114,7 +124,8 @@ static ssize_t esdm_dtls_tls_fill(struct esdm_dtls_tls *t, uint8_t *dst,
 	return 0;
 }
 
-static ssize_t esdm_dtls_tls_recv(void *conn, uint8_t *buf, size_t len)
+static ssize_t esdm_dtls_tls_recv(void *conn, uint8_t *buf, size_t len,
+				  short *want)
 {
 	struct esdm_dtls_tls *t = conn;
 	size_t rec_len;
@@ -122,7 +133,7 @@ static ssize_t esdm_dtls_tls_recv(void *conn, uint8_t *buf, size_t len)
 
 	ret = esdm_dtls_tls_fill(t, t->hdr, &t->hdr_len, ESDM_DTLS_TLS_HDR);
 	if (ret)
-		return ret;
+		return esdm_dtls_tls_wait(t, ret, want);
 
 	if (!t->rec) {
 		rec_len = (size_t)t->hdr[0] << 8 | t->hdr[1];
@@ -137,7 +148,7 @@ static ssize_t esdm_dtls_tls_recv(void *conn, uint8_t *buf, size_t len)
 
 	ret = esdm_dtls_tls_fill(t, t->rec, &t->rec_got, t->rec_len);
 	if (ret)
-		return ret;
+		return esdm_dtls_tls_wait(t, ret, want);
 	if (t->rec_len > len)
 		return -EPROTO;
 
@@ -161,18 +172,11 @@ static const char *esdm_dtls_tls_cipher(void *conn)
 	return esdm_tls_cipher(t->tls);
 }
 
-static short esdm_dtls_tls_want(void *conn)
+static int esdm_dtls_tls_flush(void *conn, short *want)
 {
 	struct esdm_dtls_tls *t = conn;
 
-	return esdm_tls_want(t->tls);
-}
-
-static int esdm_dtls_tls_flush(void *conn)
-{
-	struct esdm_dtls_tls *t = conn;
-
-	return esdm_tls_flush(t->tls);
+	return (int)esdm_dtls_tls_wait(t, esdm_tls_flush(t->tls), want);
 }
 
 static void esdm_dtls_tls_free(void *conn)
@@ -188,11 +192,10 @@ static void esdm_dtls_tls_free(void *conn)
 static const struct esdm_dtls_ops esdm_dtls_tls_ops = {
 	.handshake = esdm_dtls_tls_handshake,
 	.send = esdm_dtls_tls_send,
+	.flush = esdm_dtls_tls_flush,
 	.recv = esdm_dtls_tls_recv,
 	.pending = esdm_dtls_tls_pending,
 	.cipher = esdm_dtls_tls_cipher,
-	.want = esdm_dtls_tls_want,
-	.flush = esdm_dtls_tls_flush,
 	.free = esdm_dtls_tls_free,
 };
 

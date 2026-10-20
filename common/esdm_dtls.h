@@ -26,7 +26,10 @@
  * The DTLS is provided by the TLS stack of the crypto backend the ESDM is
  * built with (meson options dtls and crypto_backend): OpenSSL, GnuTLS or
  * Botan. The builtin and the leancrypto backend have none, so a build with
- * them has no DTLS, and every function here reports -EOPNOTSUPP.
+ * them has no DTLS, and every function here reports -EOPNOTSUPP. It is the
+ * backend of the TLS stack the TLS with certificates of esdm_tls.h uses as
+ * well, with the one set-up of the library, error mapping and connection of
+ * each - see esdm_tls_backend.h.
  *
  * It is DTLS 1.2 with an ephemeral ECDH key exchange keyed with a pre-shared
  * key (ECDHE-PSK) and no certificate on either side, on curves of 256 bits of
@@ -46,7 +49,7 @@
  * none of the TLS stacks has DTLS 1.3.
  *
  * The pre-shared key and its identity are constants compiled into the ESDM,
- * the same in every build, and no secret - see esdm_dtls_backend.h. Anybody
+ * the same in every build, and no secret - see esdm_tls_backend.h. Anybody
  * can run the key exchange with them, so the DTLS is unauthenticated: what a
  * peer is trusted for is what the kernel says about the other end of the Unix
  * domain socket (SO_PEERCRED), as without DTLS. The DTLS keeps the data -
