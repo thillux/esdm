@@ -41,8 +41,9 @@
  * alert of its own for a failed handshake: the one the failure calls for is
  * sent here.
  *
- * TLS 1.3 offers the groups of ML-KEM GnuTLS has ahead of those of NORMAL,
- * see esdm_tls_gnutls_stream_priority() and "Post-quantum algorithms" in
+ * TLS 1.3 offers the groups of ML-KEM GnuTLS has ahead of those of NORMAL, and
+ * the signature algorithms of ML-DSA where it signs TLS with them - see
+ * esdm_tls_gnutls_stream_priority() and "Post-quantum algorithms" in
  * esdm_tls.h. GnuTLS has them only when built with leancrypto.
  */
 
@@ -56,6 +57,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 
@@ -67,11 +69,12 @@
 
 /*
  * TLS 1.3 exactly; the tickets are turned off with the session flags. The
- * groups are added to it, see esdm_tls_gnutls_stream_priority().
+ * groups and the signature algorithms are added to it, see
+ * esdm_tls_gnutls_stream_priority().
  */
 #define ESDM_TLS_GNUTLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.3"
 
-/* Room for the priority of TLS 1.3 with its groups */
+/* Room for the priority of TLS 1.3 with its groups and signatures */
 #define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
 
 /*
@@ -86,9 +89,17 @@ static const char *const esdm_tls_gnutls_mlkem[] = {
 	"MLKEM1024",
 };
 
+/* The signature algorithms of ML-DSA */
+static const char *const esdm_tls_gnutls_mldsa[] = {
+	"ML-DSA-44",
+	"ML-DSA-65",
+	"ML-DSA-87",
+};
+
 /*
  * DTLS 1.2 exactly on SCTP: ECDHE with the key of the certificate, ECDSA or
- * RSA, and AEAD ciphers only - none of ML-KEM, which is for TLS 1.3 only
+ * RSA, and AEAD ciphers only - none of ML-KEM nor ML-DSA, which are for TLS 1.3
+ * only
  */
 #define ESDM_TLS_GNUTLS_DTLS_PRIORITY                                          \
 	"NORMAL:-VERS-ALL:+VERS-DTLS1.2:-CIPHER-ALL:+AES-256-GCM:"             \
@@ -507,6 +518,26 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 	return ret;
 }
 
+/*
+ * Does GnuTLS have the public key algorithm @name - of ML-DSA, which is the
+ * name of its signature algorithm as well? Asked of the public key algorithms
+ * it has, as the signature algorithms it reports having (gnutls_sign_list())
+ * leave those of ML-DSA out, 3.8.13 included, whether it has them or not.
+ */
+static bool esdm_tls_gnutls_has_pk(const char *name)
+{
+	const gnutls_pk_algorithm_t *pk;
+	const char *n;
+
+	/* The ones it has, not all it knows the name of */
+	for (pk = gnutls_pk_list(); pk && *pk; pk++) {
+		n = gnutls_pk_get_name(*pk);
+		if (n && !strcasecmp(n, name))
+			return true;
+	}
+	return false;
+}
+
 /* Append ":+<what><name>" to the priority @prio of @len bytes so far */
 static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
 				    const char *name)
@@ -523,10 +554,12 @@ static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
 /*
  * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
  * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL - for
- * "+" appends, the groups are listed anew. GnuTLS refuses a priority naming
- * a group it does not have, and one built without leancrypto has none of
- * ML-KEM: the string names only what GnuTLS reports - and should it be refused
- * nevertheless, NORMAL's groups serve.
+ * "+" appends, the groups are listed anew. The signature algorithms of
+ * ML-DSA are added where GnuTLS signs TLS with them, which the NORMAL of
+ * 3.8.13 lists already. GnuTLS refuses a priority naming a group it does not
+ * have, and one built without leancrypto has none of ML-KEM: the string names
+ * only what GnuTLS reports - and should it be refused nevertheless, NORMAL's
+ * groups serve.
  */
 static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 {
@@ -557,6 +590,12 @@ static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 	}
 	gnutls_priority_deinit(normal);
 
+	if (esdm_tls_backend_mldsa() & ESDM_TLS_MLDSA_AUTH) {
+		for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mldsa) && !ret; i++)
+			ret = esdm_tls_gnutls_prio_add(
+				str, &len, "SIGN-", esdm_tls_gnutls_mldsa[i]);
+	}
+
 	if (!ret) {
 		ret = gnutls_priority_init(prio, str, NULL);
 		if (ret >= 0)
@@ -571,6 +610,41 @@ static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 	if (gnutls_priority_init(prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
 		return -ENOMEM;
 	return 0;
+}
+
+/*
+ * A certificate of ML-DSA is refused for DTLS 1.2, which has no signature for
+ * it - see "Post-quantum algorithms" in esdm_tls.h
+ */
+static int esdm_tls_gnutls_check_dtls_key(struct esdm_tls_gnutls_ctx *c,
+					  const char *cert_file)
+{
+	gnutls_x509_crt_t *crts = NULL;
+	unsigned int num = 0, i;
+	const char *name = NULL;
+	int ret, pk;
+
+	ret = gnutls_certificate_get_x509_crt(c->cred, 0, &crts, &num);
+	if (ret < 0 || !num)
+		return -EINVAL;
+
+	pk = gnutls_x509_crt_get_pk_algorithm(crts[0], NULL);
+	if (pk > 0)
+		name = gnutls_pk_get_name((gnutls_pk_algorithm_t)pk);
+	ret = 0;
+	if (name && !strncasecmp(name, "ML-DSA", 6)) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"TLS: the certificate %s is one of %s, which DTLS 1.2 has no signature for - ML-DSA is for TLS 1.3 only\n",
+			cert_file, name);
+		ret = -EINVAL;
+	}
+
+	for (i = 0; i < num; i++)
+		gnutls_x509_crt_deinit(crts[i]);
+	gnutls_free(crts);
+
+	return ret;
 }
 
 /******************************************************************************
@@ -593,6 +667,24 @@ const char *esdm_tls_backend_mlkem_group(void)
 			return esdm_tls_gnutls_mlkem[i];
 	}
 	return NULL;
+}
+
+/*
+ * ML-DSA for certificates and CRLs where GnuTLS has its signatures - when
+ * built with leancrypto, 3.8.9 and later -, for the handshake of TLS from
+ * 3.8.10 on
+ */
+unsigned int esdm_tls_backend_mldsa(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mldsa); i++) {
+		if (!esdm_tls_gnutls_has_pk(esdm_tls_gnutls_mldsa[i]))
+			return 0;
+	}
+
+	return ESDM_TLS_MLDSA_CA |
+	       (gnutls_check_version("3.8.10") ? ESDM_TLS_MLDSA_AUTH : 0);
 }
 
 void esdm_tls_backend_ctx_free(void *ctx)
@@ -652,6 +744,11 @@ static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
 				cfg->cert_file, cfg->key_file,
 				gnutls_strerror(ret));
 			return -EINVAL;
+		}
+		if (c->sctp) {
+			ret = esdm_tls_gnutls_check_dtls_key(c, cfg->cert_file);
+			if (ret)
+				return ret;
 		}
 		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
 						cfg->ca_file);

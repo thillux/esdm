@@ -41,7 +41,9 @@
  * chain OpenSSL verified - see esdm_tls_openssl_verify().
  *
  * TLS 1.3 offers the groups of ML-KEM ahead of OpenSSL's default ones, see
- * ESDM_TLS_OPENSSL_GROUPS and "Post-quantum algorithms" in esdm_tls.h.
+ * ESDM_TLS_OPENSSL_GROUPS, and takes the signature schemes of ML-DSA with
+ * OpenSSL's default ones, which list them first from OpenSSL 3.5 on - see
+ * "Post-quantum algorithms" in esdm_tls.h.
  */
 
 #include <arpa/inet.h>
@@ -87,7 +89,7 @@
 
 /*
  * DTLS 1.2 on SCTP: ECDHE with the key of the certificate, ECDSA or RSA, and
- * AEAD ciphers only - none of ML-KEM, which is for TLS 1.3 only
+ * AEAD ciphers only - none of ML-KEM nor ML-DSA, which are for TLS 1.3 only
  */
 #define ESDM_TLS_OPENSSL_DTLS_CIPHERS                                          \
 	"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"           \
@@ -694,6 +696,31 @@ static int esdm_tls_openssl_load_crls(STACK_OF(X509_CRL) *crls,
 	return 0;
 }
 
+/* The parameter sets of ML-DSA, as OpenSSL names its keys */
+static const char *const esdm_tls_openssl_mldsa[] = {
+	"ML-DSA-44",
+	"ML-DSA-65",
+	"ML-DSA-87",
+};
+
+/*
+ * Is @key one of ML-DSA? Which DTLS 1.2 has no signature for - see
+ * "Post-quantum algorithms" in esdm_tls.h. OpenSSL before 3.5 knows no such
+ * key, and loads no certificate with one.
+ */
+static bool esdm_tls_openssl_mldsa_key(const EVP_PKEY *key)
+{
+	size_t i;
+
+	if (!key)
+		return false;
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_openssl_mldsa); i++) {
+		if (EVP_PKEY_is_a(key, esdm_tls_openssl_mldsa[i]))
+			return true;
+	}
+	return false;
+}
+
 /*
  * Does the own certificate chain to the trust anchors? See "Contexts" in
  * esdm_tls.h.
@@ -785,6 +812,15 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "TLS: cannot load the certificate %s: %s\n",
 				    cfg->cert_file, err);
+			return -EINVAL;
+		}
+		if (oc->sctp && esdm_tls_openssl_mldsa_key(X509_get0_pubkey(
+					SSL_CTX_get0_certificate(c)))) {
+			ERR_clear_error();
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"TLS: the certificate %s is one of ML-DSA, which DTLS 1.2 has no signature for - ML-DSA is for TLS 1.3 only\n",
+				cfg->cert_file);
 			return -EINVAL;
 		}
 		if (SSL_CTX_use_PrivateKey_file(c, cfg->key_file,
@@ -1290,6 +1326,41 @@ const char *esdm_tls_backend_mlkem_group(void)
 	ERR_clear_error();
 
 	return group;
+}
+
+/*
+ * ML-DSA for certificates and CRLs where its signatures are there, for the
+ * handshake where OpenSSL knows its signature schemes of TLS as well - both
+ * from 3.5 on
+ */
+unsigned int esdm_tls_backend_mldsa(void)
+{
+	unsigned int ret = ESDM_TLS_MLDSA_CA;
+	EVP_SIGNATURE *sig;
+	SSL_CTX *c;
+	size_t i;
+
+	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
+	if (!esdm_tls_openssl_libctx)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_openssl_mldsa); i++) {
+		sig = EVP_SIGNATURE_fetch(esdm_tls_openssl_libctx,
+					  esdm_tls_openssl_mldsa[i], NULL);
+		if (!sig) {
+			ERR_clear_error();
+			return 0;
+		}
+		EVP_SIGNATURE_free(sig);
+	}
+
+	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL, TLS_method());
+	if (c && SSL_CTX_set1_sigalgs_list(c, "mldsa44:mldsa65:mldsa87") == 1)
+		ret |= ESDM_TLS_MLDSA_AUTH;
+	SSL_CTX_free(c);
+	ERR_clear_error();
+
+	return ret;
 }
 
 const char *esdm_tls_backend_error(void *conn)

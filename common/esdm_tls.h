@@ -62,9 +62,10 @@
  * Post-quantum algorithms
  * -----------------------
  * TLS 1.3 on a stream socket prefers the key exchange of ML-KEM (FIPS 203) to
- * (EC)DHE alone - as far as the TLS stack has it. The groups of ML-KEM are
- * offered and accepted in this order, ahead of the (EC)DHE groups of the TLS
- * stack's default:
+ * (EC)DHE alone, and takes certificates and keys of ML-DSA (FIPS 204) next to
+ * the classical ones - as far as the TLS stack has them. The groups of ML-KEM
+ * are offered and accepted in this order, ahead of the (EC)DHE groups of the
+ * TLS stack's default:
  *
  *	SecP384r1MLKEM1024	ECDHE on P-384 and ML-KEM-1024
  *	X25519MLKEM768		X25519 and ML-KEM-768
@@ -90,11 +91,35 @@
  *    X25519MLKEM768, SecP256r1MLKEM768 and MLKEM1024, and SecP384r1MLKEM1024
  *    from 3.8 on.
  *
- * DTLS 1.2 on SCTP has none of it, and keeps to ECDHE: ML-KEM is a key
- * encapsulation, which the key exchange of (D)TLS 1.2 has no place for - the
- * groups above are defined for the key shares of TLS 1.3 only. DTLS 1.3 (RFC
- * 9147) would carry them, but none of the TLS stacks implements it - OpenSSL
- * 3.5, GnuTLS 3.8, Botan 3.13.
+ * The signature schemes mldsa44, mldsa65 and mldsa87 of TLS 1.3 are offered
+ * and accepted next to the others: a side with an ML-DSA certificate signs
+ * its handshake with it, and its peer verifies that. A CA on ML-DSA - a trust
+ * anchor or an intermediate one - signs certificates and CRLs, which the
+ * verification, the check of the own chain and the revocation check verify as
+ * any others; the chain may mix ML-DSA with the classical algorithms. Every
+ * check of a context - the key belongs to the certificate, the certificate
+ * chains to the trust anchors, the CRLs - holds for ML-DSA as well.
+ * esdm_tls_mldsa() tells what of it the TLS stack does:
+ *
+ *  - OpenSSL 3.5 and later: all of it - its default signature schemes list
+ *    the ones of ML-DSA first.
+ *  - GnuTLS built with leancrypto: certificates and CRLs signed with ML-DSA
+ *    from 3.8.9 on, and the handshake signed with ML-DSA from 3.8.10 on.
+ *  - Botan: certificates and CRLs signed with ML-DSA, 3.6 and later with its
+ *    module ml_dsa - but no signature scheme of TLS for ML-DSA (Botan 3.13):
+ *    a context with a certificate on ML-DSA is not built, as no handshake
+ *    could be signed with it. The certificates of the sides are on ECDSA or
+ *    RSA then, and may be issued by a CA on ML-DSA.
+ *
+ * DTLS 1.2 on SCTP has neither, and keeps to ECDHE with certificates on ECDSA
+ * or RSA: ML-KEM is a key encapsulation, which the key exchange of (D)TLS 1.2
+ * has no place for - the groups above are defined for the key shares of TLS
+ * 1.3 only -, and the signature schemes of ML-DSA are defined for TLS 1.3
+ * only as well. DTLS 1.3 (RFC 9147) would carry both, but none of the TLS
+ * stacks implements it - OpenSSL 3.5, GnuTLS 3.8, Botan 3.13. A context for
+ * SCTP with a certificate on ML-DSA is not built; the certificates on ECDSA or
+ * RSA may still be issued by a CA on ML-DSA, where the TLS stack verifies
+ * ML-DSA (ESDM_TLS_MLDSA_CA).
  *
  * Contexts
  * --------
@@ -558,6 +583,21 @@ const char *esdm_tls_group(struct esdm_tls *tls);
  */
 const char *esdm_tls_mlkem_group(void);
 
+/* What the TLS stack does with ML-DSA in TLS 1.3, see esdm_tls_mldsa() */
+/* Verifies certificates and CRLs signed by a CA on ML-DSA */
+#define ESDM_TLS_MLDSA_CA (1U << 0)
+/* Signs its handshake with a certificate on ML-DSA, verifies a peer's */
+#define ESDM_TLS_MLDSA_AUTH (1U << 1)
+
+/**
+ * @brief What the TLS stack of the build does with ML-DSA in TLS 1.3, see
+ *	  "Post-quantum algorithms" above
+ *
+ * @return ESDM_TLS_MLDSA_CA and ESDM_TLS_MLDSA_AUTH as far as it does, 0 if it
+ *	   has no ML-DSA
+ */
+unsigned int esdm_tls_mldsa(void);
+
 /**
  * @brief Why the connection failed, for logging; "none" if it did not
  */
@@ -749,6 +789,11 @@ static inline const char *esdm_tls_group(struct esdm_tls *tls)
 static inline const char *esdm_tls_mlkem_group(void)
 {
 	return NULL;
+}
+
+static inline unsigned int esdm_tls_mldsa(void)
+{
+	return 0;
 }
 
 static inline const char *esdm_tls_error(struct esdm_tls *tls)

@@ -50,7 +50,10 @@
  * which the revocation policy of esdm_tls.c is run on right there.
  *
  * TLS 1.3 offers the groups of ML-KEM Botan has ahead of its default ones, see
- * Esdm_Tls_Policy and "Post-quantum algorithms" in esdm_tls.h.
+ * Esdm_Tls_Policy and "Post-quantum algorithms" in esdm_tls.h. Botan verifies
+ * certificates and CRLs signed with ML-DSA, but has no signature scheme of TLS
+ * for it: a certificate whose key no signature scheme of the policy signs with
+ * is refused by the context, see esdm_tls_botan_signs().
  *
  * No exception crosses into the C code: every entry point catches them and
  * reports an errno.
@@ -391,10 +394,30 @@ esdm_tls_botan_load_certs(const std::string &path)
 	return certs;
 }
 
+/*
+ * Does a signature scheme of @policy sign with a key of the algorithm @algo?
+ * Botan chooses the certificate of a side by the algorithms of the signature
+ * schemes its peer offers, and signs the handshake with the first scheme of
+ * the policy for the key the peer offers as well: a certificate on a key no
+ * scheme of the policy is for makes every handshake fail for want of a
+ * certificate. One on ML-DSA is such, as Botan has no signature scheme of TLS
+ * for it (3.13), nor has DTLS 1.2.
+ */
+static bool esdm_tls_botan_signs(const Botan::TLS::Policy &policy,
+				 const std::string &algo)
+{
+	for (const auto &scheme : policy.allowed_signature_schemes()) {
+		if (scheme.is_available() && scheme.algorithm_name() == algo)
+			return true;
+	}
+	return false;
+}
+
 /* The own certificate and key, and the trust anchors and CRLs */
 class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
     public:
-	Esdm_Tls_Credentials(bool server, const struct esdm_tls_config *cfg)
+	Esdm_Tls_Credentials(bool server, const struct esdm_tls_config *cfg,
+			     const Botan::TLS::Policy &policy)
 		: m_server(server)
 	{
 		m_store = std::make_unique<Botan::Certificate_Store_In_Memory>();
@@ -403,6 +426,7 @@ class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
 
 		if (cfg->cert_file) {
 			m_chain = esdm_tls_botan_load_certs(cfg->cert_file);
+			check_signs(policy, cfg);
 			load_key(cfg->key_file);
 		}
 
@@ -468,6 +492,30 @@ class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
 	std::vector<Botan::X509_CRL> m_crls;
 
     private:
+	/*
+	 * The key of the own certificate signs the handshake, see
+	 * esdm_tls_botan_signs() - told before the key is read, which Botan
+	 * may not even parse for an algorithm it has no scheme for
+	 */
+	void check_signs(const Botan::TLS::Policy &policy,
+			 const struct esdm_tls_config *cfg)
+	{
+		const std::string algo =
+			m_chain[0].subject_public_key()->algo_name();
+
+		if (esdm_tls_botan_signs(policy, algo))
+			return;
+		throw Botan::Invalid_Argument(
+			"the certificate " + std::string(cfg->cert_file) +
+			" is one of " + algo + ", which Botan " +
+			Botan::short_version_string() +
+			" has no signature scheme of " +
+			(cfg->transport == ESDM_TLS_TRANSPORT_SCTP ?
+				 "DTLS 1.2" :
+				 "TLS 1.3") +
+			" for");
+	}
+
 	void load_key(const std::string &path)
 	{
 		/*
@@ -1126,10 +1174,11 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 		c->server = server;
 		c->sctp = cfg->transport == ESDM_TLS_TRANSPORT_SCTP;
 		c->rng = std::make_shared<Botan::System_RNG>();
-		/* The files, the same on either transport */
-		c->creds = std::make_shared<Esdm_Tls_Credentials>(server, cfg);
 		c->policy = std::make_shared<const Esdm_Tls_Policy>(server,
 								     c->sctp);
+		/* The files, the same on either transport */
+		c->creds = std::make_shared<Esdm_Tls_Credentials>(server, cfg,
+								  *c->policy);
 		c->sessions =
 			std::make_shared<Botan::TLS::Session_Manager_Noop>();
 
@@ -1609,6 +1658,27 @@ const char *esdm_tls_backend_mlkem_group(void)
 #else
 	return nullptr;
 #endif
+}
+
+/*
+ * ML-DSA for certificates and CRLs with the module ml_dsa (3.6 and later), for
+ * the handshake where a signature scheme of TLS 1.3 is for it - none in 3.13
+ */
+unsigned int esdm_tls_backend_mldsa(void)
+{
+	unsigned int ret = 0;
+
+#if defined(BOTAN_HAS_ML_DSA)
+	ret |= ESDM_TLS_MLDSA_CA;
+#endif
+	try {
+		if (esdm_tls_botan_signs(Esdm_Tls_Policy(false, false),
+					 "ML-DSA"))
+			ret |= ESDM_TLS_MLDSA_AUTH;
+	} catch (...) {
+	}
+
+	return ret;
 }
 
 const char *esdm_tls_backend_error(void *conn)
