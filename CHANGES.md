@@ -658,6 +658,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC server, io_uring event loop: where the kernel has multishot receives into buffer rings (Linux 6.0, liburing 2.4), the ring receives the requests of the connections in the clear and sends their answers with the wait for the next events - about 2 system calls per request instead of 3.6 (the wait and the fork check of the OpenSSL DRBG), 1.2-1.4 us less server CPU per request; connections with DTLS and esdm-server --no_io_uring_multishot keep the poll of the ring
 
+* RPC server: a new connection of the unprivileged interface is handed to the worker serving the fewest connections, if that is another one with fewer than the worker that accepted it and a free slot - into a queue of that worker, signalled by an eventfd it waits for with epoll or io_uring alike - rather than served by whichever worker the kernel woke first, which piled up to 5 of 16 clients on one worker while others had none; esdm-server --no_conn_balancing leaves the connections where they were accepted. rpc_bench, 32 byte requests, server on 8 cores and clients on 8 others of an AMD Ryzen 9 5950X, without fips140: with epoll 1.27 times the requests per second at 8 clients and twice at 16 (p50 25 instead of 79 us, p99 57 instead of 162 us), within the run-to-run spread at 4 clients and with the io_uring loop, whose connections were spread more evenly already; 1-3 us more server CPU per request, as more workers wake for fewer requests each
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

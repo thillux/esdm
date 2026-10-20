@@ -174,6 +174,11 @@ static void usage(void)
 		"\t\t\tthan receive and send through the ring (the default where\n");
 	fprintf(stderr, "\t\t\tthe kernel has it)\n");
 	fprintf(stderr,
+		"\t   --no_conn_balancing\tLeave a new RPC connection with the\n");
+	fprintf(stderr,
+		"\t\t\tworker that accepted it rather than hand it to the worker\n");
+	fprintf(stderr, "\t\t\tserving the fewest connections\n");
+	fprintf(stderr,
 		"\t   --no_fixed_drng_mapping\tServe the RPC and EGD workers from\n");
 	fprintf(stderr,
 		"\t\t\tthe first free node DRNG rather than one node DRNG each\n");
@@ -381,6 +386,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "no_io_uring", 0, 0, 0 },
 			{ "no_fixed_drng_mapping", 0, 0, 0 },
 			{ "no_io_uring_multishot", 0, 0, 0 },
+			{ "no_conn_balancing", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
@@ -503,6 +509,10 @@ static void parse_opts(int argc, char *argv[])
 			case 24:
 				/* no_io_uring_multishot */
 				esdm_rpc_server_set_io_uring_multishot(false);
+				break;
+			case 25:
+				/* no_conn_balancing */
+				esdm_rpc_server_set_conn_balancing(false);
 				break;
 
 			default:

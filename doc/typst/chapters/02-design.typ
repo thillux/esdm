@@ -1842,6 +1842,19 @@ DTLS of a connection reads and writes its socket itself. A worker that cannot
 set up its io\_uring falls back to epoll: on a kernel without it, with
 `kernel.io_uring_disabled` set, or under a seccomp filter refusing it.]
 
+#par(first-line-indent: 0pt)[All workers of an interface wait for its
+listening socket, and the first one the kernel wakes for a new connection
+accepts it - often the same few, which then serve several busy connections
+each while others have none. A worker of the unprivileged interface hands a
+connection it accepted to the worker serving the fewest connections, if that
+is another one with fewer than itself and a free slot: into a queue of that
+worker, signalled by an eventfd it waits for as for its other descriptors,
+with epoll or io\_uring alike, and takes the connection in its next round.
+The counts are read without a lock and the slot of a connection handed over
+is taken at once, so that the connections accepted next go elsewhere; ties
+stay with the accepting worker. `esdm-server --no_conn_balancing` leaves every
+connection with the worker that accepted it.]
+
 #par(first-line-indent: 0pt)[Where the kernel has multishot receives into
 buffer rings (Linux 6.0), the io\_uring of a worker reads and writes the
 connections in the clear itself, and only those with DTLS are polled. The

@@ -124,6 +124,19 @@ void esdm_rpc_server_set_io_uring(bool enable);
 void esdm_rpc_server_set_io_uring_multishot(bool enable);
 
 /**
+ * @brief Spread the new connections over the workers, or not
+ *
+ * By default, a worker of the unprivileged RPC interface that accepts a new
+ * connection hands it to the worker serving the fewest connections, if that is
+ * another one with fewer than it. Switched off, a connection stays with the
+ * worker that accepted it - the first one the kernel woke for it. To be called
+ * before esdm_rpc_server_init().
+ *
+ * @param [in] enable Spread the connections (true) or not (false)
+ */
+void esdm_rpc_server_set_conn_balancing(bool enable);
+
+/**
  * @brief Map each worker to a node DRNG of its own, or not
  *
  * By default, each worker of the unprivileged RPC interface, and of the EGD

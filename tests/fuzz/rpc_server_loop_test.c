@@ -53,7 +53,9 @@
  *   - clients closing their connections before they read their answers - the
  *     ring's send of each finding the peer gone - leave the others served,
  *   - more requests at once than the ring has buffers - its receives running
- *     out of them, ENOBUFS, and armed again - are all answered.
+ *     out of them, ENOBUFS, and armed again - are all answered,
+ *   - the connections are spread evenly over the workers of the unprivileged
+ *     interface, whichever accepts them.
  */
 
 #ifndef _GNU_SOURCE
@@ -62,6 +64,7 @@
 #include <dirent.h>
 #include <endian.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -88,6 +91,8 @@
 #include "common_test.h"
 #include "config.h"
 #include "conv_be_le.h"
+#include "esdm_config.h"
+#include "math_helper.h"
 #include "esdm_logger.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
@@ -142,6 +147,9 @@ static atomic_bool test_big;
 static atomic_bool test_hold;
 static atomic_bool test_held;
 
+/* The worker that served the last call */
+static _Atomic pthread_t test_served_by;
+
 static void test_sleep_ms(unsigned int ms)
 {
 	struct timespec ts = { .tv_sec = ms / 1000,
@@ -178,6 +186,8 @@ static void test_service_invoke(ProtobufCService *service,
 			test_sleep_ms(1);
 		atomic_store(&test_held, false);
 	}
+
+	atomic_store(&test_served_by, pthread_self());
 
 	if (atomic_load(&test_big)) {
 		big_response.randval.data = big;
@@ -602,6 +612,71 @@ static void test_burst(const char *path)
 }
 
 /*
+ * Connections made one after the other to the unprivileged interface, each
+ * holding on: every worker serves as many of them, give or take one - the
+ * worker accepting a connection hands it to the one serving the fewest.
+ */
+#define TEST_SPREAD_PER_WORKER 4
+static void test_spread(const char *path)
+{
+	size_t workers = min_size(esdm_config_online_nodes(),
+				  THREADING_MAX_WORKER_THREADS);
+	size_t n = workers * TEST_SPREAD_PER_WORKER, i, j, distinct = 0;
+	unsigned int cmin = UINT_MAX, cmax = 0;
+	pthread_t *served;
+	unsigned int *count;
+	int *fds;
+
+	fds = calloc(n, sizeof(*fds));
+	served = calloc(n, sizeof(*served));
+	count = calloc(n, sizeof(*count));
+	CHECK(fds && served && count, "out of memory");
+	if (!fds || !served || !count)
+		goto out;
+
+	for (i = 0; i < n; i++) {
+		fds[i] = test_connect(path);
+		CHECK(fds[i] >= 0, "cannot connect to %s", path);
+		if (fds[i] < 0 || !test_send(fds[i], (uint32_t)i) ||
+		    !test_answered(fds[i], (uint32_t)i)) {
+			CHECK(0, "connection %zu not served", i);
+			continue;
+		}
+		served[i] = atomic_load(&test_served_by);
+	}
+
+	/* Connections per worker */
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < i && !pthread_equal(served[j], served[i]); j++)
+			;
+		count[j]++;
+		if (j == i)
+			distinct++;
+	}
+	for (i = 0; i < n; i++) {
+		if (!count[i])
+			continue;
+		if (count[i] < cmin)
+			cmin = count[i];
+		if (count[i] > cmax)
+			cmax = count[i];
+	}
+	CHECK(distinct == workers, "%zu connections served by %zu of %zu workers",
+	      n, distinct, workers);
+	CHECK(cmax <= cmin + 1, "%u to %u connections per worker", cmin,
+	      cmax);
+
+	for (i = 0; i < n; i++) {
+		if (fds[i] >= 0)
+			close(fds[i]);
+	}
+out:
+	free(fds);
+	free(served);
+	free(count);
+}
+
+/*
  * The io_uring instances and the epoll instances of this process - those of
  * the workers, the test itself has none
  */
@@ -752,6 +827,9 @@ static int test_case_run(enum test_case tc, bool uring)
 	test_leaving(test_unpriv_path);
 	test_burst(test_priv_path);
 	test_clients(test_unpriv_path);
+	/* Once the server has seen the connections above closed */
+	test_sleep_ms(200);
+	test_spread(test_unpriv_path);
 
 #ifdef ESDM_RPC_IO_URING_MULTISHOT
 	/* Through the ring, the burst ran its receives out of buffers */

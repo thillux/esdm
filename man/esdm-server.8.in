@@ -215,6 +215,12 @@ rather than receive and send them through the ring. See
 .B RPC EVENT LOOP
 below.
 .TP
+.B \-\-no_conn_balancing
+Leave a new RPC connection with the worker that accepted it, rather than hand
+it to the worker serving the fewest connections. See
+.B RPC EVENT LOOP
+below.
+.TP
 .B \-\-no_fixed_drng_mapping
 Serve the random numbers the workers of the unprivileged RPC interface and
 of the EGD interface hand out from the first free DRNG of a node each, as
@@ -468,6 +474,16 @@ set contains
 .BR io_uring_enter (2)
 and
 .BR io_uring_register (2).
+.PP
+All workers of an interface wait for its listening socket, and the first one
+the kernel wakes for a new connection accepts it. Unless
+.B \-\-no_conn_balancing
+is given, a worker of the unprivileged interface hands a connection it
+accepted to the worker serving the fewest connections, if that is another one
+with fewer than itself and a free slot; that worker is woken through an
+eventfd and takes the connection in its next round. So the connections are
+spread evenly over the workers rather than piled up on the few the kernel
+happens to wake first, whose clients would wait for each other.
 .PP
 Receiving through the ring, each worker registers 64 buffers of 64 KiB, the
 largest request: 4 MiB of address space per worker, of which the pages the
