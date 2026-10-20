@@ -60,10 +60,11 @@ or Botan \- and missing in a build with the builtin or the leancrypto backend
 which refuses the TLS options at the start.
 .IP
 The key exchange prefers the post\-quantum groups of ML\-KEM \-
-SecP384r1MLKEM1024, X25519MLKEM768, SecP256r1MLKEM768 and MLKEM1024, in this
-order \- to (EC)DHE alone, as far as the TLS stack has them: OpenSSL 3.5 and
-later, GnuTLS built with leancrypto, Botan 3.7 and later. A peer without them
-is served with (EC)DHE. Certificates may be on ML\-DSA\-44, ML\-DSA\-65 and
+SecP384r1MLKEM1024 and MLKEM1024, in this order \- to (EC)DHE alone, as far
+as the TLS stack has them: OpenSSL 3.5 and later, GnuTLS built with
+leancrypto, Botan 3.7 and later. The hybrids whose conventional half falls
+short of 192 bits, X25519MLKEM768 and SecP256r1MLKEM768, are neither offered
+nor accepted. A peer without the groups is served with (EC)DHE. Certificates may be on ML\-DSA\-44, ML\-DSA\-65 and
 ML\-DSA\-87, for the server, the clients and the CAs alike, where the TLS
 stack signs TLS 1.3 with ML\-DSA: OpenSSL 3.5 and later, GnuTLS 3.8.10 and
 later built with leancrypto. Botan verifies certificates and CRLs signed by a

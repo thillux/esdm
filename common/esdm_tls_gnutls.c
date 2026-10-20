@@ -78,14 +78,13 @@
 #define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
 
 /*
- * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them.
- * GnuTLS 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid,
- * and leaves it out of what it offers - until it does.
+ * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them -
+ * not its hybrids X25519-MLKEM768 and SECP256R1-MLKEM768, of 128 bits. GnuTLS
+ * 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid, and
+ * leaves it out of what it offers - until it does.
  */
 static const char *const esdm_tls_gnutls_mlkem[] = {
 	"SECP384R1-MLKEM1024",
-	"X25519-MLKEM768",
-	"SECP256R1-MLKEM768",
 	"MLKEM1024",
 };
 
@@ -553,13 +552,13 @@ static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
 
 /*
  * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
- * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL - for
- * "+" appends, the groups are listed anew. The signature algorithms of
- * ML-DSA are added where GnuTLS signs TLS with them, which the NORMAL of
- * 3.8.13 lists already. GnuTLS refuses a priority naming a group it does not
- * have, and one built without leancrypto has none of ML-KEM: the string names
- * only what GnuTLS reports - and should it be refused nevertheless, NORMAL's
- * groups serve.
+ * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL but
+ * any of ML-KEM it may list - for "+" appends, the groups are listed anew.
+ * The signature algorithms of ML-DSA are added where GnuTLS signs TLS with
+ * them, which the NORMAL of 3.8.13 lists already. GnuTLS refuses a priority
+ * naming a group it does not have, and one built without leancrypto has none
+ * of ML-KEM: the string names only what GnuTLS reports - and should it be
+ * refused nevertheless, NORMAL's groups serve.
  */
 static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 {
@@ -584,7 +583,8 @@ static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 	n = gnutls_priority_group_list(normal, &groups);
 	for (i = 0; n > 0 && i < (size_t)n && !ret; i++) {
 		name = gnutls_group_get_name((gnutls_group_t)groups[i]);
-		if (name)
+		/* Hybrids of 128 bits as well, see esdm_tls_gnutls_mlkem */
+		if (name && !strstr(name, "MLKEM") && !strstr(name, "KYBER"))
 			ret = esdm_tls_gnutls_prio_add(str, &len, "GROUP-",
 						       name);
 	}

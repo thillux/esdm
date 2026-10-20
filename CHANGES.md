@@ -64,19 +64,20 @@ esdm-egd-net-crl-update@.timer downloads CRLs without an HTTP client in the
 daemons
 
 * EGD over the network: TLS 1.3 is post-quantum ready - the key exchange
-prefers the hybrids of ML-KEM SecP384r1MLKEM1024, X25519MLKEM768 and
-SecP256r1MLKEM768 and MLKEM1024 alone, in this order, to the (EC)DHE groups,
-and certificates of the server, the clients and the CAs may be on ML-DSA-44,
-ML-DSA-65 and ML-DSA-87, as far as the TLS stack has them: OpenSSL 3.5 all of
-it, GnuTLS built with leancrypto the hybrids and ML-DSA (in the handshake from
-3.8.10 on), Botan ML-KEM from 3.7 on and CAs on ML-DSA from 3.6 on - Botan
-refuses a certificate of its own on ML-DSA, as it has no signature scheme of
-TLS for it. A group the TLS stack lacks is left out rather than failing the
-start, and a peer without ML-KEM is served with (EC)DHE; the debug log tells
-what the TLS stack has and the group of each connection. The DTLS 1.2 over
-SCTP of es-ext-net has neither - both are defined for TLS 1.3 only, and none
-of the TLS stacks has DTLS 1.3 -, refuses a certificate on ML-DSA at the start
-and takes the certificates of a CA on ML-DSA
+prefers the hybrid of ML-KEM SecP384r1MLKEM1024 and MLKEM1024 alone, in this
+order, to the (EC)DHE groups - not the hybrids whose conventional half falls
+short of 192 bits, X25519MLKEM768 and SecP256r1MLKEM768 -, and certificates of
+the server, the clients and the CAs may be on ML-DSA-44, ML-DSA-65 and
+ML-DSA-87, as far as the TLS stack has them: OpenSSL 3.5 all of it, GnuTLS
+built with leancrypto the hybrid and ML-DSA (in the handshake from 3.8.10 on),
+Botan ML-KEM from 3.7 on and CAs on ML-DSA from 3.6 on - Botan refuses a
+certificate of its own on ML-DSA, as it has no signature scheme of TLS for it.
+A group the TLS stack lacks is left out rather than failing the start, and a
+peer without ML-KEM is served with (EC)DHE; the debug log tells what the TLS
+stack has and the group of each connection. The DTLS 1.2 over SCTP of
+es-ext-net has neither - both are defined for TLS 1.3 only, and none of the
+TLS stacks has DTLS 1.3 -, refuses a certificate on ML-DSA at the start and
+takes the certificates of a CA on ML-DSA
 
 * libesdm_egd_client: network modes - esdm_egd_client_alloc_net() with an
 extensible configuration, plain TCP, which keeps the syscall discipline of the

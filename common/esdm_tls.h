@@ -68,28 +68,29 @@
  * TLS stack's default:
  *
  *	SecP384r1MLKEM1024	ECDHE on P-384 and ML-KEM-1024
- *	X25519MLKEM768		X25519 and ML-KEM-768
- *	SecP256r1MLKEM768	ECDHE on P-256 and ML-KEM-768
  *	MLKEM1024		ML-KEM-1024 alone
  *
- * The hybrids hold as long as either of their halves does. A group the TLS
- * stack does not have is left out, and the (EC)DHE groups always follow: a TLS
- * stack with none of them keeps to (EC)DHE, and so does a connection with a
- * peer that has none, with either side being an ESDM or not - nothing fails for
- * want of ML-KEM. Two sides of the ESDM agree on the first group both have, by
- * a HelloRetryRequest where the client sent no key share of it: a client sends
- * one of the first ML-KEM group and, with OpenSSL and Botan, one of X25519 for
- * a server without ML-KEM. esdm_tls_mlkem_group() tells which group two sides
- * of the TLS stack of the build agree on, esdm_tls_group() the group of a
- * connection. Where the TLS stacks have them:
+ * The hybrid holds as long as either of its halves does, and its conventional
+ * half has a security level of 192 bits, as ML-KEM-1024 has more: a hybrid
+ * whose conventional half falls short - X25519MLKEM768 and SecP256r1MLKEM768,
+ * of 128 bits - is neither offered nor accepted, even where the TLS stack has
+ * it by default, as OpenSSL 3.5 and Botan 3.7 have X25519MLKEM768. A group the
+ * TLS stack does not have is left out, and the (EC)DHE groups always follow:
+ * a TLS stack with neither keeps to (EC)DHE, and so does a connection with a
+ * peer that has neither, with either side being an ESDM or not - nothing fails
+ * for want of ML-KEM. Two sides of the ESDM agree on the first group both
+ * have, by a HelloRetryRequest where the client sent no key share of it: a
+ * client sends one of the first ML-KEM group and, with OpenSSL and Botan, one
+ * of X25519 for a server without ML-KEM. esdm_tls_mlkem_group() tells which
+ * group two sides of the TLS stack of the build agree on, esdm_tls_group() the
+ * group of a connection. Where the TLS stacks have them:
  *
- *  - OpenSSL 3.5 and later: all four.
+ *  - OpenSSL 3.5 and later: both.
  *  - GnuTLS only when built with leancrypto (--with-leancrypto, 3.8.9 and
- *    later): the three hybrids. It uses ML-KEM-1024 alone in no TLS, and takes
- *    up MLKEM1024 the day it does.
- *  - Botan 3.7 and later, with its modules ml_kem and tls_13_pqc:
- *    X25519MLKEM768, SecP256r1MLKEM768 and MLKEM1024, and SecP384r1MLKEM1024
- *    from 3.8 on.
+ *    later): SecP384r1MLKEM1024. It uses ML-KEM-1024 alone in no TLS, and
+ *    takes up MLKEM1024 the day it does.
+ *  - Botan 3.7 and later, with its modules ml_kem and tls_13_pqc: MLKEM1024,
+ *    and SecP384r1MLKEM1024 from 3.8 on.
  *
  * The signature schemes mldsa44, mldsa65 and mldsa87 of TLS 1.3 are offered
  * and accepted next to the others: a side with an ML-DSA certificate signs

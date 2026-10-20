@@ -112,8 +112,9 @@ namespace
 #if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 /*
  * The groups of ML-KEM in the order of esdm_tls.h, as far as Botan has them:
- * those of the standard came with 3.7, SecP384r1MLKEM1024 with 3.8, and a
- * build has them with the modules ml_kem and tls_13_pqc.
+ * MLKEM1024 came with 3.7, SecP384r1MLKEM1024 with 3.8, and a build has them
+ * with the modules ml_kem and tls_13_pqc. Not the hybrids of Botan with
+ * X25519 and P-256, of 128 bits.
  */
 static std::vector<Botan::TLS::Group_Params> esdm_tls_botan_mlkem()
 {
@@ -121,8 +122,6 @@ static std::vector<Botan::TLS::Group_Params> esdm_tls_botan_mlkem()
 #if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 8, 0)
 		Botan::TLS::Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
 #endif
-		Botan::TLS::Group_Params_Code::HYBRID_X25519_ML_KEM_768,
-		Botan::TLS::Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768,
 		Botan::TLS::Group_Params_Code::ML_KEM_1024,
 	};
 	std::vector<Botan::TLS::Group_Params> groups;
@@ -153,8 +152,8 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 
 #if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 	/*
-	 * The groups of ML-KEM, then Botan's default ones of (EC)DHE - its
-	 * default lists some of ML-KEM as well, after X25519 and P-256. A
+	 * The groups of ML-KEM, then Botan's default ones of (EC)DHE - not the
+	 * hybrids of 128 bits its default lists after X25519 and P-256. A
 	 * server of Botan takes the first group of ML-KEM the client offers a
 	 * key share of, else the first the client lists, by a
 	 * HelloRetryRequest: two sides of this policy agree on the first one.

@@ -75,17 +75,21 @@
 
 /*
  * TLS 1.3: the groups of ML-KEM in the order of esdm_tls.h, as a tuple of
- * their own ahead of OpenSSL's default ones. A server takes a group of the
- * first tuple the client has one of - by a HelloRetryRequest if the client
- * sent no key share of it -, and so prefers ML-KEM to any (EC)DHE group. The
- * client sends key shares of SecP384r1MLKEM1024 ("*") and of X25519, the one
- * of the default for a server without ML-KEM. A group OpenSSL does not have is
- * left out ("?"); OpenSSL before 3.5 has none and knows neither the tuples nor
- * the key shares nor DEFAULT, refuses the list and keeps its default groups.
+ * their own ahead of the (EC)DHE groups. A server takes a group of the first
+ * tuple the client has one of - by a HelloRetryRequest if the client sent no
+ * key share of it -, and so prefers ML-KEM to any (EC)DHE group. The client
+ * sends key shares of SecP384r1MLKEM1024 ("*") and of X25519 for a server
+ * without ML-KEM. A group OpenSSL does not have is left out ("?").
+ *
+ * The (EC)DHE groups are the DEFAULT of OpenSSL 3.5 without its hybrid
+ * X25519MLKEM768, whose X25519 falls short of 192 bits - see esdm_tls.h -,
+ * spelled out rather than taken from DEFAULT, which takes that hybrid along.
+ * OpenSSL before 3.5 has no ML-KEM and knows neither the tuples nor the key
+ * shares, refuses the list and keeps its default groups.
  */
 #define ESDM_TLS_OPENSSL_GROUPS                                                \
-	"?*SecP384r1MLKEM1024:?X25519MLKEM768:?SecP256r1MLKEM768:?MLKEM1024"   \
-	"/DEFAULT"
+	"?*SecP384r1MLKEM1024:?MLKEM1024/?*X25519:?secp256r1/"                 \
+	"?X448:?secp384r1:?secp521r1/?ffdhe2048:?ffdhe3072"
 
 /*
  * DTLS 1.2 on SCTP: ECDHE with the key of the certificate, ECDSA or RSA, and
@@ -1297,8 +1301,6 @@ const char *esdm_tls_backend_group(void *conn)
 /* The groups of ML-KEM of ESDM_TLS_OPENSSL_GROUPS, in its order */
 static const char *const esdm_tls_openssl_mlkem[] = {
 	"SecP384r1MLKEM1024",
-	"X25519MLKEM768",
-	"SecP256r1MLKEM768",
 	"MLKEM1024",
 };
 
