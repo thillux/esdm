@@ -1988,8 +1988,9 @@
 
         # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
         # /proc/esdm served by the ESDM over its EGD socket. On the stock
-        # rolling kernel - the module needs no kernel patches - and once only,
-        # the per kernel builds below check that it compiles everywhere.
+        # kernels - the module needs no kernel patches -, one check per kernel
+        # like the live_* and ebpf_* ones: the per kernel builds below only
+        # show that it compiles there, this that it works there.
         mkEsdmCdevCheck =
           kernel:
           let
@@ -2691,6 +2692,9 @@
         checks =
           lib.mapAttrs' (name: kernel: lib.nameValuePair "live_${name}" (mkCheck kernel)) kernels
           // lib.mapAttrs' (name: kernel: lib.nameValuePair "ebpf_${name}" (mkEbpfCheck kernel)) stockKernels
+          // lib.mapAttrs' (
+            name: kernel: lib.nameValuePair "cdev_${name}" (mkEsdmCdevCheck kernel)
+          ) stockKernels
           // {
             # Only for the rolling kernel - see mkEbpfRawCheck on why this is
             # not instantiated per kernel version.
@@ -2708,10 +2712,6 @@
             # Nor the external entropy sources on the network - see
             # mkEsExtNetCheck.
             es_ext_net = mkEsExtNetCheck;
-
-            # The character device module, on the rolling kernel - see
-            # mkEsdmCdevCheck.
-            esdm_cdev = mkEsdmCdevCheck stockKernels.latest;
 
             # esdm-es-pkcs11 from its unit, read by esdm-server - see
             # mkPkcs11Check.
