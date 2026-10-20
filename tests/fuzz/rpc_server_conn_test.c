@@ -35,7 +35,9 @@
  *   - no connection is closed to make room while a worker has a free slot,
  *   - a request is not lost to a connection the server closes on its own: a
  *     connection with a request waiting is not idle, and one sent as the
- *     server closes the connection, idle or to make room, is still served.
+ *     server closes the connection, idle or to make room, is still served,
+ *   - new connections are accepted in the first rounds of a worker busy with
+ *     others, not one per round.
  */
 
 #ifndef _GNU_SOURCE
@@ -331,6 +333,20 @@ static uint32_t test_tag(const ProtobufCMessage *input)
 	return 0;
 }
 
+/*
+ * The tags of the requests served, in the order they were, from those of
+ * TEST_TAG_FIRST on - see test_accept_burst()
+ */
+#define TEST_TAG_FIRST 1
+#define TEST_LOG_MAX 4096
+static atomic_uint test_log[TEST_LOG_MAX];
+static atomic_uint test_log_len;
+
+/* A request with this tag waits while test_gate is set, holding up its worker */
+#define TEST_TAG_GATE 0xffff
+static atomic_bool test_gate;
+static atomic_bool test_gated;
+
 /* Answers every call with ret 0 after test_delay_ms */
 static void test_service_invoke(ProtobufCService *service,
 				unsigned int method_index,
@@ -338,12 +354,26 @@ static void test_service_invoke(ProtobufCService *service,
 				ProtobufCClosure closure, void *closure_data)
 {
 	RetResponse response = RET_RESPONSE__INIT;
+	uint32_t tag = test_tag(input);
 
 	(void)service;
 	(void)method_index;
 
-	if (test_tag(input) == TEST_TAG_LOCATE)
+	if (tag == TEST_TAG_LOCATE) {
 		atomic_store(&test_located, (uintptr_t)pthread_self());
+	} else if (tag == TEST_TAG_GATE) {
+		uint64_t end = test_now_ms() + 10000;
+
+		atomic_store(&test_gated, true);
+		while (atomic_load(&test_gate) && test_now_ms() < end)
+			test_sleep_ms(1);
+		atomic_store(&test_gated, false);
+	} else if (tag >= TEST_TAG_FIRST) {
+		unsigned int n = atomic_fetch_add(&test_log_len, 1);
+
+		if (n < TEST_LOG_MAX)
+			atomic_store(&test_log[n], tag);
+	}
 
 	test_sleep_ms(atomic_load(&test_delay_ms));
 
@@ -593,6 +623,130 @@ static void test_reap_late(void)
 	      "the connection was not closed after the request");
 
 	close(fd);
+}
+
+/*
+ * Connections the privileged worker serves already, each with as many
+ * requests, and new ones connecting meanwhile, see test_accept_burst(). The
+ * tags of their requests: TEST_TAG_FIRST + i for the ith of the former,
+ * TEST_TAG_NEW + j for the jth of the latter.
+ */
+#define TEST_BUSY_CONNS 30
+#define TEST_BUSY_REQUESTS 40
+#define TEST_NEW_CONNS 30
+#define TEST_TAG_NEW 1000
+
+/*
+ * New connections get their turn in a round of the worker as the others with
+ * a request do. The worker serves connections with requests, many of them in
+ * the socket each, while new connections wait to be accepted: every one is
+ * served in the first rounds, not one per round.
+ *
+ * The worker is held up while the requests are sent and the new connections
+ * made, so that it finds them all at once. @nofile is the descriptor limit for
+ * the time of the test, 0 to leave it.
+ */
+static void test_accept_burst(rlim_t nofile)
+{
+	static int busy[TEST_BUSY_CONNS], fresh[TEST_NEW_CONNS];
+	unsigned int i, j = 0, n, len, busy_before = 0, served_new = 0;
+	struct rlimit rl, saved;
+	uint64_t end;
+	int gate;
+
+	printf("%u new connections while the worker serves %u others with %u requests each\n",
+	       TEST_NEW_CONNS, TEST_BUSY_CONNS, TEST_BUSY_REQUESTS);
+
+	/* Both sides of the connections are this process' */
+	if (nofile && !getrlimit(RLIMIT_NOFILE, &saved)) {
+		rl = saved;
+		rl.rlim_cur = nofile;
+		if (setrlimit(RLIMIT_NOFILE, &rl))
+			nofile = 0;
+	} else {
+		nofile = 0;
+	}
+
+	gate = test_connect(test_priv_path);
+	CHECK(gate >= 0, "cannot connect: %s", strerror(-gate));
+	if (gate < 0)
+		goto out_limit;
+	CHECK(test_send(gate, 0) && test_answered(gate, 0, 2000),
+	      "the gate connection was not served");
+
+	/* Accepted and served once */
+	for (i = 0; i < TEST_BUSY_CONNS; i++) {
+		busy[i] = test_connect(test_priv_path);
+		CHECK(busy[i] >= 0, "cannot connect: %s", strerror(-busy[i]));
+		if (busy[i] < 0)
+			goto out_busy;
+		CHECK(test_send(busy[i], i) && test_answered(busy[i], i, 2000),
+		      "connection %u was not served", i);
+	}
+
+	atomic_store(&test_log_len, 0);
+	atomic_store(&test_gate, true);
+	CHECK(test_send_tagged(gate, 1, TEST_TAG_GATE),
+	      "cannot hold up the worker");
+	end = test_now_ms() + 2000;
+	while (!atomic_load(&test_gated) && test_now_ms() < end)
+		test_sleep_ms(1);
+	CHECK(atomic_load(&test_gated), "the worker was not held up");
+
+	for (i = 0; i < TEST_BUSY_CONNS; i++) {
+		for (n = 0; n < TEST_BUSY_REQUESTS; n++)
+			CHECK(test_send_tagged(busy[i], n, TEST_TAG_FIRST + i),
+			      "cannot send on connection %u", i);
+	}
+	for (j = 0; j < TEST_NEW_CONNS; j++) {
+		fresh[j] = test_connect(test_priv_path);
+		CHECK(fresh[j] >= 0, "cannot connect: %s", strerror(-fresh[j]));
+		if (fresh[j] < 0)
+			break;
+		CHECK(test_send_tagged(fresh[j], j, TEST_TAG_NEW + j),
+		      "cannot send on new connection %u", j);
+	}
+	atomic_store(&test_gate, false);
+
+	end = test_now_ms() + 10000;
+	while (atomic_load(&test_log_len) <
+		       TEST_BUSY_CONNS * TEST_BUSY_REQUESTS + j &&
+	       test_now_ms() < end)
+		test_sleep_ms(10);
+
+	/* The requests of the others served before the last new connection */
+	len = atomic_load(&test_log_len);
+	if (len > TEST_LOG_MAX)
+		len = TEST_LOG_MAX;
+	for (n = 0; n < len && served_new < j; n++) {
+		if (atomic_load(&test_log[n]) >= TEST_TAG_NEW)
+			served_new++;
+		else
+			busy_before++;
+	}
+
+	CHECK(served_new == TEST_NEW_CONNS,
+	      "%u of %u new connections were served", served_new,
+	      TEST_NEW_CONNS);
+	printf("the last new connection was served after %u of the %u requests of the others\n",
+	       busy_before, TEST_BUSY_CONNS * TEST_BUSY_REQUESTS);
+	/*
+	 * Accepted in the first round, they are served after the first request
+	 * of each other connection, one per round after as many rounds as were
+	 * before them.
+	 */
+	CHECK(busy_before <= 2 * TEST_BUSY_CONNS,
+	      "the new connections were not served in the first rounds");
+
+	while (j)
+		close(fresh[--j]);
+out_busy:
+	while (i)
+		close(busy[--i]);
+	close(gate);
+out_limit:
+	if (nofile)
+		setrlimit(RLIMIT_NOFILE, &saved);
 }
 
 /*
@@ -1003,6 +1157,7 @@ int main(void)
 	test_long_call();
 	test_reap_pending();
 	test_reap_late();
+	test_accept_burst(client_nofile);
 
 	if (client_nofile) {
 		test_fill(client_nofile);

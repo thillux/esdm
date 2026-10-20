@@ -405,7 +405,7 @@ int main(void)
 	uint8_t buf[32];
 	unsigned int first, rest, i, opened = 0, closed = 0, drained = 0;
 	size_t sndbuf;
-	uint64_t span = 0, start, round_ms, phase_ms, max_ms = TEST_MAX_MS;
+	uint64_t span = 0, start, round_ms, max_ms = TEST_MAX_MS;
 	pthread_t caller;
 	bool caller_running = false;
 	ssize_t rc;
@@ -495,25 +495,18 @@ int main(void)
 
 	/*
 	 * A connection closed now was dropped for a send buffer the first
-	 * answers filled - or reaped as idle, which takes the server serving
-	 * them for longer than its idle timeout: it does not serve its
-	 * connections strictly in turn, and those it is done with first wait
-	 * for the others. Under such load the scenario cannot be set up.
+	 * answers filled - or reaped as idle while the server was still busy
+	 * with the others. It serves its connections in turn, those it has yet
+	 * to accept included, so none is done with its requests more than a
+	 * round before the last.
 	 */
-	phase_ms = test_now_ms() - start;
 	for (i = 0; i < opened; i++) {
-		if (!test_closed_by_server(fds[i]))
-			continue;
-
-		if (phase_ms * 1000 >= ESDM_RPC_IDLE_TIMEOUT_USEC) {
-			printf("The first answers took %llu ms, longer than the idle timeout of the server, which reaped connections done with them - skipping\n",
-			       (unsigned long long)phase_ms);
-			ret = 77;
-		} else {
-			printf("FAIL: the first answers filled a send buffer\n");
+		if (test_closed_by_server(fds[i])) {
+			printf("FAIL: connection %u was closed after the first answers - dropped for a full send buffer, or reaped as idle\n",
+			       i);
 			ret = 1;
+			goto out_close;
 		}
-		goto out_close;
 	}
 
 	/*
