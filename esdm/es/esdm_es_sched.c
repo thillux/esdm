@@ -61,6 +61,11 @@ static void esdm_sched_finalize_locked(void)
 	if (esdm_sched_entropy_fd >= 0)
 		close(esdm_sched_entropy_fd);
 	esdm_sched_entropy_fd = -1;
+	/*
+	 * The requested bits belong to the descriptor: one opened anew starts
+	 * out with those of the kernel, so they are sent again.
+	 */
+	esdm_sched_requested_bits_set = 0;
 }
 
 static void esdm_sched_finalize(void)

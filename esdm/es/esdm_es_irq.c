@@ -63,6 +63,11 @@ static void esdm_irq_finalize_locked(void)
 	if (esdm_irq_entropy_fd >= 0)
 		close(esdm_irq_entropy_fd);
 	esdm_irq_entropy_fd = -1;
+	/*
+	 * The requested bits belong to the descriptor: one opened anew starts
+	 * out with those of the kernel, so they are sent again.
+	 */
+	esdm_irq_requested_bits_set = 0;
 }
 
 static void esdm_irq_finalize(void)
