@@ -383,7 +383,10 @@ TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 on brainpoolP512r1; with OpenSSL and
 GnuTLS, which have no ECDHE\-PSK suite with AES\-GCM, and between Botan and
 either of them, TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with \%Encrypt\-then\-MAC
 on secp521r1. The key exchange is not post\-quantum: ML\-KEM is defined for
-TLS 1.3 only, and none of the TLS stacks has DTLS 1.3.
+TLS 1.3 only, and none of the TLS stacks has DTLS 1.3. Every connection runs
+the one full handshake it starts with, with the extended master secret, which
+every peer requires: no session is resumed, no ticket issued and nothing
+renegotiated.
 .PP
 The DTLS context is set up at start up, before the privileges are dropped;
 should that fail, the daemon logs it and serves in the clear. A handshake
