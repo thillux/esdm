@@ -32,11 +32,11 @@
  * patched kernel and its esdm_es module.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -46,21 +46,27 @@
 #include "esdm_es_mgr.h"
 #include "../es_state_check.h"
 #include "esdm_es_irq.h"
+#include "es_irq_events.h"
 #include "helper.h"
 #include "test_pertubation.h"
 
 /*
- * Short sleeps arm hrtimers whose expiry raises timer interrupts and softirqs
- * on the local CPU - the same generator the eBPF interrupt test uses, and the
- * only one reachable from unprivileged user space.
+ * Reads from the disk per round, each one interrupt of the block device. A read
+ * of the initial seed size takes some 2300 events in FIPS mode: the add-on
+ * credits a third of a bit per event (256 * ESDM_ES_OSR events for 256 bits,
+ * ESDM_ES_OSR being 3), the read has to find two blocks and their oversampling
+ * available, and what is available is reduced by the oversampling twice.
  */
+#define ES_IRQ_TEST_READS 4000
+
+/* Device interrupts, which the add-on collects - see es_irq_events.h */
 static void create_irq_entropy(void)
 {
-	struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
-	unsigned int i;
+	int ret = es_irq_events(ES_IRQ_TEST_READS);
 
-	for (i = 0; i < 5000; i++)
-		nanosleep(&ts, NULL);
+	if (ret)
+		printf("ES Interrupt - info: no interrupt events created: %s\n",
+		       strerror(-ret));
 }
 
 static int es_irq_getstate(void)
@@ -107,7 +113,7 @@ static int es_irq_getdata(void)
 {
 	struct entropy_es eb_es;
 	uint8_t zero[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
-	uint32_t loops;
+	uint32_t loops, delivered = 0;
 
 	if (!esdm_es[esdm_int_es_irq]->get_ent) {
 		printf("ES Interrupt - fail: get_ent callback missing\n");
@@ -137,8 +143,21 @@ static int es_irq_getdata(void)
 				return 1;
 			}
 			printf("ES Interrupt - pass: buffer with entropy is not zero\n");
+			delivered++;
 		}
 	}
+
+	/*
+	 * Each iteration creates device interrupts before it asks, so a source
+	 * that never delivers any entropy is broken - not merely empty.
+	 */
+	if (!delivered) {
+		printf("ES Interrupt - fail: get_ent did not deliver entropy in any of %u iterations\n",
+		       loops);
+		return 1;
+	}
+	printf("ES Interrupt - pass: get_ent delivered entropy in %u of %u iterations\n",
+	       delivered, loops);
 
 	return 0;
 }

@@ -47,6 +47,7 @@
  * it.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -58,6 +59,7 @@
 #include <unistd.h>
 
 #include "esdm_es_ioctl.h"
+#include "es_irq_events.h"
 
 /* The security strength, which a request of every kernel may ask for */
 #define ES_CONF_SECURITY_STRENGTH_BITS 256
@@ -92,30 +94,10 @@ static void es_conf_sched_events(void)
 	}
 }
 
-/*
- * Interrupt events: the add-on sees device interrupts only, not those of the
- * local timer - the completions of synchronous writes, to a file in the
- * working directory, which is the build directory under meson.
- */
+/* Interrupt events: the completions of reads from the disk */
 static void es_conf_irq_events(void)
 {
-	char name[] = "es_kernel_conf_XXXXXX";
-	uint8_t block[4096];
-	unsigned int i;
-	int fd = mkstemp(name);
-
-	if (fd < 0)
-		return;
-	unlink(name);
-
-	memset(block, 0x5a, sizeof(block));
-	for (i = 0; i < 200; i++) {
-		if (pwrite(fd, block, sizeof(block), 0) != sizeof(block) ||
-		    fdatasync(fd))
-			break;
-	}
-
-	close(fd);
+	es_irq_events(400);
 }
 
 static const struct es_ioctls es_conf_sources[] = {

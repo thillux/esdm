@@ -167,8 +167,8 @@ if get_option('es_irq').enabled()
 		link_with: esdm_static_lib,
 	)
 
-	# The interrupt generator sleeps 5000 times per round, so the wall clock
-	# is dominated by the rounds rather than by the work.
+	# The interrupt generator reads from the disk 4000 times per round, so
+	# the wall clock is dominated by the rounds rather than by the work.
 	test('ES Interrupt', es_irq_tester, timeout: 300)
 endif
 
