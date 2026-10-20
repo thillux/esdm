@@ -353,7 +353,12 @@ static int relay_upstream(struct relay_conn *conn)
 		cfg.mode = ESDM_EGD_CLIENT_NET_TLS;
 		cfg.cert_file = relay_cfg.files.cert;
 		cfg.key_file = relay_cfg.files.key;
-		cfg.ca_file = relay_cfg.files.ca;
+		/* The others NULL-terminated, see struct esdm_net_tls_files */
+		cfg.ca_file = relay_cfg.files.ca[0];
+		cfg.ca_files =
+			relay_cfg.files.ca_num > 1 ?
+				(const char *const *)&relay_cfg.files.ca[1] :
+				NULL;
 		cfg.server_name = relay_cfg.server_name;
 		for (i = 0; i < relay_cfg.files.crl_num; i++)
 			crls[i] = relay_cfg.files.crl[i];
@@ -728,7 +733,8 @@ static void usage(void)
 		"\t\t\t\tunderneath, never a default\n"
 		"\t   --cert <FILE>\tCertificate of the relay, PEM\n"
 		"\t   --key <FILE>\t\tIts private key, PEM, PKCS#8\n"
-		"\t   --ca <FILE>\t\tTrust anchors the server must chain to, PEM\n"
+		"\t   --ca <FILE>\t\tTrust anchors the server must chain to, PEM;\n"
+		"\t\t\t\tmay be repeated, for the rollover of a CA\n"
 		"\t   --server_name <NAME>\tName the server's certificate is issued\n"
 		"\t\t\t\tfor (default: the host of --connect)\n"
 		"\t   --crl <FILE>\t\tCRLs, PEM; may be repeated\n"
@@ -851,7 +857,8 @@ int main(int argc, char *argv[])
 			break;
 		case OPT_CA:
 			tls_option = true;
-			if (relay_set_file(&relay_cfg.files.ca, optarg))
+			if (esdm_net_tls_option(&relay_cfg.files, "ca", optarg) <
+			    0)
 				return 1;
 			break;
 		case OPT_SERVER_NAME:

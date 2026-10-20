@@ -20,9 +20,9 @@
 /*
  * The TLS layer of the EGD network mode, common/esdm_tls.h, against the test
  * PKI of tests/egd-net/pki - for whichever TLS stack the build uses: the
- * mutual authentication, the server name, the revocation policy, the
- * transfers and the end of a connection, and the secure minimal mode and the
- * algorithms on the wire. Both ends run in this one thread on a socket pair,
+ * mutual authentication, several CAs trusted for their rollover, the server
+ * name, the revocation policy, the transfers and the end of a connection, and
+ * the secure minimal mode and the algorithms on the wire. Both ends run in this one thread on a socket pair,
  * each step of the one made whenever the other waits, so no timing decides
  * anything. Skips (77) in a build without egd-net-tls.
  *
@@ -93,7 +93,8 @@ static struct esdm_tls_config cfg_of(const char *cert, const char *key,
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.cert_file = cert;
 	cfg.key_file = key;
-	cfg.ca_file = ca;
+	cfg.ca_files[0] = ca;
+	cfg.ca_files_num = 1;
 	return cfg;
 }
 
@@ -380,6 +381,93 @@ static void expect_refused(struct esdm_tls_ctx *sctx, struct esdm_tls_ctx *cctx,
 	pair_close(&p);
 }
 
+/* A handshake of @sctx and @cctx, which has to succeed */
+static void expect_accepted(struct esdm_tls_ctx *sctx,
+			    struct esdm_tls_ctx *cctx, const char *what)
+{
+	struct pair p;
+
+	CHECK(!pair_open(&p, sctx, cctx, "localhost"), "%s: pair", what);
+	CHECK(!pair_handshake(&p),
+	      "%s: handshake: server %d (%s), client %d (%s)", what, p.sret,
+	      esdm_tls_error(p.s), p.cret, esdm_tls_error(p.c));
+	if (!p.sret && !p.cret)
+		printf("  %s: the server sees %s\n", what,
+		       esdm_tls_peer_subject(p.s));
+	pair_close(&p);
+}
+
+/*
+ * The rollover of a CA, see esdm_tls.h: trust anchors of several files, every
+ * CA of which is trusted alike - here the CA of the test PKI and the rogue
+ * CA, standing in for the old and the new CA. A side taking up a further file
+ * tells by its stamp.
+ */
+static void test_ca_rollover(void)
+{
+	struct esdm_tls_config scfg =
+		cfg_of(PKI("server.crt"), PKI("server.key"), PKI("ca.crt"));
+	struct esdm_tls_config c1 =
+		cfg_of(PKI("client1.crt"), PKI("client1.key"), PKI("ca.crt"));
+	struct esdm_tls_config rogue =
+		cfg_of(PKI("rogue-client.crt"), PKI("rogue-client.key"),
+		       PKI("rogue-ca.crt"));
+	uint8_t one[ESDM_TLS_STAMP_LEN], two[ESDM_TLS_STAMP_LEN],
+		swapped[ESDM_TLS_STAMP_LEN];
+	struct esdm_tls_ctx *sctx, *cctx1, *cctxr, *ctx = NULL;
+	unsigned int i;
+
+	printf("TLS (%s): several CAs, for their rollover\n", esdm_tls_stack());
+
+	/* The rogue client trusts the CA of the server next to its own */
+	rogue.ca_files[rogue.ca_files_num++] = PKI("ca.crt");
+	cctx1 = client_ctx(&c1);
+	cctxr = client_ctx(&rogue);
+
+	/* Before: the one CA */
+	esdm_tls_stamp(&scfg, one);
+	sctx = server_ctx(&scfg);
+	expect_accepted(sctx, cctx1, "client of the one CA");
+	expect_refused(sctx, cctxr, "client of the other CA, not yet trusted");
+	esdm_tls_ctx_put(sctx);
+
+	/* During: both, either client is taken */
+	scfg.ca_files[scfg.ca_files_num++] = PKI("rogue-ca.crt");
+	esdm_tls_stamp(&scfg, two);
+	CHECK(memcmp(one, two, sizeof(one)),
+	      "the stamp did not change with a further file of trust anchors");
+	sctx = server_ctx(&scfg);
+	expect_accepted(sctx, cctx1, "client of the old CA, both trusted");
+	expect_accepted(sctx, cctxr, "client of the new CA, both trusted");
+	esdm_tls_ctx_put(sctx);
+
+	/* The files are told apart by their place as well */
+	scfg.ca_files[0] = PKI("rogue-ca.crt");
+	scfg.ca_files[1] = PKI("ca.crt");
+	esdm_tls_stamp(&scfg, swapped);
+	CHECK(memcmp(two, swapped, sizeof(two)),
+	      "the stamp did not change with the order of the trust anchors");
+
+	/* None, or more than there is room for, is no configuration */
+	scfg.ca_files_num = 0;
+	CHECK(esdm_tls_ctx_alloc(true, &scfg, &ctx) == -EINVAL,
+	      "a context without trust anchors was built");
+	for (i = 0; i < ESDM_TLS_MAX_CA_FILES; i++)
+		scfg.ca_files[i] = PKI("ca.crt");
+	scfg.ca_files_num = ESDM_TLS_MAX_CA_FILES + 1;
+	CHECK(esdm_tls_ctx_alloc(true, &scfg, &ctx) == -EINVAL,
+	      "a context with %u files of trust anchors was built",
+	      ESDM_TLS_MAX_CA_FILES + 1);
+	scfg.ca_files_num = ESDM_TLS_MAX_CA_FILES;
+	CHECK(!esdm_tls_ctx_alloc(true, &scfg, &ctx),
+	      "a context with %u files of trust anchors was refused",
+	      ESDM_TLS_MAX_CA_FILES);
+	esdm_tls_ctx_put(ctx);
+
+	esdm_tls_ctx_put(cctx1);
+	esdm_tls_ctx_put(cctxr);
+}
+
 static void test_refused_clients(void)
 {
 	struct esdm_tls_config scfg = cfg_of(PKI("server.crt"),
@@ -401,10 +489,12 @@ static void test_refused_clients(void)
 	 * The rogue client trusts its own CA only, which the server does not
 	 * chain to - its own certificate does, so the context is built.
 	 */
-	rogue.ca_file = PKI("ca.crt");
+	rogue.ca_files[0] = PKI("ca.crt");
+	rogue.ca_files_num = 1;
 	CHECK(esdm_tls_ctx_alloc(false, &rogue, &cctx) == -EINVAL,
 	      "a context whose certificate does not chain to its trust anchors was built");
-	rogue.ca_file = PKI("rogue-ca.crt");
+	rogue.ca_files[0] = PKI("rogue-ca.crt");
+	rogue.ca_files_num = 1;
 	cctx = client_ctx(&rogue);
 	if (cctx) {
 		/* It does not trust the server either, so pretend it did */
@@ -499,7 +589,8 @@ static void test_server_name(void)
 	/* A client trusting another CA than the server's */
 	rogue_trust.cert_file = NULL;
 	rogue_trust.key_file = NULL;
-	rogue_trust.ca_file = PKI("rogue-ca.crt");
+	rogue_trust.ca_files[0] = PKI("rogue-ca.crt");
+	rogue_trust.ca_files_num = 1;
 	rctx = client_ctx(&rogue_trust);
 	CHECK(!pair_open(&p, sctx, rctx, "localhost"), "pair");
 	pair_handshake(&p);
@@ -1091,7 +1182,8 @@ static void test_contexts(void)
 	cfg = cfg_of(PKI("client1.crt"), PKI("client1.key"), PKI("int.crt"));
 	CHECK(esdm_tls_ctx_alloc(false, &cfg, &ctx) == -EINVAL,
 	      "an intermediate CA alone was taken for a trust anchor");
-	cfg.ca_file = PKI("ca-int.crt");
+	cfg.ca_files[0] = PKI("ca-int.crt");
+	cfg.ca_files_num = 1;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &ctx),
 	      "the intermediate CA next to the root was refused");
 	esdm_tls_ctx_put(ctx);
@@ -1282,6 +1374,7 @@ int main(int argc, char *argv[])
 
 	test_mutual();
 	test_refused_clients();
+	test_ca_rollover();
 	test_server_name();
 	test_transfer_and_eof();
 	test_minimal();

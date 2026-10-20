@@ -981,9 +981,13 @@ class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
 			     const Botan::TLS::Policy &policy)
 		: m_server(server)
 	{
+		/* Each file, see "Rollover of a CA" in esdm_tls.h */
 		m_store = std::make_unique<Botan::Certificate_Store_In_Memory>();
-		for (const auto &ca : esdm_tls_botan_load_certs(cfg->ca_file))
-			m_store->add_certificate(ca);
+		for (unsigned int i = 0; i < cfg->ca_files_num; i++) {
+			for (const auto &ca :
+			     esdm_tls_botan_load_certs(cfg->ca_files[i]))
+				m_store->add_certificate(ca);
+		}
 
 		if (cfg->cert_file) {
 			m_chain = esdm_tls_botan_load_certs(cfg->cert_file);
@@ -1629,8 +1633,8 @@ int esdm_tls_backend_ctx_files(void *ctx, bool server,
 					      CERT_NOT_YET_VALID) {
 				esdm_logger(
 					LOGGER_ERR, LOGGER_C_ANY,
-					"TLS: the certificate %s does not chain to the trust anchors %s: %s\n",
-					cfg->cert_file, cfg->ca_file,
+					"TLS: the certificate %s does not chain to the trust anchors %s%s: %s\n",
+					cfg->cert_file, ESDM_TLS_CAS_FMT(cfg),
 					result.result_string().c_str());
 				return -EINVAL;
 			}

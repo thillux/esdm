@@ -151,6 +151,12 @@ more certificates. A chain ends in a self\-signed one, with every TLS stack: a
 CA certificate of the file that is not self\-signed is an intermediate one,
 which needs the one that issued it in the file as well \- an intermediate CA
 alone is no trust anchor, and the server does not start with it.
+.IP
+May be given up to 8 times, the trust anchors of every file taken alike \-
+for the rollover of a CA: trust the new CA next to the old one on every side,
+issue the certificates anew by the new one \- with the CRLs of both CAs, if
+CRLs are used \-, and drop the old one last. A file added or dropped is taken
+up with the next reload, as a changed one is.
 .TP
 .BI \-\-crl " FILE"
 CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs

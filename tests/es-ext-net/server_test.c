@@ -65,7 +65,8 @@ static struct esdm_tls_ctx *client_of(const char *name)
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.cert_file = cert;
 	cfg.key_file = key;
-	cfg.ca_file = PKI("ca.crt");
+	cfg.ca_files[0] = PKI("ca.crt");
+	cfg.ca_files_num = 1;
 	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &ctx), "client context %s",
 	      name);
@@ -81,16 +82,23 @@ struct server {
 /*
  * Start the provider on a listener of 127.0.0.1, with the certificate
  * @cert and its key @key - the test PKI's server by default - and the options
- * @extra, NULL-terminated. Wait until it serves.
+ * @extra, NULL-terminated. The trust anchors are the CA of the test PKI,
+ * unless @extra names others: --ca is taken more than once, for the rollover
+ * of a CA. Wait until it serves.
  *
  * @return 0, or -1
  */
 static int server_start(struct server *s, const char *cert, const char *key,
 			const char *const *extra, struct esdm_tls_ctx *probe)
 {
+	const char *const *e;
+	bool own_ca = false;
 	char *argv[48];
 	unsigned int n = 0;
 	int lfd;
+
+	for (e = extra; e && *e; e++)
+		own_ca |= !strcmp(*e, "--ca");
 
 	memset(s, 0, sizeof(*s));
 	lfd = test_tcp_listener("127.0.0.1", &s->port);
@@ -102,8 +110,10 @@ static int server_start(struct server *s, const char *cert, const char *key,
 	argv[n++] = (char *)(cert ? cert : PKI("server.crt"));
 	argv[n++] = "--key";
 	argv[n++] = (char *)(key ? key : PKI("server.key"));
-	argv[n++] = "--ca";
-	argv[n++] = PKI("ca.crt");
+	if (!own_ca) {
+		argv[n++] = "--ca";
+		argv[n++] = PKI("ca.crt");
+	}
 	argv[n++] = "-v";
 	while (extra && *extra && n < sizeof(argv) / sizeof(argv[0]) - 1)
 		argv[n++] = (char *)*extra++;
@@ -232,7 +242,8 @@ static void test_requests(void)
 
 	/* No client certificate, an untrusted CA */
 	memset(&cfg, 0, sizeof(cfg));
-	cfg.ca_file = PKI("ca.crt");
+	cfg.ca_files[0] = PKI("ca.crt");
+	cfg.ca_files_num = 1;
 	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &none), "context");
 	CHECK(test_conn_open(&c, "127.0.0.1", s.port, NULL, none,
@@ -242,7 +253,8 @@ static void test_requests(void)
 	test_conn_close(&c);
 	cfg.cert_file = PKI("rogue-client.crt");
 	cfg.key_file = PKI("rogue-client.key");
-	cfg.ca_file = PKI("rogue-ca.crt");
+	cfg.ca_files[0] = PKI("rogue-ca.crt");
+	cfg.ca_files_num = 1;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &rogue), "context");
 	CHECK(test_conn_open(&c, "127.0.0.1", s.port, NULL, rogue,
 			     "localhost"),

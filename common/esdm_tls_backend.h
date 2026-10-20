@@ -109,6 +109,13 @@ struct esdm_dtls;
 #define ESDM_TLS_MAX_CHAIN 16
 
 /*
+ * The trust anchors of @cfg in a message, "%s%s": the first file, and that
+ * there are others
+ */
+#define ESDM_TLS_CAS_FMT(cfg)                                                  \
+	(cfg)->ca_files[0], (cfg)->ca_files_num > 1 ? " and the others" : ""
+
+/*
  * The local DTLS: DTLS 1.2, ECDHE-PSK with AES-256 on curves of 256 bits of
  * security or more, see esdm_dtls.h.
  *

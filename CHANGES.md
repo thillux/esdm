@@ -82,6 +82,14 @@ without it, keeps to the conventional groups. The debug log tells whether the
 TLS stack has the hybrid, and the group of each connection. es-ext-net, on
 the same TLS 1.3, has all of it
 
+* EGD and external entropy sources over the network: several CAs are trusted
+at once, for the rollover of a CA - --ca may be given up to 8 times to the
+esdm-egd-net-server and -relay, the esdm-es-ext-relay and every provider
+program, ca_files of struct esdm_egd_client_net_config and struct
+esdm_es_ext_server_net_config name the files next to ca_file, and a file
+added, dropped or changed is taken up with the next reload, as the other TLS
+files are; a certificate of either CA is taken, see esdm-egd-net-server(8)
+
 * libesdm_egd_client: network modes - esdm_egd_client_alloc_net() with an
 extensible configuration, plain TCP, which keeps the syscall discipline of the
 Unix domain socket once connected, and TLS, by a module of the library loaded

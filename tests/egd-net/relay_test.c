@@ -113,6 +113,9 @@ static pid_t relay_start(const char *sock, uint16_t port, bool plain,
 		args[n++] = key;
 		args[n++] = "--ca";
 		args[n++] = PKI("ca.crt");
+		/* A second CA, as in its rollover: the server is of the first */
+		args[n++] = "--ca";
+		args[n++] = PKI("rogue-ca.crt");
 		args[n++] = "--server_name";
 		args[n++] = "localhost";
 		args[n++] = "--crl";

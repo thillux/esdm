@@ -60,7 +60,9 @@ void esdm_net_tls_config(const struct esdm_net_tls_files *files,
 	memset(cfg, 0, sizeof(*cfg));
 	cfg->cert_file = files->cert;
 	cfg->key_file = files->key;
-	cfg->ca_file = files->ca;
+	for (i = 0; i < files->ca_num; i++)
+		cfg->ca_files[i] = files->ca[i];
+	cfg->ca_files_num = files->ca_num;
 	for (i = 0; i < files->crl_num; i++)
 		cfg->crl_files[i] = files->crl[i];
 	cfg->crl_files_num = files->crl_num;
@@ -82,8 +84,18 @@ int esdm_net_tls_option(struct esdm_net_tls_files *files, const char *opt,
 		return esdm_net_set_file(&files->cert, arg);
 	if (!strcmp(opt, "key"))
 		return esdm_net_set_file(&files->key, arg);
-	if (!strcmp(opt, "ca"))
-		return esdm_net_set_file(&files->ca, arg);
+	if (!strcmp(opt, "ca")) {
+		if (files->ca_num >= ESDM_TLS_MAX_CA_FILES) {
+			fprintf(stderr, "--ca may be given %u times at most\n",
+				ESDM_TLS_MAX_CA_FILES);
+			return -EINVAL;
+		}
+		files->ca[files->ca_num] = strdup(arg);
+		if (!files->ca[files->ca_num])
+			return -ENOMEM;
+		files->ca_num++;
+		return 1;
+	}
 
 	if (!strcmp(opt, "crl")) {
 		if (files->crl_num >= ESDM_TLS_MAX_CRL_FILES) {
@@ -150,8 +162,14 @@ int esdm_net_tls_files_resolve(struct esdm_net_tls_files *files,
 	ret = esdm_net_resolve_one(&files->cert, "cert", "cert", hint);
 	if (!ret)
 		ret = esdm_net_resolve_one(&files->key, "key", "key", hint);
-	if (!ret)
-		ret = esdm_net_resolve_one(&files->ca, "ca", "ca", hint);
+	/* No --ca: the credential, else every one given */
+	if (!ret && !files->ca_num) {
+		ret = esdm_net_resolve_one(&files->ca[0], "ca", "ca", hint);
+		if (!ret)
+			files->ca_num = 1;
+	}
+	for (i = 0; !ret && i < files->ca_num; i++)
+		ret = esdm_net_resolve_one(&files->ca[i], "ca", "ca", hint);
 	if (ret)
 		return ret;
 
@@ -177,7 +195,8 @@ void esdm_net_tls_files_free(struct esdm_net_tls_files *files)
 
 	free(files->cert);
 	free(files->key);
-	free(files->ca);
+	for (i = 0; i < files->ca_num; i++)
+		free(files->ca[i]);
 	for (i = 0; i < files->crl_num; i++)
 		free(files->crl[i]);
 	memset(files, 0, sizeof(*files));

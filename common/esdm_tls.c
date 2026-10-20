@@ -378,7 +378,8 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 	 * side needs. A certificate without its key, or the other way round,
 	 * is a mistake of the caller.
 	 */
-	if (!cfg->ca_file || (server && !cfg->cert_file) ||
+	if (!cfg->ca_files_num || cfg->ca_files_num > ESDM_TLS_MAX_CA_FILES ||
+	    (server && !cfg->cert_file) ||
 	    (!cfg->cert_file != !cfg->key_file) ||
 	    cfg->crl_files_num > ESDM_TLS_MAX_CRL_FILES ||
 	    cfg->transport != ESDM_TLS_TRANSPORT_STREAM)
@@ -391,9 +392,13 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 		if (ret)
 			return ret;
 	}
-	ret = esdm_tls_check_file("trust anchors", cfg->ca_file);
-	if (ret)
-		return ret;
+	for (i = 0; i < cfg->ca_files_num; i++) {
+		if (!cfg->ca_files[i])
+			return -EINVAL;
+		ret = esdm_tls_check_file("trust anchors", cfg->ca_files[i]);
+		if (ret)
+			return ret;
+	}
 	for (i = 0; i < cfg->crl_files_num; i++) {
 		if (!cfg->crl_files[i])
 			return -EINVAL;
@@ -418,9 +423,9 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 		if (!ret && cfg->cert_file)
 			ret = esdm_tls_check_keys_file("certificate",
 						       cfg->cert_file);
-		if (!ret)
+		for (i = 0; !ret && i < cfg->ca_files_num; i++)
 			ret = esdm_tls_check_keys_file("trust anchors",
-						       cfg->ca_file);
+						       cfg->ca_files[i]);
 		if (ret)
 			esdm_tls_backend_ctx_free(c->backend);
 	}
@@ -1121,7 +1126,13 @@ void esdm_tls_stamp(const struct esdm_tls_config *cfg,
 	esdm_hash_init(hash);
 	esdm_tls_stamp_file(hash, cfg->cert_file);
 	esdm_tls_stamp_file(hash, cfg->key_file);
-	esdm_tls_stamp_file(hash, cfg->ca_file);
+	/* The number of each list first: no file counts for one of another */
+	esdm_hash_update(hash, (const uint8_t *)&cfg->ca_files_num,
+			 sizeof(cfg->ca_files_num));
+	for (i = 0; i < cfg->ca_files_num && i < ESDM_TLS_MAX_CA_FILES; i++)
+		esdm_tls_stamp_file(hash, cfg->ca_files[i]);
+	esdm_hash_update(hash, (const uint8_t *)&cfg->crl_files_num,
+			 sizeof(cfg->crl_files_num));
 	for (i = 0; i < cfg->crl_files_num && i < ESDM_TLS_MAX_CRL_FILES; i++)
 		esdm_tls_stamp_file(hash, cfg->crl_files[i]);
 	esdm_hash_final(hash, stamp);

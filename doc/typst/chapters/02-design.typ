@@ -1428,8 +1428,9 @@ travels with its length in front, two bytes (`common/esdm_dtls_tls.c`). Both
 sides authenticate with certificates, the client checks the name of the
 server, and CRLs are checked within the verification of the TLS stack with the
 code of the EGD protocol over the network: the TLS with certificates, its
-rotation on SIGHUP and when the files change, its revocation checks and its
-algorithms are one implementation for both, for every TLS stack. The
+rotation on SIGHUP and when the files change, the trust anchors of several
+files for the rollover of a CA, its revocation checks and its algorithms are
+one implementation for both, for every TLS stack. The
 algorithms are those of BSI TR-02102-2: the suites of AES-GCM, ECDSA and
 RSA-PSS on keys of 256 or 3072 bits and more, and the key exchange by the
 hybrid SecP384r1MLKEM1024 ahead of the conventional groups - the curves of

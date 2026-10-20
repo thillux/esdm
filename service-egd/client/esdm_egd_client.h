@@ -181,6 +181,9 @@ enum esdm_egd_client_net_mode {
 /** Most CRL files of a configuration */
 #define ESDM_EGD_CLIENT_NET_MAX_CRL 16
 
+/** Most files of trust anchors of a configuration, @ca_file included */
+#define ESDM_EGD_CLIENT_NET_MAX_CA 8
+
 /**
  * @brief Configuration of a client of an esdm-egd-net-server
  *
@@ -240,6 +243,13 @@ struct esdm_egd_client_net_config {
 	const char *const *crl_files;
 	/** ESDM_EGD_CLIENT_NET_CRL_* */
 	unsigned int crl_flags;
+	/**
+	 * More trust anchors, PEM, next to those of @ca_file and alike,
+	 * NULL-terminated, at most ESDM_EGD_CLIENT_NET_MAX_CA - 1 files - for
+	 * the rollover of a CA, the old one and the new one trusted at once.
+	 * NULL for none.
+	 */
+	const char *const *ca_files;
 };
 
 /**

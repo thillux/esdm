@@ -617,6 +617,71 @@ static void test_tls_rotation(void)
 	server_stop(&s);
 }
 
+/*
+ * The rollover of a CA: --ca given twice, the second file taken up anew on
+ * SIGHUP - first a copy of the CA of the server, then the CA of a client of
+ * another one, which is served from then on next to the clients of the first
+ */
+static void test_tls_ca_rollover(void)
+{
+	char tmp_ca2[sizeof(tmpdir) + 16];
+	const char *args[] = { "--cert", tmp_crt, "--key",
+			       tmp_key,	 "--ca",  tmp_ca,
+			       "--ca",	 tmp_ca2, "--reload_interval",
+			       "0",	 NULL };
+	struct test_tls t;
+	struct server s;
+	unsigned int i;
+	int ret = -1;
+
+	printf("Server: two CAs given, for their rollover\n");
+
+	snprintf(tmp_ca2, sizeof(tmp_ca2), "%s/ca2.crt", tmpdir);
+	if (install_pki(PKI("int.crl")) || test_install(PKI("ca.crt"), tmp_ca2))
+		return;
+	if (server_start(&s, false, args)) {
+		CHECK(0, "the server did not start");
+		return;
+	}
+
+	memset(&t, 0, sizeof(t));
+	t.fd = test_connect("127.0.0.1", s.port, NULL);
+	ret = test_tls_shake_ca(&t, PKI("rogue-client.crt"),
+				PKI("rogue-client.key"), "localhost",
+				PKI("rogue-ca.crt"));
+	CHECK(ret || test_tls_pid(&t) != s.pid,
+	      "the client of the other CA was served before it is trusted");
+	test_tls_close(&t);
+
+	/* The other CA in the second file, taken up on SIGHUP */
+	CHECK(!test_install(PKI("rogue-ca.crt"), tmp_ca2),
+	      "installing the other CA");
+	kill(s.pid, SIGHUP);
+	for (i = 0; i < 15; i++) {
+		test_sleep_ms(200);
+		memset(&t, 0, sizeof(t));
+		t.fd = test_connect("127.0.0.1", s.port, NULL);
+		ret = test_tls_shake_ca(&t, PKI("rogue-client.crt"),
+					PKI("rogue-client.key"), "localhost",
+					PKI("rogue-ca.crt"));
+		ret = (!ret && test_tls_pid(&t) == s.pid) ? 0 : -1;
+		test_tls_close(&t);
+		if (!ret)
+			break;
+	}
+	CHECK(!ret, "the client of the other CA was refused after SIGHUP");
+
+	/* And the clients of the first CA still are served */
+	ret = test_tls_open(&t, s.port, PKI("client1.crt"), PKI("client1.key"),
+			    "localhost");
+	CHECK(!ret && test_tls_pid(&t) == s.pid,
+	      "the client of the first CA was refused: %d", ret);
+	test_tls_close(&t);
+
+	server_stop(&s);
+	unlink(tmp_ca2);
+}
+
 /* Reload on SIGHUP only */
 static void test_tls_sighup(void)
 {
@@ -734,6 +799,7 @@ int main(void)
 	test_tls();
 	test_tls_rotation();
 	test_tls_sighup();
+	test_tls_ca_rollover();
 	test_tls_reload_race();
 #else
 	printf("Built without egd-net-tls, the TLS mode is not tested\n");

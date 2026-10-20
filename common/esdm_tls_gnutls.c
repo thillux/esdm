@@ -1013,8 +1013,7 @@ static int esdm_tls_gnutls_walk(struct esdm_tls_gnutls_ctx *ctx,
  * see esdm_tls_gnutls_walk()?
  */
 static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
-				     const char *cert_file,
-				     const char *ca_file)
+				     const struct esdm_tls_config *cfg)
 {
 	gnutls_x509_crt_t chain[ESDM_TLS_MAX_CHAIN];
 	gnutls_x509_trust_list_t tl;
@@ -1039,21 +1038,22 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 					verify, GNUTLS_CRT_X509, &out, 0) >= 0) {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ANY,
-				"TLS: the certificate %s does not chain to the trust anchors %s: %s\n",
-				cert_file, ca_file, (const char *)out.data);
+				"TLS: the certificate %s does not chain to the trust anchors %s%s: %s\n",
+				cfg->cert_file, ESDM_TLS_CAS_FMT(cfg),
+				(const char *)out.data);
 			gnutls_free(out.data);
 		} else {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ANY,
-				"TLS: the certificate %s does not chain to the trust anchors %s\n",
-				cert_file, ca_file);
+				"TLS: the certificate %s does not chain to the trust anchors %s%s\n",
+				cfg->cert_file, ESDM_TLS_CAS_FMT(cfg));
 		}
 		ret = -EINVAL;
 	} else if (esdm_tls_gnutls_walk(c, crts, num, chain, &n)) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ANY,
-			"TLS: the certificate %s does not chain to a self-issued trust anchor of %s - a CA certificate that is not self-issued needs the one that issued it there as well\n",
-			cert_file, ca_file);
+			"TLS: the certificate %s does not chain to a self-issued trust anchor of %s%s - a CA certificate that is not self-issued needs the one that issued it there as well\n",
+			cfg->cert_file, ESDM_TLS_CAS_FMT(cfg));
 		ret = -EINVAL;
 	} else {
 		ret = 0;
@@ -1349,12 +1349,15 @@ static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
 	unsigned int i;
 	int ret;
 
-	ret = gnutls_certificate_set_x509_trust_file(c->cred, cfg->ca_file,
-						     GNUTLS_X509_FMT_PEM);
-	if (ret <= 0) {
+	/* Each file of trust anchors, see "Rollover of a CA" in esdm_tls.h */
+	for (i = 0; i < cfg->ca_files_num; i++) {
+		ret = gnutls_certificate_set_x509_trust_file(
+			c->cred, cfg->ca_files[i], GNUTLS_X509_FMT_PEM);
+		if (ret > 0)
+			continue;
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "TLS: cannot load the trust anchors %s: %s\n",
-			    cfg->ca_file,
+			    cfg->ca_files[i],
 			    ret < 0 ? gnutls_strerror(ret) :
 				      "no certificate in it");
 		return -EINVAL;
@@ -1376,8 +1379,7 @@ static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
 				gnutls_strerror(ret));
 			return -EINVAL;
 		}
-		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
-						cfg->ca_file);
+		ret = esdm_tls_gnutls_check_own(c, cfg);
 		if (ret)
 			return ret;
 	}

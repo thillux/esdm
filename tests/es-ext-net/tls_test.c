@@ -56,7 +56,8 @@ static struct esdm_tls_ctx *ctx_of(bool server, const char *cert,
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.cert_file = cert;
 	cfg.key_file = key;
-	cfg.ca_file = PKI("ca.crt");
+	cfg.ca_files[0] = PKI("ca.crt");
+	cfg.ca_files_num = 1;
 	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	ret = esdm_tls_ctx_alloc(server, &cfg, &ctx);
 	CHECK(!ret, "%s context: %s", server ? "server" : "client",

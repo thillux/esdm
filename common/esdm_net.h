@@ -72,7 +72,9 @@ char *esdm_net_file(const char *name);
 struct esdm_net_tls_files {
 	char *cert;
 	char *key;
-	char *ca;
+	/* The files of trust anchors, NULL-terminated, see esdm_tls.h */
+	char *ca[ESDM_TLS_MAX_CA_FILES + 1];
+	unsigned int ca_num;
 	char *crl[ESDM_TLS_MAX_CRL_FILES];
 	unsigned int crl_num;
 	bool crl_check_all;
@@ -89,9 +91,9 @@ void esdm_net_tls_config(const struct esdm_net_tls_files *files,
 /**
  * @brief Take up one of the TLS options a daemon shares, by its name
  *
- * The options of struct esdm_net_tls_files: "cert", "key", "ca", "crl" - which
- * may be repeated -, "crl_check_all" and "crl_allow_expired" - which take no
- * @arg.
+ * The options of struct esdm_net_tls_files: "cert", "key", "ca" and "crl" -
+ * the latter two may be repeated -, "crl_check_all" and "crl_allow_expired" -
+ * which take no @arg.
  *
  * @return 1 if @opt is one of them and was taken, 0 if it is none, -EINVAL
  *	   after telling on stderr what is wrong, -ENOMEM
@@ -107,6 +109,10 @@ int esdm_net_tls_option(struct esdm_net_tls_files *files, const char *opt,
  * it has them. A file named without a slash is a credential, see
  * esdm_net_file(). @hint is added to the message telling that a file is
  * missing, NULL for none.
+ *
+ * Several files of trust anchors are given with "ca" repeated - for the
+ * rollover of a CA, see esdm_tls.h; the credential "ca" may hold several
+ * trust anchors as well.
  *
  * @return 0, or -EINVAL after telling what is wrong on stderr
  */

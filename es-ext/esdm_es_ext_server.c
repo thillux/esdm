@@ -1357,9 +1357,26 @@ static int esdm_es_ext_server_net_setup(
 	if (!ret)
 		ret = esdm_es_ext_server_strdup(&net->files.key, cfg->key_file);
 	if (!ret)
-		ret = esdm_es_ext_server_strdup(&net->files.ca, cfg->ca_file);
+		ret = esdm_es_ext_server_strdup(&net->files.ca[0],
+						cfg->ca_file);
 	if (ret)
 		return ret;
+	net->files.ca_num = 1;
+	for (i = 0; cfg->ca_files && cfg->ca_files[i]; i++) {
+		if (net->files.ca_num >= ESDM_ES_EXT_NET_MAX_CA ||
+		    net->files.ca_num >= ESDM_TLS_MAX_CA_FILES) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"External ES provider: more than %u files of trust anchors\n",
+				ESDM_ES_EXT_NET_MAX_CA);
+			return -EINVAL;
+		}
+		ret = esdm_es_ext_server_strdup(
+			&net->files.ca[net->files.ca_num], cfg->ca_files[i]);
+		if (ret)
+			return ret;
+		net->files.ca_num++;
+	}
 	for (i = 0; cfg->crl_files && cfg->crl_files[i]; i++) {
 		if (i >= ESDM_ES_EXT_NET_MAX_CRL ||
 		    i >= ESDM_TLS_MAX_CRL_FILES) {

@@ -407,13 +407,15 @@ static inline void test_tls_close(struct test_tls *t)
 
 /*
  * The handshake on the connection t->fd, with the certificate @cert of the PKI
- * - NULL for none - expecting the server to be issued for @server_name.
+ * - NULL for none - expecting the server to be issued for @server_name, and
+ * trusting the CA of the PKI and @extra_ca, NULL for none.
  *
  * @return the result of the handshake: 0, or a negative errno - @t is to be
  *	   closed either way
  */
-static inline int test_tls_shake(struct test_tls *t, const char *cert,
-				 const char *key, const char *server_name)
+static inline int test_tls_shake_ca(struct test_tls *t, const char *cert,
+				    const char *key, const char *server_name,
+				    const char *extra_ca)
 {
 	struct esdm_tls_config cfg;
 	uint64_t end;
@@ -422,7 +424,9 @@ static inline int test_tls_shake(struct test_tls *t, const char *cert,
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.cert_file = cert;
 	cfg.key_file = key;
-	cfg.ca_file = PKI("ca.crt");
+	cfg.ca_files[cfg.ca_files_num++] = PKI("ca.crt");
+	if (extra_ca)
+		cfg.ca_files[cfg.ca_files_num++] = extra_ca;
 	ret = esdm_tls_ctx_alloc(false, &cfg, &t->ctx);
 	if (ret)
 		return ret;
@@ -438,6 +442,13 @@ static inline int test_tls_shake(struct test_tls *t, const char *cert,
 	}
 
 	return ret;
+}
+
+/* The handshake, trusting the CA of the PKI - see test_tls_shake_ca() */
+static inline int test_tls_shake(struct test_tls *t, const char *cert,
+				 const char *key, const char *server_name)
+{
+	return test_tls_shake_ca(t, cert, key, server_name, NULL);
 }
 
 /* Connect to @port of 127.0.0.1, and shake hands - see test_tls_shake() */

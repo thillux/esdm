@@ -182,7 +182,8 @@ static void test_reconnect(bool tls)
 		memset(&scfg, 0, sizeof(scfg));
 		scfg.cert_file = PKI("server.crt");
 		scfg.key_file = PKI("server.key");
-		scfg.ca_file = PKI("ca.crt");
+		scfg.ca_files[0] = PKI("ca.crt");
+		scfg.ca_files_num = 1;
 		ret = esdm_tls_ctx_alloc(true, &scfg, &f.ctx);
 		CHECK(!ret, "no server context: %d", ret);
 		if (ret) {

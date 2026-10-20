@@ -63,7 +63,8 @@ static struct esdm_tls_config test_cfg(const char *cert, const char *key)
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.cert_file = cert;
 	cfg.key_file = key;
-	cfg.ca_file = PKI("ca.crt");
+	cfg.ca_files[0] = PKI("ca.crt");
+	cfg.ca_files_num = 1;
 	return cfg;
 }
 

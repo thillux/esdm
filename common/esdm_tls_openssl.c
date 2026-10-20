@@ -1071,8 +1071,8 @@ static int esdm_tls_openssl_load_crls(STACK_OF(X509_CRL) *crls,
  * Does the own certificate chain to the trust anchors? See "Contexts" in
  * esdm_tls.h.
  */
-static int esdm_tls_openssl_check_own(SSL_CTX *c, const char *cert_file,
-				      const char *ca_file)
+static int esdm_tls_openssl_check_own(SSL_CTX *c,
+				      const struct esdm_tls_config *cfg)
 {
 	X509_STORE_CTX *sctx = X509_STORE_CTX_new_ex(esdm_tls_openssl_lib(),
 						     NULL);
@@ -1099,8 +1099,8 @@ static int esdm_tls_openssl_check_own(SSL_CTX *c, const char *cert_file,
 	}
 
 	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-		    "TLS: the certificate %s does not chain to the trust anchors %s: %s\n",
-		    cert_file, ca_file,
+		    "TLS: the certificate %s does not chain to the trust anchors %s%s: %s\n",
+		    cfg->cert_file, ESDM_TLS_CAS_FMT(cfg),
 		    X509_verify_cert_error_string(
 			    X509_STORE_CTX_get_error(sctx)));
 
@@ -1123,11 +1123,14 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 	unsigned int i;
 	int ret;
 
-	if (SSL_CTX_load_verify_file(c, cfg->ca_file) != 1) {
+	/* Each file of trust anchors, see "Rollover of a CA" in esdm_tls.h */
+	for (i = 0; i < cfg->ca_files_num; i++) {
+		if (SSL_CTX_load_verify_file(c, cfg->ca_files[i]) == 1)
+			continue;
 		esdm_tls_openssl_errstr(err, sizeof(err));
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "TLS: cannot load the trust anchors %s: %s\n",
-			    cfg->ca_file, err);
+			    cfg->ca_files[i], err);
 		return -EINVAL;
 	}
 
@@ -1156,8 +1159,7 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 				cfg->key_file, cfg->cert_file, err);
 			return -EINVAL;
 		}
-		ret = esdm_tls_openssl_check_own(c, cfg->cert_file,
-						 cfg->ca_file);
+		ret = esdm_tls_openssl_check_own(c, cfg);
 		if (ret)
 			return ret;
 	}
@@ -1170,9 +1172,12 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 
 	if (server) {
 		STACK_OF(X509_NAME) *names = SSL_load_client_CA_file_ex(
-			cfg->ca_file, esdm_tls_openssl_lib(), NULL);
+			cfg->ca_files[0], esdm_tls_openssl_lib(), NULL);
 
-		/* The CAs the client may choose its certificate by */
+		/* The CAs the client may choose its certificate by: all */
+		for (i = 1; names && i < cfg->ca_files_num; i++)
+			SSL_add_file_cert_subjects_to_stack(names,
+							    cfg->ca_files[i]);
 		if (names)
 			SSL_CTX_set_client_CA_list(c, names);
 		ERR_clear_error();

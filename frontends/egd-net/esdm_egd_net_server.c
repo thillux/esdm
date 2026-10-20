@@ -958,7 +958,8 @@ static void usage(void)
 		"\t   --cert <FILE>\tCertificate of the server, PEM\n"
 		"\t   --key <FILE>\t\tIts private key, PEM, PKCS#8\n"
 		"\t   --ca <FILE>\t\tTrust anchors the client certificates must\n"
-		"\t\t\t\tchain to, PEM\n"
+		"\t\t\t\tchain to, PEM; may be repeated, for the\n"
+		"\t\t\t\trollover of a CA\n"
 		"\t   --crl <FILE>\t\tCRLs, PEM; may be repeated\n"
 		"\t   --crl_check_all\tRequire CRLs of the CA certificates as well\n"
 		"\t   --crl_allow_expired\tOnly warn of a CRL past its nextUpdate\n"
@@ -1096,7 +1097,8 @@ int main(int argc, char *argv[])
 			break;
 		case OPT_CA:
 			tls_option = true;
-			if (server_set_file(&server_cfg.files.ca, optarg))
+			if (esdm_net_tls_option(&server_cfg.files, "ca",
+						optarg) < 0)
 				return 1;
 			break;
 		case OPT_CRL:

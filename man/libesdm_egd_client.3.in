@@ -232,6 +232,13 @@ TLS only:
 requires CRLs for the CA certificates of the server's chain as well,
 .B ESDM_EGD_CLIENT_NET_CRL_ALLOW_EXPIRED
 uses a CRL past its nextUpdate with a warning.
+.TP
+.B const char *const *ca_files
+TLS only: NULL, or up to
+.B ESDM_EGD_CLIENT_NET_MAX_CA
+\- 1 more files of trust anchors, PEM, NULL\-terminated, taken alike with
+.I ca_file
+\- for the rollover of a CA, the old one and the new one trusted at once.
 .RE
 .IP
 A TLS field in plain mode is an error, as is TLS without the certificate, its

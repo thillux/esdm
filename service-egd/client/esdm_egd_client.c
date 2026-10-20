@@ -417,11 +417,16 @@ static bool esdm_egd_tls_cfg_eq(const struct esdm_tls_config *a,
 
 	if (!esdm_egd_tls_str_eq(a->cert_file, b->cert_file) ||
 	    !esdm_egd_tls_str_eq(a->key_file, b->key_file) ||
-	    !esdm_egd_tls_str_eq(a->ca_file, b->ca_file) ||
+	    a->ca_files_num != b->ca_files_num ||
 	    a->crl_files_num != b->crl_files_num ||
 	    a->crl_check_all != b->crl_check_all ||
 	    a->crl_allow_expired != b->crl_allow_expired)
 		return false;
+
+	for (i = 0; i < a->ca_files_num; i++) {
+		if (!esdm_egd_tls_str_eq(a->ca_files[i], b->ca_files[i]))
+			return false;
+	}
 
 	for (i = 0; i < a->crl_files_num; i++) {
 		if (!esdm_egd_tls_str_eq(a->crl_files[i], b->crl_files[i]))
@@ -441,7 +446,8 @@ static void esdm_egd_tls_cache_free(struct esdm_egd_client_tls_cache *cache)
 	EGDC_TLS(ctx_put)(cache->ctx);
 	free((char *)cache->cfg.cert_file);
 	free((char *)cache->cfg.key_file);
-	free((char *)cache->cfg.ca_file);
+	for (i = 0; i < cache->cfg.ca_files_num; i++)
+		free((char *)cache->cfg.ca_files[i]);
 	for (i = 0; i < cache->cfg.crl_files_num; i++)
 		free((char *)cache->cfg.crl_files[i]);
 	free(cache);
@@ -489,7 +495,11 @@ static int esdm_egd_tls_cache_get(const struct esdm_tls_config *cfg,
 
 	cache->cfg.cert_file = esdm_egd_tls_strdup(cfg->cert_file, &failed);
 	cache->cfg.key_file = esdm_egd_tls_strdup(cfg->key_file, &failed);
-	cache->cfg.ca_file = esdm_egd_tls_strdup(cfg->ca_file, &failed);
+	for (i = 0; i < cfg->ca_files_num; i++) {
+		cache->cfg.ca_files[i] =
+			esdm_egd_tls_strdup(cfg->ca_files[i], &failed);
+		cache->cfg.ca_files_num++;
+	}
 	for (i = 0; i < cfg->crl_files_num; i++) {
 		cache->cfg.crl_files[i] =
 			esdm_egd_tls_strdup(cfg->crl_files[i], &failed);
@@ -569,14 +579,14 @@ esdm_egd_tls_cache_ctx(struct esdm_egd_client_tls_cache *cache)
 			LOGGER_ERR, LOGGER_C_ANY,
 			"EGD client: the changed TLS files of %s do not load (%s) - keeping the ones loaded before\n",
 			cache->cfg.cert_file ? cache->cfg.cert_file :
-					       cache->cfg.ca_file,
+					       cache->cfg.ca_files[0],
 			strerror(-ret));
 		ctx = NULL;
 	} else {
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
 			    "EGD client: reloaded the TLS files of %s\n",
 			    cache->cfg.cert_file ? cache->cfg.cert_file :
-						   cache->cfg.ca_file);
+						   cache->cfg.ca_files[0]);
 		EGDC_TLS(ctx_crl_report)(ctx, true);
 	}
 
@@ -2417,7 +2427,7 @@ int esdm_egd_client_alloc_net(struct esdm_egd_client **client,
 	}
 
 	tls_given = c.cert_file || c.key_file || c.ca_file || c.server_name ||
-		    c.crl_files || c.crl_flags;
+		    c.crl_files || c.crl_flags || c.ca_files;
 
 	switch (c.mode) {
 	case ESDM_EGD_CLIENT_NET_PLAIN:
@@ -2481,7 +2491,19 @@ int esdm_egd_client_alloc_net(struct esdm_egd_client **client,
 		memset(&tcfg, 0, sizeof(tcfg));
 		tcfg.cert_file = c.cert_file;
 		tcfg.key_file = c.key_file;
-		tcfg.ca_file = c.ca_file;
+		tcfg.ca_files[tcfg.ca_files_num++] = c.ca_file;
+		for (i = 0; c.ca_files && c.ca_files[i]; i++) {
+			if (tcfg.ca_files_num >= ESDM_EGD_CLIENT_NET_MAX_CA ||
+			    tcfg.ca_files_num >= ESDM_TLS_MAX_CA_FILES) {
+				esdm_logger(
+					LOGGER_ERR, LOGGER_C_ANY,
+					"EGD client: more than %u files of trust anchors given\n",
+					ESDM_EGD_CLIENT_NET_MAX_CA);
+				esdm_egd_client_release(new_client);
+				return -EINVAL;
+			}
+			tcfg.ca_files[tcfg.ca_files_num++] = c.ca_files[i];
+		}
 		tcfg.crl_check_all =
 			!!(c.crl_flags & ESDM_EGD_CLIENT_NET_CRL_CHECK_ALL);
 		tcfg.crl_allow_expired =

@@ -178,6 +178,7 @@ a self\-signed one, see
 .B \-\-ca
 in
 .BR esdm\-egd\-net\-server (8).
+May be given up to 8 times, for the rollover of a CA, see there.
 .TP
 .BI \-\-server_name " NAME"
 Name the provider's certificate has to be issued for, when it is not the host

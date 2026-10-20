@@ -181,7 +181,11 @@ int es_ext_net_cli_server(struct es_ext_net_cli *cli,
 	cfg->listen_fds_num = (unsigned int)cli->fds_num;
 	cfg->cert_file = cli->files.cert;
 	cfg->key_file = cli->files.key;
-	cfg->ca_file = cli->files.ca;
+	/* The others NULL-terminated, see struct esdm_net_tls_files */
+	cfg->ca_file = cli->files.ca[0];
+	cfg->ca_files = cli->files.ca_num > 1 ?
+				(const char *const *)&cli->files.ca[1] :
+				NULL;
 	for (i = 0; i < cli->files.crl_num; i++)
 		cli->crl[i] = cli->files.crl[i];
 	cli->crl[i] = NULL;
@@ -228,7 +232,8 @@ void es_ext_net_cli_usage(FILE *out)
 		"\t   --cert <FILE>\tCertificate of the provider, PEM\n"
 		"\t   --key <FILE>\t\tIts private key, PEM, PKCS#8\n"
 		"\t   --ca <FILE>\t\tTrust anchors the client certificates must\n"
-		"\t\t\t\tchain to, PEM\n"
+		"\t\t\t\tchain to, PEM; may be repeated, for the\n"
+		"\t\t\t\trollover of a CA\n"
 		"\t   --crl <FILE>\t\tCRLs, PEM; may be repeated\n"
 		"\t   --crl_check_all\tRequire CRLs of the CA certificates as well\n"
 		"\t   --crl_allow_expired\tOnly warn of a CRL past its nextUpdate\n"

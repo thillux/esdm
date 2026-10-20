@@ -127,6 +127,17 @@
  * connections still using it keep until they close. A rotation that went
  * wrong thus leaves the old context in service.
  *
+ * Rollover of a CA
+ * ----------------
+ * The trust anchors may be several files - each of which may hold several
+ * certificates -, and every CA of them is trusted alike: a certificate of
+ * either is taken. A CA is replaced without a connection refused in between
+ * by trusting the new one next to the old one on every side first, then
+ * issuing the certificates anew by the new one - with a CRL of either CA, if
+ * CRLs are used, as each certificate needs the one of its issuer -, and
+ * dropping the old one last. A side takes up a changed list of files with
+ * its next rotation, see esdm_tls_stamp().
+ *
  * Revocation
  * ----------
  * The CRLs are checked by the code here, identically for every TLS stack, on
@@ -201,6 +212,9 @@ extern "C" {
 /* Most CRL files a configuration may name */
 #define ESDM_TLS_MAX_CRL_FILES 16
 
+/* Most files of trust anchors a configuration may name */
+#define ESDM_TLS_MAX_CA_FILES 8
+
 /* Size of the stamp of the files of a configuration, see esdm_tls_stamp() */
 #define ESDM_TLS_STAMP_LEN 32
 
@@ -238,9 +252,12 @@ struct esdm_tls_config {
 	const char *key_file;
 	/*
 	 * Trust anchors the certificate of the peer has to chain to - to a
-	 * self-issued one of them, see "Contexts" above
+	 * self-issued one of them, see "Contexts" above -, files each of which
+	 * may hold several: one at least, several for the rollover of a CA,
+	 * see above
 	 */
-	const char *ca_file;
+	const char *ca_files[ESDM_TLS_MAX_CA_FILES];
+	unsigned int ca_files_num;
 	/* CRLs in PEM, each file may hold several - see "Revocation" above */
 	const char *crl_files[ESDM_TLS_MAX_CRL_FILES];
 	unsigned int crl_files_num;

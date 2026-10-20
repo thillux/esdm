@@ -560,6 +560,9 @@ ends in a self\-signed one, see
 .B \-\-ca
 in
 .BR esdm\-egd\-net\-server (8).
+May be given up to 8 times, for the rollover of a CA, see there \- the
+.B ca_files
+of the configuration.
 .TP
 .BI \-\-crl " FILE"
 CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
