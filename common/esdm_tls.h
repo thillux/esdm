@@ -189,8 +189,11 @@
  * esdm_tls_alloc() - there is no association without SCTP-AUTH.
  *
  * The HMAC is SHA-256, which the update of RFC 6083 requires: it is listed
- * first, SHA-1 after it as RFC 4895 demands - a peer listing SHA-1 first gets
- * SHA-1 from Linux.
+ * first, SHA-1 after it as RFC 4895 demands, and Linux takes no list without.
+ * Linux authenticates what it sends with the first HMAC of the peer's list it
+ * supports, and takes either of its own list from the peer: two ends of this
+ * code use SHA-256 both ways, a peer listing SHA-1 first is sent SHA-1. Linux
+ * does not tell which HMAC an association uses, so it is not checked.
  *
  * What RFC 6083 asks and the TLS stacks do not all offer: DTLS shall not
  * detect replays (section 3.3), as SCTP may deliver the records of several

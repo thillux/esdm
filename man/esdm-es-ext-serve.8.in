@@ -371,11 +371,17 @@ The cipher suites are ECDHE with ECDSA or RSA certificates, and AES-GCM or
 ChaCha20-Poly1305.
 .IP \(bu 2
 The association authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH
-(RFC 4895), HMAC-SHA-256: both sides require it before the association is set
-up, and refuse a peer that does not. The handshake runs under key 0, the empty
-key. Before it sends its ChangeCipherSpec, each side waits until the peer
-acknowledged everything it sent, and installs key 1: the 64 bytes of the TLS
-exporter
+(RFC 4895): both sides require it before the association is set up, and refuse
+a peer that does not. Each side offers HMAC-SHA-256 first, and HMAC-SHA-1
+after it, as RFC 4895 has every endpoint offer it \- Linux takes no list
+without. Linux authenticates the chunks it sends with the first HMAC of the
+peer's list it supports, and takes either of its own list from the peer:
+between the daemons of the ESDM, both directions use HMAC-SHA-256, while a
+peer offering HMAC-SHA-1 first is sent HMAC-SHA-1. Linux does not tell which
+HMAC an association uses, so the daemons cannot check it. The handshake runs
+under key 0, the empty key. Before it sends its ChangeCipherSpec, each side
+waits until the peer acknowledged everything it sent, and installs key 1: the
+64 bytes of the TLS exporter
 .B EXPORTER_DTLS_OVER_SCTP
 of the DTLS session, without a context. It makes key 1 the active one once its
 ChangeCipherSpec is sent \- the server \- or its Finished \- the client \- and
