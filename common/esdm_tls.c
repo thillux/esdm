@@ -43,6 +43,7 @@
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
 #include "esdm_tls_sctp.h"
+#include "leak_check.h"
 #include "memset_secure.h"
 
 /* A CRL this close to its nextUpdate is worth a warning */
@@ -67,6 +68,9 @@ struct esdm_tls_ctx {
 	pthread_mutex_t report_lock;
 	size_t crl_num;
 	enum esdm_tls_crl_state *crl_reported;
+
+	/* The next one left behind at the exit, see esdm_tls_exiting() */
+	struct esdm_tls_ctx *left_next;
 };
 
 struct esdm_tls {
@@ -100,7 +104,43 @@ struct esdm_tls {
 	char error[ESDM_TLS_TEXT_LEN];
 	/* Why the association on SCTP failed */
 	char sctp_error[ESDM_TLS_TEXT_LEN];
+
+	/* The next one left behind at the exit, see esdm_tls_exiting() */
+	struct esdm_tls *left_next;
 };
+
+/*
+ * The exit of the process, as for the DTLS of the connections - see
+ * esdm_dtls_exiting() in esdm_dtls.c: the destructor of a library, or an
+ * atexit handler registered before the TLS stack was set up - the teardown of
+ * the OpenSSL EGD provider by OPENSSL_cleanup(), for one - may release a
+ * connection after the static destructors of the TLS stack ran. Once the
+ * process exits, nothing goes into the TLS stack any more: no closing alert is
+ * sent, and what is released wipes what this file holds of it and leaves the
+ * objects of the TLS stack to the end of the process, reachable on the lists
+ * below - and LeakSanitizer is told, see esdm_dtls.c. The atexit handler telling the exit is registered once the first
+ * context exists, after the TLS stack set itself up.
+ */
+static atomic_bool esdm_tls_exit_started = false;
+static pthread_once_t esdm_tls_exit_once = PTHREAD_ONCE_INIT;
+static _Atomic(struct esdm_tls_ctx *) esdm_tls_ctx_left = NULL;
+static _Atomic(struct esdm_tls *) esdm_tls_left = NULL;
+
+static void esdm_tls_at_exit(void)
+{
+	atomic_store(&esdm_tls_exit_started, true);
+}
+
+static void esdm_tls_exit_register(void)
+{
+	/* Should it fail, the TLS stack is called at the exit as before */
+	(void)atexit(esdm_tls_at_exit);
+}
+
+static bool esdm_tls_exiting(void)
+{
+	return atomic_load(&esdm_tls_exit_started);
+}
 
 const char *esdm_tls_stack(void)
 {
@@ -188,6 +228,9 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 		return ret;
 	}
 
+	/* After the TLS stack set itself up, see esdm_tls_exiting() */
+	pthread_once(&esdm_tls_exit_once, esdm_tls_exit_register);
+
 	/*
 	 * Files given but nothing in them: a revocation check against no CRL
 	 * would refuse every peer - fail closed, see esdm_tls.h -, which is
@@ -254,6 +297,18 @@ void esdm_tls_ctx_put(struct esdm_tls_ctx *ctx)
 {
 	if (!ctx || atomic_fetch_sub(&ctx->refcnt, 1) != 1)
 		return;
+
+	/* Not into the TLS stack at the exit, see esdm_tls_exiting() */
+	if (esdm_tls_exiting()) {
+		struct esdm_tls_ctx *head = atomic_load(&esdm_tls_ctx_left);
+
+		esdm_leak_intended(ctx);
+		do {
+			ctx->left_next = head;
+		} while (!atomic_compare_exchange_weak(&esdm_tls_ctx_left,
+						       &head, ctx));
+		return;
+	}
 
 	esdm_tls_backend_ctx_free(ctx->backend);
 	pthread_mutex_destroy(&ctx->report_lock);
@@ -518,6 +573,28 @@ void esdm_tls_free(struct esdm_tls *tls)
 	if (!tls)
 		return;
 
+	/*
+	 * Not into the TLS stack at the exit, see esdm_tls_exiting(): what is
+	 * this file's is released, the connection of the TLS stack - and with
+	 * it the context it uses - is left behind.
+	 */
+	if (esdm_tls_exiting()) {
+		struct esdm_tls *head = atomic_load(&esdm_tls_left);
+
+		esdm_tls_sctp_free(tls->sctp);
+		tls->sctp = NULL;
+		esdm_tls_chain_free(tls->chain, tls->chain_num);
+		tls->chain = NULL;
+		tls->chain_num = 0;
+
+		esdm_leak_intended(tls);
+		do {
+			tls->left_next = head;
+		} while (!atomic_compare_exchange_weak(&esdm_tls_left, &head,
+						       tls));
+		return;
+	}
+
 	esdm_tls_backend_conn_free(tls->backend);
 	esdm_tls_sctp_free(tls->sctp);
 	esdm_tls_ctx_put(tls->ctx);
@@ -751,7 +828,8 @@ bool esdm_tls_pending(struct esdm_tls *tls)
 
 void esdm_tls_close_notify(struct esdm_tls *tls)
 {
-	if (!tls || !tls->established)
+	/* Nothing is sent at the exit, see esdm_tls_exiting() */
+	if (!tls || !tls->established || esdm_tls_exiting())
 		return;
 
 #ifdef ESDM_TLS_SCTP

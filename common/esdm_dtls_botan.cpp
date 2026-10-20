@@ -41,6 +41,7 @@
 
 #include <botan/ec_group.h>
 #include <botan/ecdsa.h>
+#include <botan/secmem.h>
 #include <botan/system_rng.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_client.h>
@@ -352,6 +353,13 @@ const char *esdm_dtls_backend_name(void)
 int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 {
 	try {
+		/*
+		 * The allocator of Botan's secure memory, which a context of
+		 * a client does not need yet: set up now, its static
+		 * destructor runs after the exit handler esdm_dtls.c registers
+		 * next - see esdm_dtls_exiting() there.
+		 */
+		Botan::secure_vector<uint8_t> allocator(1);
 		auto c = std::make_unique<Esdm_Dtls_Ctx>();
 
 		c->server = server;

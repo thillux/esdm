@@ -73,6 +73,7 @@
 #include <botan/data_src.h>
 #include <botan/kdf.h>
 #include <botan/pkcs8.h>
+#include <botan/secmem.h>
 #include <botan/system_rng.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_client.h>
@@ -960,6 +961,13 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 			     void **ctx)
 {
 	try {
+		/*
+		 * The allocator of Botan's secure memory, set up now - before
+		 * the files may need it, should there be none - so that its
+		 * static destructor runs after the exit handler esdm_tls.c
+		 * registers next - see esdm_tls_exiting() there.
+		 */
+		Botan::secure_vector<uint8_t> allocator(1);
 		auto c = std::make_unique<Esdm_Tls_Ctx>();
 
 		c->server = server;

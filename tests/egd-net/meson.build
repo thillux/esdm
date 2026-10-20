@@ -20,6 +20,26 @@ egd_net_tls_test = executable(
 test('EGD network TLS layer', egd_net_tls_test, timeout: 120,
 	suite: 'egd-net')
 
+# The same from the TLS module of libesdm_egd_client, a connection released at
+# the exit of the process by a handler registered before the module was
+# loaded. Not linked with the TLS stack, as a program using the library is
+# not.
+if egd_net_tls
+	egd_net_tls_exit_test = executable(
+			'egd_net_tls_exit_test',
+			[ 'tls_exit_test.c' ],
+			c_args: egd_net_test_args,
+			include_directories: include_dirs_egd_client,
+			dependencies: [ dl_dep ],
+		)
+
+	test('EGD network TLS layer released at the exit',
+		egd_net_tls_exit_test,
+		args: [ esdm_egd_tls_module.full_path() ],
+		depends: [ esdm_egd_tls_module ],
+		timeout: 60, suite: 'egd-net')
+endif
+
 # The addresses of the network, the allowlist and the keyed bounds of the
 # daemons, of the common library.
 egd_net_common_test = executable(

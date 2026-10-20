@@ -91,3 +91,29 @@ test('OpenSSL 3.x EGD PR Provider - instance full', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_full', 'egd-pr'],
 	env: tester_esdm_env,
 )
+
+# The RNG and SEED-SRC providers on a connection encrypted with DTLS, at the
+# exit of the process using them: torn down by OPENSSL_cleanup(), after the
+# static destructors of the TLS stack. Against rpc_dtls_test serving stand-in
+# services, which needs no privileges, on the RPC sockets fixed at build time,
+# hence alone. Skips without DTLS. Linked with OpenSSL alone, as a program
+# using the providers is: the TLS stack comes with the provider, loaded after
+# OpenSSL registered its cleanup.
+openssl_dtls_exit_test = executable(
+		'openssl_dtls_exit_test',
+		[ 'openssl_dtls_exit_test.c' ],
+		include_directories: include_dirs_client,
+		dependencies: [ dependency('libprotobuf-c'), openssl_dep ],
+	)
+
+foreach provider : [ [ 'RNG', 'libesdm-rng-provider' ],
+		     [ 'SEED-SRC', 'libesdm-seed-src-provider' ] ]
+	test('OpenSSL 3.x ' + provider[0] + ' Provider - DTLS at the exit',
+		openssl_dtls_exit_test,
+		args: [ meson.project_build_root() + '/frontends/openssl-provider',
+			provider[1] ],
+		env: [ 'ESDM_RPC_DTLS_SERVER=' + rpc_dtls_test.full_path() ],
+		depends: [ rpc_dtls_test ],
+		timeout: 60,
+		is_parallel: false)
+endforeach

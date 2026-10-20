@@ -46,6 +46,7 @@
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
+#include "leak_check.h"
 #include "esdm_logger.h"
 #include "math_helper.h"
 #include "mutex.h"
@@ -400,6 +401,12 @@ static struct esdm_dtls_ctx *esdm_rpcc_dtls_ctx_get(void)
 	if (!esdm_rpcc_dtls_ctx && !atomic_load(&esdm_rpcc_dtls_ctx_failed)) {
 		int ret = esdm_dtls_ctx_alloc(false, &esdm_rpcc_dtls_ctx);
 
+		/*
+		 * Kept also when the library is unloaded - by
+		 * OPENSSL_cleanup() at the exit, with the provider using it.
+		 */
+		if (!ret)
+			esdm_leak_intended(esdm_rpcc_dtls_ctx);
 		if (ret) {
 			atomic_store(&esdm_rpcc_dtls_ctx_failed, true);
 			esdm_logger(

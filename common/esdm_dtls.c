@@ -25,12 +25,15 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esdm_dtls.h"
 #include "esdm_dtls_backend.h"
+#include "leak_check.h"
 #include "memset_secure.h"
 #include "visibility.h"
 
@@ -50,10 +53,16 @@
 struct esdm_dtls_ctx {
 	void *backend;
 	bool server;
+
+	/* The next one left behind at the exit, see esdm_dtls_exiting() */
+	struct esdm_dtls_ctx *left_next;
 };
 
 struct esdm_dtls {
 	void *backend;
+
+	/* The next one left behind at the exit, see esdm_dtls_exiting() */
+	struct esdm_dtls *left_next;
 
 	/* The records of the connection, NULL for the ones of the backend */
 	const struct esdm_dtls_ops *ops;
@@ -90,6 +99,74 @@ bool esdm_dtls_busy(void)
 	return esdm_dtls_busy_depth > 0;
 }
 
+/*
+ * The exit of the process. The TLS stack may be gone by the time the last
+ * connection or context is released: by the destructor of a library, or by an
+ * atexit handler registered before the TLS stack was set up - OPENSSL_cleanup()
+ * tearing down an OpenSSL provider that uses the RPC client, for one. Both run
+ * after the static destructors of the TLS stack, and Botan unmaps the memory
+ * its secure allocator handed out there, so the destructor of every object
+ * still holding some crashes the process. The connection is no use to anybody
+ * at the exit either.
+ *
+ * So nothing goes into the TLS stack any more once the process exits: what is
+ * released then wipes what this file holds of it, and leaves the objects of the
+ * TLS stack to the end of the process - kept reachable on the lists below for
+ * leak checkers, and LeakSanitizer is told, as the lists go with the library
+ * when it is unloaded at the exit. The exit is told by an atexit handler, registered once the
+ * first context of the TLS stack exists: the handlers of the exit run in the
+ * reverse order of their registration, so the static destructors the TLS stack
+ * registered while the backend set up the context - it sets up what it frees
+ * at the exit, see esdm_dtls_botan.cpp - run after the handler.
+ */
+static atomic_bool esdm_dtls_exit_started = false;
+static _Atomic(struct esdm_dtls *) esdm_dtls_left = NULL;
+
+static bool esdm_dtls_exiting(void)
+{
+	return atomic_load(&esdm_dtls_exit_started);
+}
+
+static void esdm_dtls_leave_behind(struct esdm_dtls *dtls)
+{
+	struct esdm_dtls *head = atomic_load(&esdm_dtls_left);
+
+	esdm_leak_intended(dtls);
+	do {
+		dtls->left_next = head;
+	} while (!atomic_compare_exchange_weak(&esdm_dtls_left, &head, dtls));
+}
+
+#ifdef ESDM_DTLS
+static pthread_once_t esdm_dtls_exit_once = PTHREAD_ONCE_INIT;
+static _Atomic(struct esdm_dtls_ctx *) esdm_dtls_ctx_left = NULL;
+
+static void esdm_dtls_at_exit(void)
+{
+	atomic_store(&esdm_dtls_exit_started, true);
+}
+
+static void esdm_dtls_exit_register(void)
+{
+	/*
+	 * Should it fail, the TLS stack is called at the exit as before - no
+	 * reason to refuse the connection.
+	 */
+	(void)atexit(esdm_dtls_at_exit);
+}
+
+static void esdm_dtls_ctx_leave_behind(struct esdm_dtls_ctx *ctx)
+{
+	struct esdm_dtls_ctx *head = atomic_load(&esdm_dtls_ctx_left);
+
+	esdm_leak_intended(ctx);
+	do {
+		ctx->left_next = head;
+	} while (
+		!atomic_compare_exchange_weak(&esdm_dtls_ctx_left, &head, ctx));
+}
+#endif /* ESDM_DTLS */
+
 DSO_PUBLIC
 int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 {
@@ -120,6 +197,9 @@ int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 		return ret;
 	}
 
+	/* After the TLS stack set itself up, see esdm_dtls_exiting() */
+	pthread_once(&esdm_dtls_exit_once, esdm_dtls_exit_register);
+
 	*ctx = c;
 	return 0;
 #endif
@@ -132,6 +212,11 @@ void esdm_dtls_ctx_free(struct esdm_dtls_ctx *ctx)
 		return;
 
 #ifdef ESDM_DTLS
+	if (esdm_dtls_exiting()) {
+		esdm_dtls_ctx_leave_behind(ctx);
+		return;
+	}
+
 	esdm_dtls_enter();
 	esdm_dtls_backend_ctx_free(ctx->backend);
 	esdm_dtls_leave();
@@ -251,6 +336,13 @@ void esdm_dtls_free(struct esdm_dtls *dtls)
 		return;
 
 	esdm_dtls_drop_partial(dtls);
+
+	/* Not into the TLS stack at the exit, see esdm_dtls_exiting() */
+	if (esdm_dtls_exiting()) {
+		esdm_dtls_leave_behind(dtls);
+		return;
+	}
+
 	esdm_dtls_enter();
 	if (dtls->ops)
 		dtls->ops->free(dtls->backend);
