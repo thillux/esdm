@@ -268,12 +268,14 @@ if get_option('esdm-server').enabled()
 	rpc_bench = executable(
 			'rpc_bench',
 			[ 'rpc_bench.c' ],
-			include_directories: include_dirs_client,
+			include_directories: [ include_dirs_client,
+					       include_dirs_egd_client ],
 			dependencies: [ dependencies_client,
 					dependency('threads'),
 					cc.find_library('dl', required: false),
 					cc.find_library('m', required: false) ],
-			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib,
+				     esdm_egd_client_linked_lib ]
 		)
 
 	rpc_bench_env = [ tester_esdm_env ]

@@ -57,7 +57,9 @@
  * e.g. --no_dtls or --no_io_uring, and may be repeated. -v prints every run of
  * a figure as well, for figures to be put together from several invocations
  * - to compare two servers in turns, say. The paths are full, pr, unseeded,
- * getrandom and kernel; all but pr are taken without any - see bench_paths.
+ * getrandom, kernel and egd - the EGD socket of the server, which the server
+ * started by the bench serves then; all but pr and egd are taken without any
+ * - see bench_paths.
  * The getrandom(2) of libesdm-getrandom is looked up in the library named by
  * ESDM_GETRANDOM_LIB, and skipped without it.
  */
@@ -79,6 +81,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "esdm_egd_client.h"
 #include "esdm_rpc_client.h"
 #include "esdm_rpc_service.h"
 #include "../test_env.h"
@@ -135,6 +138,32 @@ static ssize_t bench_kernel(uint8_t *buf, size_t len)
 	return ret < 0 ? -errno : ret;
 }
 
+/*
+ * The EGD socket of the server, by libesdm_egd_client: a client - and with it
+ * a connection - per thread, as a client serializes its requests. The server
+ * the bench starts serves it on BENCH_EGD_SOCKET; with -x, the client takes
+ * ESDM_EGD_SOCKET or the socket of the build.
+ */
+#define BENCH_EGD_SOCKET "/tmp/esdm-rpc-bench-egd.socket"
+static const char *bench_egd_socket = BENCH_EGD_SOCKET;
+static __thread struct esdm_egd_client *bench_egd_client;
+
+static ssize_t bench_egd(uint8_t *buf, size_t len)
+{
+	int ret;
+
+	if (!bench_egd_client) {
+		ret = esdm_egd_client_alloc(&bench_egd_client,
+					    bench_egd_socket, 0);
+		if (ret)
+			return ret;
+	}
+
+	ret = esdm_egd_client_get_random(bench_egd_client, buf, len);
+
+	return ret ? ret : (ssize_t)len;
+}
+
 static const struct bench_path {
 	const char *name;
 	bench_fn fn;
@@ -156,7 +185,12 @@ static const struct bench_path {
 	{ "unseeded", bench_unseeded, true, true, SIZE_MAX },
 	{ "getrandom", bench_getrandom, false, true, SIZE_MAX },
 	{ "kernel", bench_kernel, false, true, SIZE_MAX },
+	/* Not by default: the server serves it only when asked to */
+	{ "egd", bench_egd, false, false, SIZE_MAX },
 };
+
+/* The server the bench starts serves the EGD socket */
+static bool bench_egd_served = false;
 
 static size_t bench_sizes[BENCH_MAX_LIST] = { 32, 256, 4096, 65536, 1048576 };
 static unsigned int bench_nsizes = 5;
@@ -406,6 +440,10 @@ static void *bench_thread_main(void *arg)
 		pthread_barrier_wait(t->done);
 	}
 
+	if (bench_egd_client) {
+		esdm_egd_client_free(bench_egd_client);
+		bench_egd_client = NULL;
+	}
 	memset(buf, 0, t->len);
 	free(buf);
 	return NULL;
@@ -765,7 +803,7 @@ static pid_t bench_server_start(void)
 {
 	const char *server = getenv("ESDM_SERVER");
 	char *envp[TEST_ENV_MAX_VARS + 1];
-	char *argv[BENCH_MAX_SERVER_ARGS + 3];
+	char *argv[BENCH_MAX_SERVER_ARGS + 5];
 	unsigned int i;
 	pid_t pid;
 	int ret;
@@ -794,6 +832,11 @@ static pid_t bench_server_start(void)
 	argv[1] = "-f";
 	for (i = 0; i < bench_nserver_args; i++)
 		argv[i + 2] = bench_server_args[i];
+	if (bench_egd_served) {
+		argv[i + 2] = "--egd_socket";
+		argv[i + 3] = BENCH_EGD_SOCKET;
+		i += 2;
+	}
 	argv[i + 2] = NULL;
 
 	/* Built before the fork - see test_env_daemon_envp() */
@@ -887,7 +930,7 @@ static void bench_usage(const char *name)
 {
 	fprintf(stderr,
 		"Usage: %s [-x] [-v] [-S server option] [-s sizes] [-t threads] [-p processes] [-r runs] [-m ms] [path ...]\n"
-		"\tpaths: full pr unseeded getrandom kernel\n"
+		"\tpaths: full pr unseeded getrandom kernel egd\n"
 		"\t-x: use the esdm-server running already\n"
 		"\t-v: print every run\n",
 		name);
@@ -957,7 +1000,13 @@ int main(int argc, char *argv[])
 		if (i == ARRAY_SIZE(bench_paths))
 			goto usage;
 		selected[i] = true;
+		if (bench_paths[i].fn == bench_egd)
+			bench_egd_served = true;
 	}
+
+	/* The server running already serves its EGD socket where it does */
+	if (external)
+		bench_egd_socket = NULL;
 
 	for (p = 0; p < bench_nprocs; p++) {
 		for (t = 0; t < bench_nthreads; t++) {
