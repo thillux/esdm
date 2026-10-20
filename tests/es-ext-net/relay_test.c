@@ -501,6 +501,79 @@ static void test_revocation(void)
 	unlink(crl);
 }
 
+/* Does the file @path hold @text? */
+static bool file_has(const char *path, const char *text)
+{
+	char buf[16384];
+	FILE *f = fopen(path, "r");
+	size_t n;
+
+	if (!f)
+		return false;
+	n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	return strstr(buf, text);
+}
+
+/*
+ * The certificate of the relay revoked by the CRL of the provider. TLS 1.3
+ * completes the handshake of the relay before the provider judged its
+ * certificate, and the provider refuses it by the alert the first request
+ * brings: the relay takes that for the failed handshake it is - the provider
+ * not reachable, the alert logged as the failure of the handshake -, not for
+ * a request that failed.
+ */
+static void test_refused(void)
+{
+	char log[sizeof(test_dir) + 16], text[128];
+	const char *const sextra[] = { "--crl", PKI("int.crl"), NULL };
+	const char *const rextra[] = { "--cert", PKI("client-revoked.crt"),
+				       "--key", PKI("client-revoked.key"),
+				       NULL };
+	struct es_ext_test_client c;
+	uint16_t port = 0;
+	pid_t serve, relay = -1;
+	uint32_t rate;
+	char info[64];
+	int ret, fd, saved;
+
+	printf("Relay: its certificate refused by the provider\n");
+
+	snprintf(log, sizeof(log), "%s/relay.log", test_dir);
+	serve = serve_start(&port, NULL, sextra);
+
+	/* What the relay logs, into the file */
+	fd = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	saved = dup(2);
+	if (fd >= 0 && saved >= 0 && dup2(fd, 2) == 2) {
+		relay = relay_start(port, "localhost", rextra);
+		dup2(saved, 2);
+	}
+	if (saved >= 0)
+		close(saved);
+	if (fd >= 0)
+		close(fd);
+	CHECK(serve > 0 && relay > 0, "daemons");
+
+	CHECK(!es_ext_test_client_open(&c, test_socket, false),
+	      "no local connection");
+	ret = relay_info(&c, info, sizeof(info), &rate);
+	CHECK(ret < 0, "the refused relay was served: %d", ret);
+	es_ext_test_client_close(&c);
+
+	snprintf(text, sizeof(text), "handshake with 127.0.0.1:%u failed:", port);
+	CHECK(file_has(log, text), "no failed handshake logged");
+	CHECK(file_has(log, "is not reachable"),
+	      "the provider was not taken as unreachable");
+	CHECK(!file_has(log, "failed upstream"),
+	      "the refusal was taken as a request that failed");
+
+	test_daemon_stop(relay);
+	test_daemon_stop(serve);
+	unlink(log);
+}
+
 int main(int argc, char *argv[])
 {
 	uint16_t port = 0;
@@ -545,6 +618,7 @@ int main(int argc, char *argv[])
 
 	test_slow_and_wrong();
 	test_revocation();
+	test_refused();
 
 	unlink(test_socket);
 	rmdir(test_dir);

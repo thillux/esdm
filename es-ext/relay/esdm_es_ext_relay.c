@@ -397,6 +397,28 @@ static int relay_upstream(struct relay_conn *conn, uint64_t deadline)
 }
 
 /*
+ * The first request on a new upstream connection failed with @err: if the
+ * provider was not seen to take the connection, it refused it - TLS 1.3 tells
+ * a client so with the answer to its first request, after its handshake
+ * completed, see esdm_tls_confirmed(). That is the failure of the handshake,
+ * and the provider is not reachable: the connection is closed.
+ *
+ * @return @err if it is such a refusal, 0 for a request that failed on a
+ *	   connection the provider took
+ */
+static int relay_refused(struct relay_conn *conn, int err)
+{
+	if (esdm_tls_confirmed(esdm_dtls_tls(conn->up)))
+		return 0;
+
+	esdm_logger(err == -EACCES ? LOGGER_ERR : LOGGER_DEBUG, LOGGER_C_ANY,
+		    "%s: handshake with %s failed: %s\n", RELAY_NAME,
+		    relay_cfg.connect, esdm_tls_error(esdm_dtls_tls(conn->up)));
+	relay_upstream_close(conn);
+	return err;
+}
+
+/*
  * Forward the request @req to the provider and take its answer into @rsp,
  * checked as the ESDM checks it - within @deadline.
  *
@@ -574,10 +596,10 @@ static bool relay_local_request(struct relay_conn *conn)
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN + 1];
 	uint8_t rsp[RELAY_RSP_MAX];
 	uint64_t deadline = relay_now_ms() + relay_cfg.timeout_ms;
+	bool ret, forwarded = false;
 	uint32_t length;
 	uint16_t type;
 	ssize_t n;
-	bool ret;
 	int err;
 
 	n = relay_local_recv(conn, req, sizeof(req));
@@ -618,6 +640,12 @@ static bool relay_local_request(struct relay_conn *conn)
 		conn->info_done = true;
 
 		err = relay_upstream(conn, deadline);
+		if (!err) {
+			n = relay_forward(conn, req, type, length, rsp,
+					  deadline);
+			if (n < 0)
+				err = relay_refused(conn, (int)n);
+		}
 		if (err) {
 			if (!atomic_exchange(&relay_unreachable_told, true))
 				esdm_logger(
@@ -636,12 +664,15 @@ static bool relay_local_request(struct relay_conn *conn)
 			esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
 				    "%s: the provider %s is reachable again\n",
 				    RELAY_NAME, relay_cfg.connect);
+		forwarded = true;
 	}
 
 	if (!conn->up)
 		return false;
 
-	n = relay_forward(conn, req, type, length, rsp, deadline);
+	/* INFO went with the connection, see above */
+	if (!forwarded)
+		n = relay_forward(conn, req, type, length, rsp, deadline);
 	if (n < 0) {
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
 			    "%s: the request of %s failed upstream: %s\n",

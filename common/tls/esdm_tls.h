@@ -403,6 +403,27 @@ short esdm_tls_want(struct esdm_tls *tls);
 bool esdm_tls_pending(struct esdm_tls *tls);
 
 /**
+ * @brief Has the peer been seen to take the connection?
+ *
+ * The handshake of TLS 1.3 completes for a client before its server judged the
+ * certificate of the client: the client's Finished goes out with its
+ * certificate, and a server taking it answers nothing more - no ticket, in the
+ * minimal mode. A server refusing the client - a revoked certificate, say -
+ * tells so by its alert, which the client gets with its first receive. So a
+ * client's connection is confirmed once data of the server came: a failure of
+ * a connection not confirmed is the refusal of the handshake, with the alert
+ * of the server as esdm_tls_error(), and to be taken as a connection that
+ * failed - not as a request that did. Asking the server for something it
+ * answers right away would tell it before the first request, but costs a round
+ * trip with every connection, and the first request of every client of the ESDM
+ * is one such.
+ *
+ * @return true for a server's connection once established, for a client's
+ *	   once it received data
+ */
+bool esdm_tls_confirmed(struct esdm_tls *tls);
+
+/**
  * @brief Tell the peer that no more data follows, best effort
  *
  * The closing alert is sent if the socket takes it right away; nothing is
@@ -601,6 +622,12 @@ static inline short esdm_tls_want(struct esdm_tls *tls)
 }
 
 static inline bool esdm_tls_pending(struct esdm_tls *tls)
+{
+	(void)tls;
+	return false;
+}
+
+static inline bool esdm_tls_confirmed(struct esdm_tls *tls)
 {
 	(void)tls;
 	return false;

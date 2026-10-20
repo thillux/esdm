@@ -96,6 +96,9 @@ struct esdm_tls {
 	/* Why the handshake failed, where the backend does not know it */
 	char error[ESDM_TLS_TEXT_LEN];
 
+	/* A client received data: the server took it, see esdm_tls_confirmed() */
+	bool confirmed;
+
 	/* The next one left behind at the exit, see esdm_tls_exiting() */
 	struct esdm_tls *left_next;
 };
@@ -914,6 +917,8 @@ int esdm_tls_flush(struct esdm_tls *tls)
 
 ssize_t esdm_tls_recv(struct esdm_tls *tls, void *buf, size_t len)
 {
+	ssize_t n;
+
 	if (!tls || !buf)
 		return -EINVAL;
 	if (!tls->established)
@@ -921,7 +926,15 @@ ssize_t esdm_tls_recv(struct esdm_tls *tls, void *buf, size_t len)
 	if (!len)
 		return -EINVAL;
 
-	return esdm_tls_backend_recv(tls->backend, buf, len, &tls->want);
+	n = esdm_tls_backend_recv(tls->backend, buf, len, &tls->want);
+	if (n > 0)
+		tls->confirmed = true;
+	return n;
+}
+
+bool esdm_tls_confirmed(struct esdm_tls *tls)
+{
+	return tls && tls->established && (tls->ctx->server || tls->confirmed);
 }
 
 short esdm_tls_want(struct esdm_tls *tls)

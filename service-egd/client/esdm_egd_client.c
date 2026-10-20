@@ -131,6 +131,12 @@ static inline const char *esdm_egd_notls_error(struct esdm_tls *tls)
 	(void)tls;
 	return "no TLS";
 }
+
+static inline bool esdm_egd_notls_confirmed(struct esdm_tls *tls)
+{
+	(void)tls;
+	return false;
+}
 #endif
 
 /*
@@ -1570,12 +1576,17 @@ static int esdm_egd_client_tls_read_all_locked(struct esdm_egd_client *client,
 		if (n != -EAGAIN) {
 			/*
 			 * A TLS 1.3 server refuses the certificate of the
-			 * client after the client's handshake completed: here.
+			 * client after the client's handshake completed: with
+			 * the first answer, the failure of the handshake - see
+			 * esdm_tls_confirmed(). The connection is dropped, and
+			 * the operation tried on a fresh one, as after a
+			 * handshake that failed at once.
 			 */
-			if (n == -EACCES)
+			if (!EGDC_TLS(confirmed)(client->tls) &&
+			    (n == -EACCES || n == -EPROTO))
 				esdm_logger(
 					LOGGER_ERR, LOGGER_C_ANY,
-					"EGD client: %s refused the connection: %s\n",
+					"EGD client: the TLS handshake with %s failed: %s\n",
 					client->socket_path,
 					EGDC_TLS(error)(client->tls));
 			return (int)n;

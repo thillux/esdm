@@ -357,8 +357,14 @@ static void expect_told(struct pair *p, const char *what)
 {
 	ssize_t n = p->cret;
 
-	if (!n)
+	/* Refused after its handshake: no connection the server took */
+	if (!n) {
+		CHECK(!esdm_tls_confirmed(p->c),
+		      "%s: confirmed before anything was received", what);
 		n = recv_result(p, p->c);
+		CHECK(!esdm_tls_confirmed(p->c),
+		      "%s: confirmed by the refusal", what);
+	}
 	CHECK(n == -EACCES, "%s: the client was not told it is refused: %zd",
 	      what, n);
 	if (n == -EACCES)
@@ -629,12 +635,17 @@ static void test_transfer_and_eof(void)
 
 	CHECK(!pair_open(&p, sctx, cctx, "localhost"), "pair");
 	CHECK(!pair_handshake(&p), "handshake");
+	CHECK(esdm_tls_confirmed(p.s) && !esdm_tls_confirmed(p.c),
+	      "confirmed: server %d, client %d before data", esdm_tls_confirmed(p.s),
+	      esdm_tls_confirmed(p.c));
 	memset(out, 0, len);
 	CHECK(!transfer(&p, p.c, p.s, data, out, len) && !memcmp(data, out, len),
 	      "1 MiB from the client did not arrive intact");
 	memset(out, 0, len);
 	CHECK(!transfer(&p, p.s, p.c, data, out, len) && !memcmp(data, out, len),
 	      "1 MiB from the server did not arrive intact");
+	CHECK(esdm_tls_confirmed(p.c),
+	      "the client is not confirmed by the data of the server");
 
 	/* A small message, then the closing alert */
 	CHECK(!transfer(&p, p.c, p.s, data, out, 3), "small transfer");

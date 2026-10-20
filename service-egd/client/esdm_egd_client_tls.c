@@ -39,6 +39,7 @@ static const struct esdm_egd_tls_module esdm_egd_tls_module_ops = {
 	.cipher = esdm_tls_cipher,
 	.group = esdm_tls_group,
 	.error = esdm_tls_error,
+	.confirmed = esdm_tls_confirmed,
 	.wait = esdm_tls_wait,
 	.stamp = esdm_tls_stamp,
 };
