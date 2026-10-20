@@ -40,6 +40,10 @@
  * it out - and runs the revocation policy of esdm_tls.c on it. GnuTLS sends no
  * alert of its own for a failed handshake: the one the failure calls for is
  * sent here.
+ *
+ * TLS 1.3 offers the groups of ML-KEM GnuTLS has ahead of those of NORMAL,
+ * see esdm_tls_gnutls_stream_priority() and "Post-quantum algorithms" in
+ * esdm_tls.h. GnuTLS has them only when built with leancrypto.
  */
 
 #include <arpa/inet.h>
@@ -58,14 +62,33 @@
 #include "esdm_logger.h"
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
+#include "helper.h"
 #include "memset_secure.h"
 
-/* TLS 1.3 exactly; the tickets are turned off with the session flags */
+/*
+ * TLS 1.3 exactly; the tickets are turned off with the session flags. The
+ * groups are added to it, see esdm_tls_gnutls_stream_priority().
+ */
 #define ESDM_TLS_GNUTLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.3"
+
+/* Room for the priority of TLS 1.3 with its groups */
+#define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
+
+/*
+ * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them.
+ * GnuTLS 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid,
+ * and leaves it out of what it offers - until it does.
+ */
+static const char *const esdm_tls_gnutls_mlkem[] = {
+	"SECP384R1-MLKEM1024",
+	"X25519-MLKEM768",
+	"SECP256R1-MLKEM768",
+	"MLKEM1024",
+};
 
 /*
  * DTLS 1.2 exactly on SCTP: ECDHE with the key of the certificate, ECDSA or
- * RSA, and AEAD ciphers only
+ * RSA, and AEAD ciphers only - none of ML-KEM, which is for TLS 1.3 only
  */
 #define ESDM_TLS_GNUTLS_DTLS_PRIORITY                                          \
 	"NORMAL:-VERS-ALL:+VERS-DTLS1.2:-CIPHER-ALL:+AES-256-GCM:"             \
@@ -484,6 +507,72 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 	return ret;
 }
 
+/* Append ":+<what><name>" to the priority @prio of @len bytes so far */
+static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
+				    const char *name)
+{
+	int n = snprintf(prio + *len, ESDM_TLS_GNUTLS_PRIORITY_LEN - *len,
+			 ":+%s%s", what, name);
+
+	if (n < 0 || (size_t)n >= ESDM_TLS_GNUTLS_PRIORITY_LEN - *len)
+		return -ENOSPC;
+	*len += (size_t)n;
+	return 0;
+}
+
+/*
+ * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
+ * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL - for
+ * "+" appends, the groups are listed anew. GnuTLS refuses a priority naming
+ * a group it does not have, and one built without leancrypto has none of
+ * ML-KEM: the string names only what GnuTLS reports - and should it be refused
+ * nevertheless, NORMAL's groups serve.
+ */
+static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
+{
+	char str[ESDM_TLS_GNUTLS_PRIORITY_LEN];
+	gnutls_priority_t normal;
+	const unsigned int *groups;
+	const char *name;
+	size_t len, i;
+	int n, ret = 0;
+
+	len = (size_t)snprintf(str, sizeof(str), "%s:-GROUP-ALL",
+			       ESDM_TLS_GNUTLS_PRIORITY);
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem) && !ret; i++) {
+		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
+		    GNUTLS_GROUP_INVALID)
+			ret = esdm_tls_gnutls_prio_add(
+				str, &len, "GROUP-", esdm_tls_gnutls_mlkem[i]);
+	}
+
+	if (gnutls_priority_init(&normal, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
+		return -ENOMEM;
+	n = gnutls_priority_group_list(normal, &groups);
+	for (i = 0; n > 0 && i < (size_t)n && !ret; i++) {
+		name = gnutls_group_get_name((gnutls_group_t)groups[i]);
+		if (name)
+			ret = esdm_tls_gnutls_prio_add(str, &len, "GROUP-",
+						       name);
+	}
+	gnutls_priority_deinit(normal);
+
+	if (!ret) {
+		ret = gnutls_priority_init(prio, str, NULL);
+		if (ret >= 0)
+			return 0;
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+			    "TLS: GnuTLS refused the priority %s: %s\n", str,
+			    gnutls_strerror(ret));
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "TLS: the groups of NORMAL serve, without ML-KEM\n");
+	if (gnutls_priority_init(prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
+		return -ENOMEM;
+	return 0;
+}
+
 /******************************************************************************
  * esdm_tls_backend.h
  ******************************************************************************/
@@ -491,6 +580,19 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 const char *esdm_tls_backend_name(void)
 {
 	return "GnuTLS";
+}
+
+/* The first group of ML-KEM GnuTLS has */
+const char *esdm_tls_backend_mlkem_group(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem); i++) {
+		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
+		    GNUTLS_GROUP_INVALID)
+			return esdm_tls_gnutls_mlkem[i];
+	}
+	return NULL;
 }
 
 void esdm_tls_backend_ctx_free(void *ctx)
@@ -583,13 +685,20 @@ int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 		ret = -ENOMEM;
 		goto err;
 	}
-	if (gnutls_priority_init(&c->prio,
-				 c->sctp ? ESDM_TLS_GNUTLS_DTLS_PRIORITY :
-					   ESDM_TLS_GNUTLS_PRIORITY,
-				 NULL) < 0) {
-		c->prio = NULL;
-		ret = -ENOMEM;
-		goto err;
+	if (c->sctp) {
+		if (gnutls_priority_init(&c->prio,
+					 ESDM_TLS_GNUTLS_DTLS_PRIORITY,
+					 NULL) < 0) {
+			c->prio = NULL;
+			ret = -ENOMEM;
+			goto err;
+		}
+	} else {
+		ret = esdm_tls_gnutls_stream_priority(&c->prio);
+		if (ret) {
+			c->prio = NULL;
+			goto err;
+		}
 	}
 
 	ret = esdm_tls_gnutls_files(c, cfg);

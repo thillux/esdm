@@ -39,6 +39,9 @@
  *
  * The revocation policy of esdm_tls.c runs in the verify callback, on the
  * chain OpenSSL verified - see esdm_tls_openssl_verify().
+ *
+ * TLS 1.3 offers the groups of ML-KEM ahead of OpenSSL's default ones, see
+ * ESDM_TLS_OPENSSL_GROUPS and "Post-quantum algorithms" in esdm_tls.h.
  */
 
 #include <arpa/inet.h>
@@ -46,6 +49,7 @@
 #include <limits.h>
 #include <openssl/bio.h>
 #include <openssl/bn.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -65,10 +69,25 @@
 #include "esdm_logger.h"
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
+#include "helper.h"
+
+/*
+ * TLS 1.3: the groups of ML-KEM in the order of esdm_tls.h, as a tuple of
+ * their own ahead of OpenSSL's default ones. A server takes a group of the
+ * first tuple the client has one of - by a HelloRetryRequest if the client
+ * sent no key share of it -, and so prefers ML-KEM to any (EC)DHE group. The
+ * client sends key shares of SecP384r1MLKEM1024 ("*") and of X25519, the one
+ * of the default for a server without ML-KEM. A group OpenSSL does not have is
+ * left out ("?"); OpenSSL before 3.5 has none and knows neither the tuples nor
+ * the key shares nor DEFAULT, refuses the list and keeps its default groups.
+ */
+#define ESDM_TLS_OPENSSL_GROUPS                                                \
+	"?*SecP384r1MLKEM1024:?X25519MLKEM768:?SecP256r1MLKEM768:?MLKEM1024"   \
+	"/DEFAULT"
 
 /*
  * DTLS 1.2 on SCTP: ECDHE with the key of the certificate, ECDSA or RSA, and
- * AEAD ciphers only
+ * AEAD ciphers only - none of ML-KEM, which is for TLS 1.3 only
  */
 #define ESDM_TLS_OPENSSL_DTLS_CIPHERS                                          \
 	"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"           \
@@ -843,6 +862,15 @@ static int esdm_tls_openssl_stream(SSL_CTX *c)
 	/* Wipe the plaintext of a record once it is handed out */
 	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
 
+	/* ML-KEM first, as far as OpenSSL has it, see above */
+	if (SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_GROUPS) != 1) {
+		ERR_clear_error();
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_ANY,
+			"TLS: OpenSSL %s refused the groups of ML-KEM, its default groups serve\n",
+			OpenSSL_version(OPENSSL_VERSION_STRING));
+	}
+
 	return 0;
 }
 
@@ -1228,6 +1256,40 @@ const char *esdm_tls_backend_group(void *conn)
 
 	/* A NID, or the id of TLS of a group of a provider, as OpenSSL has it */
 	return nid ? SSL_group_to_name(c->ssl, nid) : NULL;
+}
+
+/* The groups of ML-KEM of ESDM_TLS_OPENSSL_GROUPS, in its order */
+static const char *const esdm_tls_openssl_mlkem[] = {
+	"SecP384r1MLKEM1024",
+	"X25519MLKEM768",
+	"SecP256r1MLKEM768",
+	"MLKEM1024",
+};
+
+/* The first of them OpenSSL takes, in the library context of this file */
+const char *esdm_tls_backend_mlkem_group(void)
+{
+	const char *group = NULL;
+	SSL_CTX *c;
+	size_t i;
+
+	pthread_once(&esdm_tls_openssl_once, esdm_tls_openssl_init);
+	if (!esdm_tls_openssl_libctx)
+		return NULL;
+
+	c = SSL_CTX_new_ex(esdm_tls_openssl_libctx, NULL, TLS_method());
+	if (!c) {
+		ERR_clear_error();
+		return NULL;
+	}
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_openssl_mlkem) && !group; i++) {
+		if (SSL_CTX_set1_groups_list(c, esdm_tls_openssl_mlkem[i]) == 1)
+			group = esdm_tls_openssl_mlkem[i];
+	}
+	SSL_CTX_free(c);
+	ERR_clear_error();
+
+	return group;
 }
 
 const char *esdm_tls_backend_error(void *conn)

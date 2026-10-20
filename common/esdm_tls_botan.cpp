@@ -49,6 +49,9 @@
  * esdm_tls_botan_name_matches() - and does not hand out the path it verified,
  * which the revocation policy of esdm_tls.c is run on right there.
  *
+ * TLS 1.3 offers the groups of ML-KEM Botan has ahead of its default ones, see
+ * Esdm_Tls_Policy and "Post-quantum algorithms" in esdm_tls.h.
+ *
  * No exception crosses into the C code: every entry point catches them and
  * reports an errno.
  */
@@ -103,11 +106,40 @@
 namespace
 {
 
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 /*
- * TLS 1.3 exactly on a stream socket, DTLS 1.2 exactly on SCTP - there with
- * ECDHE and AEAD ciphers only, the MTU of RFC 6083 and no cookie exchange,
- * which SCTP has its own of. No resumption nor renegotiation, and a server that
- * requires a certificate.
+ * The groups of ML-KEM in the order of esdm_tls.h, as far as Botan has them:
+ * those of the standard came with 3.7, SecP384r1MLKEM1024 with 3.8, and a
+ * build has them with the modules ml_kem and tls_13_pqc.
+ */
+static std::vector<Botan::TLS::Group_Params> esdm_tls_botan_mlkem()
+{
+	static const Botan::TLS::Group_Params_Code codes[] = {
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 8, 0)
+		Botan::TLS::Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
+#endif
+		Botan::TLS::Group_Params_Code::HYBRID_X25519_ML_KEM_768,
+		Botan::TLS::Group_Params_Code::HYBRID_SECP256R1_ML_KEM_768,
+		Botan::TLS::Group_Params_Code::ML_KEM_1024,
+	};
+	std::vector<Botan::TLS::Group_Params> groups;
+
+	for (const auto code : codes) {
+		Botan::TLS::Group_Params group(code);
+
+		if (group.is_available())
+			groups.push_back(group);
+	}
+
+	return groups;
+}
+#endif
+
+/*
+ * TLS 1.3 exactly on a stream socket, with the groups of ML-KEM first; DTLS
+ * 1.2 exactly on SCTP - there with ECDHE and AEAD ciphers only, the MTU of RFC
+ * 6083 and no cookie exchange, which SCTP has its own of. No resumption nor
+ * renegotiation, and a server that requires a certificate.
  */
 class Esdm_Tls_Policy final : public Botan::TLS::Policy {
     public:
@@ -115,6 +147,65 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 		: m_server(server), m_sctp(sctp)
 	{
 	}
+
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
+	/*
+	 * The groups of ML-KEM, then Botan's default ones of (EC)DHE - its
+	 * default lists some of ML-KEM as well, after X25519 and P-256. A
+	 * server of Botan takes the first group of ML-KEM the client offers a
+	 * key share of, else the first the client lists, by a
+	 * HelloRetryRequest: two sides of this policy agree on the first one.
+	 */
+	std::vector<Botan::TLS::Group_Params>
+	key_exchange_groups() const override
+	{
+		if (m_sctp)
+			return Botan::TLS::Policy::key_exchange_groups();
+
+		std::vector<Botan::TLS::Group_Params> groups =
+			esdm_tls_botan_mlkem();
+
+		for (const auto &group :
+		     Botan::TLS::Policy::key_exchange_groups()) {
+			if (!group.is_post_quantum())
+				groups.push_back(group);
+		}
+
+		return groups;
+	}
+
+	/*
+	 * Key shares of the first group of ML-KEM, and of the first one of ECDHE
+	 * for a server without ML-KEM - Botan's default sends the latter only,
+	 * which costs a HelloRetryRequest with every server preferring ML-KEM
+	 */
+	std::vector<Botan::TLS::Group_Params>
+	key_exchange_groups_to_offer() const override
+	{
+		std::vector<Botan::TLS::Group_Params> offer;
+		const auto groups = key_exchange_groups();
+
+		if (m_sctp)
+			return Botan::TLS::Policy::key_exchange_groups_to_offer();
+
+		for (const auto &group : groups) {
+			if (group.is_post_quantum()) {
+				offer.push_back(group);
+				break;
+			}
+		}
+		for (const auto &group : groups) {
+			if (group.is_pure_ecc_group()) {
+				offer.push_back(group);
+				break;
+			}
+		}
+		if (offer.empty())
+			return Botan::TLS::Policy::key_exchange_groups_to_offer();
+
+		return offer;
+	}
+#endif
 
 	bool allow_tls12() const override
 	{
@@ -1496,6 +1587,28 @@ const char *esdm_tls_backend_group(void *conn)
 
 	return c->callbacks->m_group.empty() ? nullptr :
 					       c->callbacks->m_group.c_str();
+}
+
+/* The first group of ML-KEM Botan has, as Botan names it */
+const char *esdm_tls_backend_mlkem_group(void)
+{
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
+	try {
+		static const std::string name = []() {
+			const auto groups = esdm_tls_botan_mlkem();
+
+			return groups.empty() ?
+				       std::string() :
+				       groups.front().to_string().value_or("");
+		}();
+
+		return name.empty() ? nullptr : name.c_str();
+	} catch (...) {
+		return nullptr;
+	}
+#else
+	return nullptr;
+#endif
 }
 
 const char *esdm_tls_backend_error(void *conn)

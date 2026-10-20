@@ -147,6 +147,20 @@ const char *esdm_tls_stack(void)
 	return esdm_tls_backend_name();
 }
 
+/*
+ * What TLS 1.3 has of the post-quantum algorithms with the TLS stack of the
+ * build, see esdm_tls.h
+ */
+static void esdm_tls_pq_report(void)
+{
+	const char *group = esdm_tls_backend_mlkem_group();
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "TLS: %s, key exchange %s%s\n",
+		    esdm_tls_backend_name(),
+		    group ? "preferring " : "(EC)DHE, no ML-KEM group",
+		    group ? group : "");
+}
+
 /* Can the file be read? A clearer error than any TLS stack gives. */
 static int esdm_tls_check_file(const char *what, const char *path)
 {
@@ -282,6 +296,9 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 		}
 	}
 	pthread_mutex_init(&c->report_lock, NULL);
+
+	if (c->transport == ESDM_TLS_TRANSPORT_STREAM)
+		esdm_tls_pq_report();
 
 	*ctx = c;
 	return 0;
@@ -910,6 +927,11 @@ const char *esdm_tls_group(struct esdm_tls *tls)
 				   NULL;
 
 	return name ? name : "none";
+}
+
+const char *esdm_tls_mlkem_group(void)
+{
+	return esdm_tls_backend_mlkem_group();
 }
 
 const char *esdm_tls_error(struct esdm_tls *tls)

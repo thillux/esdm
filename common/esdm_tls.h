@@ -59,6 +59,43 @@
  * none, a build with them has no egd-net-tls and no es-ext-net, and every
  * function here reports -EOPNOTSUPP.
  *
+ * Post-quantum algorithms
+ * -----------------------
+ * TLS 1.3 on a stream socket prefers the key exchange of ML-KEM (FIPS 203) to
+ * (EC)DHE alone - as far as the TLS stack has it. The groups of ML-KEM are
+ * offered and accepted in this order, ahead of the (EC)DHE groups of the TLS
+ * stack's default:
+ *
+ *	SecP384r1MLKEM1024	ECDHE on P-384 and ML-KEM-1024
+ *	X25519MLKEM768		X25519 and ML-KEM-768
+ *	SecP256r1MLKEM768	ECDHE on P-256 and ML-KEM-768
+ *	MLKEM1024		ML-KEM-1024 alone
+ *
+ * The hybrids hold as long as either of their halves does. A group the TLS
+ * stack does not have is left out, and the (EC)DHE groups always follow: a TLS
+ * stack with none of them keeps to (EC)DHE, and so does a connection with a
+ * peer that has none, with either side being an ESDM or not - nothing fails for
+ * want of ML-KEM. Two sides of the ESDM agree on the first group both have, by
+ * a HelloRetryRequest where the client sent no key share of it: a client sends
+ * one of the first ML-KEM group and, with OpenSSL and Botan, one of X25519 for
+ * a server without ML-KEM. esdm_tls_mlkem_group() tells which group two sides
+ * of the TLS stack of the build agree on, esdm_tls_group() the group of a
+ * connection. Where the TLS stacks have them:
+ *
+ *  - OpenSSL 3.5 and later: all four.
+ *  - GnuTLS only when built with leancrypto (--with-leancrypto, 3.8.9 and
+ *    later): the three hybrids. It uses ML-KEM-1024 alone in no TLS, and takes
+ *    up MLKEM1024 the day it does.
+ *  - Botan 3.7 and later, with its modules ml_kem and tls_13_pqc:
+ *    X25519MLKEM768, SecP256r1MLKEM768 and MLKEM1024, and SecP384r1MLKEM1024
+ *    from 3.8 on.
+ *
+ * DTLS 1.2 on SCTP has none of it, and keeps to ECDHE: ML-KEM is a key
+ * encapsulation, which the key exchange of (D)TLS 1.2 has no place for - the
+ * groups above are defined for the key shares of TLS 1.3 only. DTLS 1.3 (RFC
+ * 9147) would carry them, but none of the TLS stacks implements it - OpenSSL
+ * 3.5, GnuTLS 3.8, Botan 3.13.
+ *
  * Contexts
  * --------
  * A context is everything a side loaded from its files. Building one checks
@@ -511,6 +548,17 @@ const char *esdm_tls_cipher(struct esdm_tls *tls);
 const char *esdm_tls_group(struct esdm_tls *tls);
 
 /**
+ * @brief The ML-KEM group two sides of the TLS stack of the build agree on
+ *
+ * The first one of the list of "Post-quantum algorithms" above that the TLS
+ * stack has, as it names it - what esdm_tls_group() tells of a connection of
+ * TLS 1.3 between two contexts of this build.
+ *
+ * @return the name of the group, NULL if the TLS stack has none of them
+ */
+const char *esdm_tls_mlkem_group(void);
+
+/**
  * @brief Why the connection failed, for logging; "none" if it did not
  */
 const char *esdm_tls_error(struct esdm_tls *tls);
@@ -696,6 +744,11 @@ static inline const char *esdm_tls_group(struct esdm_tls *tls)
 {
 	(void)tls;
 	return "none";
+}
+
+static inline const char *esdm_tls_mlkem_group(void)
+{
+	return NULL;
 }
 
 static inline const char *esdm_tls_error(struct esdm_tls *tls)

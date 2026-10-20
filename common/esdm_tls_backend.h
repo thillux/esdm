@@ -27,7 +27,9 @@
  *
  * The files and their checks, the verification of the peer and the revocation
  * policy are the same for either transport: a backend differs in the protocol
- * version and the ciphers it sets up, and in how it reaches the socket.
+ * version, the ciphers and the groups it sets up - those of ML-KEM on a stream
+ * socket only, see "Post-quantum algorithms" in esdm_tls.h -, and in how it
+ * reaches the socket.
  *
  * Every function that has to wait for the socket returns -EAGAIN and stores
  * what it waits for, POLLIN or POLLOUT, in *want. A stream socket is reached
@@ -216,6 +218,12 @@ const char *esdm_tls_backend_cipher(void *conn);
 
 /* Name of the key exchange group in use, NULL if there is none yet */
 const char *esdm_tls_backend_group(void *conn);
+
+/*
+ * The ML-KEM group of TLS 1.3 two sides of the TLS stack agree on, NULL if it
+ * has none - see esdm_tls_mlkem_group()
+ */
+const char *esdm_tls_backend_mlkem_group(void);
 
 /*
  * The keying material exporter of RFC 5705 - DTLS 1.2 - with the label @label
