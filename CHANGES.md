@@ -609,7 +609,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: esdm_cdev on Linux 7.3, whose kernel threads look paths up in an empty root of their own: the module connects to the ESDM and reads the kernel's boot_id in the file system context of init again, instead of failing both with -ENOENT and serving every read from the kernel's RNG
 
-* ci: the nix workflow builds esdm_es and esdm_cdev against every kernel of nixpkgs on x86_64 and aarch64, boots the esdm_cdev and eBPF VM tests of each kernel next to the esdm_es one, and runs every other check of the flake
+* ci: the nix workflow builds esdm_es and esdm_cdev against every kernel of nixpkgs on x86_64 and aarch64, boots the esdm_cdev and eBPF VM tests of each kernel next to the esdm_es one, and runs every other check of the flake; the test CI runs on Ubuntu 26.04 next to 24.04, on x86_64 and arm64
 
 Changes 1.2.3
 * Fix handling of non-blocking server response

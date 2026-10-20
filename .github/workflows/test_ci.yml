@@ -10,7 +10,7 @@ env:
   JITTERENTROPY_VERSION: "3.7.0"
   # Ubuntu 24.04 only ships Botan 2, while ESDM requires botan-3 >= 3.2, and it
   # does not package leancrypto at all - both are therefore built from source
-  # and cached.
+  # and cached, on 26.04 as well, so that both releases build the same.
   BOTAN_VERSION: "3.12.0"
   LEANCRYPTO_VERSION: "1.8.0"
   # The GnuTLS backend drives GnuTLS' SP800-90A CTR DRBG through
@@ -44,9 +44,11 @@ jobs:
       # first one - the configurations are independent of each other.
       fail-fast: false
       matrix:
-        # ubuntu-24.04-arm is the native arm64 runner, so the arm64 leg is a
-        # real build and test run rather than an emulated one.
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        # Both LTS releases of Ubuntu, whose toolchains and libraries differ
+        # - gcc 13 and OpenSSL 3.0 on 24.04, gcc 15 and OpenSSL 3.5 on 26.04.
+        # The -arm runners are native arm64 ones, so the arm64 legs are real
+        # build and test runs rather than emulated ones.
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
         # Every crypto backend, including the DRNG variants the backends offer.
         # The variants matter: they select different code paths behind #ifdef
         # and are not covered by building the backend's default alone.
@@ -74,49 +76,63 @@ jobs:
             opts: -Dcrypto_backend=gnutls
         # Several external entropy sources of each kind: the tests of the
         # instances against each other are only built where there are some.
-        # One runner suffices, the code is the same on both.
+        # On x86_64 only, the code is the same on arm64 - but on both
+        # releases, as are the configurations below. The second one of each
+        # takes the backend of the first by its YAML anchor.
         include:
           - runner: ubuntu-24.04
-            backend:
+            backend: &several-ext-sources
               name: openssl-several-ext-sources
               opts: >-
                 -Dcrypto_backend=openssl
                 -Des_ext_lib_num=4 -Des_ext_socket_num=4
+          - runner: ubuntu-26.04
+            backend: *several-ext-sources
           # What speaks to the network or to a token, by the TLS stacks of
           # OpenSSL and GnuTLS: the opportunistic DTLS, the EGD protocol over
           # the network with its TLS mode, the external entropy sources on
           # the network and esdm-es-pkcs11 - none of the jobs above builds
-          # them. The minimized Botan has no TLS. One runner suffices here
-          # as well.
+          # them. The minimized Botan has no TLS. The OpenSSL, libp11 and
+          # SoftHSM of the two releases differ.
           - runner: ubuntu-24.04
-            backend:
+            backend: &openssl-net
               name: openssl-net
               opts: >-
                 -Dcrypto_backend=openssl
                 -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
                 -Des_pkcs11=enabled
+          - runner: ubuntu-26.04
+            backend: *openssl-net
           - runner: ubuntu-24.04
-            backend:
+            backend: &gnutls-net
               name: gnutls-net
               opts: >-
                 -Dcrypto_backend=gnutls
                 -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
                 -Des_pkcs11=enabled
+          - runner: ubuntu-26.04
+            backend: *gnutls-net
           # es-ext-net on its own: the TLS layer it shares with egd-net,
           # without egd-net and without the DTLS of the local connections
           - runner: ubuntu-24.04
-            backend:
+            backend: &openssl-es-ext-net
               name: openssl-es-ext-net
               opts: -Dcrypto_backend=openssl -Des-ext-net=enabled
+          - runner: ubuntu-26.04
+            backend: *openssl-es-ext-net
           # egd-net with the backends without a TLS stack: plain TCP only
           - runner: ubuntu-24.04
-            backend:
+            backend: &builtin-egd-net
               name: builtin-egd-net
               opts: -Dcrypto_backend=builtin -Degd-net=enabled
+          - runner: ubuntu-26.04
+            backend: *builtin-egd-net
           - runner: ubuntu-24.04
-            backend:
+            backend: &leancrypto-egd-net
               name: leancrypto-egd-net
               opts: -Dcrypto_backend=leancrypto -Degd-net=enabled
+          - runner: ubuntu-26.04
+            backend: *leancrypto-egd-net
 
     steps:
     - uses: actions/checkout@v4
@@ -383,7 +399,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
 
     steps:
     - uses: actions/checkout@v4
@@ -449,7 +465,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
 
     env:
       # halt_on_error/abort_on_error make a finding fail the job instead of
@@ -568,8 +584,13 @@ jobs:
   # compiled for the BPF target with clang and turned into libbpf skeletons by
   # bpftool, so this covers a toolchain the other jobs never touch.
   ebpf:
-    name: ebpf
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.runner }} / ebpf
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-24.04, ubuntu-26.04 ]
 
     steps:
     - uses: actions/checkout@v4
@@ -582,6 +603,7 @@ jobs:
         #
         # "bpftool" itself is only a virtual package on 24.04, so it cannot be
         # installed by that name - the providers are the linux-tools packages.
+        # On 26.04 it is a package of its own, which they pull in.
         sudo apt-get install -y meson ninja-build pkg-config \
                                 libprotobuf-c-dev libfuse3-dev \
                                 libjson-c-dev libbpf-dev clang \
@@ -598,7 +620,8 @@ jobs:
         # The build only ever calls "bpftool gen skeleton", which transforms an
         # ELF object in userspace and does not have to match the running
         # kernel, so any real binary will do - point PATH at the one that
-        # linux-tools-generic brought in.
+        # linux-tools-generic brought in. On 26.04 the bpftool package puts
+        # the program itself at /usr/sbin/bpftool, which is used as it is.
         if bpftool version >/dev/null 2>&1; then
           echo "bpftool already usable"
           exit 0
