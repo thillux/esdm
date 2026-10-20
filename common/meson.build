@@ -36,6 +36,7 @@ if get_option('crypto_backend') in [ 'openssl', 'gnutls', 'botan' ]
 	tls_backend_src = files([
 		'tls/esdm_tls_' + get_option('crypto_backend') +
 			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
+		'tls/esdm_tls_io.c',
 	])
 endif
 

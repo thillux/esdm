@@ -64,6 +64,12 @@ struct esdm_dtls {
 	const struct esdm_dtls_ops *ops;
 	void *conn;
 
+	/*
+	 * The transport of the local DTLS: its socket or buffers of the caller,
+	 * see esdm_dtls_alloc_mem()
+	 */
+	struct esdm_tls_io io;
+
 	/* What a step that returned -EAGAIN waits for */
 	short want;
 
@@ -252,16 +258,16 @@ void esdm_dtls_ctx_free(struct esdm_dtls_ctx *ctx)
 	free(ctx);
 }
 
-DSO_PUBLIC
-int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
-		    struct esdm_dtls **dtls)
+/* esdm_dtls_alloc(), on the buffers of the caller with @fd -1 */
+static int esdm_dtls_alloc_io(struct esdm_dtls_ctx *ctx, int fd,
+			      size_t max_msg, struct esdm_dtls **dtls)
 {
 #ifdef ESDM_DTLS
 	struct esdm_dtls *d;
 	int ret;
 #endif
 
-	if (!ctx || !dtls || fd < 0 || !max_msg)
+	if (!ctx || !dtls || !max_msg)
 		return -EINVAL;
 	*dtls = NULL;
 
@@ -274,11 +280,12 @@ int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 	d->ops = &esdm_dtls_local_ops;
 	d->want = POLLIN;
 	d->max_msg = max_msg;
+	esdm_tls_io_init(&d->io, fd, true);
 
 	/* No server name, and no certificate to check */
 	esdm_dtls_enter();
-	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, fd, NULL,
-					NULL, NULL, &d->conn);
+	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, &d->io,
+					NULL, NULL, NULL, &d->conn);
 	esdm_dtls_leave();
 	if (ret) {
 		free(d);
@@ -288,6 +295,63 @@ int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 	*dtls = d;
 	return 0;
 #endif
+}
+
+DSO_PUBLIC
+int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
+		    struct esdm_dtls **dtls)
+{
+	if (fd < 0)
+		return -EINVAL;
+	return esdm_dtls_alloc_io(ctx, fd, max_msg, dtls);
+}
+
+DSO_PUBLIC
+int esdm_dtls_alloc_mem(struct esdm_dtls_ctx *ctx, size_t max_msg,
+			struct esdm_dtls **dtls)
+{
+	return esdm_dtls_alloc_io(ctx, -1, max_msg, dtls);
+}
+
+/* The transport of the local DTLS of @dtls, NULL for another one */
+static struct esdm_tls_io *esdm_dtls_io(struct esdm_dtls *dtls)
+{
+#ifdef ESDM_DTLS
+	if (dtls && dtls->ops == &esdm_dtls_local_ops)
+		return &dtls->io;
+#else
+	(void)dtls;
+#endif
+	return NULL;
+}
+
+DSO_PUBLIC
+int esdm_dtls_feed(struct esdm_dtls *dtls, const void *msg, size_t len)
+{
+	struct esdm_tls_io *io = esdm_dtls_io(dtls);
+
+	if (!io || io->fd >= 0 || (!msg && len))
+		return -EINVAL;
+	return esdm_tls_io_feed(io, msg, len);
+}
+
+DSO_PUBLIC
+void esdm_dtls_feed_eof(struct esdm_dtls *dtls)
+{
+	struct esdm_tls_io *io = esdm_dtls_io(dtls);
+
+	if (io && io->fd < 0)
+		esdm_tls_io_feed_eof(io);
+}
+
+DSO_PUBLIC
+struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls)
+{
+	struct esdm_tls_io *io = esdm_dtls_io(dtls);
+
+	if (!io || io->fd >= 0)
+		return NULL;
+	return (struct esdm_dtls_msg *)esdm_tls_io_take(io);
 }
 
 int esdm_dtls_new_ops(const struct esdm_dtls_ops *ops, void *conn,
@@ -370,6 +434,7 @@ void esdm_dtls_free(struct esdm_dtls *dtls)
 	esdm_dtls_enter();
 	dtls->ops->free(dtls->conn);
 	esdm_dtls_leave();
+	esdm_tls_io_clear(&dtls->io);
 	free(dtls);
 }
 
@@ -529,6 +594,10 @@ bool esdm_dtls_pending(struct esdm_dtls *dtls)
 
 	if (!dtls)
 		return false;
+
+	/* Records fed already are data the socket will not signal either */
+	if (esdm_tls_io_pending(esdm_dtls_io(dtls)))
+		return true;
 
 	esdm_dtls_enter();
 	ret = dtls->ops->pending(dtls->conn);

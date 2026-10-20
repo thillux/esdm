@@ -660,6 +660,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * RPC server: a new connection of the unprivileged interface is handed to the worker serving the fewest connections, if that is another one with fewer than the worker that accepted it and a free slot - into a queue of that worker, signalled by an eventfd it waits for with epoll or io_uring alike - rather than served by whichever worker the kernel woke first, which piled up to 5 of 16 clients on one worker while others had none; esdm-server --no_conn_balancing leaves the connections where they were accepted. rpc_bench, 32 byte requests, server on 8 cores and clients on 8 others of an AMD Ryzen 9 5950X, without fips140: with epoll 1.27 times the requests per second at 8 clients and twice at 16 (p50 25 instead of 79 us, p99 57 instead of 162 us), within the run-to-run spread at 4 clients and with the io_uring loop, whose connections were spread more evenly already; 1-3 us more server CPU per request, as more workers wake for fewer requests each
 
+* TLS layer: the TLS stacks of all three backends reach their transport through one place, common/tls/esdm_tls_io.c - the BIO of OpenSSL, the push and pull functions of GnuTLS, the callbacks of Botan -, either the socket as before (send(2) with MSG_NOSIGNAL, recv(2), non-blocking) or buffers of the caller: esdm_dtls_alloc_mem() sets up the local DTLS on buffers, esdm_dtls_feed() hands in the messages the caller received, esdm_dtls_take() hands out what the DTLS wrote, to be sent by the caller - with io_uring, say. Everything else of the DTLS - the busy marker, the wiping of the plaintext, the parts of a message, the minimal mode - is the same on either
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

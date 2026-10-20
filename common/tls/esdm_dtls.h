@@ -93,6 +93,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include "config.h"
@@ -110,6 +111,17 @@ extern "C" {
 
 struct esdm_dtls_ctx;
 struct esdm_dtls;
+
+/*
+ * A message of the socket the DTLS of esdm_dtls_alloc_mem() wrote, for the
+ * caller to send, see esdm_dtls_take(). Laid out as struct esdm_tls_io_msg.
+ */
+struct esdm_dtls_msg {
+	struct esdm_dtls_msg *next;
+	size_t len;
+	size_t off;
+	uint8_t data[];
+};
 
 #if defined(ESDM_DTLS) || defined(ESDM_ES_EXT_NET)
 
@@ -147,6 +159,48 @@ void esdm_dtls_ctx_free(struct esdm_dtls_ctx *ctx);
  */
 int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd, size_t max_msg,
 		    struct esdm_dtls **dtls);
+
+/**
+ * @brief Start the DTLS of a connection whose messages the caller receives and
+ *	  sends itself
+ *
+ * The records of the DTLS are not read from a socket and written to it, but
+ * handed in by the caller with esdm_dtls_feed() as it receives them - one
+ * message of its SOCK_SEQPACKET socket each - and taken by it with
+ * esdm_dtls_take() to be sent, after every call that may have written some:
+ * the handshake, a send, and a receive, which may answer an alert. A step
+ * waiting for the peer returns -EAGAIN as on the socket, to be taken again
+ * once more is fed. With io_uring, say, which receives and sends them
+ * without the readiness of the socket.
+ *
+ * @param [in] ctx The context of the side
+ * @param [in] max_msg The largest message the peer may send
+ * @param [out] dtls The DTLS of the connection
+ *
+ * @return 0 on success, a negative errno otherwise
+ */
+int esdm_dtls_alloc_mem(struct esdm_dtls_ctx *ctx, size_t max_msg,
+			struct esdm_dtls **dtls);
+
+/**
+ * @brief Hand in a message received for a DTLS of esdm_dtls_alloc_mem()
+ *
+ * @return 0, -ENOMEM, or -EINVAL for a DTLS on a socket
+ */
+int esdm_dtls_feed(struct esdm_dtls *dtls, const void *msg, size_t len);
+
+/**
+ * @brief The peer of a DTLS of esdm_dtls_alloc_mem() ended the connection
+ */
+void esdm_dtls_feed_eof(struct esdm_dtls *dtls);
+
+/**
+ * @brief Take what a DTLS of esdm_dtls_alloc_mem() wrote, to be sent
+ *
+ * @return the messages, in order, linked by next - each the caller's, to be
+ *	   released with free(3) -, NULL if there are none
+ */
+struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls);
 
 /**
  * @brief Release the DTLS of a connection, may be NULL
@@ -265,6 +319,35 @@ static inline int esdm_dtls_alloc(struct esdm_dtls_ctx *ctx, int fd,
 	(void)max_msg;
 	*dtls = NULL;
 	return -EOPNOTSUPP;
+}
+
+static inline int esdm_dtls_alloc_mem(struct esdm_dtls_ctx *ctx,
+				      size_t max_msg, struct esdm_dtls **dtls)
+{
+	(void)ctx;
+	(void)max_msg;
+	(void)dtls;
+	return -EOPNOTSUPP;
+}
+
+static inline int esdm_dtls_feed(struct esdm_dtls *dtls, const void *msg,
+				 size_t len)
+{
+	(void)dtls;
+	(void)msg;
+	(void)len;
+	return -EOPNOTSUPP;
+}
+
+static inline void esdm_dtls_feed_eof(struct esdm_dtls *dtls)
+{
+	(void)dtls;
+}
+
+static inline struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls)
+{
+	(void)dtls;
+	return NULL;
 }
 
 static inline void esdm_dtls_free(struct esdm_dtls *dtls)

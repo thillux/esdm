@@ -506,11 +506,11 @@ static bool esdm_tls_botan_cert_alert(Botan::TLS::Alert::Type type)
 /* The connection as the channel sees it */
 class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
     public:
-	Esdm_Tls_Callbacks(int fd, bool dgram, bool server,
+	Esdm_Tls_Callbacks(struct esdm_tls_io *io, bool dgram, bool server,
 			   const char *server_name,
 			   esdm_tls_backend_check check, void *check_arg,
 			   esdm_tls_botan_verify_fn verify)
-		: m_fd(fd), m_dgram(dgram), m_server(server),
+		: m_io(io), m_dgram(dgram), m_server(server),
 		  m_server_name(server_name ? server_name : ""), m_check(check),
 		  m_check_arg(check_arg), m_verify(verify)
 	{
@@ -674,7 +674,7 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 		}
 	}
 
-	int m_fd;
+	struct esdm_tls_io *m_io;
 	bool m_dgram;
 	bool m_server;
 	std::string m_server_name;
@@ -710,8 +710,7 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	int send_part(const uint8_t *buf, size_t len) noexcept
 	{
 		for (;;) {
-			ssize_t n = send(m_fd, buf, len,
-					 MSG_DONTWAIT | MSG_NOSIGNAL);
+			ssize_t n = esdm_tls_io_send(m_io, buf, len);
 
 			if (n >= 0)
 				return n > INT32_MAX ? INT32_MAX :
@@ -809,7 +808,7 @@ static int esdm_tls_botan_feed(Esdm_Tls_Conn *c)
 	int ret = 0;
 
 	while (!cb.has_data() && !cb.m_peer_closed) {
-		ssize_t n = recv(cb.m_fd, buf.get(), buflen, MSG_DONTWAIT);
+		ssize_t n = esdm_tls_io_recv(cb.m_io, buf.get(), buflen);
 
 		if (n < 0) {
 			if (errno == EINTR)
@@ -1327,7 +1326,7 @@ void esdm_tls_backend_ctx_free(void *ctx)
 	delete static_cast<Esdm_Tls_Ctx *>(ctx);
 }
 
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+int esdm_tls_backend_conn_new(void *ctx, bool server, struct esdm_tls_io *io,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
@@ -1339,7 +1338,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 		unsigned char addr[sizeof(struct in6_addr)];
 
 		d->callbacks = std::make_shared<Esdm_Tls_Callbacks>(
-			fd, c->dgram, server, server_name, check, arg,
+			io, c->dgram, server, server_name, check, arg,
 			c->verify);
 		if (server) {
 			d->channel = std::make_unique<Botan::TLS::Server>(

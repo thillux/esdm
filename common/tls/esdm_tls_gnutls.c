@@ -24,8 +24,8 @@
  * DTLS 1.2 with the pre-shared key of the local DTLS on SOCK_SEQPACKET.
  *
  * GnuTLS reaches the socket through push and pull functions of its own, one
- * send(2) with MSG_NOSIGNAL or recv(2) each on the non-blocking socket - a
- * message of the socket each on SOCK_SEQPACKET -, which makes every call
+ * send or receive of esdm_tls_io.h each, on the non-blocking socket or the
+ * buffers of the caller - a message each on SOCK_SEQPACKET -, which makes every call
  * return GNUTLS_E_AGAIN rather than wait for the peer. The session of the
  * local DTLS is a datagram one with the replay detection of DTLS, and with
  * timeouts too long to ever retransmit: the connection is reliable.
@@ -151,7 +151,7 @@ struct esdm_tls_gnutls_ctx {
 struct esdm_tls_gnutls_conn {
 	gnutls_session_t session;
 	struct esdm_tls_gnutls_ctx *ctx;
-	int fd;
+	struct esdm_tls_io *io;
 	/* SOCK_SEQPACKET: a record of the connection is a message of its own */
 	bool dgram;
 
@@ -182,7 +182,7 @@ static ssize_t esdm_tls_gnutls_push(gnutls_transport_ptr_t ptr, const void *buf,
 				    size_t len)
 {
 	struct esdm_tls_gnutls_conn *c = ptr;
-	ssize_t n = send(c->fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+	ssize_t n = esdm_tls_io_send(c->io, buf, len);
 
 	if (n < 0)
 		gnutls_transport_set_errno(c->session, errno);
@@ -194,7 +194,7 @@ static ssize_t esdm_tls_gnutls_pull(gnutls_transport_ptr_t ptr, void *buf,
 				    size_t len)
 {
 	struct esdm_tls_gnutls_conn *c = ptr;
-	ssize_t n = recv(c->fd, buf, len, MSG_DONTWAIT);
+	ssize_t n = esdm_tls_io_recv(c->io, buf, len);
 
 	/*
 	 * 0 is the end of the stream, which GnuTLS tells apart itself - but to
@@ -560,7 +560,7 @@ int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
 	return 0;
 }
 
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+int esdm_tls_backend_conn_new(void *ctx, bool server, struct esdm_tls_io *io,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
@@ -576,7 +576,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 	d = calloc(1, sizeof(*d));
 	if (!d)
 		return -ENOMEM;
-	d->fd = fd;
+	d->io = io;
 	d->ctx = c;
 	d->check = check;
 	d->check_arg = arg;

@@ -70,8 +70,9 @@
  * off the wire, see tests/test_tls_wire.h.
  *
  * Every function that has to wait for the socket returns -EAGAIN and stores
- * what it waits for, POLLIN or POLLOUT, in *want. The socket is reached with
- * send(2) with MSG_NOSIGNAL and recv(2) only. On SOCK_SEQPACKET, the TLS stack
+ * what it waits for, POLLIN or POLLOUT, in *want. The socket is reached through
+ * esdm_tls_io.h alone - send(2) with MSG_NOSIGNAL and recv(2), or buffers of
+ * the caller. On SOCK_SEQPACKET, the TLS stack
  * is told a link MTU no record exceeds, does not retransmit - the connection
  * is reliable - and has no cookie exchange: a connected Unix domain socket has
  * no address to spoof.
@@ -92,6 +93,7 @@
 #include <sys/types.h>
 
 #include "esdm_tls.h"
+#include "esdm_tls_io.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -232,14 +234,16 @@ int esdm_tls_backend_ctx_new(bool server, enum esdm_tls_transport transport,
 void esdm_tls_backend_ctx_free(void *ctx);
 
 /*
- * @return 0 or a negative errno; *conn is the (D)TLS of the connection on @fd.
+ * @return 0 or a negative errno; *conn is the (D)TLS of the connection on @io,
+ *	   its socket or buffers of the caller - see esdm_tls_io.h -, which
+ *	   stays the caller's and must outlive the connection.
  *	   A client of the TLS with certificates is handed the name it expects
  *	   the server to have, which the backend keeps a copy of, and @check
  *	   with @arg is run on the chain of the peer, see esdm_tls_backend_check
  *	   - a peer whose chain is not handed to it is refused. The local DTLS
  *	   has neither: NULL.
  */
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+int esdm_tls_backend_conn_new(void *ctx, bool server, struct esdm_tls_io *io,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn);

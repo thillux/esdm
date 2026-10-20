@@ -26,9 +26,9 @@
  * The socket is reached through a BIO of its own: the one of OpenSSL
  * write(2)s - and with that raises SIGPIPE in the process the library is
  * linked into for a peer that went away -, and OpenSSL's datagram BIO expects
- * an address family of the Internet. One send(2) with MSG_NOSIGNAL or one
- * recv(2) per call, on the non-blocking socket - on SOCK_SEQPACKET a message
- * of the socket each.
+ * an address family of the Internet. One send or one receive of esdm_tls_io.h
+ * per call - on SOCK_SEQPACKET a message each -, on the non-blocking socket or
+ * the buffers of the caller.
  *
  * Everything is created in one library context of its own with the default
  * provider: the (D)TLS must not take its random numbers from a RAND provider
@@ -143,7 +143,7 @@ struct esdm_tls_openssl_ctx {
 
 struct esdm_tls_openssl_conn {
 	SSL *ssl;
-	int fd;
+	struct esdm_tls_io *io;
 	/* SOCK_SEQPACKET: a record of the connection is a message of its own */
 	bool dgram;
 	esdm_tls_backend_check check;
@@ -165,7 +165,7 @@ static int esdm_tls_openssl_bio_write(BIO *bio, const char *buf, int len)
 	ssize_t n;
 
 	BIO_clear_retry_flags(bio);
-	n = send(c->fd, buf, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL);
+	n = esdm_tls_io_send(c->io, buf, (size_t)len);
 	if (n < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 			BIO_set_retry_write(bio);
@@ -181,7 +181,7 @@ static int esdm_tls_openssl_bio_read(BIO *bio, char *buf, int len)
 	ssize_t n;
 
 	BIO_clear_retry_flags(bio);
-	n = recv(c->fd, buf, (size_t)len, MSG_DONTWAIT);
+	n = esdm_tls_io_recv(c->io, buf, (size_t)len);
 	if (n < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 			BIO_set_retry_read(bio);
@@ -636,7 +636,7 @@ err:
 	return ret;
 }
 
-int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
+int esdm_tls_backend_conn_new(void *ctx, bool server, struct esdm_tls_io *io,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn)
@@ -648,7 +648,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 
 	if (!c)
 		return -ENOMEM;
-	c->fd = fd;
+	c->io = io;
 	c->check = check;
 	c->check_arg = arg;
 	c->dgram = oc->transport == ESDM_TLS_TRANSPORT_SEQPACKET;

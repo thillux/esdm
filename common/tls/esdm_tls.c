@@ -76,6 +76,8 @@ struct esdm_tls {
 	void *backend;
 	struct esdm_tls_ctx *ctx;
 	int fd;
+	/* The transport of the backend, the socket - see esdm_tls_io.h */
+	struct esdm_tls_io io;
 
 	/* What the last operation returning -EAGAIN waits for */
 	short want;
@@ -785,11 +787,12 @@ int esdm_tls_alloc(struct esdm_tls_ctx *ctx, int fd, const char *server_name,
 	if (!t)
 		return -ENOMEM;
 	t->fd = fd;
+	esdm_tls_io_init(&t->io, fd, false);
 	t->want = POLLIN;
 	/* The policy of this context checks the peer, see esdm_tls_check_peer() */
 	t->ctx = ctx;
 
-	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, fd,
+	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, &t->io,
 					ctx->server ? NULL : server_name,
 					esdm_tls_check_peer, t, &t->backend);
 	if (ret) {
@@ -829,6 +832,7 @@ void esdm_tls_free(struct esdm_tls *tls)
 	}
 
 	esdm_tls_backend_conn_free(tls->backend);
+	esdm_tls_io_clear(&tls->io);
 	esdm_tls_ctx_put(tls->ctx);
 	esdm_tls_chain_free(tls->chain, tls->chain_num);
 	memset_secure(tls, 0, sizeof(*tls));

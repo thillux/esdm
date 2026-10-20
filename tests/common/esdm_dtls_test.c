@@ -36,7 +36,11 @@
  *   master secret, between contexts that had connections before - no session
  *   or ticket offered or issued, no early data, no heartbeat;
  * - a record sent again - a replay - is dropped by the replay detection of
- *   DTLS, also after a newer one: the message comes once.
+ *   DTLS, also after a newer one: the message comes once;
+ * - a server whose records the caller receives and sends - on buffers,
+ *   esdm_dtls_alloc_mem() - with a client on its socket: the handshake and
+ *   messages of one record and of several, both ways, each record a message
+ *   of the socket.
  */
 
 #define _GNU_SOURCE
@@ -47,6 +51,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -493,6 +498,9 @@ out:
 	close(sv[1]);
 }
 
+static void test_buffers(struct esdm_dtls_ctx *cctx,
+			 struct esdm_dtls_ctx *sctx);
+
 static void test_dtls(void)
 {
 	static uint8_t msg[TEST_MAX_MSG], got[TEST_MAX_MSG + 16];
@@ -621,6 +629,9 @@ static void test_dtls(void)
 	/* The suite, the curve and Encrypt-then-MAC on the wire, and replays */
 	test_wire(cctx, sctx);
 
+	/* The records of the server received and sent by the caller */
+	test_buffers(cctx, sctx);
+
 out:
 	CHECK_EQ(esdm_dtls_busy(), false);
 	esdm_dtls_free(client);
@@ -632,6 +643,122 @@ out:
 	esdm_dtls_ctx_free(sctx);
 
 	CHECK_EQ(test_freed_plaintext, 0);
+}
+
+/*
+ * What the server on buffers would have from its socket @fd, fed to it, and
+ * what it wrote, sent there - the receiving and sending of an io_uring, say.
+ * Returns the messages it sent.
+ */
+static unsigned int test_pump(struct esdm_dtls *server, int fd)
+{
+	static uint8_t buf[ESDM_DTLS_PART_SIZE + 512];
+	struct esdm_dtls_msg *m, *next;
+	unsigned int sent = 0;
+	ssize_t n;
+
+	while ((n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0)
+		CHECK_EQ(esdm_dtls_feed(server, buf, (size_t)n), 0);
+
+	for (m = esdm_dtls_take(server); m; m = next) {
+		next = m->next;
+		CHECK_EQ(send(fd, m->data, m->len, MSG_NOSIGNAL),
+			 (ssize_t)m->len);
+		free(m);
+		sent++;
+	}
+
+	return sent;
+}
+
+/* Messages of the socket waiting on @fd, none taken off */
+static unsigned int test_queued(int fd)
+{
+	int n = 0;
+
+	(void)ioctl(fd, FIONREAD, &n);
+	return n > 0;
+}
+
+static void test_buffers(struct esdm_dtls_ctx *cctx, struct esdm_dtls_ctx *sctx)
+{
+	static uint8_t msg[TEST_MAX_MSG], got[TEST_MAX_MSG + 16];
+	static const size_t sizes[] = { 1, 100, ESDM_DTLS_PART_SIZE + 1,
+					3 * ESDM_DTLS_PART_SIZE,
+					TEST_MAX_MSG };
+	struct esdm_dtls *client = NULL, *server = NULL;
+	int sv[2], c = -EAGAIN, s = -EAGAIN;
+	unsigned int i, records;
+	ssize_t n;
+
+	printf("a server on buffers\n");
+
+	CHECK_EQ(socketpair(AF_UNIX,
+			    SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+			    sv),
+		 0);
+	CHECK_EQ(esdm_dtls_alloc(cctx, sv[0], TEST_MAX_MSG, &client), 0);
+	CHECK_EQ(esdm_dtls_alloc_mem(sctx, TEST_MAX_MSG, &server), 0);
+	if (!client || !server)
+		goto out;
+
+	/* The buffers are the server's alone */
+	CHECK_EQ(esdm_dtls_feed(client, "x", 1), -EINVAL);
+	CHECK(esdm_dtls_take(client) == NULL, "a client on a socket has records");
+
+	for (i = 0; i < 1000 && (c || s); i++) {
+		if (c == -EAGAIN)
+			c = esdm_dtls_handshake(client);
+		test_pump(server, sv[1]);
+		if (s == -EAGAIN)
+			s = esdm_dtls_handshake(server);
+		test_pump(server, sv[1]);
+		if ((c && c != -EAGAIN) || (s && s != -EAGAIN))
+			break;
+	}
+	CHECK_EQ(c, 0);
+	CHECK_EQ(s, 0);
+	if (c || s)
+		goto out;
+
+	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		size_t parts = (sizes[i] + ESDM_DTLS_PART_SIZE - 1) /
+			       ESDM_DTLS_PART_SIZE;
+
+		memset(msg, (int)(0x40 + i), sizes[i]);
+
+		/* Client to server: the records, each a message */
+		CHECK_EQ(esdm_dtls_send(client, msg, sizes[i]), 0);
+		CHECK(test_queued(sv[1]), "nothing sent by the client");
+		test_pump(server, sv[1]);
+		CHECK(esdm_dtls_pending(server), "the records fed are not pending");
+		n = esdm_dtls_recv(server, got, sizeof(got));
+		CHECK_EQ(n, (ssize_t)sizes[i]);
+		if (n == (ssize_t)sizes[i])
+			CHECK_MEM_EQ(got, msg, sizes[i]);
+		CHECK_EQ(esdm_dtls_recv(server, got, sizeof(got)), -EAGAIN);
+
+		/* And back: what the server wrote, sent by the caller */
+		CHECK_EQ(esdm_dtls_send(server, msg, sizes[i]), 0);
+		records = test_pump(server, sv[1]);
+		CHECK_EQ(records, (unsigned int)parts);
+		n = test_recv(client, sv[0], got, sizeof(got));
+		CHECK_EQ(n, (ssize_t)sizes[i]);
+		if (n == (ssize_t)sizes[i])
+			CHECK_MEM_EQ(got, msg, sizes[i]);
+	}
+
+	/* The peer gone: a receive finding nothing after the end */
+	esdm_dtls_feed_eof(server);
+	n = esdm_dtls_recv(server, got, sizeof(got));
+	CHECK(n < 0 && n != -EAGAIN, "the end of the peer not noticed (%zd)",
+	      n);
+
+out:
+	esdm_dtls_free(client);
+	esdm_dtls_free(server);
+	close(sv[0]);
+	close(sv[1]);
 }
 
 #endif /* ESDM_DTLS */
