@@ -26,7 +26,9 @@
 # Rogue CA (rogue-ca.crt), trusted by nobody
 #  +- rogue-client.crt
 #
-# ML-DSA Root CA "ESDM EGD Test ML-DSA Root CA" (mldsa-ca.crt), on ML-DSA-87
+# ML-DSA Root CA "ESDM EGD Test ML-DSA Root CA" (mldsa-ca.crt), on ML-DSA-87 -
+# all of which every context of the ESDM refuses, as ML-DSA is post-quantum
+# cryptography on its own: the tests check that
 #  +- mldsa-server.crt      the server on ML-DSA-87, the names of server.crt
 #  +- mldsa-ec-server.crt   the same on ECDSA P-256
 #  +- mldsa-int.crt         intermediate CA "ESDM EGD Test ML-DSA Intermediate
@@ -35,8 +37,8 @@
 #  |   +- mldsa-client-revoked.crt  another one, revoked by mldsa-int.crl
 #  |   +- mldsa-ec-client.crt  a client on ECDSA P-256, the intermediate in its
 #  |   |                   file
-#  |   +- mldsa65-client.crt  a client on ML-DSA-65, which is not taken
-#  +- mldsa65-int.crt       intermediate CA on ML-DSA-65, which is not taken
+#  |   +- mldsa65-client.crt  a client on ML-DSA-65
+#  +- mldsa65-int.crt       intermediate CA on ML-DSA-65
 #      +- mldsa65-ec-client.crt  a client on ECDSA P-256, that intermediate in
 #                          its file
 #

@@ -139,22 +139,18 @@ const char *esdm_tls_stack(void)
 }
 
 /*
- * What TLS 1.3 has of the post-quantum algorithms with the TLS stack of the
- * build, see esdm_tls.h
+ * What TLS 1.3 has of the hybrid key exchange with the TLS stack of the build,
+ * see "Algorithms" in esdm_tls.h
  */
 static void esdm_tls_pq_report(void)
 {
 	const char *group = esdm_tls_backend_mlkem_group();
-	unsigned int mldsa = esdm_tls_backend_mldsa();
 
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-		    "TLS: %s, key exchange %s%s, ML-DSA %s\n",
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "TLS: %s, key exchange %s%s\n",
 		    esdm_tls_backend_name(),
-		    group ? "preferring " : "(EC)DHE, no ML-KEM group",
-		    group ? group : "",
-		    (mldsa & ESDM_TLS_MLDSA_AUTH) ? "for certificates and CAs" :
-		    (mldsa & ESDM_TLS_MLDSA_CA)	  ? "for CAs only" :
-						    "none");
+		    group ? "preferring the hybrid " :
+			    "(EC)DHE, no hybrid of ML-KEM",
+		    group ? group : "");
 }
 
 /* Can the file be read? A clearer error than any TLS stack gives. */
@@ -173,6 +169,196 @@ static int esdm_tls_check_file(const char *what, const char *path)
 	close(fd);
 
 	return 0;
+}
+
+/*
+ * The keys of certificates taken - see "Algorithms" in esdm_tls.h: RSA and
+ * ECDSA, conventional signatures BSI TR-02102-1 recommends, as the OIDs of
+ * their keys
+ */
+static const char *const esdm_tls_keys_taken[] = {
+	"1.2.840.113549.1.1.1", /* rsaEncryption */
+	"1.2.840.113549.1.1.10", /* RSASSA-PSS */
+	"1.2.840.10045.2.1", /* id-ecPublicKey */
+};
+
+/* Keys refused by name, for the log - any other is refused by its OID */
+static const struct {
+	const char *oid;
+	const char *name;
+} esdm_tls_keys_refused[] = {
+	{ "2.16.840.1.101.3.4.3.17", "ML-DSA-44" },
+	{ "2.16.840.1.101.3.4.3.18", "ML-DSA-65" },
+	{ "2.16.840.1.101.3.4.3.19", "ML-DSA-87" },
+	{ "1.3.101.112", "Ed25519" },
+	{ "1.3.101.113", "Ed448" },
+	{ "1.2.840.10040.4.1", "DSA" },
+};
+
+/*
+ * Is the key of @cert one of esdm_tls_keys_taken? ML-DSA is a post-quantum
+ * signature on its own, not in a hybrid with a conventional one, and EdDSA is
+ * no signature of BSI TR-02102-1.
+ *
+ * @return NULL if it is taken - or if the TLS stack cannot tell its algorithm,
+ *	   which leaves it to the stack -, the name of its algorithm otherwise
+ */
+static const char *esdm_tls_key_refused(const struct esdm_tls_cert_info *cert)
+{
+	size_t i;
+
+	if (!cert->key_oid[0])
+		return NULL;
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_keys_taken); i++) {
+		if (!strcmp(cert->key_oid, esdm_tls_keys_taken[i]))
+			return NULL;
+	}
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_keys_refused); i++) {
+		if (!strcmp(cert->key_oid, esdm_tls_keys_refused[i].oid))
+			return esdm_tls_keys_refused[i].name;
+	}
+	return cert->key_oid;
+}
+
+/* Largest certificate file read, see esdm_tls_check_keys_file() */
+#define ESDM_TLS_MAX_CERT_FILE (4 * 1024 * 1024)
+
+/* The value of a character of base64, -1 for none */
+static int esdm_tls_b64(char c)
+{
+	if (c >= 'A' && c <= 'Z')
+		return c - 'A';
+	if (c >= 'a' && c <= 'z')
+		return c - 'a' + 26;
+	if (c >= '0' && c <= '9')
+		return c - '0' + 52;
+	if (c == '+')
+		return 62;
+	if (c == '/')
+		return 63;
+	return -1;
+}
+
+/*
+ * The DER of the base64 of a PEM block from @in to @end into @out, which has
+ * room for it: white space skipped, the padding ending it.
+ *
+ * @return the bytes of DER, -EINVAL for a character of no base64
+ */
+static ssize_t esdm_tls_pem_der(const char *in, const char *end, uint8_t *out)
+{
+	uint32_t acc = 0;
+	size_t len = 0;
+	unsigned int bits = 0;
+
+	for (; in < end && *in != '='; in++) {
+		int v;
+
+		if (*in == '\n' || *in == '\r' || *in == ' ' || *in == '\t')
+			continue;
+		v = esdm_tls_b64(*in);
+		if (v < 0)
+			return -EINVAL;
+		acc = (acc << 6) | (uint32_t)v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			out[len++] = (uint8_t)(acc >> bits);
+		}
+	}
+
+	return (ssize_t)len;
+}
+
+/*
+ * The keys of every certificate in the PEM file @path - the own one and its
+ * chain, or the trust anchors -, see esdm_tls_key_refused(): a context is not
+ * built with a certificate on another one, whatever the TLS stack would do
+ * with it. Run once the TLS stack loaded the file, which tells what else is
+ * wrong with it.
+ *
+ * @return 0, or a negative errno - logged here
+ */
+static int esdm_tls_check_keys_file(const char *what, const char *path)
+{
+	static const char begin[] = "-----BEGIN CERTIFICATE-----";
+	static const char finish[] = "-----END CERTIFICATE-----";
+	struct esdm_tls_der der = { 0 };
+	const char *p, *b, *e;
+	char *text = NULL;
+	struct stat st;
+	size_t len = 0;
+	ssize_t n;
+	int fd, ret = 0;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		ret = -errno;
+		goto unreadable;
+	}
+	if (fstat(fd, &st) || st.st_size < 0 ||
+	    st.st_size > ESDM_TLS_MAX_CERT_FILE) {
+		ret = -EINVAL;
+		goto unreadable;
+	}
+	text = malloc((size_t)st.st_size + 1);
+	der.data = malloc((size_t)st.st_size + 1);
+	if (!text || !der.data) {
+		ret = -ENOMEM;
+		goto unreadable;
+	}
+	while (len < (size_t)st.st_size) {
+		n = read(fd, text + len, (size_t)st.st_size - len);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		len += (size_t)n;
+	}
+	text[len] = '\0';
+
+	for (p = text; (b = strstr(p, begin)); p = e + sizeof(finish) - 1) {
+		struct esdm_tls_cert_info cert;
+		const char *refused;
+
+		b += sizeof(begin) - 1;
+		e = strstr(b, finish);
+		if (!e)
+			break;
+
+		n = esdm_tls_pem_der(b, e, der.data);
+		der.len = n > 0 ? (size_t)n : 0;
+		if (n <= 0 || esdm_tls_backend_cert_info(&der, &cert)) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"TLS: a certificate of the %s %s does not parse\n",
+				what, path);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		refused = esdm_tls_key_refused(&cert);
+		if (refused) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"TLS: the certificate %s of the %s %s is one of %s, which is not taken - see the algorithms in esdm-egd-net-server(8)\n",
+				cert.subject, what, path, refused);
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+	goto out;
+
+unreadable:
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+		    "TLS: cannot read the %s %s: %s\n", what, path,
+		    strerror(-ret));
+out:
+	if (fd >= 0)
+		close(fd);
+	free(text);
+	free(der.data);
+	return ret;
 }
 
 int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
@@ -228,6 +414,13 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 	ret = esdm_tls_backend_ctx_new(server, cfg->transport, &c->backend);
 	if (!ret) {
 		ret = esdm_tls_backend_ctx_files(c->backend, server, cfg);
+		/* The algorithms of the certificates, see esdm_tls.h */
+		if (!ret && cfg->cert_file)
+			ret = esdm_tls_check_keys_file("certificate",
+						       cfg->cert_file);
+		if (!ret)
+			ret = esdm_tls_check_keys_file("trust anchors",
+						       cfg->ca_file);
 		if (ret)
 			esdm_tls_backend_ctx_free(c->backend);
 	}
@@ -492,33 +685,21 @@ esdm_tls_check_chain(struct esdm_tls_ctx *ctx, const struct esdm_tls_der *chain,
 }
 
 /*
- * Of ML-DSA, ML-DSA-87 alone is taken - see "Post-quantum algorithms" in
- * esdm_tls.h: the OIDs of the keys of the others
- */
-static const struct {
-	const char *oid;
-	const char *name;
-} esdm_tls_mldsa_refused[] = {
-	{ "2.16.840.1.101.3.4.3.17", "ML-DSA-44" },
-	{ "2.16.840.1.101.3.4.3.18", "ML-DSA-65" },
-};
-
-/*
  * Is a certificate of @chain - the peer's, a CA's, the trust anchor - on a key
- * of ML-DSA-44 or ML-DSA-65? It signed the handshake, or the certificate
- * below it. Checked here for every TLS stack and either transport, whatever
- * the stack verifies.
+ * esdm_tls_key_refused() refuses? It signed the handshake, or the certificate
+ * below it. Checked here for every TLS stack, whatever the stack verifies.
  *
  * @return the verdict, with the reason in @why if it is no acceptance
  */
 static enum esdm_tls_verdict
-esdm_tls_check_mldsa(const struct esdm_tls_der *chain, size_t num, char *why,
-		     size_t whylen)
+esdm_tls_check_keys(const struct esdm_tls_der *chain, size_t num, char *why,
+		    size_t whylen)
 {
-	size_t depth, i;
+	size_t depth;
 
 	for (depth = 0; depth < num; depth++) {
 		struct esdm_tls_cert_info cert;
+		const char *refused;
 
 		if (esdm_tls_backend_cert_info(&chain[depth], &cert)) {
 			snprintf(why, whylen,
@@ -526,25 +707,22 @@ esdm_tls_check_mldsa(const struct esdm_tls_der *chain, size_t num, char *why,
 				 depth);
 			return esdm_tls_verdict_bad_chain;
 		}
-		for (i = 0; i < ARRAY_SIZE(esdm_tls_mldsa_refused); i++) {
-			if (strcmp(cert.key_oid, esdm_tls_mldsa_refused[i].oid))
-				continue;
-			/* A long subject cut off, for the log */
-			if (snprintf(
-				    why, whylen,
-				    "%s (depth %zu) is on %s - of ML-DSA, only ML-DSA-87 is taken",
-				    cert.subject, depth,
-				    esdm_tls_mldsa_refused[i].name) < 0)
-				why[0] = '\0';
-			return esdm_tls_verdict_bad_chain;
-		}
+		refused = esdm_tls_key_refused(&cert);
+		if (!refused)
+			continue;
+		/* A long subject cut off, for the log */
+		if (snprintf(why, whylen,
+			     "%s (depth %zu) is on %s, which is not taken",
+			     cert.subject, depth, refused) < 0)
+			why[0] = '\0';
+		return esdm_tls_verdict_bad_chain;
 	}
 
 	return esdm_tls_verdict_accepted;
 }
 
 /*
- * The parameter sets of ML-DSA and the revocation policy on the chain of the
+ * The algorithms of the keys and the revocation policy on the chain of the
  * peer, from the verification of the TLS stack - see esdm_tls_backend_check.
  * The chain they accept is kept for what the connection tells of its peer,
  * and esdm_tls_peer_revoked().
@@ -563,8 +741,8 @@ static enum esdm_tls_verdict esdm_tls_check_peer(void *arg,
 		return esdm_tls_verdict_bad_chain;
 	}
 
-	verdict = esdm_tls_check_mldsa(chain, num, tls->error,
-				       sizeof(tls->error));
+	verdict = esdm_tls_check_keys(chain, num, tls->error,
+				      sizeof(tls->error));
 	if (verdict == esdm_tls_verdict_accepted)
 		verdict = esdm_tls_check_chain(tls->ctx, chain, num, false,
 					       tls->error, sizeof(tls->error));
@@ -825,11 +1003,6 @@ const char *esdm_tls_group(struct esdm_tls *tls)
 const char *esdm_tls_mlkem_group(void)
 {
 	return esdm_tls_backend_mlkem_group();
-}
-
-unsigned int esdm_tls_mldsa(void)
-{
-	return esdm_tls_backend_mldsa();
 }
 
 bool esdm_tls_ip6_name(void)

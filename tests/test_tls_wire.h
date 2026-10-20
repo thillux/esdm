@@ -23,8 +23,9 @@
  * A test moving the records between the two ends of a connection reads them
  * with this: what passes in the clear - the handshake of DTLS 1.2 up to the
  * ChangeCipherSpec, the ClientHello and the ServerHello of TLS 1.3 -, the
- * suites, the groups and the extensions of the hellos, the suite and the
- * group the server takes, and which handshake messages pass. Every record is
+ * suites, the groups, the signature algorithms, the key shares and the
+ * extensions of the hellos, the suite and the group the server takes, and
+ * which handshake messages pass. Every record is
  * counted, encrypted or not: what a peer sends after a point - a
  * NewSessionTicket of TLS 1.3, encrypted - shows as records.
  *
@@ -55,6 +56,7 @@
 
 /* The extensions looked at */
 #define TEST_TLS_EXT_GROUPS 10
+#define TEST_TLS_EXT_SIGALGS 13
 #define TEST_TLS_EXT_HEARTBEAT 15
 #define TEST_TLS_EXT_ETM 22
 #define TEST_TLS_EXT_EMS 23
@@ -63,6 +65,7 @@
 #define TEST_TLS_EXT_EARLY_DATA 42
 #define TEST_TLS_EXT_SUPPORTED_VERSIONS 43
 #define TEST_TLS_EXT_POST_HANDSHAKE_AUTH 49
+#define TEST_TLS_EXT_KEY_SHARE 51
 
 /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV, no suite */
 #define TEST_TLS_SCSV 0x00ff
@@ -78,11 +81,21 @@ struct test_tls_wire {
 	/* DTLS records and handshake headers, else TLS ones */
 	bool dtls;
 
-	/* Of the ClientHello: the suites and groups it offers */
+	/* Of the ClientHello: the suites, groups and signatures it offers */
 	uint16_t suites[16];
 	unsigned int nsuites;
 	uint16_t groups[16];
 	unsigned int ngroups;
+	uint16_t sigalgs[64];
+	unsigned int nsigalgs;
+
+	/*
+	 * Of TLS 1.3: the groups of the key shares of the ClientHello, the one
+	 * of a ServerHello - the share it takes, or the group a
+	 * HelloRetryRequest asks for
+	 */
+	uint16_t shares[8];
+	unsigned int nshares;
 
 	/* Of the ServerHello and the ServerKeyExchange, 0 without */
 	uint16_t suite;
@@ -170,9 +183,40 @@ static inline bool test_tls_has_hs(const struct test_tls_wire *w, uint8_t type)
 	return type < 32 && (w->hs_types & (1U << type));
 }
 
-/* The extensions of a hello, the rest of @r */
+/* A list of 16-bit values, all of an extension after its length of @n bytes */
+static inline void test_tls_wire_list(struct test_tls_reader *ext, size_t n,
+				      uint16_t *list, unsigned int *num,
+				      unsigned int max, struct test_tls_wire *w)
+{
+	if (test_tls_get(ext, n) + n != ext->len || (ext->len - n) % 2) {
+		w->malformed = true;
+		return;
+	}
+	while (ext->off < ext->len && *num < max)
+		list[(*num)++] = (uint16_t)test_tls_get(ext, 2);
+}
+
+/* The key shares of the ClientHello: group, length, key each */
+static inline void test_tls_wire_shares(struct test_tls_reader *ext,
+					struct test_tls_wire *w)
+{
+	if (test_tls_get(ext, 2) + 2 != ext->len) {
+		w->malformed = true;
+		return;
+	}
+	while (!ext->bad && ext->off < ext->len) {
+		uint16_t group = (uint16_t)test_tls_get(ext, 2);
+
+		test_tls_skip(ext, test_tls_get(ext, 2));
+		if (w->nshares < sizeof(w->shares) / sizeof(w->shares[0]))
+			w->shares[w->nshares++] = group;
+	}
+	w->malformed |= ext->bad;
+}
+
+/* The extensions of a hello, the rest of @r - of a ServerHello if @server */
 static inline void test_tls_wire_exts(struct test_tls_reader *r,
-				      struct test_tls_wire *w)
+				      struct test_tls_wire *w, bool server)
 {
 	struct test_tls_reader exts = { .p = r->p + r->off };
 
@@ -198,20 +242,33 @@ static inline void test_tls_wire_exts(struct test_tls_reader *r,
 			w->ext_lens[w->nexts] = (uint16_t)ext.len;
 			w->exts[w->nexts++] = (uint16_t)type;
 		}
-		if (type == TEST_TLS_EXT_ETM)
+		switch (type) {
+		case TEST_TLS_EXT_ETM:
 			w->etm = true;
-		if (type != TEST_TLS_EXT_GROUPS)
-			continue;
-
-		/* The list of the groups is all of the extension */
-		if (test_tls_get(&ext, 2) + 2 != ext.len || ext.len % 2) {
-			w->malformed = true;
-			continue;
+			break;
+		case TEST_TLS_EXT_GROUPS:
+			test_tls_wire_list(
+				&ext, 2, w->groups, &w->ngroups,
+				sizeof(w->groups) / sizeof(w->groups[0]), w);
+			break;
+		case TEST_TLS_EXT_SIGALGS:
+			test_tls_wire_list(
+				&ext, 2, w->sigalgs, &w->nsigalgs,
+				sizeof(w->sigalgs) / sizeof(w->sigalgs[0]), w);
+			break;
+		case TEST_TLS_EXT_KEY_SHARE:
+			/* Of a ServerHello and a HelloRetryRequest: a group */
+			if (!server)
+				test_tls_wire_shares(&ext, w);
+			else if (ext.len >= 2 &&
+				 w->nshares < sizeof(w->shares) /
+						      sizeof(w->shares[0]))
+				w->shares[w->nshares++] =
+					(uint16_t)test_tls_get(&ext, 2);
+			break;
+		default:
+			break;
 		}
-		while (ext.off < ext.len &&
-		       w->ngroups < sizeof(w->groups) / sizeof(w->groups[0]))
-			w->groups[w->ngroups++] =
-				(uint16_t)test_tls_get(&ext, 2);
 	}
 	w->malformed |= exts.bad;
 }
@@ -245,7 +302,7 @@ static inline void test_tls_wire_hs(uint8_t type, struct test_tls_reader *r,
 				w->suites[w->nsuites++] = suite;
 		}
 		test_tls_skip(r, test_tls_get(r, 1));
-		test_tls_wire_exts(r, w);
+		test_tls_wire_exts(r, w, false);
 		break;
 	case TEST_TLS_HS_SERVER_HELLO:
 		/* version, random, session ID */
@@ -254,7 +311,7 @@ static inline void test_tls_wire_hs(uint8_t type, struct test_tls_reader *r,
 		test_tls_skip(r, w->session_id_len);
 		w->suite = (uint16_t)test_tls_get(r, 2);
 		test_tls_skip(r, 1);
-		test_tls_wire_exts(r, w);
+		test_tls_wire_exts(r, w, true);
 		break;
 	case TEST_TLS_HS_CERTIFICATE:
 		w->certificate = true;

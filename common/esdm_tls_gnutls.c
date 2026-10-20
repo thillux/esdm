@@ -40,11 +40,10 @@
  * alert of its own for a failed handshake: the one the failure calls for is
  * sent here.
  *
- * TLS 1.3 offers the groups of ML-KEM GnuTLS has ahead of those of NORMAL, and
- * the signature algorithm of ML-DSA-87 where it signs TLS with it, not those
- * of ML-DSA-44 and ML-DSA-65 - see esdm_tls_gnutls_stream_priority() and
- * "Post-quantum algorithms" in esdm_tls.h. GnuTLS has them only when built
- * with leancrypto.
+ * TLS 1.3 takes the algorithms of BSI TR-02102-2 alone, the hybrid key
+ * exchange of ML-KEM - which GnuTLS has only when built with leancrypto - ahead
+ * of the conventional one: see esdm_tls_gnutls_stream_priority() and
+ * "Algorithms" in esdm_tls.h.
  */
 
 #include <arpa/inet.h>
@@ -94,11 +93,15 @@
 #define ESDM_TLS_GNUTLS_MINIMAL_FLAGS GNUTLS_NO_TICKETS
 
 /*
- * TLS 1.3 exactly, in the minimal mode. The groups and the signature
- * algorithms are added to it, see esdm_tls_gnutls_stream_priority().
+ * TLS 1.3 exactly, in the minimal mode, with the suites of esdm_tls.h - not
+ * TLS_CHACHA20_POLY1305_SHA256 - and the security level of BSI TR-02102 for
+ * the certificates of either side: RSA and finite field groups of 3072 bits
+ * and more, elliptic curves of 256 bits and more. The groups and the signature
+ * algorithms are set in esdm_tls_gnutls_stream_priority().
  */
 #define ESDM_TLS_GNUTLS_PRIORITY                                               \
-	"NORMAL:-VERS-ALL:+VERS-TLS1.3" ESDM_TLS_GNUTLS_MINIMAL
+	"NORMAL:-VERS-ALL:+VERS-TLS1.3:-CHACHA20-POLY1305:%PROFILE_HIGH"       \
+	ESDM_TLS_GNUTLS_MINIMAL
 
 /* Room for the priority of TLS 1.3 with its groups and signatures */
 #define ESDM_TLS_GNUTLS_PRIORITY_LEN 1024
@@ -397,24 +400,31 @@ static int esdm_tls_gnutls_psk(struct esdm_tls_gnutls_ctx *c, bool server)
 #ifdef ESDM_TLS_AUTH
 
 /*
- * The groups of ML-KEM in the order of esdm_tls.h, as GnuTLS names them -
- * not its hybrids X25519-MLKEM768 and SECP256R1-MLKEM768, of 128 bits. GnuTLS
- * 3.8 knows MLKEM1024, but uses ML-KEM-1024 in TLS only in the hybrid, and
- * leaves it out of what it offers - until it does.
+ * The groups of esdm_tls.h in its order, as GnuTLS names them: the hybrid of
+ * ML-KEM - not X25519-MLKEM768 and SECP256R1-MLKEM768, of 128 bits, nor
+ * ML-KEM alone -, then the conventional ones GnuTLS has for TLS 1.3, which
+ * are no curves of Brainpool
  */
-static const char *const esdm_tls_gnutls_mlkem[] = {
-	"SECP384R1-MLKEM1024",
-	"MLKEM1024",
+#define ESDM_TLS_GNUTLS_HYBRID "SECP384R1-MLKEM1024"
+static const char *const esdm_tls_gnutls_groups[] = {
+	ESDM_TLS_GNUTLS_HYBRID,
+	"SECP384R1",
+	"SECP256R1",
+	"SECP521R1",
+	"FFDHE3072",
+	"FFDHE4096",
 };
 
 /*
- * The signature algorithms of ML-DSA in the priority: ML-DSA-87 alone, see
- * esdm_tls.h - the NORMAL of 3.8.13 lists the others as well
+ * The signature algorithms of NORMAL taken out, see esdm_tls.h: those with
+ * SHA-1 and SHA-224, which NORMAL lists for the signatures of certificates,
+ * EdDSA, and ML-DSA - a post-quantum signature on its own -, which NORMAL
+ * lists where GnuTLS is built with leancrypto
  */
-static const char *const esdm_tls_gnutls_mldsa[] = {
-	"-SIGN-ML-DSA-44",
-	"-SIGN-ML-DSA-65",
-	"+SIGN-ML-DSA-87",
+static const char *const esdm_tls_gnutls_signs_out[] = {
+	"RSA-SHA1",	"ECDSA-SHA1", "DSA-SHA1",   "RSA-SHA224",
+	"ECDSA-SHA224", "DSA-SHA224", "DSA-SHA256", "EdDSA-Ed25519",
+	"EdDSA-Ed448",	"ML-DSA-44",  "ML-DSA-65",  "ML-DSA-87",
 };
 
 /* Append ":<what><name>" to the priority @prio of @len bytes so far */
@@ -431,64 +441,44 @@ static int esdm_tls_gnutls_prio_add(char *prio, size_t *len, const char *what,
 }
 
 /*
- * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups in the
- * order of esdm_tls.h: those of ML-KEM GnuTLS has, then those of NORMAL but
- * any of ML-KEM it may list - for "+" appends, the groups are listed anew.
- * Of the signature algorithms of ML-DSA, ML-DSA-87 is added where GnuTLS signs
- * TLS with it, ML-DSA-44 and ML-DSA-65 taken out. GnuTLS refuses a priority
- * naming a group it does not have, and one built without leancrypto has none
- * of ML-KEM: the string names only what GnuTLS reports - and should it be
- * refused nevertheless, NORMAL's groups serve.
+ * The priority of TLS 1.3, ESDM_TLS_GNUTLS_PRIORITY with the groups of
+ * esdm_tls.h alone - "+" appends, so the groups are listed anew - and without
+ * the signature algorithms of esdm_tls_gnutls_signs_out. GnuTLS refuses a
+ * priority naming a group or an algorithm it does not know: the string names
+ * only what GnuTLS reports.
  */
 static int esdm_tls_gnutls_stream_priority(gnutls_priority_t *prio)
 {
 	char str[ESDM_TLS_GNUTLS_PRIORITY_LEN];
-	gnutls_priority_t normal;
-	const unsigned int *groups;
-	const char *name;
 	size_t len, i;
-	int n, ret = 0;
+	int ret = 0;
 
 	len = (size_t)snprintf(str, sizeof(str), "%s:-GROUP-ALL",
 			       ESDM_TLS_GNUTLS_PRIORITY);
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem) && !ret; i++) {
-		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_groups) && !ret; i++) {
+		if (gnutls_group_get_id(esdm_tls_gnutls_groups[i]) !=
 		    GNUTLS_GROUP_INVALID)
 			ret = esdm_tls_gnutls_prio_add(
-				str, &len, "+GROUP-", esdm_tls_gnutls_mlkem[i]);
+				str, &len, "+GROUP-",
+				esdm_tls_gnutls_groups[i]);
 	}
-
-	if (gnutls_priority_init(&normal, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
-		return -ENOMEM;
-	n = gnutls_priority_group_list(normal, &groups);
-	for (i = 0; n > 0 && i < (size_t)n && !ret; i++) {
-		name = gnutls_group_get_name((gnutls_group_t)groups[i]);
-		/* Hybrids of 128 bits as well, see esdm_tls_gnutls_mlkem */
-		if (name && !strstr(name, "MLKEM") && !strstr(name, "KYBER"))
-			ret = esdm_tls_gnutls_prio_add(str, &len, "+GROUP-",
-						       name);
-	}
-	gnutls_priority_deinit(normal);
-
-	if (esdm_tls_backend_mldsa() & ESDM_TLS_MLDSA_AUTH) {
-		for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mldsa) && !ret; i++)
+	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_signs_out) && !ret; i++) {
+		if (gnutls_sign_get_id(esdm_tls_gnutls_signs_out[i]) !=
+		    GNUTLS_SIGN_UNKNOWN)
 			ret = esdm_tls_gnutls_prio_add(
-				str, &len, "", esdm_tls_gnutls_mldsa[i]);
+				str, &len, "-SIGN-",
+				esdm_tls_gnutls_signs_out[i]);
 	}
+	if (ret)
+		return ret;
 
-	if (!ret) {
-		ret = gnutls_priority_init(prio, str, NULL);
-		if (ret >= 0)
-			return 0;
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+	ret = gnutls_priority_init(prio, str, NULL);
+	if (ret < 0) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 			    "TLS: GnuTLS refused the priority %s: %s\n", str,
 			    gnutls_strerror(ret));
+		return -EINVAL;
 	}
-
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-		    "TLS: the groups of NORMAL serve, without ML-KEM\n");
-	if (gnutls_priority_init(prio, ESDM_TLS_GNUTLS_PRIORITY, NULL) < 0)
-		return -ENOMEM;
 	return 0;
 }
 
@@ -1077,129 +1067,6 @@ static int esdm_tls_gnutls_check_own(struct esdm_tls_gnutls_ctx *c,
 }
 
 /*
- * Does GnuTLS have the public key algorithm @name - of ML-DSA, which is the
- * name of its signature algorithm as well? Asked of the public key algorithms
- * it has, as the signature algorithms it reports having (gnutls_sign_list())
- * leave those of ML-DSA out, 3.8.13 included, whether it has them or not.
- */
-static bool esdm_tls_gnutls_has_pk(const char *name)
-{
-	const gnutls_pk_algorithm_t *pk;
-	const char *n;
-
-	/* The ones it has, not all it knows the name of */
-	for (pk = gnutls_pk_list(); pk && *pk; pk++) {
-		n = gnutls_pk_get_name(*pk);
-		if (n && !strcasecmp(n, name))
-			return true;
-	}
-	return false;
-}
-
-/*
- * Of ML-DSA, a certificate on ML-DSA-87 alone, see "Post-quantum algorithms"
- * in esdm_tls.h
- */
-static int esdm_tls_gnutls_check_key(struct esdm_tls_gnutls_ctx *c,
-				     const char *cert_file)
-{
-	gnutls_x509_crt_t *crts = NULL;
-	unsigned int num = 0, i;
-	const char *name = NULL;
-	int ret, pk;
-
-	ret = gnutls_certificate_get_x509_crt(c->cred, 0, &crts, &num);
-	if (ret < 0 || !num)
-		return -EINVAL;
-
-	pk = gnutls_x509_crt_get_pk_algorithm(crts[0], NULL);
-	if (pk > 0)
-		name = gnutls_pk_get_name((gnutls_pk_algorithm_t)pk);
-	ret = 0;
-	if (name && !strncasecmp(name, "ML-DSA", 6) &&
-	    strcasecmp(name, "ML-DSA-87")) {
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"TLS: the certificate %s is one of %s, which is not taken - of ML-DSA, only ML-DSA-87 is\n",
-			cert_file, name);
-		ret = -EINVAL;
-	}
-
-	for (i = 0; i < num; i++)
-		gnutls_x509_crt_deinit(crts[i]);
-	gnutls_free(crts);
-
-	return ret;
-}
-
-/*
- * Does the key of the credentials belong to their certificate, when that is
- * one of ML-DSA? GnuTLS checks a key by a signature of it the certificate
- * verifies, but finds no signature algorithm of ML-DSA for that check (3.8.13)
- * and takes any key of the algorithm of the certificate then: the check is
- * made here, with the signature algorithm of the name of the key's.
- *
- * @return 0, -EINVAL if it does not belong
- */
-static int esdm_tls_gnutls_check_match(struct esdm_tls_gnutls_ctx *c,
-				       const struct esdm_tls_config *cfg)
-{
-	static const char text[] = "a key of esdm_tls and its certificate";
-	gnutls_datum_t data = { (unsigned char *)text, sizeof(text) - 1 };
-	gnutls_datum_t sig = { NULL, 0 };
-	gnutls_x509_privkey_t x509key = NULL;
-	gnutls_x509_crt_t *crts = NULL;
-	gnutls_privkey_t key = NULL;
-	gnutls_pubkey_t pub = NULL;
-	gnutls_sign_algorithm_t sign;
-	unsigned int num = 0, i;
-	const char *name = NULL;
-	int pk, ret = -EINVAL;
-
-	if (gnutls_certificate_get_x509_crt(c->cred, 0, &crts, &num) < 0 ||
-	    !num)
-		return -EINVAL;
-
-	pk = gnutls_x509_crt_get_pk_algorithm(crts[0], NULL);
-	if (pk > 0)
-		name = gnutls_pk_get_name((gnutls_pk_algorithm_t)pk);
-	if (!name || strncasecmp(name, "ML-DSA", 6)) {
-		ret = 0;
-		goto out;
-	}
-
-	sign = gnutls_sign_get_id(name);
-	if (sign == GNUTLS_SIGN_UNKNOWN ||
-	    gnutls_certificate_get_x509_key(c->cred, 0, &x509key) < 0 ||
-	    gnutls_privkey_init(&key) < 0 ||
-	    gnutls_privkey_import_x509(key, x509key, 0) < 0 ||
-	    gnutls_pubkey_init(&pub) < 0 ||
-	    gnutls_pubkey_import_x509(pub, crts[0], 0) < 0 ||
-	    gnutls_privkey_sign_data2(key, sign, 0, &data, &sig) < 0 ||
-	    gnutls_pubkey_verify_data2(pub, sign, 0, &data, &sig) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-			    "TLS: the key %s does not belong to the certificate %s\n",
-			    cfg->key_file, cfg->cert_file);
-		goto out;
-	}
-	ret = 0;
-
-out:
-	gnutls_free(sig.data);
-	if (pub)
-		gnutls_pubkey_deinit(pub);
-	if (key)
-		gnutls_privkey_deinit(key);
-	if (x509key)
-		gnutls_x509_privkey_deinit(x509key);
-	for (i = 0; i < num; i++)
-		gnutls_x509_crt_deinit(crts[i]);
-	gnutls_free(crts);
-
-	return ret;
-}
-
-/*
  * Did @issuer, as a CA, sign @cert? Everything GnuTLS verifies of a certificate
  * against its issuer, but the times - the chain this is for was verified
  * with them already.
@@ -1509,11 +1376,6 @@ static int esdm_tls_gnutls_files(struct esdm_tls_gnutls_ctx *c,
 				gnutls_strerror(ret));
 			return -EINVAL;
 		}
-		ret = esdm_tls_gnutls_check_key(c, cfg->cert_file);
-		if (!ret)
-			ret = esdm_tls_gnutls_check_match(c, cfg);
-		if (ret)
-			return ret;
 		ret = esdm_tls_gnutls_check_own(c, cfg->cert_file,
 						cfg->ca_file);
 		if (ret)
@@ -1688,37 +1550,19 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 	return 0;
 }
 
-/* The first group of ML-KEM GnuTLS has */
+/* The hybrid of ML-KEM, if GnuTLS has it */
 const char *esdm_tls_backend_mlkem_group(void)
 {
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_gnutls_mlkem); i++) {
-		if (gnutls_group_get_id(esdm_tls_gnutls_mlkem[i]) !=
-		    GNUTLS_GROUP_INVALID)
-			return esdm_tls_gnutls_mlkem[i];
-	}
-	return NULL;
+	return gnutls_group_get_id(ESDM_TLS_GNUTLS_HYBRID) !=
+			       GNUTLS_GROUP_INVALID ?
+		       ESDM_TLS_GNUTLS_HYBRID :
+		       NULL;
 }
 
 /* The name check of GnuTLS takes an address of either family */
 bool esdm_tls_backend_ip6_name(void)
 {
 	return true;
-}
-
-/*
- * ML-DSA-87 for certificates and CRLs where GnuTLS has its signatures - when
- * built with leancrypto, 3.8.9 and later -, for the handshake of TLS from
- * 3.8.10 on
- */
-unsigned int esdm_tls_backend_mldsa(void)
-{
-	if (!esdm_tls_gnutls_has_pk("ML-DSA-87"))
-		return 0;
-
-	return ESDM_TLS_MLDSA_CA |
-	       (gnutls_check_version("3.8.10") ? ESDM_TLS_MLDSA_AUTH : 0);
 }
 
 #endif /* ESDM_TLS_AUTH */

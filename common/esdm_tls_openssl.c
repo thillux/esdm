@@ -38,10 +38,10 @@
  * The revocation policy of esdm_tls.c runs in the verify callback, on the
  * chain OpenSSL verified - see esdm_tls_openssl_verify().
  *
- * TLS 1.3 offers the groups of ML-KEM ahead of the (EC)DHE ones, see
- * ESDM_TLS_OPENSSL_GROUPS, and the signature scheme of ML-DSA-87 next to the
- * classical ones, see ESDM_TLS_OPENSSL_SIGALGS - and "Post-quantum algorithms"
- * in esdm_tls.h.
+ * TLS 1.3 takes the algorithms of BSI TR-02102-2 alone, the hybrid key
+ * exchange of ML-KEM ahead of the conventional one - see
+ * ESDM_TLS_OPENSSL_GROUPS, ESDM_TLS_OPENSSL_SIGALGS and
+ * ESDM_TLS_OPENSSL_CIPHERS, and "Algorithms" in esdm_tls.h.
  */
 
 #include <arpa/inet.h>
@@ -72,37 +72,49 @@
 #include "helper.h"
 
 /*
- * TLS 1.3: the groups of ML-KEM in the order of esdm_tls.h, as a tuple of
- * their own ahead of the (EC)DHE groups. A server takes a group of the first
- * tuple the client has one of - by a HelloRetryRequest if the client sent no
- * key share of it -, and so prefers ML-KEM to any (EC)DHE group. The client
- * sends key shares of SecP384r1MLKEM1024 ("*") and of X25519 for a server
- * without ML-KEM. A group OpenSSL does not have is left out ("?").
+ * TLS 1.3: the groups of esdm_tls.h - the hybrid SecP384r1MLKEM1024 as a tuple
+ * of its own ahead of the elliptic curves and those ahead of the finite field
+ * groups. A server takes a group of the first tuple the client has one of - by
+ * a HelloRetryRequest if the client sent no key share of it -, and so prefers
+ * the hybrid to any conventional group. The client sends key shares of
+ * SecP384r1MLKEM1024 and of secp384r1 ("*"). A group OpenSSL does not have is
+ * left out ("?").
  *
- * The (EC)DHE groups are the DEFAULT of OpenSSL 3.5 without its hybrid
- * X25519MLKEM768, whose X25519 falls short of 192 bits - see esdm_tls.h -,
- * spelled out rather than taken from DEFAULT, which takes that hybrid along.
- * OpenSSL before 3.5 has no ML-KEM and knows neither the tuples nor the key
- * shares, refuses the list and keeps its default groups.
+ * OpenSSL before 3.5 knows neither the tuples nor the key shares and refuses
+ * the list: ESDM_TLS_OPENSSL_GROUPS_OLD serves then, the curves of every
+ * OpenSSL 3 - not its default, which has X25519 and X448.
  */
 #define ESDM_TLS_OPENSSL_GROUPS                                                \
-	"?*SecP384r1MLKEM1024:?MLKEM1024/?*X25519:?secp256r1/"                 \
-	"?X448:?secp384r1:?secp521r1/?ffdhe2048:?ffdhe3072"
+	"?*SecP384r1MLKEM1024/?*secp384r1:?secp256r1:?secp521r1:"              \
+	"?brainpoolP384r1tls13:?brainpoolP256r1tls13:?brainpoolP512r1tls13/"   \
+	"?ffdhe3072:?ffdhe4096"
+#define ESDM_TLS_OPENSSL_GROUPS_OLD                                            \
+	"secp384r1:secp256r1:secp521r1:ffdhe3072:ffdhe4096"
 
 /*
- * TLS 1.3: the signature schemes of the default of OpenSSL 3.5, but of ML-DSA
- * mldsa87 alone, not mldsa44 and mldsa65 - see esdm_tls.h. OpenSSL before 3.5
- * knows no mldsa87, refuses the list and keeps its default, which has no
- * ML-DSA.
+ * TLS 1.3: the signature schemes of esdm_tls.h - ECDSA, the curves of Brainpool
+ * included, and RSA-PSS. The schemes of Brainpool came with OpenSSL 3.2: before,
+ * ESDM_TLS_OPENSSL_SIGALGS_OLD serves.
  */
-#define ESDM_TLS_OPENSSL_SIGALGS                                               \
-	"mldsa87:ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:"               \
-	"ecdsa_secp521r1_sha512:ed25519:ed448:"                                \
-	"ecdsa_brainpoolP256r1tls13_sha256:ecdsa_brainpoolP384r1tls13_sha384:" \
-	"ecdsa_brainpoolP512r1tls13_sha512:rsa_pss_pss_sha256:"                \
-	"rsa_pss_pss_sha384:rsa_pss_pss_sha512:rsa_pss_rsae_sha256:"           \
-	"rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:"            \
-	"rsa_pkcs1_sha384:rsa_pkcs1_sha512"
+#define ESDM_TLS_OPENSSL_SIGALGS_OLD                                           \
+	"ecdsa_secp384r1_sha384:ecdsa_secp256r1_sha256:"                       \
+	"ecdsa_secp521r1_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:"      \
+	"rsa_pss_rsae_sha512:rsa_pss_pss_sha256:rsa_pss_pss_sha384:"           \
+	"rsa_pss_pss_sha512"
+#define ESDM_TLS_OPENSSL_SIGALGS                                                \
+	ESDM_TLS_OPENSSL_SIGALGS_OLD                                            \
+	":ecdsa_brainpoolP384r1tls13_sha384:ecdsa_brainpoolP256r1tls13_sha256:" \
+	"ecdsa_brainpoolP512r1tls13_sha512"
+
+/* TLS 1.3: the suites of esdm_tls.h, not TLS_CHACHA20_POLY1305_SHA256 */
+#define ESDM_TLS_OPENSSL_CIPHERS "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256"
+
+/*
+ * TLS 1.3: the security level of BSI TR-02102 - RSA and finite field groups of
+ * 3072 bits and more, elliptic curves of 256 bits and more, no SHA-1 - for the
+ * certificates of either side, its own and the peer's
+ */
+#define ESDM_TLS_OPENSSL_SECURITY_LEVEL 3
 
 /*
  * The local DTLS: TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 on P-521. OpenSSL has
@@ -406,33 +418,37 @@ static int esdm_tls_openssl_minimal(SSL_CTX *c)
 
 #ifdef ESDM_TLS_AUTH
 /*
- * TLS 1.3 exactly on a stream socket. A write the socket only took part of is
- * continued with the rest, from wherever the caller keeps it.
+ * TLS 1.3 exactly on a stream socket, with the algorithms of esdm_tls.h. A
+ * write the socket only took part of is continued with the rest, from wherever
+ * the caller keeps it.
  */
 static int esdm_tls_openssl_stream(SSL_CTX *c)
 {
 	if (!SSL_CTX_set_min_proto_version(c, TLS1_3_VERSION) ||
-	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION))
+	    !SSL_CTX_set_max_proto_version(c, TLS1_3_VERSION) ||
+	    !SSL_CTX_set_ciphersuites(c, ESDM_TLS_OPENSSL_CIPHERS))
 		return -ENOMEM;
+	SSL_CTX_set_security_level(c, ESDM_TLS_OPENSSL_SECURITY_LEVEL);
 	SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE |
 				    SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
-	/* ML-KEM first, as far as OpenSSL has it, see above */
+	/* The hybrid first, as far as OpenSSL has it, see above */
 	if (SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_GROUPS) != 1) {
 		ERR_clear_error();
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ANY,
-			"TLS: OpenSSL %s refused the groups of ML-KEM, its default groups serve\n",
+			"TLS: OpenSSL %s has no hybrid of ML-KEM, the conventional groups serve\n",
 			OpenSSL_version(OPENSSL_VERSION_STRING));
+		if (SSL_CTX_set1_groups_list(c, ESDM_TLS_OPENSSL_GROUPS_OLD) !=
+		    1)
+			return -ENOMEM;
 	}
 
-	/* ML-DSA-87 alone of ML-DSA, see above */
 	if (SSL_CTX_set1_sigalgs_list(c, ESDM_TLS_OPENSSL_SIGALGS) != 1) {
 		ERR_clear_error();
-		esdm_logger(
-			LOGGER_DEBUG, LOGGER_C_ANY,
-			"TLS: OpenSSL %s refused the signature schemes with ML-DSA-87, its default ones serve\n",
-			OpenSSL_version(OPENSSL_VERSION_STRING));
+		if (SSL_CTX_set1_sigalgs_list(
+			    c, ESDM_TLS_OPENSSL_SIGALGS_OLD) != 1)
+			return -ENOMEM;
 	}
 
 	return 0;
@@ -1051,30 +1067,6 @@ static int esdm_tls_openssl_load_crls(STACK_OF(X509_CRL) *crls,
 	return 0;
 }
 
-/* The parameter sets of ML-DSA, as OpenSSL names its keys */
-static const char *const esdm_tls_openssl_mldsa[] = {
-	"ML-DSA-44",
-	"ML-DSA-65",
-	"ML-DSA-87",
-};
-
-/*
- * The parameter set of ML-DSA of @key, NULL for a key of another algorithm.
- * OpenSSL before 3.5 knows no such key, and loads no certificate with one.
- */
-static const char *esdm_tls_openssl_mldsa_key(const EVP_PKEY *key)
-{
-	size_t i;
-
-	if (!key)
-		return NULL;
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_openssl_mldsa); i++) {
-		if (EVP_PKEY_is_a(key, esdm_tls_openssl_mldsa[i]))
-			return esdm_tls_openssl_mldsa[i];
-	}
-	return NULL;
-}
-
 /*
  * Does the own certificate chain to the trust anchors? See "Contexts" in
  * esdm_tls.h.
@@ -1128,7 +1120,6 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 {
 	char err[ESDM_TLS_TEXT_LEN];
 	SSL_CTX *c = oc->ssl_ctx;
-	const char *mldsa;
 	unsigned int i;
 	int ret;
 
@@ -1147,17 +1138,6 @@ static int esdm_tls_openssl_files(struct esdm_tls_openssl_ctx *oc, bool server,
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "TLS: cannot load the certificate %s: %s\n",
 				    cfg->cert_file, err);
-			return -EINVAL;
-		}
-		/* Of ML-DSA, ML-DSA-87 alone, see esdm_tls.h */
-		mldsa = esdm_tls_openssl_mldsa_key(
-			X509_get0_pubkey(SSL_CTX_get0_certificate(c)));
-		ERR_clear_error();
-		if (mldsa && strcmp(mldsa, "ML-DSA-87")) {
-			esdm_logger(
-				LOGGER_ERR, LOGGER_C_ANY,
-				"TLS: the certificate %s is one of %s, which is not taken - of ML-DSA, only ML-DSA-87 is\n",
-				cfg->cert_file, mldsa);
 			return -EINVAL;
 		}
 		if (SSL_CTX_use_PrivateKey_file(c, cfg->key_file,
@@ -1358,19 +1338,13 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 	return 0;
 }
 
-/* The groups of ML-KEM of ESDM_TLS_OPENSSL_GROUPS, in its order */
-static const char *const esdm_tls_openssl_mlkem[] = {
-	"SecP384r1MLKEM1024",
-	"MLKEM1024",
-};
-
-/* The first of them OpenSSL takes, in the library context of this file */
+/* The hybrid of ESDM_TLS_OPENSSL_GROUPS, if OpenSSL takes it */
 const char *esdm_tls_backend_mlkem_group(void)
 {
+	static const char group[] = "SecP384r1MLKEM1024";
 	OSSL_LIB_CTX *libctx = esdm_tls_openssl_lib();
-	const char *group = NULL;
 	SSL_CTX *c;
-	size_t i;
+	long ret;
 
 	if (!libctx)
 		return NULL;
@@ -1380,51 +1354,18 @@ const char *esdm_tls_backend_mlkem_group(void)
 		ERR_clear_error();
 		return NULL;
 	}
-	for (i = 0; i < ARRAY_SIZE(esdm_tls_openssl_mlkem) && !group; i++) {
-		if (SSL_CTX_set1_groups_list(c, esdm_tls_openssl_mlkem[i]) == 1)
-			group = esdm_tls_openssl_mlkem[i];
-	}
+	/* A macro of SSL_CTX_ctrl() */
+	ret = SSL_CTX_set1_groups_list(c, group);
 	SSL_CTX_free(c);
 	ERR_clear_error();
 
-	return group;
+	return ret == 1 ? group : NULL;
 }
 
 /* X509_VERIFY_PARAM_set1_ip_asc() takes either family */
 bool esdm_tls_backend_ip6_name(void)
 {
 	return true;
-}
-
-/*
- * ML-DSA-87 for certificates and CRLs where its signatures are there, for the
- * handshake where the signature schemes of ESDM_TLS_OPENSSL_SIGALGS are taken
- * as well - both from 3.5 on
- */
-unsigned int esdm_tls_backend_mldsa(void)
-{
-	OSSL_LIB_CTX *libctx = esdm_tls_openssl_lib();
-	unsigned int ret = ESDM_TLS_MLDSA_CA;
-	EVP_SIGNATURE *sig;
-	SSL_CTX *c;
-
-	if (!libctx)
-		return 0;
-
-	sig = EVP_SIGNATURE_fetch(libctx, "ML-DSA-87", NULL);
-	if (!sig) {
-		ERR_clear_error();
-		return 0;
-	}
-	EVP_SIGNATURE_free(sig);
-
-	c = SSL_CTX_new_ex(libctx, NULL, TLS_method());
-	if (c && SSL_CTX_set1_sigalgs_list(c, ESDM_TLS_OPENSSL_SIGALGS) == 1)
-		ret |= ESDM_TLS_MLDSA_AUTH;
-	SSL_CTX_free(c);
-	ERR_clear_error();
-
-	return ret;
 }
 
 #endif /* ESDM_TLS_AUTH */

@@ -44,11 +44,11 @@
  * right there. A connection of a context without the files - the local DTLS,
  * whose suites know no certificate - refuses every chain.
  *
- * TLS 1.3 offers the groups of ML-KEM Botan has ahead of its default ones, see
- * Esdm_Tls_Policy and "Post-quantum algorithms" in esdm_tls.h. Botan verifies
- * certificates and CRLs signed with ML-DSA, but has no signature scheme of TLS
- * for it: a certificate whose key no signature scheme of the policy signs with
- * is refused by the context, see esdm_tls_botan_signs().
+ * TLS 1.3 takes the algorithms of BSI TR-02102-2 alone, the hybrid key
+ * exchange of ML-KEM Botan has ahead of the conventional one, see
+ * Esdm_Tls_Policy and "Algorithms" in esdm_tls.h. A certificate whose key no
+ * signature scheme of the policy signs with is refused by the context, see
+ * esdm_tls_botan_signs().
  *
  * No exception crosses into the C code: every entry point catches them and
  * reports an errno.
@@ -108,33 +108,29 @@
 namespace
 {
 
-#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 /*
- * The groups of ML-KEM in the order of esdm_tls.h, as far as Botan has them:
- * MLKEM1024 came with 3.7, SecP384r1MLKEM1024 with 3.8, and a build has them
- * with the modules ml_kem and tls_13_pqc. Not the hybrids of Botan with
- * X25519 and P-256, of 128 bits.
+ * The groups of TLS 1.3 of esdm_tls.h in its order, as far as Botan has them,
+ * by their codes of TLS: the hybrid of ML-KEM SecP384r1MLKEM1024 - with Botan
+ * 3.8 and later, built with the modules ml_kem and tls_13_pqc; not the hybrids
+ * with X25519 and P-256, of 128 bits, nor ML-KEM alone -, then the curves
+ * secp384r1, secp256r1, secp521r1 and those of Brainpool, then the finite
+ * field groups of 3072 and 4096 bits
  */
-static std::vector<Botan::TLS::Group_Params> esdm_tls_botan_mlkem()
+static const uint16_t esdm_tls_botan_groups[] = {
+	0x11ED, 24, 23, 25, 32, 31, 33, 257, 258,
+};
+
+/* The hybrid of ML-KEM, if Botan has it */
+static std::optional<Botan::TLS::Group_Params> esdm_tls_botan_hybrid()
 {
-	static const Botan::TLS::Group_Params_Code codes[] = {
 #if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 8, 0)
-		Botan::TLS::Group_Params_Code::HYBRID_SECP384R1_ML_KEM_1024,
+	Botan::TLS::Group_Params group(esdm_tls_botan_groups[0]);
+
+	if (group.is_pqc_hybrid() && group.is_available())
+		return group;
 #endif
-		Botan::TLS::Group_Params_Code::ML_KEM_1024,
-	};
-	std::vector<Botan::TLS::Group_Params> groups;
-
-	for (const auto code : codes) {
-		Botan::TLS::Group_Params group(code);
-
-		if (group.is_available())
-			groups.push_back(group);
-	}
-
-	return groups;
+	return std::nullopt;
 }
-#endif
 
 /*
  * The protocol of a transport, and the secure minimal mode of
@@ -172,11 +168,12 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 	{
 	}
 
+	/* TLS 1.3: AES-GCM, not ChaCha20-Poly1305 - see esdm_tls.h */
 	std::vector<std::string> allowed_ciphers() const override
 	{
 		if (m_dgram)
 			return { "AES-256/GCM", "AES-256" };
-		return Botan::TLS::Policy::allowed_ciphers();
+		return { "AES-256/GCM", "AES-128/GCM" };
 	}
 
 	std::vector<std::string> allowed_macs() const override
@@ -226,78 +223,96 @@ class Esdm_Tls_Policy final : public Botan::TLS::Policy {
 		return Botan::TLS::Policy::allowed_key_exchange_methods();
 	}
 
-	/* A PSK suite signs nothing: the key exchange authenticates it */
+	/*
+	 * A PSK suite signs nothing: the key exchange authenticates it. TLS 1.3
+	 * signs with ECDSA and RSA-PSS - not EdDSA, and Botan has no signature
+	 * scheme of ML-DSA.
+	 */
 	std::vector<std::string> allowed_signature_methods() const override
 	{
 		if (m_dgram)
 			return { "IMPLICIT" };
-		return Botan::TLS::Policy::allowed_signature_methods();
+		return { "ECDSA", "RSA" };
 	}
 
 	/*
-	 * TLS 1.3: the groups of ML-KEM, then Botan's default ones of (EC)DHE -
-	 * not the hybrids of 128 bits its default lists after X25519 and P-256.
-	 * A server of Botan takes the first group of ML-KEM the client offers a
-	 * key share of, else the first the client lists, by a
-	 * HelloRetryRequest: two sides of this policy agree on the first one.
+	 * TLS 1.3: the groups of esdm_tls_botan_groups Botan has. A server of
+	 * Botan takes the hybrid if the client offers a key share of it, else
+	 * the first group the client lists, by a HelloRetryRequest: two sides of
+	 * this policy agree on the first one.
 	 */
 	std::vector<Botan::TLS::Group_Params>
 	key_exchange_groups() const override
 	{
+		std::vector<Botan::TLS::Group_Params> groups;
+
 		if (m_dgram)
 			return { Botan::TLS::Group_Params::BRAINPOOL512R1,
 				 Botan::TLS::Group_Params::SECP521R1 };
 
-#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
-		std::vector<Botan::TLS::Group_Params> groups =
-			esdm_tls_botan_mlkem();
+		for (const auto code : esdm_tls_botan_groups) {
+			Botan::TLS::Group_Params group(code);
 
-		for (const auto &group :
-		     Botan::TLS::Policy::key_exchange_groups()) {
-			if (!group.is_post_quantum())
+			if (group.is_available())
 				groups.push_back(group);
 		}
-
 		return groups;
-#else
-		return Botan::TLS::Policy::key_exchange_groups();
-#endif
 	}
 
-#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 	/*
-	 * TLS 1.3: key shares of the first group of ML-KEM, and of the first one
-	 * of ECDHE for a server without ML-KEM - Botan's default sends the
-	 * latter only, which costs a HelloRetryRequest with every server
-	 * preferring ML-KEM
+	 * TLS 1.3: key shares of the hybrid, and of the first curve for a server
+	 * without it - Botan's default sends the latter only, which costs a
+	 * HelloRetryRequest with every server preferring the hybrid
 	 */
 	std::vector<Botan::TLS::Group_Params>
 	key_exchange_groups_to_offer() const override
 	{
 		std::vector<Botan::TLS::Group_Params> offer;
-		const auto groups = key_exchange_groups();
+		const auto hybrid = esdm_tls_botan_hybrid();
 
 		if (m_dgram)
 			return Botan::TLS::Policy::key_exchange_groups_to_offer();
 
-		for (const auto &group : groups) {
-			if (group.is_post_quantum()) {
-				offer.push_back(group);
-				break;
-			}
-		}
-		for (const auto &group : groups) {
+		if (hybrid)
+			offer.push_back(*hybrid);
+		for (const auto &group : key_exchange_groups()) {
 			if (group.is_pure_ecc_group()) {
 				offer.push_back(group);
 				break;
 			}
 		}
-		if (offer.empty())
-			return Botan::TLS::Policy::key_exchange_groups_to_offer();
-
 		return offer;
 	}
-#endif
+
+	/*
+	 * The security level of BSI TR-02102 for the certificates and the key
+	 * exchange: RSA and finite field groups of 3072 bits and more, elliptic
+	 * curves of 256 bits and more, signatures of 128 bits of security
+	 */
+	size_t minimum_rsa_bits() const override
+	{
+		return 3072;
+	}
+
+	size_t minimum_dh_group_size() const override
+	{
+		return 3072;
+	}
+
+	size_t minimum_ecdh_group_size() const override
+	{
+		return 256;
+	}
+
+	size_t minimum_ecdsa_group_size() const override
+	{
+		return 256;
+	}
+
+	size_t minimum_signature_strength() const override
+	{
+		return 128;
+	}
 
 	bool allow_tls12() const override
 	{
@@ -1752,47 +1767,21 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 	}
 }
 
-/* The first group of ML-KEM Botan has, as Botan names it */
+/* The hybrid of ML-KEM, if Botan has it, as Botan names it */
 const char *esdm_tls_backend_mlkem_group(void)
 {
-#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
 	try {
 		static const std::string name = []() {
-			const auto groups = esdm_tls_botan_mlkem();
+			const auto hybrid = esdm_tls_botan_hybrid();
 
-			return groups.empty() ?
-				       std::string() :
-				       groups.front().to_string().value_or("");
+			return hybrid ? hybrid->to_string().value_or("") :
+					std::string();
 		}();
 
 		return name.empty() ? nullptr : name.c_str();
 	} catch (...) {
 		return nullptr;
 	}
-#else
-	return nullptr;
-#endif
-}
-
-/*
- * ML-DSA for certificates and CRLs with the module ml_dsa (3.6 and later), for
- * the handshake where a signature scheme of TLS 1.3 is for it - none in 3.13
- */
-unsigned int esdm_tls_backend_mldsa(void)
-{
-	unsigned int ret = 0;
-
-#if defined(BOTAN_HAS_ML_DSA)
-	ret |= ESDM_TLS_MLDSA_CA;
-#endif
-	try {
-		if (esdm_tls_botan_signs(Esdm_Tls_Policy(false, false),
-					 "ML-DSA"))
-			ret |= ESDM_TLS_MLDSA_AUTH;
-	} catch (...) {
-	}
-
-	return ret;
 }
 
 /* From 3.13 on, see esdm_tls_botan_name_matches() */

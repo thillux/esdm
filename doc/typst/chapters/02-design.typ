@@ -1429,11 +1429,15 @@ sides authenticate with certificates, the client checks the name of the
 server, and CRLs are checked within the verification of the TLS stack with the
 code of the EGD protocol over the network: the TLS with certificates, its
 rotation on SIGHUP and when the files change, its revocation checks and its
-post-quantum algorithms are one implementation for both, for every TLS stack.
-The key exchange prefers the groups of ML-KEM - SecP384r1MLKEM1024, MLKEM1024,
-but no hybrid whose conventional half falls short of 192 bits - to (EC)DHE,
-and certificates may be on ML-DSA-87, as far as the TLS stack has them - not
-on ML-DSA-44 or ML-DSA-65, which are refused in a chain as well.
+algorithms are one implementation for both, for every TLS stack. The
+algorithms are those of BSI TR-02102-2: the suites of AES-GCM, ECDSA and
+RSA-PSS on keys of 256 or 3072 bits and more, and the key exchange by the
+hybrid SecP384r1MLKEM1024 ahead of the conventional groups - the curves of
+NIST and Brainpool, ffdhe3072 and ffdhe4096 -, as far as the TLS stack has
+it. No algorithm of post-quantum cryptography is taken on its own - neither
+ML-KEM nor ML-DSA, whose certificates are refused -, and neither X25519, X448,
+EdDSA nor ChaCha20-Poly1305 nor a hybrid whose conventional half falls short
+of 192 bits.
 
 The listener of the provider faces the network, so it bounds its connections
 as the EGD network server does: in all, in their handshake in all and per

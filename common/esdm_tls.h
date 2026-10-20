@@ -61,61 +61,54 @@
  * function here reports -EOPNOTSUPP. It is the backend of the TLS stack the
  * local DTLS of esdm_dtls.h uses as well, see esdm_tls_backend.h.
  *
- * Post-quantum algorithms
- * -----------------------
- * TLS 1.3 prefers the key exchange of ML-KEM (FIPS 203) to (EC)DHE alone, and takes certificates and keys of ML-DSA (FIPS 204) next to
- * the classical ones - as far as the TLS stack has them. The groups of ML-KEM
- * are offered and accepted in this order, ahead of the (EC)DHE groups of the
- * TLS stack's default:
+ * Algorithms
+ * ----------
+ * TLS 1.3 takes the conventional algorithms BSI TR-02102-2 recommends and the
+ * hybrid key exchange it allows - no algorithm of post-quantum cryptography on
+ * its own, neither ML-KEM nor ML-DSA, and none of X25519, X448, EdDSA or
+ * ChaCha20-Poly1305 -, with every TLS stack:
  *
- *	SecP384r1MLKEM1024	ECDHE on P-384 and ML-KEM-1024
- *	MLKEM1024		ML-KEM-1024 alone
+ *  - The suites TLS_AES_256_GCM_SHA384 and TLS_AES_128_GCM_SHA256 - and
+ *    TLS_AES_128_CCM_SHA256 with GnuTLS.
+ *  - The key exchange by these groups, offered and accepted in this order:
  *
- * The hybrid holds as long as either of its halves does, and its conventional
- * half has a security level of 192 bits, as ML-KEM-1024 has more: a hybrid
- * whose conventional half falls short - X25519MLKEM768 and SecP256r1MLKEM768,
- * of 128 bits - is neither offered nor accepted, even where the TLS stack has
- * it by default, as OpenSSL 3.5 and Botan 3.7 have X25519MLKEM768. A group the
- * TLS stack does not have is left out, and the (EC)DHE groups always follow:
- * a TLS stack with neither keeps to (EC)DHE, and so does a connection with a
- * peer that has neither, with either side being an ESDM or not - nothing fails
- * for want of ML-KEM. Two sides of the ESDM agree on the first group both
- * have, by a HelloRetryRequest where the client sent no key share of it: a
- * client sends one of the first ML-KEM group and, with OpenSSL and Botan, one
- * of X25519 for a server without ML-KEM. esdm_tls_mlkem_group() tells which
- * group two sides of the TLS stack of the build agree on, esdm_tls_group() the
- * group of a connection. Where the TLS stacks have them:
+ *	SecP384r1MLKEM1024	ECDHE on P-384 and ML-KEM-1024 (FIPS 203), a
+ *				hybrid
+ *	secp384r1, secp256r1, secp521r1
+ *	brainpoolP384r1tls13, brainpoolP256r1tls13, brainpoolP512r1tls13
+ *	ffdhe3072, ffdhe4096
  *
- *  - OpenSSL 3.5 and later: both.
+ *    The hybrid holds as long as either of its halves does, and its
+ *    conventional half has a security level of 192 bits, as ML-KEM-1024 has
+ *    more: a hybrid whose conventional half falls short - X25519MLKEM768 and
+ *    SecP256r1MLKEM768 -, and ML-KEM alone, are neither offered nor accepted,
+ *    even where the TLS stack has them by default.
+ *  - Signatures by ECDSA with SHA-2 on the curves above and by RSA-PSS - RSA
+ *    with PKCS#1 v1.5 in the signatures of certificates only, as TLS 1.3 has
+ *    it.
+ *  - Keys of certificates on RSA of 3072 bits and more, and on elliptic curves
+ *    of 256 bits and more. A certificate on another key - ML-DSA, EdDSA, DSA -
+ *    in the certificate file or among the trust anchors fails the context,
+ *    and one in the chain of a peer - its own or a CA's - the handshake, by
+ *    the checks of esdm_tls.c, with every TLS stack.
+ *
+ * What the TLS stack does not have is left out: a TLS stack without the hybrid
+ * keeps to the conventional groups, and so does a connection with a peer
+ * without it - nothing fails for want of ML-KEM. Two sides of the ESDM agree on
+ * the first group both have, by a HelloRetryRequest where the client sent no
+ * key share of it: a client sends one of the hybrid and one of secp384r1.
+ * esdm_tls_mlkem_group() tells whether the TLS stack of the build has the
+ * hybrid, esdm_tls_group() the group of a connection. Where the TLS stacks have
+ * it:
+ *
+ *  - OpenSSL 3.5 and later - and the curves of Brainpool from 3.2 on.
  *  - GnuTLS only when built with leancrypto (--with-leancrypto, 3.8.9 and
- *    later): SecP384r1MLKEM1024. It uses ML-KEM-1024 alone in no TLS, and
- *    takes up MLKEM1024 the day it does.
- *  - Botan 3.7 and later, with its modules ml_kem and tls_13_pqc: MLKEM1024,
- *    and SecP384r1MLKEM1024 from 3.8 on.
+ *    later). GnuTLS has no curves of Brainpool for TLS 1.3.
+ *  - Botan 3.8 and later, with its modules ml_kem and tls_13_pqc.
  *
- * Of ML-DSA, ML-DSA-87 alone is taken, at the security level of ML-KEM-1024:
- * its signature scheme mldsa87 of TLS 1.3 is offered and accepted next to the
- * classical ones, a side with a certificate on it signs its handshake with it,
- * and its peer verifies that. A CA on ML-DSA-87 - a trust anchor or an
- * intermediate one - signs certificates and CRLs, which the verification, the
- * check of the own chain and the revocation check verify as any others; the
- * chain may mix ML-DSA-87 with the classical algorithms. Every check of a
- * context - the key belongs to the certificate, the certificate chains to the
- * trust anchors, the CRLs - holds for ML-DSA as well. ML-DSA-44 and ML-DSA-65
- * are not taken: their signature schemes are neither offered nor accepted, a
- * context with a certificate on one is not built, and a peer with a
- * certificate on one in its chain - its own or a CA's - is refused, with
- * every TLS stack, by the check of esdm_tls.c next to the revocation policy.
- * esdm_tls_mldsa() tells what of ML-DSA-87 the TLS stack does:
- *
- *  - OpenSSL 3.5 and later: all of it.
- *  - GnuTLS built with leancrypto: certificates and CRLs signed with ML-DSA
- *    from 3.8.9 on, and the handshake signed with ML-DSA from 3.8.10 on.
- *  - Botan: certificates and CRLs signed with ML-DSA, 3.6 and later with its
- *    module ml_dsa - but no signature scheme of TLS for ML-DSA (Botan 3.13):
- *    a context with a certificate on ML-DSA is not built, as no handshake
- *    could be signed with it. The certificates of the sides are on ECDSA or
- *    RSA then, and may be issued by a CA on ML-DSA-87.
+ * The local DTLS of esdm_dtls.h takes algorithms of BSI TR-02102-2 as well -
+ * ECDHE-PSK with AES-256 on brainpoolP512r1 or secp521r1 -, without a hybrid:
+ * none of the TLS stacks has DTLS 1.3.
  *
  * Contexts
  * --------
@@ -453,31 +446,16 @@ const char *esdm_tls_cipher(struct esdm_tls *tls);
 const char *esdm_tls_group(struct esdm_tls *tls);
 
 /**
- * @brief The ML-KEM group two sides of the TLS stack of the build agree on
+ * @brief The hybrid group of ML-KEM two sides of the TLS stack of the build
+ *	  agree on
  *
- * The first one of the list of "Post-quantum algorithms" above that the TLS
- * stack has, as it names it - what esdm_tls_group() tells of a connection of
- * TLS 1.3 between two contexts of this build.
+ * SecP384r1MLKEM1024 of "Algorithms" above, as the TLS stack names it, if it
+ * has it - what esdm_tls_group() tells of a connection of TLS 1.3 between two
+ * contexts of this build.
  *
- * @return the name of the group, NULL if the TLS stack has none of them
+ * @return the name of the group, NULL if the TLS stack does not have it
  */
 const char *esdm_tls_mlkem_group(void);
-
-/* What the TLS stack does with ML-DSA-87 in TLS 1.3, see esdm_tls_mldsa() */
-/* Verifies certificates and CRLs signed by a CA on ML-DSA-87 */
-#define ESDM_TLS_MLDSA_CA (1U << 0)
-/* Signs its handshake with a certificate on ML-DSA-87, verifies a peer's */
-#define ESDM_TLS_MLDSA_AUTH (1U << 1)
-
-/**
- * @brief What the TLS stack of the build does with ML-DSA-87 in TLS 1.3 - the
- *	  only parameter set of ML-DSA taken, see "Post-quantum algorithms"
- *	  above
- *
- * @return ESDM_TLS_MLDSA_CA and ESDM_TLS_MLDSA_AUTH as far as it does, 0 if it
- *	   has no ML-DSA
- */
-unsigned int esdm_tls_mldsa(void);
 
 /**
  * @brief Whether the TLS stack of the build checks a server name that is an
@@ -662,11 +640,6 @@ static inline const char *esdm_tls_group(struct esdm_tls *tls)
 static inline const char *esdm_tls_mlkem_group(void)
 {
 	return NULL;
-}
-
-static inline unsigned int esdm_tls_mldsa(void)
-{
-	return 0;
 }
 
 static inline bool esdm_tls_ip6_name(void)

@@ -737,13 +737,12 @@ connects to. A client is known by the SHA-256 of its certificate, which the
 STATUS of the provider tells as
 .BR peer .
 .IP \(bu 2
-The key exchange prefers the post\-quantum groups of ML\-KEM \-
-SecP384r1MLKEM1024 and MLKEM1024, in this order \- to (EC)DHE alone, as far
-as the TLS stack has them: OpenSSL 3.5 and later, GnuTLS built with
-leancrypto, Botan 3.7 and later. Certificates may be on ML\-DSA\-87 where the
-TLS stack signs TLS 1.3 with ML\-DSA, and issued by a CA on ML\-DSA\-87 where
-it verifies ML\-DSA; ML\-DSA\-44 and ML\-DSA\-65 are not taken. All of it is
-the TLS of
+The algorithms are those of BSI TR\-02102\-2: the key exchange prefers the
+hybrid SecP384r1MLKEM1024 \- ECDHE on P\-384 and ML\-KEM\-1024 \- to
+(EC)DHE alone, as far as the TLS stack has it: OpenSSL 3.5 and later, GnuTLS
+built with leancrypto, Botan 3.8 and later. No post\-quantum algorithm is taken
+on its own \- neither ML\-KEM nor certificates on ML\-DSA \-, and none of
+X25519, X448, EdDSA or ChaCha20\-Poly1305. All of it is the TLS of
 .BR esdm\-egd\-net\-server (8).
 .IP \(bu 2
 A firewall in between has to pass TCP to the port.

@@ -117,8 +117,8 @@ address. With CRLs, the server's chain is checked as described in
 .B REVOCATION
 of
 .BR esdm\-egd\-net\-server (8).
-The key exchange by ML\-KEM and the certificates on ML\-DSA are those of the
-server, see
+The algorithms \- the hybrid key exchange of ML\-KEM, and no post\-quantum
+cryptography on its own \- are those of the server, see
 .B TLS
 in
 .BR esdm\-egd\-net\-server (8).

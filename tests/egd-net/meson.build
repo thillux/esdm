@@ -20,11 +20,10 @@ egd_net_tls_test = executable(
 test('EGD network TLS layer', egd_net_tls_test, timeout: 120,
 	suite: 'egd-net')
 
-# The post-quantum algorithms of the TLS layer, each skipping (77) where the
-# TLS stack of the build lacks it: the key exchange by ML-KEM, certificates
-# of a CA on ML-DSA, and certificates on ML-DSA for both sides.
-foreach part : [ [ 'ML-KEM', 'mlkem' ], [ 'ML-DSA CA', 'mldsa-ca' ],
-		 [ 'ML-DSA', 'mldsa' ] ]
+# The post-quantum algorithms of the TLS layer: the key exchange by the hybrid
+# of ML-KEM, skipping (77) where the TLS stack of the build lacks it, and
+# certificates on ML-DSA - post-quantum on its own -, refused.
+foreach part : [ [ 'ML-KEM hybrid', 'mlkem' ], [ 'ML-DSA refused', 'mldsa' ] ]
 	test('EGD network TLS layer, ' + part[0], egd_net_tls_test,
 		args: [ part[1] ], timeout: 120, suite: 'egd-net')
 endforeach

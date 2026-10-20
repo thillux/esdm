@@ -144,8 +144,7 @@ struct esdm_tls_cert_info {
 	int64_t not_after;
 	/*
 	 * The OID of the algorithm of its key, dotted - empty if the TLS stack
-	 * cannot tell -, for the parameter sets of ML-DSA taken, see
-	 * "Post-quantum algorithms" in esdm_tls.h
+	 * cannot tell -, for the keys taken, see "Algorithms" in esdm_tls.h
 	 */
 	char key_oid[64];
 };
@@ -188,7 +187,7 @@ enum esdm_tls_verdict {
 	esdm_tls_verdict_no_crl,
 	/*
 	 * A certificate of the chain does not parse, or is on a key that is not
-	 * taken - ML-DSA-44 or ML-DSA-65: alert bad_certificate
+	 * taken - ML-DSA or EdDSA, say: alert bad_certificate
 	 */
 	esdm_tls_verdict_bad_chain,
 };
@@ -317,13 +316,10 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 			       struct esdm_tls_cert_info *info);
 
 /*
- * The ML-KEM group of TLS 1.3 two sides of the TLS stack agree on, NULL if it
- * has none - see esdm_tls_mlkem_group()
+ * The hybrid group of ML-KEM of TLS 1.3, NULL if the TLS stack does not have
+ * it - see esdm_tls_mlkem_group()
  */
 const char *esdm_tls_backend_mlkem_group(void);
-
-/* ESDM_TLS_MLDSA_CA and ESDM_TLS_MLDSA_AUTH - see esdm_tls_mldsa() */
-unsigned int esdm_tls_backend_mldsa(void);
 
 /* An IPv6 address as server name is checked, see esdm_tls_ip6_name() */
 bool esdm_tls_backend_ip6_name(void);

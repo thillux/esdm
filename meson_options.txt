@@ -1178,8 +1178,8 @@ option('egd-net-tls', type: 'feature', value: 'auto',
 
 Mutually authenticated TLS 1.3 with certificates, CRLs and their rotation,
 provided by the TLS stack of the crypto backend: crypto_backend openssl,
-gnutls or botan - with the key exchange of ML-KEM and certificates on ML-DSA
-as far as the TLS stack has them. The builtin and the leancrypto backend have
+gnutls or botan - with the algorithms of BSI TR-02102-2, the hybrid key
+exchange of ML-KEM as far as the TLS stack has it. The builtin and the leancrypto backend have
 none; with them, egd-net is built with plain TCP only, with a warning when
 this is enabled.
 auto and enabled take the TLS stack where there is one - the two cannot be
@@ -1203,10 +1203,11 @@ The provider server of libesdm_es_ext gains a network mode, which every
 provider program of the library - esdm-es-pkcs11, and one of
 esdm_es_ext_provider_main() - offers with --listen: the entropy source is
 served on TCP with mutually authenticated TLS 1.3 - certificates and CRLs
-as the TLS of egd-net has them, the key exchange of ML-KEM where both TLS
-stacks have it. The esdm-es-ext-relay is built as well: it serves a local
-provider socket, which the ESDM reads as one of its ExternalSocket sources,
-and forwards each request to such a provider on another host.
+as the TLS of egd-net has them, its algorithms and the hybrid key exchange
+of ML-KEM where both TLS stacks have it. The esdm-es-ext-relay is built as
+well: it serves a local provider socket, which the ESDM reads as one of its
+ExternalSocket sources, and forwards each request to such a provider on
+another host.
 
 The ESDM itself takes no part in the network: it reads the relay like any
 local provider, and trusts it by the user it runs as.

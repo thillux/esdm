@@ -21,16 +21,15 @@
  * The TLS layer of the EGD network mode, common/esdm_tls.h, against the test
  * PKI of tests/egd-net/pki - for whichever TLS stack the build uses: the
  * mutual authentication, the server name, the revocation policy, the
- * transfers and the end of a connection, and the secure minimal mode on the
- * wire. Both ends run in this one thread on a socket pair, each step of the
- * one made whenever the other waits, so no timing decides anything. Skips
- * (77) in a build without egd-net-tls.
+ * transfers and the end of a connection, and the secure minimal mode and the
+ * algorithms on the wire. Both ends run in this one thread on a socket pair,
+ * each step of the one made whenever the other waits, so no timing decides
+ * anything. Skips (77) in a build without egd-net-tls.
  *
  * The post-quantum algorithms are parts of their own, run with an argument:
- * "mlkem" the key exchange by the group of ML-KEM the TLS stack prefers,
- * "mldsa-ca" certificates of a CA on ML-DSA-87, "mldsa" certificates on
- * ML-DSA-87 for both sides - and those of ML-DSA-65 refused. Each skips (77)
- * where the TLS stack lacks what it tests.
+ * "mlkem" the key exchange by the hybrid of ML-KEM, which skips (77) where the
+ * TLS stack lacks it, "mldsa" certificates on ML-DSA - a post-quantum
+ * signature on its own - refused by every context.
  */
 
 #define _GNU_SOURCE
@@ -71,6 +70,19 @@ static int failures = 0;
 	} while (0)
 
 #define PKI(name) ESDM_TEST_PKI "/" name
+
+/* The path of the file @name of the test PKI, which is no literal */
+static const char *pki_file(const char *name)
+{
+	static char paths[8][512];
+	static unsigned int next;
+	char *path = paths[next++ % 8];
+
+	snprintf(path, sizeof(paths[0]), "%s/%s", ESDM_TEST_PKI, name);
+	return path;
+}
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 /* A configuration of PKI files: cert and key by their base name */
 static struct esdm_tls_config cfg_of(const char *cert, const char *key,
@@ -615,6 +627,40 @@ static void wire_step(struct wire *w)
 }
 
 /*
+ * The algorithms of TLS 1.3 of esdm_tls.h, by their codes of TLS: the suites
+ * of AES-GCM - and AES-128-CCM, which GnuTLS has -, the groups -
+ * SecP384r1MLKEM1024, secp384r1, secp256r1, secp521r1, the three curves of
+ * Brainpool, ffdhe3072 and ffdhe4096 -, and the signatures of ECDSA, RSA-PSS
+ * and, for certificates, RSA with PKCS#1 v1.5. Nothing of X25519, X448,
+ * ChaCha20-Poly1305, EdDSA, ML-KEM or ML-DSA alone.
+ */
+static const uint16_t bsi_suites[] = { 0x1301, 0x1302, 0x1304 };
+static const uint16_t bsi_groups[] = { 0x11ed, 23, 24,	25, 31,
+				       32,     33, 257, 258 };
+static const uint16_t bsi_sigalgs[] = { 0x0403, 0x0503, 0x0603, 0x081a,
+					0x081b, 0x081c, 0x0804, 0x0805,
+					0x0806, 0x0809, 0x080a, 0x080b,
+					0x0401, 0x0501, 0x0601 };
+
+/* Is every one of @num values at @vals among the @nok at @ok? */
+static bool wire_all_in(const uint16_t *vals, unsigned int num,
+			const uint16_t *ok, size_t nok, uint16_t *bad)
+{
+	unsigned int i;
+	size_t j;
+
+	for (i = 0; i < num; i++) {
+		for (j = 0; j < nok && ok[j] != vals[i]; j++)
+			;
+		if (j == nok) {
+			*bad = vals[i];
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
  * One connection between @sctx and @cctx through the relay: its ClientHello
  * offers no session ticket, no pre-shared key - which TLS 1.3 resumes with -
  * and no early data, and asks for no heartbeat and no post-handshake
@@ -631,6 +677,7 @@ static void wire_connection(struct esdm_tls_ctx *sctx,
 	static struct wire w;
 	int cret = -EAGAIN, sret = -EAGAIN;
 	unsigned int i, before = 0, after;
+	uint16_t bad = 0;
 	uint8_t got[4];
 	ssize_t n = -EAGAIN;
 
@@ -712,13 +759,45 @@ static void wire_connection(struct esdm_tls_ctx *sctx,
 	      "connection %u: the data of the server took %u records", nr,
 	      w.s2c.records - before - after);
 
+	/* The algorithms, offered and taken */
+	printf("  connection %u: suite 0x%04x, group 0x%04x, %u suites, %u groups, %u key shares and %u signatures offered\n",
+	       nr, w.s2c.suite, w.s2c.nshares ? w.s2c.shares[w.s2c.nshares - 1] : 0,
+	       w.c2s.nsuites, w.c2s.ngroups, w.c2s.nshares, w.c2s.nsigalgs);
+	CHECK(wire_all_in(w.c2s.suites, w.c2s.nsuites, bsi_suites,
+			  ARRAY_SIZE(bsi_suites), &bad),
+	      "connection %u: the client offers the suite 0x%04x", nr, bad);
+	CHECK(wire_all_in(&w.s2c.suite, 1, bsi_suites, ARRAY_SIZE(bsi_suites),
+			  &bad),
+	      "connection %u: the server takes the suite 0x%04x", nr, bad);
+	CHECK(w.c2s.ngroups &&
+		      wire_all_in(w.c2s.groups, w.c2s.ngroups, bsi_groups,
+				  ARRAY_SIZE(bsi_groups), &bad),
+	      "connection %u: the client offers the group 0x%04x", nr, bad);
+	CHECK(w.c2s.nshares &&
+		      wire_all_in(w.c2s.shares, w.c2s.nshares, bsi_groups,
+				  ARRAY_SIZE(bsi_groups), &bad),
+	      "connection %u: the client sends a key share of 0x%04x", nr,
+	      bad);
+	CHECK(w.s2c.nshares &&
+		      wire_all_in(w.s2c.shares, w.s2c.nshares, bsi_groups,
+				  ARRAY_SIZE(bsi_groups), &bad),
+	      "connection %u: the server takes the group 0x%04x", nr, bad);
+	CHECK(w.c2s.nsigalgs &&
+		      wire_all_in(w.c2s.sigalgs, w.c2s.nsigalgs, bsi_sigalgs,
+				  ARRAY_SIZE(bsi_sigalgs), &bad),
+	      "connection %u: the client offers the signature 0x%04x", nr,
+	      bad);
+	if (esdm_tls_mlkem_group())
+		CHECK(w.s2c.nshares && w.s2c.shares[w.s2c.nshares - 1] == 0x11ed,
+		      "connection %u: the hybrid of ML-KEM was not taken", nr);
+
 out:
 	wire_close(&w);
 }
 
 /*
- * The secure minimal mode on the wire: two connections between the same
- * contexts, the second a full handshake as the first
+ * The secure minimal mode and the algorithms on the wire: two connections
+ * between the same contexts, the second a full handshake as the first
  */
 static void test_minimal(void)
 {
@@ -728,7 +807,7 @@ static void test_minimal(void)
 					   PKI("client1.key"), PKI("ca.crt"));
 	struct esdm_tls_ctx *sctx = server_ctx(&scfg), *cctx = client_ctx(&c1);
 
-	printf("TLS (%s): the secure minimal mode on the wire\n",
+	printf("TLS (%s): the secure minimal mode and the algorithms on the wire\n",
 	       esdm_tls_stack());
 
 	if (sctx && cctx) {
@@ -1075,8 +1154,8 @@ static void test_contexts(void)
 }
 
 /*
- * The key exchange of two sides of the TLS stack of the build: the group of
- * ML-KEM it prefers, see "Post-quantum algorithms" in esdm_tls.h
+ * The key exchange of two sides of the TLS stack of the build: the hybrid of
+ * ML-KEM, see "Algorithms" in esdm_tls.h
  */
 static int test_mlkem(void)
 {
@@ -1091,12 +1170,12 @@ static int test_mlkem(void)
 	size_t i;
 
 	if (!group) {
-		printf("TLS (%s): the TLS stack has no group of ML-KEM - skipped\n",
+		printf("TLS (%s): the TLS stack has no hybrid of ML-KEM - skipped\n",
 		       esdm_tls_stack());
 		return 77;
 	}
-	printf("TLS (%s): key exchange by ML-KEM, %s preferred\n",
-	       esdm_tls_stack(), group);
+	printf("TLS (%s): key exchange by the hybrid %s\n", esdm_tls_stack(),
+	       group);
 
 	sctx = server_ctx(&scfg);
 	cctx = client_ctx(&c1);
@@ -1127,193 +1206,59 @@ static int test_mlkem(void)
 	return failures ? 1 : 0;
 }
 
-/* A handshake of @scfg and @ccfg, which has to succeed */
-static void expect_handshake(const struct esdm_tls_config *scfg,
-			     const struct esdm_tls_config *ccfg,
-			     const char *what)
-{
-	struct esdm_tls_ctx *sctx = server_ctx(scfg), *cctx = client_ctx(ccfg);
-	struct pair p;
-
-	CHECK(!pair_open(&p, sctx, cctx, "localhost"), "%s: pair", what);
-	CHECK(!pair_handshake(&p),
-	      "%s: handshake: server %d (%s), client %d (%s)", what, p.sret,
-	      esdm_tls_error(p.s), p.cret, esdm_tls_error(p.c));
-	if (!p.sret && !p.cret)
-		printf("  %s: the server sees %s, the client %s\n", what,
-		       esdm_tls_peer_subject(p.s), esdm_tls_peer_subject(p.c));
-	pair_close(&p);
-
-	esdm_tls_ctx_put(sctx);
-	esdm_tls_ctx_put(cctx);
-}
-
 /*
- * Certificates on ECDSA of a CA on ML-DSA-87: the chains, the own one checked
- * by the contexts, and the CRLs signed with ML-DSA-87 - and the chain through
- * a CA on ML-DSA-65 refused
- */
-static int test_mldsa_ca(void)
-{
-	struct esdm_tls_config scfg =
-		cfg_of(PKI("mldsa-ec-server.crt"), PKI("mldsa-ec-server.key"),
-		       PKI("mldsa-ca.crt"));
-	struct esdm_tls_config ccfg =
-		cfg_of(PKI("mldsa-ec-client.crt"), PKI("mldsa-ec-client.key"),
-		       PKI("mldsa-ca.crt"));
-	struct esdm_tls_config c65 =
-		cfg_of(PKI("mldsa65-ec-client.crt"),
-		       PKI("mldsa65-ec-client.key"), PKI("mldsa-ca.crt"));
-	struct esdm_tls_ctx *sctx, *cctx;
-
-	if (!(esdm_tls_mldsa() & ESDM_TLS_MLDSA_CA)) {
-		printf("TLS (%s): the TLS stack verifies no signature of ML-DSA - skipped\n",
-		       esdm_tls_stack());
-		return 77;
-	}
-	printf("TLS (%s): certificates of a CA on ML-DSA\n", esdm_tls_stack());
-
-	expect_handshake(&scfg, &ccfg, "ECDSA of an ML-DSA CA");
-
-	/* A CA on ML-DSA-65 in the chain of the client is not taken */
-	sctx = server_ctx(&scfg);
-	cctx = client_ctx(&c65);
-	expect_crl(sctx, cctx, false, "ECDSA client of an ML-DSA-65 CA");
-	esdm_tls_ctx_put(sctx);
-	esdm_tls_ctx_put(cctx);
-
-	/* CRLs of both CAs, which only count if their signature verifies */
-	scfg.crl_check_all = true;
-	cfg_add_crl(&scfg, PKI("mldsa-int.crl"));
-	cfg_add_crl(&scfg, PKI("mldsa-ca.crl"));
-	cfg_add_crl(&ccfg, PKI("mldsa-ca.crl"));
-	expect_handshake(&scfg, &ccfg, "with the CRLs of the ML-DSA CAs");
-
-	/* Without the one of the root CA, the client is refused */
-	scfg.crl_files_num = 1;
-	sctx = server_ctx(&scfg);
-	cctx = client_ctx(&ccfg);
-	expect_crl(sctx, cctx, false,
-		   "crl_check_all without the CRL of the ML-DSA root CA");
-	esdm_tls_ctx_put(sctx);
-	esdm_tls_ctx_put(cctx);
-
-	printf("TLS (%s): ML-DSA CA %s\n", esdm_tls_stack(),
-	       failures ? "FAILED" : "passed");
-	return failures ? 1 : 0;
-}
-
-/*
- * Certificates on ML-DSA-87 for both sides, with the handshake signed with
- * them: alone, revoked, next to those on ECDSA, and the checks of a context,
- * which refuses one on ML-DSA-65
+ * Certificates on ML-DSA - a post-quantum signature on its own - are not
+ * taken, see "Algorithms" in esdm_tls.h: neither as the own certificate, nor
+ * in its chain, nor among the trust anchors. Every context with one is
+ * refused, with every TLS stack - by the check of esdm_tls.c, or by the TLS
+ * stack where it cannot even parse them.
  */
 static int test_mldsa(void)
 {
-	struct esdm_tls_config scfg =
-		cfg_of(PKI("mldsa-server.crt"), PKI("mldsa-server.key"),
-		       PKI("mldsa-ca.crt"));
-	struct esdm_tls_config ccfg =
-		cfg_of(PKI("mldsa-client.crt"), PKI("mldsa-client.key"),
-		       PKI("mldsa-ca.crt"));
-	struct esdm_tls_config crev =
-		cfg_of(PKI("mldsa-client-revoked.crt"),
-		       PKI("mldsa-client-revoked.key"), PKI("mldsa-ca.crt"));
-	struct esdm_tls_config c65 =
-		cfg_of(PKI("mldsa65-client.crt"), PKI("mldsa65-client.key"),
-		       PKI("mldsa-ca.crt"));
+	static const struct {
+		const char *cert, *key, *ca, *what;
+		bool server;
+	} cases[] = {
+		{ "mldsa-server.crt", "mldsa-server.key", "mldsa-ca.crt",
+		  "a server on ML-DSA-87", true },
+		{ "mldsa-client.crt", "mldsa-client.key", "mldsa-ca.crt",
+		  "a client on ML-DSA-87", false },
+		{ "mldsa65-client.crt", "mldsa65-client.key", "mldsa-ca.crt",
+		  "a client on ML-DSA-65", false },
+		{ "mldsa-ec-server.crt", "mldsa-ec-server.key", "mldsa-ca.crt",
+		  "a server on ECDSA of a CA on ML-DSA-87", true },
+		{ "mldsa-ec-client.crt", "mldsa-ec-client.key", "ca-mldsa.crt",
+		  "a client on ECDSA with an intermediate CA on ML-DSA-87",
+		  false },
+		/* The chain of the own certificate is a conventional one */
+		{ "server.crt", "server.key", "ca-mldsa.crt",
+		  "a server on ECDSA trusting a CA on ML-DSA-87 as well",
+		  true },
+	};
 	struct esdm_tls_config cfg;
-	struct esdm_tls_ctx *sctx, *cctx, *ctx = NULL;
-	static const char *const names[] = { "localhost", "127.0.0.1", "::1" };
-	struct pair p;
+	struct esdm_tls_ctx *ctx;
 	unsigned int i;
 	int ret;
 
-	/* A certificate the TLS stack cannot sign with makes no context */
-	if (!(esdm_tls_mldsa() & ESDM_TLS_MLDSA_AUTH)) {
-		ret = esdm_tls_ctx_alloc(true, &scfg, &ctx);
-		CHECK(ret == -EINVAL,
-		      "a context with a certificate on ML-DSA was not refused: %d",
-		      ret);
+	printf("TLS (%s): certificates on ML-DSA refused\n", esdm_tls_stack());
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		cfg = cfg_of(pki_file(cases[i].cert), pki_file(cases[i].key),
+			     pki_file(cases[i].ca));
+		ctx = NULL;
+		ret = esdm_tls_ctx_alloc(cases[i].server, &cfg, &ctx);
+		CHECK(ret == -EINVAL, "%s: a context was built (%d)",
+		      cases[i].what, ret);
 		esdm_tls_ctx_put(ctx);
-		printf("TLS (%s): the TLS stack signs no handshake with ML-DSA, a context with a certificate on ML-DSA is refused - skipped\n",
-		       esdm_tls_stack());
-		return failures ? 1 : 77;
+		printf("  %s: refused\n", cases[i].what);
 	}
-	printf("TLS (%s): certificates on ML-DSA\n", esdm_tls_stack());
 
-	sctx = server_ctx(&scfg);
-	cctx = client_ctx(&ccfg);
-	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-		if (!name_usable(names[i]))
-			continue;
-		CHECK(!pair_open(&p, sctx, cctx, names[i]), "pair");
-		CHECK(!pair_handshake(&p),
-		      "handshake with server name %s: server %d (%s), client %d (%s)",
-		      names[i], p.sret, esdm_tls_error(p.s), p.cret,
-		      esdm_tls_error(p.c));
-		if (!i) {
-			CHECK(strstr(esdm_tls_peer_subject(p.s),
-				     "ML-DSA Client"),
-			      "the server sees the subject %s",
-			      esdm_tls_peer_subject(p.s));
-			CHECK(strstr(esdm_tls_peer_subject(p.c),
-				     "ML-DSA Server"),
-			      "the client sees the subject %s",
-			      esdm_tls_peer_subject(p.c));
-			printf("  ML-DSA-87 server and client of an ML-DSA-87 CA: %s, %s\n",
-			       esdm_tls_cipher(p.s), esdm_tls_group(p.s));
-		}
-		pair_close(&p);
-	}
-	esdm_tls_ctx_put(sctx);
-	esdm_tls_ctx_put(cctx);
-
-	/* Revocation by a CRL signed with ML-DSA */
-	scfg.crl_check_all = true;
-	cfg_add_crl(&scfg, PKI("mldsa-int.crl"));
-	cfg_add_crl(&scfg, PKI("mldsa-ca.crl"));
-	sctx = server_ctx(&scfg);
-	cctx = client_ctx(&ccfg);
-	expect_crl(sctx, cctx, true, "ML-DSA client with all CRLs");
-	esdm_tls_ctx_put(cctx);
-	cctx = client_ctx(&crev);
-	expect_crl(sctx, cctx, false, "revoked ML-DSA client");
-	esdm_tls_ctx_put(cctx);
-	esdm_tls_ctx_put(sctx);
-
-	/* Either kind of certificate, either side, trusting both CAs */
-	scfg = cfg_of(PKI("server.crt"), PKI("server.key"),
-		      PKI("ca-mldsa.crt"));
-	ccfg.ca_file = PKI("ca-mldsa.crt");
-	expect_handshake(&scfg, &ccfg, "ECDSA server, ML-DSA client");
-	scfg = cfg_of(PKI("mldsa-server.crt"), PKI("mldsa-server.key"),
-		      PKI("ca-mldsa.crt"));
-	cfg = cfg_of(PKI("client1.crt"), PKI("client1.key"),
-		     PKI("ca-mldsa.crt"));
-	expect_handshake(&scfg, &cfg, "ML-DSA server, ECDSA client");
-
-	/* The key has to belong to the certificate */
-	cfg = cfg_of(PKI("mldsa-server.crt"), PKI("mldsa-client.key"),
-		     PKI("mldsa-ca.crt"));
-	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
-	      "an ML-DSA key not belonging to the certificate was accepted");
-	cfg = cfg_of(PKI("mldsa-client.crt"), PKI("mldsa-client-revoked.key"),
-		     PKI("mldsa-ca.crt"));
-	CHECK(esdm_tls_ctx_alloc(false, &cfg, &ctx) == -EINVAL,
-	      "a key of the parameter set of the certificate, not its own, was accepted");
-	cfg = cfg_of(PKI("mldsa-server.crt"), PKI("server.key"),
-		     PKI("mldsa-ca.crt"));
-	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
-	      "an ECDSA key for an ML-DSA certificate was accepted");
-	cfg = cfg_of(PKI("mldsa-server.crt"), PKI("mldsa-server.key"),
-		     PKI("ca.crt"));
-	CHECK(esdm_tls_ctx_alloc(true, &cfg, &ctx) == -EINVAL,
-	      "an ML-DSA certificate not chaining to the trust anchors was accepted");
-
-	/* Of ML-DSA, ML-DSA-87 alone is taken */
-	CHECK(esdm_tls_ctx_alloc(false, &c65, &ctx) == -EINVAL,
-	      "a context with a certificate on ML-DSA-65 was built");
+	/* And the conventional one alone is taken */
+	cfg = cfg_of(PKI("server.crt"), PKI("server.key"), PKI("ca.crt"));
+	ctx = NULL;
+	CHECK(!esdm_tls_ctx_alloc(true, &cfg, &ctx),
+	      "the conventional server was refused");
+	esdm_tls_ctx_put(ctx);
 
 	printf("TLS (%s): ML-DSA %s\n", esdm_tls_stack(),
 	       failures ? "FAILED" : "passed");
@@ -1329,8 +1274,6 @@ int main(int argc, char *argv[])
 	if (argc > 1) {
 		if (!strcmp(argv[1], "mlkem"))
 			return test_mlkem();
-		if (!strcmp(argv[1], "mldsa-ca"))
-			return test_mldsa_ca();
 		if (!strcmp(argv[1], "mldsa"))
 			return test_mldsa();
 		printf("unknown part %s\n", argv[1]);

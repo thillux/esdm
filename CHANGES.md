@@ -63,20 +63,24 @@ certificate closed, and CRLs close to or past their nextUpdate logged;
 esdm-egd-net-crl-update@.timer downloads CRLs without an HTTP client in the
 daemons
 
-* EGD over the network: TLS 1.3 is post-quantum ready - the key exchange
-prefers the hybrid of ML-KEM SecP384r1MLKEM1024 and MLKEM1024 alone, in this
-order, to the (EC)DHE groups - not the hybrids whose conventional half falls
-short of 192 bits, X25519MLKEM768 and SecP256r1MLKEM768 -, and certificates of
-the server, the clients and the CAs may be on ML-DSA-87 - ML-DSA-44 and
-ML-DSA-65 are refused, in the own certificate and in the chain of a peer -, as
-far as the TLS stack has them: OpenSSL 3.5 all of it, GnuTLS built with
-leancrypto the hybrid and ML-DSA (in the handshake from 3.8.10 on), Botan
-ML-KEM from 3.7 on and CAs on ML-DSA-87 from 3.6 on - Botan refuses a
-certificate of its own on ML-DSA, as it has no signature scheme of TLS for it.
-A group the TLS stack lacks is left out rather than failing the start, and a
-peer without ML-KEM is served with (EC)DHE; the debug log tells what the TLS
-stack has and the group of each connection. es-ext-net, on the same TLS 1.3,
-has all of it
+* EGD over the network: TLS 1.3 takes the algorithms of BSI TR-02102-2 alone,
+with every TLS stack - the conventional ones it recommends and the hybrid key
+exchange it allows, no algorithm of post-quantum cryptography on its own:
+the suites TLS_AES_256_GCM_SHA384 and TLS_AES_128_GCM_SHA256 (and
+TLS_AES_128_CCM_SHA256 with GnuTLS), the key exchange by the hybrid of ML-KEM
+SecP384r1MLKEM1024 ahead of secp384r1, secp256r1, secp521r1, the curves of
+Brainpool, ffdhe3072 and ffdhe4096, signatures by ECDSA and RSA-PSS, and
+certificates on RSA of 3072 bits and more or on elliptic curves of 256 bits
+and more. Neither X25519, X448, ffdhe2048, ChaCha20-Poly1305, EdDSA nor
+signatures with SHA-1 are offered or accepted, nor ML-KEM alone, nor a hybrid
+whose conventional half falls short of 192 bits (X25519MLKEM768,
+SecP256r1MLKEM768); a certificate on ML-DSA, EdDSA or DSA among the own
+certificate, its chain and the trust anchors fails the start, one in the
+chain of a peer the handshake. The hybrid comes with OpenSSL 3.5, GnuTLS
+built with leancrypto and Botan 3.8; a TLS stack without it, or a peer
+without it, keeps to the conventional groups. The debug log tells whether the
+TLS stack has the hybrid, and the group of each connection. es-ext-net, on
+the same TLS 1.3, has all of it
 
 * libesdm_egd_client: network modes - esdm_egd_client_alloc_net() with an
 extensible configuration, plain TCP, which keeps the syscall discipline of the
@@ -179,8 +183,8 @@ by default; see esdm-es-ext-relay(8) and NETWORK in libesdm_es_ext(3)
 incompatible with the 1.2.4 development versions: a provider listens, and the
 relay connects, on TCP, neither needs the kernel module sctp, a firewall
 passes TCP to port 7379, and the status tells "tcp" as the "transport"; the
-key exchange of ML-KEM and certificates on ML-DSA-87, which DTLS 1.2 had no
-place for, are those of egd-net now
+algorithms are those of egd-net now, the hybrid key exchange of ML-KEM, which
+DTLS 1.2 had no place for, included
 
 * Incompatible with the 1.2.4 development versions, whose PKCS#11 entropy source was part of the ESDM: esdm-tool --pkcs11-pin and --pkcs11-token-label, esdm-server --pkcs11_module, esdm_rpcc_set_pkcs11_config[_int]() of libesdm_rpc_client, esdm_config_es_pkcs11_entropy_rate[_set]() of libesdm and the meson options es_pkcs11_pin and es_pkcs11_entropy_blocks are removed - the module, the token label and the PIN are configuration of esdm-es-pkcs11, and es_pkcs11_module_path, es_pkcs11_token_label and es_pkcs11_entropy_rate are its defaults; the slot of the RPC call stays as RpcReservedSetPkcs11Config, which the server answers with -EOPNOTSUPP, so that the calls after it keep their index on the wire
 

@@ -399,10 +399,11 @@ There are two modes:
   private CA, the clients are identified by the fingerprint of theirs, and
   CRLs are checked the same way with every TLS stack. Certificates, trust
   anchors and CRLs are taken up while the daemons run. The TLS stack is that
-  of the crypto backend - OpenSSL, GnuTLS or Botan. The key exchange prefers
-  the post-quantum SecP384r1MLKEM1024 and MLKEM1024 to (EC)DHE,
-  and certificates and CAs may be on ML-DSA-87, as far as the TLS stack has them -
-  see `esdm-egd-net-server(8)`.
+  of the crypto backend - OpenSSL, GnuTLS or Botan. The algorithms are those of
+  BSI TR-02102-2: the key exchange prefers the hybrid SecP384r1MLKEM1024 to
+  (EC)DHE, as far as the TLS stack has it, and no post-quantum algorithm is
+  taken on its own - neither ML-KEM nor ML-DSA -, nor X25519, EdDSA or
+  ChaCha20-Poly1305 - see `esdm-egd-net-server(8)`.
 
 * Plain TCP, neither encrypted nor authenticated. It is meant only for
   networks that protect the traffic underneath - IPsec, WireGuard - and has to
