@@ -1261,6 +1261,15 @@ const char *esdm_tls_backend_cipher(void *conn)
 	return name ? name : "unknown";
 }
 
+const char *esdm_tls_backend_group(void *conn)
+{
+	struct esdm_tls_gnutls_conn *d = conn;
+	gnutls_group_t group = gnutls_group_get(d->session);
+
+	return group == GNUTLS_GROUP_INVALID ? NULL :
+					       gnutls_group_get_name(group);
+}
+
 const char *esdm_tls_backend_error(void *conn)
 {
 	struct esdm_tls_gnutls_conn *d = conn;

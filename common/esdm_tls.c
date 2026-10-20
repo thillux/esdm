@@ -903,6 +903,15 @@ const char *esdm_tls_cipher(struct esdm_tls *tls)
 	return name ? name : "none";
 }
 
+const char *esdm_tls_group(struct esdm_tls *tls)
+{
+	const char *name = (tls && tls->established) ?
+				   esdm_tls_backend_group(tls->backend) :
+				   NULL;
+
+	return name ? name : "none";
+}
+
 const char *esdm_tls_error(struct esdm_tls *tls)
 {
 	const char *err;

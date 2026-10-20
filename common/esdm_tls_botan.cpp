@@ -629,6 +629,10 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 		const Botan::TLS::Session_Summary &session) override
 	{
 		m_cipher = session.ciphersuite().to_string();
+#if BOTAN_VERSION_CODE >= BOTAN_VERSION_CODE_FOR(3, 7, 0)
+		/* The group, which a summary tells from 3.7 on */
+		m_group = session.kex_parameters().value_or("");
+#endif
 	}
 
 	void tls_verify_cert_chain(
@@ -807,6 +811,8 @@ class Esdm_Tls_Callbacks final : public Botan::TLS::Callbacks {
 	bool m_fatal = false;
 	Botan::TLS::Alert::Type m_alert = Botan::TLS::Alert::CloseNotify;
 	std::string m_cipher = "unknown";
+	/* The key exchange group, empty while unknown */
+	std::string m_group;
 	std::string m_error;
 };
 
@@ -1482,6 +1488,14 @@ const char *esdm_tls_backend_cipher(void *conn)
 	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
 
 	return c->callbacks->m_cipher.c_str();
+}
+
+const char *esdm_tls_backend_group(void *conn)
+{
+	auto *c = static_cast<Esdm_Tls_Conn *>(conn);
+
+	return c->callbacks->m_group.empty() ? nullptr :
+					       c->callbacks->m_group.c_str();
 }
 
 const char *esdm_tls_backend_error(void *conn)

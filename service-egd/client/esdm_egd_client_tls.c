@@ -37,6 +37,7 @@ static const struct esdm_egd_tls_module esdm_egd_tls_module_ops = {
 	.close_notify = esdm_tls_close_notify,
 	.peer_subject = esdm_tls_peer_subject,
 	.cipher = esdm_tls_cipher,
+	.group = esdm_tls_group,
 	.error = esdm_tls_error,
 	.wait = esdm_tls_wait,
 	.stamp = esdm_tls_stamp,

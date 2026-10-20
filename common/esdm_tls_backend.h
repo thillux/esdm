@@ -214,6 +214,9 @@ void esdm_tls_backend_close_notify(void *conn);
 /* Name of the cipher suite in use */
 const char *esdm_tls_backend_cipher(void *conn);
 
+/* Name of the key exchange group in use, NULL if there is none yet */
+const char *esdm_tls_backend_group(void *conn);
+
 /*
  * The keying material exporter of RFC 5705 - DTLS 1.2 - with the label @label
  * of @label_len bytes and no context, into @out of @out_len bytes. Called on

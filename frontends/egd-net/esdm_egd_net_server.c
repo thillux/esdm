@@ -711,8 +711,9 @@ static int server_conn_handshake(struct server_conn *conn)
 	}
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
-		    "%s: client %s connected, %s\n", SERVER_NAME, conn->peer,
-		    esdm_tls_cipher(conn->tls));
+		    "%s: client %s connected, %s, %s\n", SERVER_NAME,
+		    conn->peer, esdm_tls_cipher(conn->tls),
+		    esdm_tls_group(conn->tls));
 
 	return 0;
 }

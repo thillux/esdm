@@ -1049,10 +1049,11 @@ static int esdm_egd_client_handshake(struct esdm_egd_client *client,
 			    client->socket_path, EGDC_TLS(error)(client->tls));
 	} else if (!ret) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-			    "EGD client: %s authenticated as %s, %s\n",
+			    "EGD client: %s authenticated as %s, %s, %s\n",
 			    client->socket_path,
 			    EGDC_TLS(peer_subject)(client->tls),
-			    EGDC_TLS(cipher)(client->tls));
+			    EGDC_TLS(cipher)(client->tls),
+			    EGDC_TLS(group)(client->tls));
 	}
 
 	return ret;

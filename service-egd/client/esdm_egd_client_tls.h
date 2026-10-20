@@ -43,7 +43,7 @@
 extern "C" {
 #endif
 
-#define ESDM_EGD_TLS_MODULE_VERSION 1
+#define ESDM_EGD_TLS_MODULE_VERSION 2
 
 /* What the library looks up in the module */
 #define ESDM_EGD_TLS_MODULE_SYMBOL "esdm_egd_tls_module"
@@ -69,6 +69,7 @@ struct esdm_egd_tls_module {
 	void (*close_notify)(struct esdm_tls *tls);
 	const char *(*peer_subject)(struct esdm_tls *tls);
 	const char *(*cipher)(struct esdm_tls *tls);
+	const char *(*group)(struct esdm_tls *tls);
 	const char *(*error)(struct esdm_tls *tls);
 	int (*wait)(struct esdm_tls *tls, int timeout_ms);
 	void (*stamp)(const struct esdm_tls_config *cfg,

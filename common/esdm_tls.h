@@ -505,6 +505,12 @@ int esdm_tls_peer_revoked(struct esdm_tls *tls, struct esdm_tls_ctx *ctx,
 const char *esdm_tls_cipher(struct esdm_tls *tls);
 
 /**
+ * @brief Name of the key exchange group of the connection as the TLS stack
+ *	  names it, for logging; "none" before the handshake is complete
+ */
+const char *esdm_tls_group(struct esdm_tls *tls);
+
+/**
  * @brief Why the connection failed, for logging; "none" if it did not
  */
 const char *esdm_tls_error(struct esdm_tls *tls);
@@ -681,6 +687,12 @@ static inline int esdm_tls_peer_revoked(struct esdm_tls *tls,
 }
 
 static inline const char *esdm_tls_cipher(struct esdm_tls *tls)
+{
+	(void)tls;
+	return "none";
+}
+
+static inline const char *esdm_tls_group(struct esdm_tls *tls)
 {
 	(void)tls;
 	return "none";

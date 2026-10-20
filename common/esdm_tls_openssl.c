@@ -1221,6 +1221,15 @@ const char *esdm_tls_backend_cipher(void *conn)
 	return SSL_get_cipher_name(c->ssl);
 }
 
+const char *esdm_tls_backend_group(void *conn)
+{
+	struct esdm_tls_openssl_conn *c = conn;
+	int nid = (int)SSL_get_negotiated_group(c->ssl);
+
+	/* A NID, or the id of TLS of a group of a provider, as OpenSSL has it */
+	return nid ? SSL_group_to_name(c->ssl, nid) : NULL;
+}
+
 const char *esdm_tls_backend_error(void *conn)
 {
 	struct esdm_tls_openssl_conn *c = conn;
