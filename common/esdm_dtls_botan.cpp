@@ -45,7 +45,9 @@
 #include <botan/secmem.h>
 #include <botan/system_rng.h>
 #include <botan/tls_callbacks.h>
+#include <botan/tls_ciphersuite.h>
 #include <botan/tls_client.h>
+#include <botan/tls_exceptn.h>
 #include <botan/tls_external_psk.h>
 #include <botan/tls_policy.h>
 #include <botan/tls_server.h>
@@ -63,22 +65,55 @@ namespace
 {
 
 /*
- * DTLS 1.2 exactly: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 of RFC 8442 on
- * brainpoolP512r1, or on secp521r1 with a peer that does not offer it - the
- * OpenSSL and GnuTLS backends, which offer secp521r1 only; no renegotiation;
- * the link MTU of esdm_dtls_backend.h, as nothing is fragmented on the
- * connection.
+ * DTLS 1.2 exactly, ECDHE with the pre-shared key: preferably
+ * TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 of RFC 8442 on brainpoolP512r1;
+ * TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with Encrypt-then-MAC, and secp521r1,
+ * with a peer that has neither - the OpenSSL and GnuTLS backends. No
+ * renegotiation; the link MTU of esdm_dtls_backend.h, as nothing is
+ * fragmented on the connection.
  */
 class Esdm_Dtls_Policy final : public Botan::TLS::Policy {
     public:
 	std::vector<std::string> allowed_ciphers() const override
 	{
-		return { "AES-256/GCM" };
+		return { "AES-256/GCM", "AES-256" };
 	}
 
 	std::vector<std::string> allowed_macs() const override
 	{
-		return { "AEAD" };
+		return { "AEAD", "SHA-384" };
+	}
+
+	/*
+	 * The suites, GCM first. Botan's own list leaves the CBC suites out of
+	 * DTLS: its MAC-then-encrypt decryption keeps a timing channel of Lucky
+	 * Thirteen, which DTLS lets an attacker observe as often as it likes.
+	 * With Encrypt-then-MAC, the MAC is checked over the ciphertext before
+	 * anything is decrypted, and there is no such channel: the CBC suite is
+	 * taken with it only - see tls_session_established(). A suite this
+	 * build of Botan does not have is left out.
+	 */
+	std::vector<uint16_t>
+	ciphersuite_list(Botan::TLS::Protocol_Version version) const override
+	{
+		/* ECDHE_PSK_WITH_AES_256_GCM_SHA384, ..._256_CBC_SHA384 */
+		static const uint16_t suites[] = { 0xD002, 0xC038 };
+		std::vector<uint16_t> list;
+
+		(void)version;
+
+		for (const auto id : suites) {
+			const auto suite = Botan::TLS::Ciphersuite::by_id(id);
+
+			if (suite && suite->valid())
+				list.push_back(id);
+		}
+		return list;
+	}
+
+	bool negotiate_encrypt_then_mac() const override
+	{
+		return true;
 	}
 
 	std::vector<std::string> allowed_key_exchange_methods() const override
@@ -247,9 +282,21 @@ class Esdm_Dtls_Callbacks final : public Botan::TLS::Callbacks {
 			m_closed = true;
 	}
 
+	/*
+	 * The CBC suite without Encrypt-then-MAC is refused, see
+	 * Esdm_Dtls_Policy::ciphersuite_list(): the exception ends the
+	 * handshake with a fatal alert. Every peer of the ESDM offers and
+	 * agrees to it, whichever its TLS stack.
+	 */
 	void tls_session_established(
 		const Botan::TLS::Session_Summary &session) override
 	{
+		if (session.ciphersuite().cbc_ciphersuite() &&
+		    !session.supports_encrypt_then_mac())
+			throw Botan::TLS::TLS_Exception(
+				Botan::TLS::Alert::InsufficientSecurity,
+				"CBC without Encrypt-then-MAC");
+
 		m_cipher = session.ciphersuite().to_string();
 	}
 
