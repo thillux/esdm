@@ -64,6 +64,22 @@ rpc_server_conn_test = executable(
 
 test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
 
+# The event loops of the server's workers: io_uring where it is built and the
+# kernel lets the test set it up, epoll where it is switched off or refused by
+# a seccomp filter of the test - serving a stand-in service on sockets of the
+# test's own.
+rpc_server_loop_test = executable(
+		'rpc_server_loop_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_loop_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC server event loops', rpc_server_loop_test, timeout: 120)
+
 # The opportunistic DTLS of the RPC connections: the client library of the test
 # against the server's accept loop and workers serving stand-in services,
 # through a relay on the sockets the client connects to - which are fixed at
