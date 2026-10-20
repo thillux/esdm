@@ -46,7 +46,19 @@ extern "C" {
  */
 #define ESDM_DTLS_LINK_MTU 16700
 
-/* DTLS 1.2, ephemeral ECDH, ECDSA P-256 certificate, AEAD ciphers */
+/*
+ * DTLS 1.2, ECDHE-PSK with AES-256 on curves of 256 bits of security or more,
+ * see esdm_dtls.h.
+ *
+ * The pre-shared key and its identity are constants of the ESDM, the same in
+ * every build and every process, and no secret: the key is the SHA-256 of the
+ * identity, printf %s esdm-opportunistic-dtls | sha256sum. They only let the
+ * TLS stacks run the key exchange without a certificate - what a peer is
+ * trusted for is still what the kernel says about it.
+ */
+#define ESDM_DTLS_PSK_IDENTITY "esdm-opportunistic-dtls"
+#define ESDM_DTLS_PSK_LEN 32
+extern const uint8_t esdm_dtls_psk[ESDM_DTLS_PSK_LEN];
 
 /* Name of the TLS stack, for logging */
 const char *esdm_dtls_backend_name(void);

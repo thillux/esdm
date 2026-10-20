@@ -33,21 +33,26 @@
 #include <errno.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
-#include <openssl/evp.h>
 #include <openssl/provider.h>
 #include <openssl/ssl.h>
-#include <openssl/x509.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 
 #include "esdm_dtls.h"
 #include "esdm_dtls_backend.h"
 
-#define ESDM_DTLS_OPENSSL_CIPHERS                                              \
-	"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:"         \
-	"ECDHE-ECDSA-AES128-GCM-SHA256"
+/*
+ * TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 on P-521. OpenSSL has no ECDHE-PSK
+ * suite with AES-GCM - RFC 8442's - and its one with an AEAD cipher is
+ * ChaCha20-Poly1305, which neither NIST SP 800-52r2 nor BSI TR-02102-2
+ * allows. Encrypt-then-MAC is on by default, see
+ * esdm_dtls_openssl_client_hello().
+ */
+#define ESDM_DTLS_OPENSSL_CIPHERS "ECDHE-PSK-AES256-CBC-SHA384"
+#define ESDM_DTLS_OPENSSL_GROUPS "secp521r1"
 
 /******************************************************************************
  * The library context and the BIO, both set up once per process
@@ -196,45 +201,63 @@ const char *esdm_dtls_backend_name(void)
 }
 
 /*
- * An ephemeral key and a self-signed certificate for it: the DTLS is
- * unauthenticated - see esdm_dtls.h - so the certificate is only what DTLS
- * needs to carry the key, and nobody verifies it.
+ * The pre-shared key of either side, see esdm_dtls_backend.h. A server knows
+ * no other identity - returning 0 refuses a client with another one.
  */
-static int esdm_dtls_openssl_server_key(SSL_CTX *ctx)
+static unsigned int esdm_dtls_openssl_psk_client(SSL *ssl, const char *hint,
+						 char *identity,
+						 unsigned int max_identity_len,
+						 unsigned char *psk,
+						 unsigned int max_psk_len)
 {
-	EVP_PKEY *pkey;
-	X509 *cert;
-	X509_NAME *name;
-	int ret = -ENOMEM;
+	(void)ssl;
+	(void)hint;
 
-	pkey = EVP_PKEY_Q_keygen(esdm_dtls_openssl_libctx, NULL, "EC", "P-256");
-	cert = X509_new_ex(esdm_dtls_openssl_libctx, NULL);
-	if (!pkey || !cert)
-		goto out;
+	/* max_identity_len leaves out the terminating NUL */
+	if (sizeof(ESDM_DTLS_PSK_IDENTITY) - 1 > max_identity_len ||
+	    sizeof(esdm_dtls_psk) > max_psk_len)
+		return 0;
 
-	name = X509_get_subject_name(cert);
-	if (!X509_set_version(cert, X509_VERSION_3) ||
-	    !ASN1_INTEGER_set(X509_get_serialNumber(cert), 1) ||
-	    !X509_gmtime_adj(X509_getm_notBefore(cert), -3600) ||
-	    !X509_gmtime_adj(X509_getm_notAfter(cert), 3600L * 24 * 3650) ||
-	    !X509_set_pubkey(cert, pkey) ||
-	    !X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-					(const unsigned char *)"esdm", -1, -1,
-					0) ||
-	    !X509_set_issuer_name(cert, name) ||
-	    !X509_sign(cert, pkey, EVP_sha256()) ||
-	    !SSL_CTX_use_certificate(ctx, cert) ||
-	    !SSL_CTX_use_PrivateKey(ctx, pkey) ||
-	    !SSL_CTX_check_private_key(ctx))
-		goto out;
+	memcpy(identity, ESDM_DTLS_PSK_IDENTITY,
+	       sizeof(ESDM_DTLS_PSK_IDENTITY));
+	memcpy(psk, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	return sizeof(esdm_dtls_psk);
+}
 
-	ret = 0;
+static unsigned int esdm_dtls_openssl_psk_server(SSL *ssl, const char *identity,
+						 unsigned char *psk,
+						 unsigned int max_psk_len)
+{
+	(void)ssl;
 
-out:
-	ERR_clear_error();
-	X509_free(cert);
-	EVP_PKEY_free(pkey);
-	return ret;
+	if (!identity || strcmp(identity, ESDM_DTLS_PSK_IDENTITY) ||
+	    sizeof(esdm_dtls_psk) > max_psk_len)
+		return 0;
+
+	memcpy(psk, esdm_dtls_psk, sizeof(esdm_dtls_psk));
+	return sizeof(esdm_dtls_psk);
+}
+
+/*
+ * A client has to offer Encrypt-then-MAC (RFC 7366), which the server agrees
+ * to for a CBC suite: MAC-then-encrypt is what Lucky Thirteen reads records
+ * from, and DTLS lets an attacker try again after every record it broke. A
+ * client of OpenSSL cannot tell whether its server agreed - every server of
+ * the ESDM does, whichever its TLS stack.
+ */
+static int esdm_dtls_openssl_client_hello(SSL *ssl, int *alert, void *arg)
+{
+	const unsigned char *ext;
+	size_t len;
+
+	(void)arg;
+
+	if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_encrypt_then_mac, &ext,
+				      &len))
+		return SSL_CLIENT_HELLO_SUCCESS;
+
+	*alert = SSL_AD_INSUFFICIENT_SECURITY;
+	return SSL_CLIENT_HELLO_ERROR;
 }
 
 int esdm_dtls_backend_ctx_new(bool server, void **ctx)
@@ -252,13 +275,14 @@ int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 		goto err;
 
 	/*
-	 * DTLS 1.2 exactly, AEAD ciphers only, and neither renegotiation nor
-	 * session tickets - a connection lives as long as it does, with the
-	 * one handshake it started with.
+	 * DTLS 1.2 exactly, the one suite on the one curve, and neither
+	 * renegotiation nor session tickets - a connection lives as long as it
+	 * does, with the one handshake it started with.
 	 */
 	if (!SSL_CTX_set_min_proto_version(c, DTLS1_2_VERSION) ||
 	    !SSL_CTX_set_max_proto_version(c, DTLS1_2_VERSION) ||
-	    !SSL_CTX_set_cipher_list(c, ESDM_DTLS_OPENSSL_CIPHERS))
+	    !SSL_CTX_set_cipher_list(c, ESDM_DTLS_OPENSSL_CIPHERS) ||
+	    !SSL_CTX_set1_groups_list(c, ESDM_DTLS_OPENSSL_GROUPS))
 		goto err;
 	SSL_CTX_set_options(c, SSL_OP_NO_RENEGOTIATION | SSL_OP_NO_TICKET |
 				       SSL_OP_NO_QUERY_MTU);
@@ -276,11 +300,13 @@ int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 	SSL_CTX_set_options(c, SSL_OP_CLEANSE_PLAINTEXT);
 
 	if (server) {
-		if (esdm_dtls_openssl_server_key(c))
-			goto err;
+		SSL_CTX_set_psk_server_callback(c,
+						esdm_dtls_openssl_psk_server);
+		SSL_CTX_set_client_hello_cb(c, esdm_dtls_openssl_client_hello,
+					    NULL);
 	} else {
-		/* Unauthenticated, see esdm_dtls.h */
-		SSL_CTX_set_verify(c, SSL_VERIFY_NONE, NULL);
+		SSL_CTX_set_psk_client_callback(c,
+						esdm_dtls_openssl_psk_client);
 	}
 
 	*ctx = c;
