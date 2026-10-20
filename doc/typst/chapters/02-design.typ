@@ -669,9 +669,11 @@ following properties:
   requests discussed in the previous bullets were unsuccessful – the DRNG
   reverts back to an unseeded state, see section @sec:not-fully-seeded.
 
-#par(first-line-indent: 0pt)[With the automatic reseeding after 600 seconds,
-the ESDM is triggered to reseed itself before the first request after a
-suspend that put the hardware to sleep for longer than 600 seconds.]
+#par(first-line-indent: 0pt)[The reseed interval is timed on CLOCK_BOOTTIME,
+which counts the time the system was suspended: a DRNG whose 600 seconds
+elapsed during a suspend is reseeded before the first request after it. On top
+of that, `esdm-server-signal-helper --resume`, run by the resume unit, has the
+server reseed all DRNGs right after every resume.]
 
 === Fully Seeded Level <sec:seed-levels>
 

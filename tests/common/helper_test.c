@@ -38,7 +38,9 @@
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sched.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -76,6 +78,140 @@ static void test_online_nodes(void)
 			break;
 		}
 	}
+}
+
+/* Whole seconds of @clk, -1 if it cannot be read */
+static long long clock_sec(clockid_t clk)
+{
+	struct timespec ts;
+
+	if (clock_gettime(clk, &ts))
+		return -1;
+	return (long long)ts.tv_sec;
+}
+
+static int write_file(const char *path, const char *text)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	ssize_t len = (ssize_t)strlen(text);
+	int ret = 0;
+
+	if (fd < 0)
+		return -errno;
+	if (write(fd, text, (size_t)len) != len)
+		ret = -errno;
+	close(fd);
+	return ret;
+}
+
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
+
+/* The suspend played in a time namespace, in seconds */
+#define TEST_SUSPENDED_SEC 100000
+
+/*
+ * In a time namespace whose CLOCK_BOOTTIME runs TEST_SUSPENDED_SEC ahead of its
+ * CLOCK_MONOTONIC - which is what a suspend of that long looks like - does
+ * esdm_monotonic_now() count the suspended time? It reads the time spent
+ * suspended once per second, so the answer may take that long.
+ *
+ * @return 0 if it does, 1 if not, 77 if no time namespace can be had here
+ */
+static int monotonic_now_suspended(void)
+{
+	char map[64];
+	uid_t uid = geteuid();
+	gid_t gid = getegid();
+	int status, i;
+	pid_t pid;
+
+	/* A time namespace is owned by a user namespace, created along */
+	if (unshare(CLONE_NEWUSER | CLONE_NEWTIME))
+		return 77;
+
+	snprintf(map, sizeof(map), "0 %u 1", (unsigned int)uid);
+	if (write_file("/proc/self/setgroups", "deny") ||
+	    write_file("/proc/self/uid_map", map))
+		return 77;
+	snprintf(map, sizeof(map), "0 %u 1", (unsigned int)gid);
+	if (write_file("/proc/self/gid_map", map))
+		return 77;
+
+	/* Only before the first process enters the namespace */
+	snprintf(map, sizeof(map), "boottime %d 0", TEST_SUSPENDED_SEC);
+	if (write_file("/proc/self/timens_offsets", map))
+		return 77;
+
+	/* The caller stays outside, its children enter */
+	pid = fork();
+	if (pid < 0)
+		return 77;
+	if (!pid) {
+		for (i = 0; i < 30; i++) {
+			struct timespec pause = { .tv_sec = 0,
+						  .tv_nsec =
+							  100 * 1000 * 1000 };
+			long long mono = clock_sec(CLOCK_MONOTONIC);
+
+			if (esdm_monotonic_now() - mono >=
+			    TEST_SUSPENDED_SEC - 1)
+				_exit(0);
+			nanosleep(&pause, NULL);
+		}
+		_exit(1);
+	}
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+		return 1;
+	return WEXITSTATUS(status);
+}
+
+/*
+ * esdm_monotonic_now() keeps the time on CLOCK_BOOTTIME: the reseed interval
+ * of the DRNGs is timed with it, and a seed taken before a suspend must not
+ * serve on for a full interval after the resume.
+ */
+static void test_monotonic_now(void)
+{
+	long long boot, now, later;
+	int status;
+	pid_t pid;
+
+	boot = clock_sec(CLOCK_BOOTTIME);
+	now = esdm_monotonic_now();
+	later = esdm_monotonic_now();
+
+	/* The coarse clock it is read from lags by less than a tick */
+	CHECK(now >= boot - 1 && now <= boot + 1,
+	      "esdm_monotonic_now() returned %lld, CLOCK_BOOTTIME is at %lld",
+	      now, boot);
+	CHECK(later >= now, "esdm_monotonic_now() went back from %lld to %lld",
+	      now, later);
+
+	/* Namespaces of a process of their own, which they are kept to */
+	pid = fork();
+	if (pid < 0) {
+		CHECK(0, "cannot fork: %s", strerror(errno));
+		return;
+	}
+	if (!pid)
+		_exit(monotonic_now_suspended());
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+		CHECK(0, "the suspend check did not complete");
+		return;
+	}
+
+	if (WEXITSTATUS(status) == 77) {
+		printf("esdm_monotonic_now: suspend not covered, no time namespace to be had\n");
+		return;
+	}
+
+	CHECK(!WEXITSTATUS(status),
+	      "esdm_monotonic_now() does not count %d seconds spent suspended",
+	      TEST_SUSPENDED_SEC);
 }
 
 static void test_helper_macros(void)
@@ -661,6 +797,7 @@ int main(int argc, char *argv[])
 	may_enable_memory_debugging();
 
 	test_online_nodes();
+	test_monotonic_now();
 	test_helper_macros();
 	test_safe_read_write_roundtrip();
 	test_safe_read_partial();

@@ -28,9 +28,19 @@ running.
 .PP
 On
 .BR \-\-resume ,
-the helper connects to the unprivileged RPC interface and writes an empty data
-buffer into the auxiliary pool. That write is what triggers the reseed of the
-DRNGs after the resume; no PID file is needed for it.
+the helper connects to the privileged RPC interface and asks the daemon to
+reseed all of its DRNGs, as
+.B RNDRESEEDCRNG
+does for the kernel's random number generator: the seeds they hold are from
+before the suspend, and the reseed interval alone would keep them in service
+for up to its whole length afterwards. The reseed worker of the daemon reseeds
+them right away, and a DRNG asked for data before it got there is reseeded
+first. Only root may ask for this, which is what the shipped resume unit runs
+as; for anybody else the helper fails. No PID file is needed for it.
+.PP
+The reseed interval of the daemon counts the time the system was suspended as
+well, so a DRNG whose interval elapsed during a long suspend is reseeded at its
+next use even without the helper.
 .PP
 Both operations are wired to the sleep targets by the shipped
 .BR esdm\-server\-suspend.service " and " esdm\-server\-resume.service
@@ -44,7 +54,8 @@ has to be given.
 Signal the impending suspend.
 .TP
 .BR \-r ", " \-\-resume
-Signal the completed resume.
+Signal the completed resume, which has the daemon reseed its DRNGs. Requires
+root.
 .TP
 .BR \-p ", " \-\-pid " \fIPIDFILE\fR"
 Read the PID of the daemon from

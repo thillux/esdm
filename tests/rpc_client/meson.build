@@ -156,6 +156,14 @@ if get_option('esdm-server').enabled()
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
 		)
 
+	rpc_resume_reseed_test = executable(
+			'rpc_resume_reseed_test',
+			[ esdm_tester_common, 'rpc_resume_reseed_test.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
 	rpc_seed_lvl_test = executable(
 			'rpc_seed_lvl_test',
 			[ esdm_tester_common, 'rpc_seed_lvl.c' ],
@@ -240,6 +248,12 @@ if get_option('esdm-server').enabled()
 
 	test('RPC call seed_lvl_test', rpc_seed_lvl_test,
 		env: [ tester_esdm_env ])
+
+	# The server reseeds its DRNGs on the resume the signal helper reports
+	test('RPC server reseeds on resume', rpc_resume_reseed_test,
+		env: [ tester_esdm_env,
+		       'ESDM_SIGNAL_HELPER=' +
+				esdm_server_signal_helper.full_path() ])
 
 	# Sweeps every client wrapper in one server life cycle, hence the
 	# larger timeout.

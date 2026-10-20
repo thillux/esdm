@@ -35,9 +35,10 @@ void esdm_rpc_rnd_reseed_crng(PrivAccess_Service *service,
 	(void)service;
 
 	/*
-	 * Add the privilege check here to be compliant with the kernel although
-	 * a caller can invoke the reseed operation by simply writing data
-	 * into the DRNG.
+	 * Privileged as with the kernel. An unprivileged caller can write data
+	 * into the auxiliary pool, but that reseeds no DRNG - this is the call
+	 * that does, the resume after a suspend among its callers, see
+	 * esdm-server-signal-helper.
 	 */
 	if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;

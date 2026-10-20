@@ -305,9 +305,10 @@ static void test_suspend_trailing_junk(void)
 static void test_resume_without_server(void)
 {
 	/*
-	 * No server is running under this test, so the unprivileged service
+	 * No server is running under this test, so the privileged service
 	 * cannot be reached and resume signalling has to fail rather than
-	 * report a reseed that never happened.
+	 * report a reseed that never happened. That the reseed happens with a
+	 * server is the business of tests/rpc_client/rpc_resume_reseed_test.c.
 	 */
 	CHECK(!signal_resume(), "resume claimed success without a server");
 }

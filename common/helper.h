@@ -39,25 +39,25 @@ extern "C" {
 	(data_type *)((char *)(member) - (char *)&((data_type *)0)->member_var)
 
 /*
- * Whole seconds on CLOCK_MONOTONIC, 0 if the clock cannot be read.
+ * Whole seconds on CLOCK_BOOTTIME, 0 if the clock cannot be read.
  *
- * Read from the coarse clock, the time of the last tick, which lags the precise
- * one by less than a tick and never by a second: whole seconds are all that is
- * asked for. Every generate operation of a DRNG asks, for its reseed interval -
- * and the coarse clock is read from memory by the vDSO whatever the
- * clocksource is, while CLOCK_MONOTONIC takes a system call and a trap to the
- * hypervisor on a clocksource without a vDSO, such as acpi_pm or the HPET of a
- * guest whose TSC is not trusted.
+ * A clock that never goes back and that counts the time the system was
+ * suspended: what is timed with it - the reseed interval of the DRNGs above
+ * all - runs on during a suspend, so a seed taken before it does not serve on
+ * for another full interval after the resume, however long the system slept.
+ *
+ * Read from the coarse monotonic clock, the time of the last tick, which lags
+ * the precise one by less than a tick and never by a second: whole seconds are
+ * all that is asked for. Every generate operation of a DRNG asks, for its
+ * reseed interval - and the coarse clock is read from memory by the vDSO
+ * whatever the clocksource is, while CLOCK_MONOTONIC and CLOCK_BOOTTIME take a
+ * system call and a trap to the hypervisor on a clocksource without a vDSO,
+ * such as acpi_pm or the HPET of a guest whose TSC is not trusted. The time
+ * spent suspended, by which CLOCK_BOOTTIME is ahead of CLOCK_MONOTONIC, is
+ * added to it: that changes only across a suspend, and is read afresh at most
+ * once per second.
  */
-static inline long long esdm_monotonic_now(void)
-{
-	struct timespec now;
-
-	if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == -1)
-		return 0;
-
-	return (long long)now.tv_sec;
-}
+long long esdm_monotonic_now(void);
 
 /*
  * Milliseconds on CLOCK_MONOTONIC, from the coarse clock as well, 0 if the
@@ -80,7 +80,7 @@ static inline int64_t esdm_monotonic_coarse_ms(void)
 	return (int64_t)now.tv_sec * 1000 + (int64_t)now.tv_nsec / 1000000;
 }
 
-/* Seconds elapsed since timeout_sec (CLOCK_MONOTONIC), 0 if not yet reached */
+/* Seconds elapsed since timeout_sec (esdm_monotonic_now()), 0 if not reached */
 static inline time_t esdm_time_after_now(time_t timeout_sec)
 {
 	time_t curr = (time_t)esdm_monotonic_now();

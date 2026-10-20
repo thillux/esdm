@@ -191,7 +191,7 @@ struct esdm_drng *esdm_drng_node_instance(void)
 	return esdm_drng_init_instance();
 }
 
-/* Record the seed time (whole seconds, CLOCK_MONOTONIC). */
+/* Record the seed time (whole seconds of esdm_monotonic_now()). */
 static void esdm_drng_set_seeded_now(struct esdm_drng *drng)
 {
 	atomic_store(&drng->last_seeded_time, esdm_monotonic_now());
@@ -1510,9 +1510,13 @@ static DECLARE_WAIT_QUEUE(esdm_drng_reseed_wait);
 static _Atomic uint64_t esdm_drng_reseed_worker_passes = 0;
 
 /*
- * When the worker comes back to look at the DRNGs, in whole seconds on
- * CLOCK_MONOTONIC, or zero while no wait is scheduled - before the first pass
- * and after the last one.
+ * When the worker comes back to look at the DRNGs, in whole seconds of
+ * esdm_monotonic_now(), or zero while no wait is scheduled - before the first
+ * pass and after the last one. The wait itself is timed on CLOCK_MONOTONIC,
+ * which stands still while the system is suspended: after a resume, the worker
+ * sleeps out the rest of its wait, while this time may have passed already -
+ * and the requests running into a reseed interval that elapsed during the
+ * suspend tell it.
  */
 static _Atomic uint64_t esdm_drng_reseed_worker_wakeup = 0;
 

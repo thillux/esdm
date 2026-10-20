@@ -39,6 +39,67 @@
 #include "helper.h"
 #include "math_helper.h"
 
+#define ESDM_NSEC_PER_SEC 1000000000LL
+
+static long long esdm_timespec_ns(const struct timespec *ts)
+{
+	return (long long)ts->tv_sec * ESDM_NSEC_PER_SEC +
+	       (long long)ts->tv_nsec;
+}
+
+/*
+ * The time the system spent suspended, in nanoseconds: how far CLOCK_BOOTTIME
+ * is ahead of CLOCK_MONOTONIC. Read afresh in the first call of each second of
+ * the coarse monotonic clock, noted in esdm_suspended_sec - so a suspend is
+ * seen within a second of the resume, the monotonic clock having stood still
+ * meanwhile.
+ */
+static _Atomic long long esdm_suspended_ns = 0;
+static _Atomic long long esdm_suspended_sec = -1;
+
+/* The time spent suspended as of the coarse monotonic second @sec */
+static long long esdm_suspended(long long sec)
+{
+	struct timespec mono, boot;
+	long long now, seen;
+
+	seen = atomic_load_explicit(&esdm_suspended_ns, memory_order_relaxed);
+	if (atomic_load_explicit(&esdm_suspended_sec, memory_order_relaxed) ==
+	    sec)
+		return seen;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &mono) == -1 ||
+	    clock_gettime(CLOCK_BOOTTIME, &boot) == -1)
+		return seen;
+
+	/*
+	 * The two clocks are read one after the other, so this comes out larger
+	 * than the time spent suspended by what lies between the two reads -
+	 * which differs from one read to the next. Only ever grown: the clock
+	 * built on it must not go back on that account, and the time spent
+	 * suspended does not shrink.
+	 */
+	now = esdm_timespec_ns(&boot) - esdm_timespec_ns(&mono);
+	while (now > seen &&
+	       !atomic_compare_exchange_weak(&esdm_suspended_ns, &seen, now))
+		;
+	atomic_store_explicit(&esdm_suspended_sec, sec, memory_order_relaxed);
+
+	return (now > seen) ? now : seen;
+}
+
+long long esdm_monotonic_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == -1)
+		return 0;
+
+	return (esdm_timespec_ns(&now) +
+		esdm_suspended((long long)now.tv_sec)) /
+	       ESDM_NSEC_PER_SEC;
+}
+
 uint32_t esdm_online_nodes(void)
 {
 	/*

@@ -240,8 +240,8 @@ int esdm_selftest_es(void)
 /***************************** The self test pass *****************************/
 
 /*
- * How many self test passes completed, and when the last one did on
- * CLOCK_MONOTONIC.
+ * How many self test passes completed, and when the last one did in whole
+ * seconds of esdm_monotonic_now().
  */
 static atomic_llong esdm_selftest_passes_done = 0;
 static atomic_llong esdm_selftest_last_pass = 0;

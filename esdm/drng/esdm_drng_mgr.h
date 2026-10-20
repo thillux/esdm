@@ -63,9 +63,11 @@ struct esdm_drng {
 	atomic_llong seed_generation;
 
 	/*
-	 * Time of last seeding in whole seconds (CLOCK_MONOTONIC), atomic so
-	 * the lock-free must_reseed() fast path can read it without taking
-	 * drng->lock. No consumer needs sub-second resolution.
+	 * Time of last seeding in whole seconds of esdm_monotonic_now() -
+	 * CLOCK_BOOTTIME, so the reseed interval runs on while the system is
+	 * suspended - atomic so the lock-free must_reseed() fast path can read
+	 * it without taking drng->lock. No consumer needs sub-second
+	 * resolution.
 	 */
 	atomic_llong last_seeded_time;
 

@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <esdm_rpc_client.h>
 
 /*
@@ -103,22 +104,35 @@ static bool signal_suspend(char *pidfile_path)
 	return kill(pid, SIGUSR1) == 0;
 }
 
+/*
+ * The DRNGs come out of a suspend with the seeds they took before it, and their
+ * reseed interval alone would keep those in service for up to its whole length
+ * afterwards - while the memory they lived in through the suspend, or a
+ * hibernation image of it, may have been read meanwhile. Have the server
+ * reseed every DRNG before its next use: the RNDRESEEDCRNG of the privileged
+ * interface, which only root may ask for - the resume unit runs as root.
+ * Writing data into the auxiliary pool, which an unprivileged caller may, only
+ * stirs the pool and reseeds nothing.
+ */
 static bool signal_resume(void)
 {
 	int ret = -1;
 
-	if (esdm_rpcc_init_unpriv_service(NULL) != 0)
+	if (esdm_rpcc_init_priv_service(NULL) != 0)
 		return false;
 	fprintf(stdout, "Signal resume to ESDM\n");
 
-	/* write empty byte array to trigger reseed after resume */
-	unsigned char dummy_data[1] = { 0 };
+	esdm_invoke(esdm_rpcc_rnd_reseed_crng());
 
-	esdm_invoke(esdm_rpcc_write_data(dummy_data, sizeof(dummy_data)));
+	esdm_rpcc_fini_priv_service();
 
-	esdm_rpcc_fini_unpriv_service();
+	if (ret) {
+		fprintf(stderr, "The ESDM refused to reseed its DRNGs: %s\n",
+			strerror(-ret));
+		return false;
+	}
 
-	return ret == 0;
+	return true;
 }
 
 static void usage(void)
