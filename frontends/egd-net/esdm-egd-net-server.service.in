@@ -46,6 +46,8 @@ DynamicUser=yes
 LimitNOFILE=4096
 CapabilityBoundingSet=
 DevicePolicy=closed
+# No core dump to take the private key of the TLS files along
+LimitCORE=0
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes

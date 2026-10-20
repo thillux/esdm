@@ -66,8 +66,10 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <botan/certstor.h>
 #include <botan/data_src.h>
@@ -234,6 +236,53 @@ static std::string esdm_tls_botan_read(const std::string &path)
 	return text.str();
 }
 
+/* Largest key file read - a PKCS#8 key of RSA 16384 is less than 13 KiB */
+#define ESDM_TLS_BOTAN_MAX_KEY_FILE (64 * 1024)
+
+/*
+ * The contents of the private key file @path, in memory that is wiped when it
+ * is freed - also on the way out of an exception: read(2) straight into a
+ * secure_vector. A stream, as esdm_tls_botan_read() reads the public files
+ * with, holds what it read in buffers of its own, which nothing wipes.
+ */
+static Botan::secure_vector<uint8_t>
+esdm_tls_botan_read_secret(const std::string &path)
+{
+	Botan::secure_vector<uint8_t> buf(ESDM_TLS_BOTAN_MAX_KEY_FILE + 1);
+	size_t len = 0;
+	int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0)
+		throw Botan::Stream_IO_Error("cannot open " + path);
+
+	while (len < buf.size()) {
+		ssize_t n = read(fd, buf.data() + len, buf.size() - len);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0) {
+			int errsv = errno;
+
+			close(fd);
+			throw Botan::Stream_IO_Error("cannot read " + path +
+						     ": " +
+						     std::strerror(errsv));
+		}
+		if (!n)
+			break;
+		len += static_cast<size_t>(n);
+	}
+	close(fd);
+
+	if (len > ESDM_TLS_BOTAN_MAX_KEY_FILE)
+		throw Botan::Decoding_Error("the key file " + path +
+					    " is too large");
+	/* Shrinks in place: what is cut off is zero or wiped already */
+	buf.resize(len);
+
+	return buf;
+}
+
 static std::vector<Botan::X509_Certificate>
 esdm_tls_botan_load_certs(const std::string &path)
 {
@@ -330,11 +379,15 @@ class Esdm_Tls_Credentials final : public Botan::Credentials_Manager {
     private:
 	void load_key(const std::string &path)
 	{
-		std::string text = esdm_tls_botan_read(path);
-		Botan::DataSource_Memory src(text);
+		/*
+		 * Both hold the PEM in a secure_vector, wiped as they go out
+		 * of scope, whether the key loads or throws
+		 */
+		Botan::secure_vector<uint8_t> pem =
+			esdm_tls_botan_read_secret(path);
+		Botan::DataSource_Memory src(pem.data(), pem.size());
 
 		m_key = Botan::PKCS8::load_key(src);
-		memset_secure(text.data(), 0, text.size());
 
 		/* Both encoded by Botan, in the same way */
 		if (m_chain[0].subject_public_key()->public_key_bits() !=
