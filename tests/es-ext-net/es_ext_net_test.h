@@ -18,11 +18,9 @@
  */
 
 /*
- * What the tests of the external entropy sources on the network share: SCTP
+ * What the tests of the external entropy sources on the network share: TCP
  * sockets on loopback, bound to a port the kernel picked - so that no two
- * tests race for a port -, with or without the SCTP-AUTH of
- * esdm_tls_sctp_prepare(), and the skip of a test on a host whose kernel has
- * no SCTP.
+ * tests race for a port -, the daemons under test, and a client of them.
  *
  * The test PKI is the one of the EGD network tests, tests/egd-net/pki.
  */
@@ -35,6 +33,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,8 +45,6 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <linux/sctp.h>
 
 #include "esdm_dtls.h"
 #include "esdm_es_ext_proto.h"
@@ -93,27 +90,6 @@ static inline uint64_t test_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
-/*
- * Does the kernel have SCTP? A test without it is skipped (77): the kernel
- * module sctp is not loaded, and cannot be by the test.
- */
-static inline bool test_sctp_available(void)
-{
-	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_SCTP);
-
-	if (fd < 0) {
-		if (errno == EPROTONOSUPPORT || errno == ESOCKTNOSUPPORT ||
-		    errno == EAFNOSUPPORT) {
-			printf("No SCTP in this kernel (%s) - the module sctp is not loaded\n",
-			       strerror(errno));
-			return false;
-		}
-		return true;
-	}
-	close(fd);
-	return true;
-}
-
 /* @addr with port @port into @ss; the size of the address */
 static inline socklen_t test_sockaddr(const char *addr, uint16_t port,
 				      struct sockaddr_storage *ss)
@@ -139,12 +115,10 @@ static inline socklen_t test_sockaddr(const char *addr, uint16_t port,
 }
 
 /*
- * A listening SCTP socket of the one-to-one style on @addr, port picked by the
- * kernel - @port receives it -, set up for SCTP-AUTH if @auth. -1 if the
- * address cannot be bound - no IPv6 on the host, say.
+ * A listening TCP socket on @addr, port picked by the kernel - @port receives
+ * it. -1 if the address cannot be bound - no IPv6 on the host, say.
  */
-static inline int test_sctp_listener(const char *addr, bool auth,
-				     uint16_t *port)
+static inline int test_tcp_listener(const char *addr, uint16_t *port)
 {
 	struct sockaddr_storage ss;
 	socklen_t len = test_sockaddr(addr, 0, &ss);
@@ -152,14 +126,13 @@ static inline int test_sctp_listener(const char *addr, bool auth,
 
 	if (!len)
 		return -1;
-	fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_SCTP);
+	fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
 	if (fd < 0)
 		return -1;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 	if (ss.ss_family == AF_INET6)
 		setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
-	if ((auth && esdm_tls_sctp_prepare(fd)) ||
-	    bind(fd, (struct sockaddr *)&ss, len) < 0 || listen(fd, 64) < 0) {
+	if (bind(fd, (struct sockaddr *)&ss, len) < 0 || listen(fd, 64) < 0) {
 		close(fd);
 		return -1;
 	}
@@ -173,97 +146,17 @@ static inline int test_sctp_listener(const char *addr, bool auth,
 }
 
 /*
- * An SCTP socket connected to @addr:@port, set up for SCTP-AUTH if @auth,
- * blocking until the association is up and non-blocking afterwards; -1 if
- * it cannot connect.
+ * A TCP socket of @src - any address if NULL - connected to @addr:@port,
+ * blocking until the connection is up and non-blocking afterwards; -1 if it
+ * cannot connect.
  */
-static inline int test_sctp_connect(const char *addr, uint16_t port, bool auth)
-{
-	struct sockaddr_storage ss;
-	socklen_t len = test_sockaddr(addr, port, &ss);
-	int fd, flags;
-
-	if (!len)
-		return -1;
-	fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_SCTP);
-	if (fd < 0)
-		return -1;
-	if ((auth && esdm_tls_sctp_prepare(fd)) ||
-	    connect(fd, (struct sockaddr *)&ss, len) < 0) {
-		close(fd);
-		return -1;
-	}
-
-	flags = fcntl(fd, F_GETFL);
-	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-	return fd;
-}
-
-/* The active key of SCTP-AUTH of the association on @fd, or a negative errno */
-static inline int test_sctp_active_key(int fd)
-{
-	struct sctp_authkeyid id = { 0 };
-	socklen_t len = sizeof(id);
-
-	if (getsockopt(fd, IPPROTO_SCTP, SCTP_AUTH_ACTIVE_KEY, &id, &len) < 0)
-		return -errno;
-	return id.scact_keynumber;
-}
-
-/* Does the association have the key @key? Making it active tells. */
-static inline bool test_sctp_has_key(int fd, uint16_t key)
-{
-	int active = test_sctp_active_key(fd);
-	struct sctp_authkeyid id = { .scact_keynumber = key };
-	bool ret;
-
-	if (active < 0)
-		return false;
-	ret = !setsockopt(fd, IPPROTO_SCTP, SCTP_AUTH_ACTIVE_KEY, &id,
-			  sizeof(id));
-	id.scact_keynumber = (uint16_t)active;
-	setsockopt(fd, IPPROTO_SCTP, SCTP_AUTH_ACTIVE_KEY, &id, sizeof(id));
-	return ret;
-}
-
-/*
- * Does the list of chunks @opt of @fd - SCTP_LOCAL_AUTH_CHUNKS or
- * SCTP_PEER_AUTH_CHUNKS - hold DATA and FORWARD-TSN?
- */
-static inline bool test_sctp_auth_chunks(int fd, int opt)
-{
-	union {
-		struct sctp_authchunks chunks;
-		uint8_t buf[sizeof(struct sctp_authchunks) + 256];
-	} u;
-	socklen_t len = sizeof(u);
-	bool data = false, fwd = false;
-	unsigned int i;
-
-	memset(&u, 0, sizeof(u));
-	if (getsockopt(fd, IPPROTO_SCTP, opt, &u, &len) < 0)
-		return false;
-	for (i = 0; i < u.chunks.gauth_number_of_chunks && i < 256; i++) {
-		if (u.chunks.gauth_chunks[i] == 0)
-			data = true;
-		if (u.chunks.gauth_chunks[i] == 192)
-			fwd = true;
-	}
-	return data && fwd;
-}
-
-/*
- * An SCTP socket of @src - any address if NULL - connected to @addr:@port,
- * blocking until the association is up and non-blocking afterwards, set up for
- * SCTP-AUTH if @auth; -1 if it cannot connect.
- */
-static inline int test_sctp_connect_from(const char *addr, uint16_t port,
-					 const char *src, bool auth)
+static inline int test_tcp_connect_from(const char *addr, uint16_t port,
+					const char *src)
 {
 	struct sockaddr_storage ss, sss;
 	socklen_t len = test_sockaddr(addr, port, &ss), slen = 0;
 	struct timeval tv = { .tv_sec = TEST_IO_MS / 1000 };
-	int fd, flags;
+	int fd, flags, one = 1;
 
 	if (!len)
 		return -1;
@@ -272,13 +165,13 @@ static inline int test_sctp_connect_from(const char *addr, uint16_t port,
 		if (!slen)
 			return -1;
 	}
-	fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_SCTP);
+	fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
 	if (fd < 0)
 		return -1;
-	/* A server that does not take the association: no waiting forever */
+	/* A server that does not take the connection: no waiting forever */
 	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-	if ((auth && esdm_tls_sctp_prepare(fd)) ||
-	    (src && bind(fd, (struct sockaddr *)&sss, slen) < 0) ||
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+	if ((src && bind(fd, (struct sockaddr *)&sss, slen) < 0) ||
 	    connect(fd, (struct sockaddr *)&ss, len) < 0) {
 		close(fd);
 		return -1;
@@ -381,7 +274,7 @@ static inline int test_daemon_stop(pid_t pid)
 	return test_daemon_wait(pid, 15000);
 }
 
-/* A client of the network: an association and the DTLS of it */
+/* A client of the network: a connection and the TLS of it */
 struct test_conn {
 	int fd;
 	struct esdm_dtls *dtls;
@@ -412,7 +305,7 @@ static inline int test_conn_open(struct test_conn *c, const char *addr,
 
 	c->dtls = NULL;
 	c->ret = -ECONNREFUSED;
-	c->fd = test_sctp_connect_from(addr, port, src, true);
+	c->fd = test_tcp_connect_from(addr, port, src);
 	if (c->fd < 0)
 		return c->ret;
 
@@ -470,8 +363,8 @@ static inline ssize_t test_conn_request(struct test_conn *c, uint16_t type,
 }
 
 /*
- * Does the server close the association within @ms? Whatever it still sends
- * is read and dropped.
+ * Does the server close the connection within @ms? Whatever it still sends is
+ * read and dropped.
  */
 static inline bool test_fd_closed(int fd, unsigned int ms)
 {

@@ -153,8 +153,6 @@ enum esdm_net_listener {
 	ESDM_NET_LISTENER_UNIX,
 	/* A TCP socket of IPv4 or IPv6 */
 	ESDM_NET_LISTENER_TCP,
-	/* An SCTP socket of IPv4 or IPv6, of the one-to-one style */
-	ESDM_NET_LISTENER_SCTP,
 };
 
 /**
@@ -165,18 +163,16 @@ enum esdm_net_listener {
 int esdm_net_listener_check(int fd, enum esdm_net_listener kind);
 
 /**
- * @brief Bind and listen on "[HOST]:PORT", one socket per address it resolves
- *	  to - with @protocol, IPPROTO_TCP or IPPROTO_SCTP
+ * @brief Bind and listen on TCP "[HOST]:PORT", one socket per address it
+ *	  resolves to
  *
  * The wildcard of IPv6 is bound for IPv6 only, as the one of IPv4 is bound as
- * well. @prepare, if not NULL, is called on every socket before it is bound:
- * what a socket has to be before it listens.
+ * well.
  *
  * @return 0 with the sockets stored from @fds[*@num] on and *@num advanced,
  *	   at most to @max, or a negative errno after telling on stderr
  */
-int esdm_net_listen(const char *text, int protocol, int backlog,
-		    int (*prepare)(int fd), int *fds, int *num, int max);
+int esdm_net_listen(const char *text, int backlog, int *fds, int *num, int max);
 
 /**
  * @brief An address and port as text: "192.0.2.1:7378", "[2001:db8::1]:7378"

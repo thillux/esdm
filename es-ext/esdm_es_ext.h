@@ -32,7 +32,7 @@
  * line of a provider and serves them, and esdm_es_ext_server_*() serve them
  * from a program of its own making. The protocol is documented below for
  * providers written without the library. A provider may run on another host
- * as well, served on SCTP with mutually authenticated DTLS and read by the
+ * as well, served on TCP with mutually authenticated TLS and read by the
  * ESDM through the esdm-es-ext-relay of its own host (meson option
  * es-ext-net) - see "Network" below.
  *
@@ -283,9 +283,9 @@ struct esdm_es_ext_plugin {
  * the server - and "server" what the server knows itself: its "version", the
  * "plugin_api" version of the struct esdm_es_ext_plugin of its source, the
  * "name" and "entropy_rate" it declares in its answer to INFO (null for none),
- * the "transport" it serves on ("unix", or "sctp" on the network, see
- * "Network" below), whether the "dtls" of the connection asking is on, on the
- * network the "peer" asking - the SHA-256 of its certificate -, the "clients"
+ * the "transport" it serves on ("unix", or "tcp" on the network, see
+ * "Network" below), whether the connection asking is encrypted - "dtls", true
+ * on the network for its TLS -, on the network the "peer" asking - the SHA-256 of its certificate -, the "clients"
  * connected and the "client_slots" there are, the "requests" served, the
  * "selftest" verdict of the source ("passed", "failed" or "none" before the
  * first one) and its "uptime_seconds". A
@@ -368,56 +368,48 @@ struct esdm_es_ext_plugin {
  * can observe it.
  *
  * Network: a provider on another host (meson option es-ext-net) is served on
- * SCTP by the provider server of libesdm_es_ext, see
+ * TCP by the provider server of libesdm_es_ext, see
  * esdm_es_ext_server_alloc_net(). The ESDM does not speak to it itself - it
  * left the network namespace of the host when it started: the
  * esdm-es-ext-relay of its host serves a local provider socket, which the
- * ESDM reads as any other, and forwards each request on SCTP:
+ * ESDM reads as any other, and forwards each request on TCP:
  *
  *	host of the ESDM                                  host of the provider
  *	+--------------+ SOCK_SEQPACKET +-------------+        +--------------+
- *	| esdm-server  |--------------->| esdm-es-ext-| SCTP   | esdm-es-     |
+ *	| esdm-server  |--------------->| esdm-es-ext-| TCP    | esdm-es-     |
  *	| ExternalSock.| Unix socket,   | relay       |------->| pkcs11, a    |
- *	| checks the   | STARTDTLS and  | client cert,| DTLS   | provider     |
+ *	| checks the   | STARTDTLS and  | client cert,| TLS    | provider     |
  *	| uid of the   | opportunistic  | checks the  | with   | program, ... |
  *	| relay        | DTLS as above  | server name | certi- | checks the   |
  *	+--------------+                +-------------+ ficates| client cert  |
  *	                                                       +--------------+
  *
- * On SCTP, every message is DTLS from the first one on, as RFC 6083 maps DTLS
- * onto SCTP: no STARTDTLS, no message in the clear, and a STARTDTLS inside the
- * DTLS is a request that breaks the protocol. The DTLS is DTLS 1.2, both sides
- * authenticate with a certificate, and the client checks the name of the
- * server - see "DTLS over SCTP" in common/esdm_tls.h. The SCTP association
- * authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH (RFC 4895), the
- * key of which comes from the DTLS session:
+ * On TCP, every message is TLS from the first one on: no STARTDTLS, no message
+ * in the clear, and a STARTDTLS inside the TLS is a request that breaks the
+ * protocol. The TLS is TLS 1.3 - with the key exchange of ML-KEM where both
+ * TLS stacks have it -, both sides authenticate with a certificate, and the
+ * client checks the name of the server - see common/esdm_tls.h:
  *
- *	relay (DTLS client)                              provider (DTLS server)
- *	  |-- INIT, with SCTP-AUTH required for DATA and FORWARD-TSN ------>|
- *	  |<---------- INIT ACK, the same - or no association: refused -----|
- *	  |   key 0, the empty key, active on both sides                    |
+ *	relay (TLS client)                               provider (TLS server)
+ *	  |-- TCP connection ---------------------------------------------->|
+ *	  |== TLS 1.3 handshake, certificates both ways ===================>|
+ *	  |<================================================================|
  *	  |                                                                 |
- *	  |== DTLS 1.2 handshake, every record one SCTP message, key 0 ====>|
- *	  |<===== ... certificates both ways, CertificateRequest ... =======|
- *	  |== ..., ClientKeyExchange, CertificateVerify, key 0 ============>|
- *	  |   all acknowledged; key 1 = exporter "EXPORTER_DTLS_OVER_SCTP"  |
- *	  |== ChangeCipherSpec, Finished, key 0 ===========================>|
- *	  |   key 1 active                       all acknowledged; key 1    |
- *	  |                                      installed and, after its   |
- *	  |<================================ ChangeCipherSpec, key 0 ========|
- *	  |                                      ChangeCipherSpec, active   |
- *	  |<=========================================== Finished, key 1 =====|
- *	  |   key 0 deleted                                  key 0 deleted  |
- *	  |                                                                 |
- *	  |== INFO, SELFTEST, GET_ENTROPY, STATUS, one by one, key 1 ======>|
- *	  |<======================================= the answers, key 1 =====|
+ *	  |== INFO, SELFTEST, GET_ENTROPY, STATUS, one by one =============>|
+ *	  |<================================================== the answers ==|
  *
- * The messages inside the DTLS are those of the Unix domain socket, each
- * carried by records with the byte in front, as above. The relay forwards the
- * requests of the ESDM one to one and answers STARTDTLS itself; what it
- * forwards back is checked as the ESDM checks it. The answer to STATUS tells
- * "sctp" as the "transport" of the server, and as its "peer" the SHA-256 of
- * the certificate of the client asking - the relay's.
+ * The messages inside the TLS are those of the Unix domain socket, each cut
+ * into parts with the byte in front, as above. TCP keeps no boundaries: each
+ * part travels with its length in front, two bytes, big endian:
+ *
+ *	+---------+---+------------------------------+
+ *	| length  | 1 | part 1                       |   ...
+ *	+---------+---+------------------------------+
+ *
+ * The relay forwards the requests of the ESDM one to one and answers STARTDTLS
+ * itself; what it forwards back is checked as the ESDM checks it. The answer to
+ * STATUS tells "tcp" as the "transport" of the server, and as its "peer" the
+ * SHA-256 of the certificate of the client asking - the relay's.
  ******************************************************************************/
 
 #define ESDM_ES_EXT_PROTO_MAGIC 0x58455345 /* "ESEX" in memory */
@@ -571,9 +563,8 @@ void esdm_es_ext_server_free(struct esdm_es_ext_server *server);
  * Provider server on the network - libesdm_es_ext, meson option es-ext-net
  *
  * The provider server serves its source to the ESDM of another host as well:
- * on SCTP, with DTLS 1.2 whose client and server both authenticate with a
- * certificate, as RFC 6083 maps DTLS onto SCTP - see "Network" in the socket
- * protocol above. The ESDM reaches it through the esdm-es-ext-relay of its
+ * on TCP, with TLS 1.3 whose client and server both authenticate with a
+ * certificate - see "Network" in the socket protocol above. The ESDM reaches it through the esdm-es-ext-relay of its
  * own host, see esdm-es-ext-relay(8).
  *
  * The listener faces the network and anybody may connect to it, so the
@@ -615,10 +606,8 @@ struct esdm_es_ext_server_net_config {
 	 */
 	const char *const *listen;
 	/**
-	 * Listening sockets handed over - by socket activation, say: SCTP of
-	 * the one-to-one style, SOCK_STREAM and IPPROTO_SCTP. The server takes
-	 * them over. Associations set up before the server set the socket up
-	 * for SCTP-AUTH have none, and are refused.
+	 * Listening sockets handed over - by socket activation, say: TCP,
+	 * SOCK_STREAM of IPv4 or IPv6. The server takes them over.
 	 */
 	const int *listen_fds;
 	unsigned int listen_fds_num;
@@ -687,7 +676,7 @@ void esdm_es_ext_server_net_config_init(
 /**
  * @brief Serve an external entropy source on the network
  *
- * As esdm_es_ext_server_alloc(), on the SCTP sockets of @cfg with the DTLS
+ * As esdm_es_ext_server_alloc(), on the TCP sockets of @cfg with the TLS
  * with certificates of the network - see above. The TLS files are loaded
  * here, the listeners bound, and the @init callback of @plugin called: a
  * daemon dropping its privileges does so afterwards. esdm_es_ext_server_run()
@@ -704,8 +693,7 @@ void esdm_es_ext_server_net_config_init(
  *
  * @return 0 on success, a negative errno otherwise: -EINVAL for a
  *	   configuration that does not parse, a TLS file that does not load -
- *	   both logged -, -EOPNOTSUPP in a library built without es-ext-net,
- *	   -EPROTONOSUPPORT if the kernel has no SCTP
+ *	   both logged -, -EOPNOTSUPP in a library built without es-ext-net
  */
 int esdm_es_ext_server_alloc_net(const struct esdm_es_ext_plugin *plugin,
 				 const struct esdm_es_ext_server_net_config *cfg,

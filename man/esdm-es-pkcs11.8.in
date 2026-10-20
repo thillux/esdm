@@ -96,7 +96,7 @@ nothing to test.
 With
 .B \-\-listen
 or sockets handed over by socket activation, the daemon serves the token to
-the ESDM of other hosts instead, on SCTP with DTLS and certificates, through
+the ESDM of other hosts instead, on TCP with TLS and certificates, through
 their
 .BR esdm\-es\-ext\-relay (8)
 \- see
@@ -351,8 +351,8 @@ Print the version.
 .SH NETWORK
 A token on one host serves the ESDM of others: with
 .BR \-\-listen ,
-the daemon serves it on SCTP, with DTLS 1.2 and certificates on both sides and
-SCTP-AUTH, as every provider program of
+the daemon serves it on TCP, with TLS 1.3 and certificates on both sides, as
+every provider program of
 .BR libesdm_es_ext (3)
 serves its source \- see
 .B NETWORK
@@ -366,7 +366,7 @@ and
 .B \-\-no_dtls
 are refused on the network; the certificate of a client tells who it is. The
 STATUS tells
-.B sctp
+.B tcp
 as the
 .B transport
 of the server, and the SHA-256 of the client's certificate as its

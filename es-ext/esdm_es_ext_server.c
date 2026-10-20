@@ -27,7 +27,7 @@
  * anyway, as they are never called concurrently, and all the ESDM needs: it
  * sends one request at a time per connection.
  *
- * On the network, the DTLS of a connection - with certificates, on SCTP, see
+ * On the network, the TLS of a connection - with certificates, on TCP, see
  * esdm_tls.h - starts as it is accepted, its handshake a step at a time
  * whenever the socket is ready for it, so a client that is slow or silent in
  * its handshake holds up nobody but itself. The same thread keeps house: the
@@ -40,6 +40,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -106,7 +107,7 @@ enum esdm_es_ext_client_state {
 	ESDM_ES_EXT_CLIENT_PLAIN,
 	/* STARTDTLS answered - or on the network, accepted -, the handshake */
 	ESDM_ES_EXT_CLIENT_HANDSHAKE,
-	/* Requests as DTLS application data */
+	/* Requests as application data of the DTLS - on the network the TLS */
 	ESDM_ES_EXT_CLIENT_DTLS,
 };
 
@@ -441,7 +442,7 @@ static void esdm_es_ext_server_net_accept(struct esdm_es_ext_server *server,
 	char addr[ESDM_NET_ADDR_STR_LEN];
 	size_t source_len;
 	unsigned int i;
-	int fd, ret;
+	int fd, ret, one = 1;
 
 	fd = accept4(lfd, (struct sockaddr *)&ss, &sslen,
 		     SOCK_CLOEXEC | SOCK_NONBLOCK);
@@ -449,6 +450,8 @@ static void esdm_es_ext_server_net_accept(struct esdm_es_ext_server *server,
 		esdm_es_ext_server_accept_failed();
 		return;
 	}
+	/* Requests and answers are small, and wanted at once */
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
 	esdm_net_addr_unmap(&ss);
 	esdm_net_addr_str(&ss, addr, sizeof(addr));
@@ -498,21 +501,17 @@ static void esdm_es_ext_server_net_accept(struct esdm_es_ext_server *server,
 	net->probation_num++;
 
 	/*
-	 * DTLS from the first message on, see "Network" in esdm_es_ext.h -
-	 * the requests of the client, nothing larger. An association without
-	 * SCTP-AUTH is refused here.
+	 * TLS from the first message on, see "Network" in esdm_es_ext.h - the
+	 * requests of the client, nothing larger
 	 */
 	c->ctx = net->ctx;
 	esdm_tls_ctx_get(c->ctx);
 	ret = esdm_dtls_alloc_tls(net->ctx, fd, ESDM_ES_EXT_PROTO_REQ_LEN, NULL,
 				  &c->dtls);
 	if (ret) {
-		esdm_logger(
-			LOGGER_VERBOSE, LOGGER_C_ANY,
-			"External ES provider: refusing %s: %s\n", addr,
-			ret == -EPROTONOSUPPORT ?
-				"its association has no SCTP-AUTH" :
-				strerror(-ret));
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
+			    "External ES provider: refusing %s: %s\n", addr,
+			    strerror(-ret));
 		esdm_es_ext_server_close_client(server, i);
 	}
 }
@@ -908,7 +907,7 @@ esdm_es_ext_server_fields(struct esdm_es_ext_server *server, unsigned int i)
 	json_object_object_add(
 		obj, "transport",
 		json_object_new_string(esdm_es_ext_server_is_net(server) ?
-					       "sctp" :
+					       "tcp" :
 					       "unix"));
 	json_object_object_add(
 		obj, "dtls",
@@ -1043,7 +1042,7 @@ static bool esdm_es_ext_server_serve(struct esdm_es_ext_server *server,
 	if ((size_t)n > sizeof(req) ||
 	    esdm_es_ext_proto_req_unpack(req, (size_t)n, &type, &length) ||
 	    /*
-	     * Once, and in the clear - on the network, the DTLS is there from
+	     * Once, and in the clear - on the network, the TLS is there from
 	     * the first message on
 	     */
 	    (type == ESDM_ES_EXT_PROTO_STARTDTLS &&
@@ -1381,7 +1380,7 @@ static int esdm_es_ext_server_net_setup(
 	net->files.crl_allow_expired =
 		!!(cfg->crl_flags & ESDM_ES_EXT_NET_CRL_ALLOW_EXPIRED);
 	esdm_net_tls_config(&net->files, &net->tls_cfg);
-	net->tls_cfg.transport = ESDM_TLS_TRANSPORT_SCTP;
+	net->tls_cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 
 	for (i = 0; cfg->allow && cfg->allow[i]; i++) {
 		if (i >= ESDM_NET_MAX_ALLOW ||
@@ -1418,27 +1417,23 @@ esdm_es_ext_server_net_listen(struct esdm_es_ext_server *s,
 		if (num >= ESDM_ES_EXT_NET_MAX_LISTEN)
 			return -EINVAL;
 		ret = esdm_net_listener_check(cfg->listen_fds[i],
-					      ESDM_NET_LISTENER_SCTP);
+					      ESDM_NET_LISTENER_TCP);
 		if (ret) {
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ANY,
-				"External ES provider: descriptor %d is no listening SCTP socket of the one-to-one style: %s\n",
+				"External ES provider: descriptor %d is no listening TCP socket: %s\n",
 				cfg->listen_fds[i], strerror(-ret));
 			return ret;
 		}
-		/* For the associations set up from here on */
-		ret = esdm_tls_sctp_prepare(cfg->listen_fds[i]);
-		if (ret)
-			return ret;
 		s->listen_fds[num++] = cfg->listen_fds[i];
 		s->listen_num = (unsigned int)num;
 	}
 
 	for (i = 0; cfg->listen && cfg->listen[i]; i++) {
-		ret = esdm_net_listen(cfg->listen[i], IPPROTO_SCTP,
+		ret = esdm_net_listen(cfg->listen[i],
 				      ESDM_ES_EXT_SERVER_NET_BACKLOG,
-				      esdm_tls_sctp_prepare, s->listen_fds,
-				      &num, ESDM_ES_EXT_NET_MAX_LISTEN);
+				      s->listen_fds, &num,
+				      ESDM_ES_EXT_NET_MAX_LISTEN);
 		s->listen_num = (unsigned int)num;
 		if (ret)
 			return ret;
@@ -1585,7 +1580,7 @@ int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable)
 	if (!server)
 		return -EINVAL;
 
-	/* The network has the DTLS with certificates, and nothing else */
+	/* The network has the TLS with certificates, and nothing else */
 	if (esdm_es_ext_server_is_net(server))
 		return enable ? 0 : -EINVAL;
 

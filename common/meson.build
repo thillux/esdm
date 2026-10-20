@@ -30,8 +30,8 @@ endif
 
 # The DTLS of the connections, by the TLS stack of the crypto backend - see
 # esdm_dtls.h and the dtls option in the top-level meson.build. The messages
-# on top of the records are there for the DTLS with certificates of
-# es-ext-net as well.
+# on top of the records are there for the TLS with certificates of es-ext-net
+# as well.
 if get_option('dtls').enabled() or es_ext_net
 	common_src += files([ 'esdm_dtls.c' ])
 endif
@@ -42,12 +42,11 @@ if get_option('dtls').enabled()
 	])
 endif
 
-# The TLS with certificates of the EGD protocol over the network, and the DTLS
-# with certificates on SCTP of the external entropy sources over the network,
-# by the TLS stack of the crypto backend - see esdm_tls.h and the egd-net and
-# es-ext-net options in the top-level meson.build. Built into the static common
-# library only: libesdm has no use for it, and would only depend on the TLS
-# stack for it.
+# The TLS with certificates of the EGD protocol and of the external entropy
+# sources over the network, by the TLS stack of the crypto backend - see
+# esdm_tls.h and the egd-net and es-ext-net options in the top-level
+# meson.build. Built into the static common library only: libesdm has no use
+# for it, and would only depend on the TLS stack for it.
 common_tls_src = []
 if tls_auth
 	common_tls_src += files([
@@ -57,7 +56,7 @@ if tls_auth
 	])
 endif
 if es_ext_net
-	common_tls_src += files([ 'esdm_tls_sctp.c', 'esdm_dtls_tls.c' ])
+	common_tls_src += files([ 'esdm_dtls_tls.c' ])
 endif
 
 # What the daemons serving the network share - see esdm_net.h. Into the static
@@ -385,9 +384,8 @@ endforeach
 conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
 conf_data.set('ESDM_EGD_NET', egd_net)
 conf_data.set('ESDM_EGD_NET_TLS', egd_net_tls)
-# The TLS layer with certificates, esdm_tls.h, and its DTLS on SCTP
+# The TLS layer with certificates, esdm_tls.h
 conf_data.set('ESDM_TLS_AUTH', tls_auth)
-conf_data.set('ESDM_TLS_SCTP', es_ext_net)
 conf_data.set('ESDM_ES_EXT_NET', es_ext_net)
 conf_data.set('ESDM_ES_EXT_NET_PORT', get_option('es-ext-net-port'))
 conf_data.set('ESDM_EGD_NET_PORT', get_option('egd-net-port'))

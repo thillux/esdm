@@ -3,7 +3,7 @@
 # esdm-es-ext-relay(8).
 #
 # The relay serves a provider socket below, which the ESDM reads through one of
-# its provider socket sources, and forwards it over SCTP with DTLS and
+# its provider socket sources, and forwards it over TCP with TLS and
 # certificates to a provider program - esdm-es-pkcs11, or one of your own -
 # serving on the network.
 # Tell the ESDM about it with a drop-in of esdm-server.service, e.g.
@@ -33,10 +33,7 @@
 # ESDM_ES_EXT_RELAY_ARGS instead, readable by the user esdm-es-ext-relay, and
 # reset the LoadCredential= lines in a drop-in. CRLs are given with --crl.
 #
-# SCTP: the kernel loads its module sctp when the relay opens its first
-# connection, unless the distribution keeps it from loading on demand - load it
-# at boot then (modules-load.d(5)). Any firewall in between has to pass SCTP to
-# port @PORT@ of the provider.
+# Any firewall in between has to pass TCP to port @PORT@ of the provider.
 #
 # The relay runs as the system user esdm-es-ext-relay (see sysusers.d), a user
 # of its own rather than a DynamicUser=: the ESDM accepts a provider by the
@@ -93,7 +90,7 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProtectSystem=strict
 RemoveIPC=yes
-# The local socket, and the network for the provider - SCTP over IPv4 or IPv6
+# The local socket, and the network for the provider - TCP over IPv4 or IPv6
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

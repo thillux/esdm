@@ -19,25 +19,14 @@
 
 /*
  * What a crypto backend provides for esdm_tls.h: TLS 1.3 with certificates
- * from PEM files on a connected, non-blocking stream socket, DTLS 1.2 with the
- * same certificates on an SCTP association, and the parsing of certificates
- * and CRLs the revocation check needs. The reference counting of the
- * contexts, the revocation policy, the fingerprint and the waiting are backend
- * independent - esdm_tls.c -, and so is everything of SCTP - esdm_tls_sctp.c.
- *
- * The files and their checks, the verification of the peer and the revocation
- * policy are the same for either transport: a backend differs in the protocol
- * version, the ciphers, the groups and the signature schemes it sets up - the
- * ones of ML-KEM and ML-DSA on a stream socket only, see "Post-quantum
- * algorithms" in esdm_tls.h -, and in how it reaches the socket.
+ * from PEM files on a connected, non-blocking stream socket, and the parsing
+ * of certificates and CRLs the revocation check needs. The reference counting
+ * of the contexts, the revocation policy, the fingerprint and the waiting are
+ * backend independent - esdm_tls.c.
  *
  * Every function that has to wait for the socket returns -EAGAIN and stores
- * what it waits for, POLLIN or POLLOUT, in *want. A stream socket is reached
- * with send(2) with MSG_NOSIGNAL and recv(2) only. On SCTP, the backend hands
- * every record it writes to esdm_tls_sctp_queue() and reads every one with
- * esdm_tls_sctp_recv(), whole - see esdm_tls_sctp.h; the TLS stack is told a
- * path MTU of ESDM_TLS_SCTP_MTU, sends no retransmissions of its own, and
- * neither renegotiates nor resumes.
+ * what it waits for, POLLIN or POLLOUT, in *want. The socket is reached with
+ * send(2) with MSG_NOSIGNAL and recv(2) only.
  *
  * The TLS stack's own revocation checks stay off: the CRLs are loaded into the
  * context next to the TLS configuration, not into it. The revocation policy of
@@ -55,7 +44,6 @@
 #include <sys/types.h>
 
 #include "esdm_tls.h"
-#include "esdm_tls_sctp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -153,8 +141,8 @@ const char *esdm_tls_backend_name(void);
 
 /*
  * @return 0 or a negative errno; *ctx is the context of one side, see
- *	   esdm_tls_ctx_alloc(), for the transport cfg->transport. A failure is
- *	   logged here, with what the TLS stack said about it.
+ *	   esdm_tls_ctx_alloc(). A failure is logged here, with what the TLS
+ *	   stack said about it.
  */
 int esdm_tls_backend_ctx_new(bool server, const struct esdm_tls_config *cfg,
 			     void **ctx);
@@ -184,15 +172,13 @@ int esdm_tls_backend_cert_info(const struct esdm_tls_der *cert,
 			       struct esdm_tls_cert_info *info);
 
 /*
- * @return 0 or a negative errno; *conn is the TLS of the connection on @fd -
- *	   on SCTP, of the association @sctp, NULL on a stream socket. A
+ * @return 0 or a negative errno; *conn is the TLS of the connection on @fd. A
  *	   client is handed the name it expects the server to have, which the
  *	   backend keeps a copy of. @check with @arg is run on the chain of the
  *	   peer, see esdm_tls_backend_check - a peer whose chain is not handed
  *	   to it is refused.
  */
 int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
-			      struct esdm_tls_sctp *sctp,
 			      const char *server_name,
 			      esdm_tls_backend_check check, void *arg,
 			      void **conn);
@@ -239,18 +225,6 @@ unsigned int esdm_tls_backend_mldsa(void);
 
 /* An IPv6 address as server name is checked, see esdm_tls_ip6_name() */
 bool esdm_tls_backend_ip6_name(void);
-
-/*
- * The keying material exporter of RFC 5705 - DTLS 1.2 - with the label @label
- * of @label_len bytes and no context, into @out of @out_len bytes. Called on
- * SCTP only, and as soon as the master secret is known on either side: when
- * the first ChangeCipherSpec of the connection goes out - in the middle of the
- * handshake, see esdm_tls_sctp.h.
- *
- * @return 0, or a negative errno
- */
-int esdm_tls_backend_export(void *conn, const uint8_t *label,
-			    size_t label_len, uint8_t *out, size_t out_len);
 
 /* Why the connection failed, NULL or empty if the backend does not know */
 const char *esdm_tls_backend_error(void *conn);

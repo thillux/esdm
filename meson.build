@@ -376,15 +376,15 @@ if egd_net
 	subdirs += [ 'frontends/egd-net' ]
 endif
 
-# The external entropy sources on the network - see es-ext/esdm_es_ext.h and
-# "DTLS over SCTP" in common/esdm_tls.h. Mutually authenticated DTLS on SCTP
-# only, by the TLS stack of the crypto backend; the TLS layer goes into the
-# static common library, as for egd-net.
+# The external entropy sources on the network - see "Network" in
+# es-ext/esdm_es_ext.h. Mutually authenticated TLS on TCP only, by the TLS
+# stack of the crypto backend; the TLS layer goes into the static common
+# library, as for egd-net.
 es_ext_net = get_option('es-ext-net').enabled()
 es_ext_net_deps = []
 if es_ext_net
 	if host_machine.system() != 'linux'
-		error('es-ext-net needs the SCTP of Linux - set -Des-ext-net=disabled')
+		error('es-ext-net is only available on Linux - set -Des-ext-net=disabled')
 	endif
 	if get_option('esdm-es-ext').disabled()
 		error('es-ext-net serves the providers of libesdm_es_ext on the network - enable esdm-es-ext as well')

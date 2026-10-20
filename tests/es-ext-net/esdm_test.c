@@ -20,20 +20,20 @@
 /*
  * An external entropy source on the network, end to end: the esdm-server
  * reads its ExternalSocket source from the provider socket of the
- * esdm-es-ext-relay, which forwards over SCTP with DTLS and certificates to
+ * esdm-es-ext-relay, which forwards over TCP with TLS and certificates to
  * the provider program of the rated test source.
  *
  *  - the source is connected, shown under the name the remote provider
  *    declares and credited at the rate it declares;
  *  - its status in the ESDM is the one of the remote server - transport
- *    "sctp" - and of the remote source, passed through;
+ *    "tcp" - and of the remote source, passed through;
  *  - it delivers - with the ESDM's privileges dropped, as the relay serves
  *    the user nobody next to root;
  *  - the remote provider restarted between two seedings: the next one is
  *    served by it again, the relay connecting anew.
  *
  * Skipped (77) unless run as root, as the esdm-server refuses to start
- * otherwise, in a build without es-ext-net, and on a kernel without SCTP.
+ * otherwise, and in a build without es-ext-net.
  * The daemon claims the fixed socket, semaphore and IPC names, so the test
  * puts itself in namespaces of its own.
  *
@@ -82,17 +82,16 @@ static pid_t serve_start(uint16_t *port)
 	pid_t pid;
 
 	if (!*port) {
-		lfd = test_sctp_listener("127.0.0.1", true, port);
+		lfd = test_tcp_listener("127.0.0.1", port);
 	} else {
 		socklen_t len = test_sockaddr("127.0.0.1", *port, &ss);
 
 		lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC,
-			     IPPROTO_SCTP);
+			     IPPROTO_TCP);
 		if (lfd >= 0) {
 			setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one,
 				   sizeof(one));
-			if (esdm_tls_sctp_prepare(lfd) ||
-			    bind(lfd, (struct sockaddr *)&ss, len) < 0 ||
+			if (bind(lfd, (struct sockaddr *)&ss, len) < 0 ||
 			    listen(lfd, 16) < 0) {
 				close(lfd);
 				lfd = -1;
@@ -207,7 +206,7 @@ static void test_esdm(void)
 	CHECK(json_object_object_get_ex(es, "provider", &provider) &&
 		      json_object_object_get_ex(provider, "server", &server) &&
 		      json_str(server, "transport") &&
-		      !strcmp(json_str(server, "transport"), "sctp") &&
+		      !strcmp(json_str(server, "transport"), "tcp") &&
 		      json_object_object_get_ex(provider, "plugin", &server) &&
 		      json_object_is_type(server, json_type_object),
 	      "the status of the remote provider is not passed through");
@@ -257,9 +256,6 @@ int main(int argc, char *argv[])
 		printf("Program must be started as root\n");
 		return 77;
 	}
-	if (!test_sctp_available())
-		return 77;
-
 	ret = test_isolate_namespaces();
 	if (ret) {
 		printf("Cannot isolate the test namespaces: %s\n",

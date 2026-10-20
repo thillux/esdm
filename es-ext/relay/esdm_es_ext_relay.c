@@ -25,8 +25,8 @@
  * reaches no network, and parses no certificate. The relay serves it a local
  * provider socket instead, which the ESDM reads as any ExternalSocket source -
  * checking the uid of the relay as it checks that of any provider -, and
- * forwards each request to a provider served on SCTP with DTLS and
- * certificates, see esdm_es_ext_server_alloc_net().
+ * forwards each request to a provider served on TCP with TLS and certificates,
+ * see esdm_es_ext_server_alloc_net().
  *
  * The messages are forwarded as they are, one to one - rather than served by
  * the provider server of libesdm_es_ext with callbacks forwarding them: what
@@ -63,6 +63,7 @@
 #include <getopt.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -233,8 +234,7 @@ static void relay_upstream_close(struct relay_conn *conn)
 }
 
 /*
- * An SCTP association with SCTP-AUTH to one address of the provider, within
- * @deadline.
+ * A TCP connection to one address of the provider, within @deadline.
  *
  * @return the socket, non-blocking, or a negative errno
  */
@@ -242,18 +242,14 @@ static int relay_connect_addr(const struct addrinfo *ai, uint64_t deadline)
 {
 	struct pollfd pfd;
 	socklen_t len = sizeof(int);
-	int fd, err = 0, ret;
+	int fd, err = 0, ret, one = 1;
 
 	fd = socket(ai->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-		    IPPROTO_SCTP);
+		    IPPROTO_TCP);
 	if (fd < 0)
 		return -errno;
-
-	ret = esdm_tls_sctp_prepare(fd);
-	if (ret) {
-		close(fd);
-		return ret;
-	}
+	/* Requests and answers are small, and wanted at once */
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
 	if (connect(fd, ai->ai_addr, ai->ai_addrlen) < 0 &&
 	    errno != EINPROGRESS) {
@@ -296,7 +292,7 @@ static int relay_upstream(struct relay_conn *conn, uint64_t deadline)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_SCTP;
+	hints.ai_protocol = IPPROTO_TCP;
 	ret = getaddrinfo(relay_cfg.host, relay_cfg.port, &hints, &res);
 	if (ret) {
 		esdm_logger(LOGGER_WARN, LOGGER_C_ANY,
@@ -939,7 +935,7 @@ static int relay_reload(bool force)
 	int ret;
 
 	esdm_net_tls_config(&relay_cfg.files, &cfg);
-	cfg.transport = ESDM_TLS_TRANSPORT_SCTP;
+	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	ret = esdm_net_tls_reload(RELAY_NAME, false, &cfg, force, relay_stamp,
 				  &ctx);
 	if (ret <= 0)
@@ -1058,12 +1054,12 @@ static uid_t relay_parse_uid(const char *arg)
 static void usage(void)
 {
 	fprintf(stderr, "\nESDM external entropy source relay\n\n");
-	fprintf(stderr, "%s %s, DTLS by %s\n\n", RELAY_NAME,
+	fprintf(stderr, "%s %s, TLS and DTLS by %s\n\n", RELAY_NAME,
 		ESDM_ES_EXT_RELAY_VERSION, esdm_tls_stack());
 	fprintf(stderr, "Usage: %s --connect <HOST[:PORT]> [OPTIONS]\n\n",
 		RELAY_NAME);
 	fprintf(stderr,
-		"\t-C --connect <HOST[:PORT]>\tThe provider on the network, SCTP;\n"
+		"\t-C --connect <HOST[:PORT]>\tThe provider on the network, TCP;\n"
 		"\t\t\t\t[IPv6]:PORT (default port %u)\n"
 		"\t-s --socket <PATH>\tLocal provider socket for the ESDM\n"
 		"\t\t\t\t(default: %s)\n"
@@ -1341,7 +1337,7 @@ int main(int argc, char *argv[])
 	}
 
 	esdm_logger(LOGGER_STATUS, LOGGER_C_ANY,
-		    "%s: relaying %s to %s, DTLS over SCTP by %s\n", RELAY_NAME,
+		    "%s: relaying %s to %s, TLS over TCP by %s\n", RELAY_NAME,
 		    relay_cfg.socket_path, relay_cfg.connect, esdm_tls_stack());
 	systemd_notify_ready();
 

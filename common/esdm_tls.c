@@ -20,8 +20,7 @@
 /*
  * The backend independent part of esdm_tls.h: the reference counting of the
  * contexts, the revocation policy, what a connection remembers of its peer,
- * the waiting - and on SCTP, sending what the TLS stack wrote, which is where
- * the keys of SCTP-AUTH change, see esdm_tls_sctp.h.
+ * and the waiting.
  */
 
 #include <errno.h>
@@ -42,7 +41,6 @@
 #include "esdm_sha256.h"
 #include "esdm_tls.h"
 #include "esdm_tls_backend.h"
-#include "esdm_tls_sctp.h"
 #include "helper.h"
 #include "leak_check.h"
 #include "memset_secure.h"
@@ -79,9 +77,6 @@ struct esdm_tls {
 	struct esdm_tls_ctx *ctx;
 	int fd;
 
-	/* The association on SCTP, NULL on a stream socket */
-	struct esdm_tls_sctp *sctp;
-
 	/* What the last operation returning -EAGAIN waits for */
 	short want;
 
@@ -98,13 +93,8 @@ struct esdm_tls {
 	struct esdm_tls_der *chain;
 	size_t chain_num;
 
-	/* The TLS stack completed the handshake, see esdm_tls_handshake() */
-	bool backend_done;
-
 	/* Why the handshake failed, where the backend does not know it */
 	char error[ESDM_TLS_TEXT_LEN];
-	/* Why the association on SCTP failed */
-	char sctp_error[ESDM_TLS_TEXT_LEN];
 
 	/* The next one left behind at the exit, see esdm_tls_exiting() */
 	struct esdm_tls *left_next;
@@ -205,15 +195,8 @@ int esdm_tls_ctx_alloc(bool server, const struct esdm_tls_config *cfg,
 	if (!cfg->ca_file || (server && !cfg->cert_file) ||
 	    (!cfg->cert_file != !cfg->key_file) ||
 	    cfg->crl_files_num > ESDM_TLS_MAX_CRL_FILES ||
-	    (cfg->transport != ESDM_TLS_TRANSPORT_STREAM &&
-	     cfg->transport != ESDM_TLS_TRANSPORT_SCTP))
+	    cfg->transport != ESDM_TLS_TRANSPORT_STREAM)
 		return -EINVAL;
-
-#ifndef ESDM_TLS_SCTP
-	/* DTLS over SCTP is built with es-ext-net only */
-	if (cfg->transport == ESDM_TLS_TRANSPORT_SCTP)
-		return -EOPNOTSUPP;
-#endif
 
 	if (cfg->cert_file) {
 		ret = esdm_tls_check_file("certificate", cfg->cert_file);
@@ -615,28 +598,10 @@ int esdm_tls_alloc(struct esdm_tls_ctx *ctx, int fd, const char *server_name,
 	/* The policy of this context checks the peer, see esdm_tls_check_peer() */
 	t->ctx = ctx;
 
-#ifdef ESDM_TLS_SCTP
-	/* No association without SCTP-AUTH, see "DTLS over SCTP" in the header */
-	if (ctx->transport == ESDM_TLS_TRANSPORT_SCTP) {
-		ret = esdm_tls_sctp_new(fd, ctx->server, &t->sctp,
-					t->sctp_error, sizeof(t->sctp_error));
-		if (ret) {
-			esdm_logger(ret == -EPROTONOSUPPORT ? LOGGER_VERBOSE :
-							      LOGGER_ERR,
-				    LOGGER_C_ANY,
-				    "DTLS over SCTP: connection refused: %s\n",
-				    t->sctp_error);
-			free(t);
-			return ret;
-		}
-	}
-#endif
-
-	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, fd, t->sctp,
+	ret = esdm_tls_backend_conn_new(ctx->backend, ctx->server, fd,
 					ctx->server ? NULL : server_name,
 					esdm_tls_check_peer, t, &t->backend);
 	if (ret) {
-		esdm_tls_sctp_free(t->sctp);
 		free(t);
 		return ret;
 	}
@@ -660,8 +625,6 @@ void esdm_tls_free(struct esdm_tls *tls)
 	if (esdm_tls_exiting()) {
 		struct esdm_tls *head = atomic_load(&esdm_tls_left);
 
-		esdm_tls_sctp_free(tls->sctp);
-		tls->sctp = NULL;
 		esdm_tls_chain_free(tls->chain, tls->chain_num);
 		tls->chain = NULL;
 		tls->chain_num = 0;
@@ -675,47 +638,10 @@ void esdm_tls_free(struct esdm_tls *tls)
 	}
 
 	esdm_tls_backend_conn_free(tls->backend);
-	esdm_tls_sctp_free(tls->sctp);
 	esdm_tls_ctx_put(tls->ctx);
 	esdm_tls_chain_free(tls->chain, tls->chain_num);
 	memset_secure(tls, 0, sizeof(*tls));
 	free(tls);
-}
-
-/* The key of SCTP-AUTH, from the DTLS session - see esdm_tls_sctp_flush() */
-static int esdm_tls_sctp_export_key(void *arg, uint8_t *key, size_t len)
-{
-	struct esdm_tls *tls = arg;
-
-	return esdm_tls_backend_export(
-		tls->backend, (const uint8_t *)ESDM_TLS_SCTP_EXPORTER_LABEL,
-		strlen(ESDM_TLS_SCTP_EXPORTER_LABEL), key, len);
-}
-
-/*
- * Send what the TLS stack queued on SCTP. -EAGAIN sets what to wait for; on an
- * error, the reason is kept for esdm_tls_error().
- *
- * @return 0 when all is out - always on a stream socket -, -EAGAIN, a
- *	   negative errno
- */
-static int esdm_tls_push(struct esdm_tls *tls)
-{
-	const char *why;
-	int ret;
-
-	if (!tls->sctp)
-		return 0;
-
-	ret = esdm_tls_sctp_flush(tls->sctp, esdm_tls_sctp_export_key, tls,
-				  &tls->want);
-	if (ret && ret != -EAGAIN && !tls->sctp_error[0]) {
-		why = esdm_tls_sctp_error(tls->sctp);
-		snprintf(tls->sctp_error, sizeof(tls->sctp_error), "%s",
-			 (why && *why) ? why : strerror(-ret));
-	}
-
-	return ret;
 }
 
 /*
@@ -756,7 +682,7 @@ static int esdm_tls_established(struct esdm_tls *tls)
 
 int esdm_tls_handshake(struct esdm_tls *tls)
 {
-	int ret, sent;
+	int ret;
 
 	if (!tls)
 		return -EINVAL;
@@ -764,76 +690,20 @@ int esdm_tls_handshake(struct esdm_tls *tls)
 		return 0;
 	if (tls->error[0])
 		return -EACCES;
-	if (tls->sctp_error[0])
-		return -EPROTO;
 
-	/*
-	 * What the last step wrote goes out before the next is made - and while
-	 * it cannot yet, the TLS stack takes what the peer sent all the same:
-	 * the alert of a peer refusing this side comes ahead of the
-	 * notification of SCTP the queue may wait for, see esdm_tls_sctp.h,
-	 * and would hold it up for good. What the TLS stack writes meanwhile
-	 * goes into the queue behind what waits.
-	 */
-	sent = esdm_tls_push(tls);
-	if (sent && sent != -EAGAIN)
-		return sent;
-
-	/*
-	 * A TLS stack that completed its part is not asked again - GnuTLS
-	 * would take that for a renegotiation -, only what it wrote waited
-	 * to go out
-	 */
-	if (tls->backend_done)
-		ret = 0;
-	else
-		ret = esdm_tls_backend_handshake(tls->backend, &tls->want);
-	if (!ret)
-		tls->backend_done = true;
-
-	/*
-	 * What it wrote now - the next flight, or the alert of a failure, which
-	 * is best effort - and what to wait for: as long as something is
-	 * queued, sending it is what the handshake waits for.
-	 */
-	sent = esdm_tls_push(tls);
+	ret = esdm_tls_backend_handshake(tls->backend, &tls->want);
 
 	/* The policy refused the peer: whatever the TLS stack made of that */
 	if (ret && ret != -EAGAIN && tls->error[0])
 		return -EACCES;
-	if (ret && ret != -EAGAIN)
-		return ret;
-	if (sent && sent != -EAGAIN)
-		return sent;
-	if (ret || sent)
-		return -EAGAIN;
-
-	ret = esdm_tls_established(tls);
 	if (ret)
 		return ret;
 
-#ifdef ESDM_TLS_SCTP
-	/* The key from the DTLS session is the only one, from here on */
-	if (tls->sctp) {
-		ret = esdm_tls_sctp_established(tls->sctp,
-						esdm_tls_sctp_export_key, tls);
-		if (ret) {
-			snprintf(tls->sctp_error, sizeof(tls->sctp_error),
-				 "%s", esdm_tls_sctp_error(tls->sctp));
-			tls->established = false;
-			return -EPROTO;
-		}
-	}
-#endif
-
-	return 0;
+	return esdm_tls_established(tls);
 }
 
 ssize_t esdm_tls_send(struct esdm_tls *tls, const void *buf, size_t len)
 {
-	ssize_t ret;
-	int sent;
-
 	if (!tls || (!buf && len))
 		return -EINVAL;
 	if (!tls->established)
@@ -841,40 +711,21 @@ ssize_t esdm_tls_send(struct esdm_tls *tls, const void *buf, size_t len)
 	if (!len)
 		return 0;
 
-	/* One record, which SCTP takes whole */
-	if (tls->sctp && len > ESDM_TLS_SCTP_RECORD_MAX)
-		return -EMSGSIZE;
-
-	ret = esdm_tls_backend_send(tls->backend, buf, len, &tls->want);
-
-	/* Taken, whatever of it the socket takes right now */
-	sent = esdm_tls_push(tls);
-	if (ret > 0 && sent && sent != -EAGAIN)
-		return sent;
-
-	return ret;
+	return esdm_tls_backend_send(tls->backend, buf, len, &tls->want);
 }
 
 int esdm_tls_flush(struct esdm_tls *tls)
 {
-	int ret;
-
 	if (!tls)
 		return -EINVAL;
 	if (!tls->established)
 		return -ENOTCONN;
-
-	ret = esdm_tls_push(tls);
-	if (ret)
-		return ret;
 
 	return esdm_tls_backend_flush(tls->backend, &tls->want);
 }
 
 ssize_t esdm_tls_recv(struct esdm_tls *tls, void *buf, size_t len)
 {
-	ssize_t ret;
-
 	if (!tls || !buf)
 		return -EINVAL;
 	if (!tls->established)
@@ -882,17 +733,7 @@ ssize_t esdm_tls_recv(struct esdm_tls *tls, void *buf, size_t len)
 	if (!len)
 		return -EINVAL;
 
-	ret = esdm_tls_backend_recv(tls->backend, buf, len, &tls->want);
-
-	/* An alert the TLS stack answered with, best effort */
-	if (tls->sctp && esdm_tls_sctp_queued(tls->sctp)) {
-		short want = tls->want;
-
-		(void)esdm_tls_push(tls);
-		tls->want = want;
-	}
-
-	return ret;
+	return esdm_tls_backend_recv(tls->backend, buf, len, &tls->want);
 }
 
 short esdm_tls_want(struct esdm_tls *tls)
@@ -910,21 +751,6 @@ void esdm_tls_close_notify(struct esdm_tls *tls)
 	/* Nothing is sent at the exit, see esdm_tls_exiting() */
 	if (!tls || !tls->established || esdm_tls_exiting())
 		return;
-
-#ifdef ESDM_TLS_SCTP
-	/*
-	 * After all sent is acknowledged only (RFC 6083 section 4.9) - not at
-	 * all if that takes waiting
-	 */
-	if (tls->sctp) {
-		if (esdm_tls_sctp_queued(tls->sctp) ||
-		    esdm_tls_sctp_dry(tls->sctp) != 1)
-			return;
-		esdm_tls_backend_close_notify(tls->backend);
-		(void)esdm_tls_push(tls);
-		return;
-	}
-#endif
 
 	esdm_tls_backend_close_notify(tls->backend);
 }
@@ -1014,8 +840,6 @@ const char *esdm_tls_error(struct esdm_tls *tls)
 		return "none";
 	if (tls->error[0])
 		return tls->error;
-	if (tls->sctp_error[0])
-		return tls->sctp_error;
 
 	err = esdm_tls_backend_error(tls->backend);
 	return (err && *err) ? err : "none";
@@ -1041,8 +865,7 @@ int esdm_tls_wait(struct esdm_tls *tls, int timeout_ms)
 		return -EINVAL;
 
 	/* Decrypted already, nothing to wait for */
-	if (tls->want == POLLIN && esdm_tls_pending(tls) &&
-	    !(tls->sctp && esdm_tls_sctp_queued(tls->sctp)))
+	if (tls->want == POLLIN && esdm_tls_pending(tls))
 		return 0;
 
 	pfd.fd = tls->fd;
@@ -1126,12 +949,3 @@ void esdm_tls_stamp(const struct esdm_tls_config *cfg,
 	esdm_hash_final(hash, stamp);
 	esdm_hash_zero(hash);
 }
-
-#ifndef ESDM_TLS_SCTP
-/* DTLS over SCTP is built with es-ext-net only, see esdm_tls_sctp.c */
-int esdm_tls_sctp_prepare(int fd)
-{
-	(void)fd;
-	return -EOPNOTSUPP;
-}
-#endif

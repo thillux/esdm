@@ -20,13 +20,12 @@
 /*
  * The network mode of the provider server of libesdm_es_ext, as a provider
  * program - esdm_es_ext_provider_main() - offers it, serving the test source
- * on SCTP with DTLS and certificates - its socket handed over by socket
+ * on TCP with TLS and certificates - its socket handed over by socket
  * activation, bound here to a port the kernel picked:
  *
- *  - the requests inside the DTLS, the fields of STATUS on the network - the
+ *  - the requests inside the TLS, the fields of STATUS on the network - the
  *    transport and the peer asking -, and the refusals: STARTDTLS, a client
- *    without a certificate or of an untrusted CA, an association without
- *    SCTP-AUTH;
+ *    without a certificate or of an untrusted CA, a client speaking no TLS;
  *  - the allowlist, from the second loopback address;
  *  - the bounds: the connections in all, those in their handshake, in all and
  *    per source, and those per client;
@@ -36,8 +35,7 @@
  *    established connection of the client it revokes;
  *  - the options it refuses to start with.
  *
- * Needs no privileges. Skips (77) in a build without es-ext-net, and on a
- * kernel without SCTP.
+ * Needs no privileges. Skips (77) in a build without es-ext-net.
  *
  * Usage: es_ext_net_server_test <test provider>
  */
@@ -68,7 +66,7 @@ static struct esdm_tls_ctx *client_of(const char *name)
 	cfg.cert_file = cert;
 	cfg.key_file = key;
 	cfg.ca_file = PKI("ca.crt");
-	cfg.transport = ESDM_TLS_TRANSPORT_SCTP;
+	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &ctx), "client context %s",
 	      name);
 	return ctx;
@@ -95,7 +93,7 @@ static int server_start(struct server *s, const char *cert, const char *key,
 	int lfd;
 
 	memset(s, 0, sizeof(*s));
-	lfd = test_sctp_listener("127.0.0.1", true, &s->port);
+	lfd = test_tcp_listener("127.0.0.1", &s->port);
 	if (lfd < 0)
 		return -1;
 
@@ -170,10 +168,10 @@ static const char *json_str(struct json_object *obj, const char *a,
 	return json_object_get_string(v);
 }
 
-/* A raw association without a handshake, from @src */
-static int raw_assoc(uint16_t port, const char *src)
+/* A raw connection without a handshake, from @src */
+static int raw_conn(uint16_t port, const char *src)
 {
-	return test_sctp_connect_from("127.0.0.1", port, src, true);
+	return test_tcp_connect_from("127.0.0.1", port, src);
 }
 
 static void test_requests(void)
@@ -216,7 +214,7 @@ static void test_requests(void)
 	obj = status_of(rsp, n);
 	CHECK(obj, "no STATUS: %zd", n);
 	str = json_str(obj, "server", "transport");
-	CHECK(str && !strcmp(str, "sctp"), "the transport is %s",
+	CHECK(str && !strcmp(str, "tcp"), "the transport is %s",
 	      str ? str : "missing");
 	/* The peer asking: the SHA-256 of the certificate of client 1 */
 	str = json_str(obj, "server", "peer");
@@ -227,7 +225,7 @@ static void test_requests(void)
 		printf("  STATUS tells the peer %s\n", str);
 	json_object_put(obj);
 
-	/* STARTDTLS inside the DTLS: no such thing on the network */
+	/* STARTDTLS inside the TLS: no such thing on the network */
 	n = test_conn_request(&c, ESDM_ES_EXT_PROTO_STARTDTLS, 0, rsp);
 	CHECK(n < 0, "STARTDTLS was answered on the network: %zd", n);
 	test_conn_close(&c);
@@ -235,7 +233,7 @@ static void test_requests(void)
 	/* No client certificate, an untrusted CA */
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.ca_file = PKI("ca.crt");
-	cfg.transport = ESDM_TLS_TRANSPORT_SCTP;
+	cfg.transport = ESDM_TLS_TRANSPORT_STREAM;
 	CHECK(!esdm_tls_ctx_alloc(false, &cfg, &none), "context");
 	CHECK(test_conn_open(&c, "127.0.0.1", s.port, NULL, none,
 			     "localhost") ||
@@ -251,10 +249,18 @@ static void test_requests(void)
 	      "a client of an untrusted CA was served");
 	test_conn_close(&c);
 
-	/* No SCTP-AUTH: the association is closed as it is accepted */
-	fd = test_sctp_connect_from("127.0.0.1", s.port, NULL, false);
+	/* No TLS: a request in the clear ends the connection */
+	fd = raw_conn(s.port, NULL);
+	if (fd >= 0) {
+		uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
+
+		esdm_es_ext_proto_req_pack(req, ESDM_ES_EXT_PROTO_INFO, 0);
+		CHECK(send(fd, req, sizeof(req), MSG_NOSIGNAL) ==
+			      (ssize_t)sizeof(req),
+		      "send: %s", strerror(errno));
+	}
 	CHECK(fd >= 0 && test_fd_closed(fd, 3000),
-	      "an association without SCTP-AUTH was kept");
+	      "a client speaking no TLS was kept");
 	if (fd >= 0)
 		close(fd);
 
@@ -318,12 +324,12 @@ static void test_bounds(void)
 	CHECK(!server_start(&s, NULL, NULL, extra, c1), "server");
 
 	/* In their handshake: one per source, two in all */
-	r1 = raw_assoc(s.port, "127.0.0.1");
+	r1 = raw_conn(s.port, "127.0.0.1");
 	test_sleep_ms(200);
-	r2 = raw_assoc(s.port, "127.0.0.1");
+	r2 = raw_conn(s.port, "127.0.0.1");
 	CHECK(r2 < 0 || test_fd_closed(r2, 3000),
 	      "a second handshake of one source was taken");
-	r3 = raw_assoc(s.port, "127.0.0.2");
+	r3 = raw_conn(s.port, "127.0.0.2");
 	test_sleep_ms(200);
 	CHECK(r3 >= 0 && !test_fd_closed(r3, 300),
 	      "a handshake of another source was refused");
@@ -388,7 +394,7 @@ static void test_timeouts(void)
 	CHECK(!server_start(&s, NULL, NULL, extra, c1), "server");
 
 	start = test_now_ms();
-	fd = raw_assoc(s.port, NULL);
+	fd = raw_conn(s.port, NULL);
 	CHECK(fd >= 0 && test_fd_closed(fd, 4000),
 	      "a silent handshake was not ended");
 	printf("  a silent handshake ended after %llu ms\n",
@@ -561,9 +567,6 @@ int main(int argc, char *argv[])
 	}
 	serve_path = argv[1];
 	signal(SIGPIPE, SIG_IGN);
-
-	if (!test_sctp_available())
-		return 77;
 
 	test_requests();
 	test_allowlist();

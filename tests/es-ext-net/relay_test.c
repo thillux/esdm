@@ -35,8 +35,7 @@
  *    answered with an errno in time;
  *  - a provider of another name than the relay expects: refused.
  *
- * Needs no privileges. Skips (77) in a build without es-ext-net, and on a
- * kernel without SCTP.
+ * Needs no privileges. Skips (77) in a build without es-ext-net.
  *
  * Usage: es_ext_net_relay_test <esdm-es-ext-relay> <rated test provider>
  */
@@ -77,18 +76,17 @@ static pid_t serve_start(uint16_t *port, const char *settings,
 	pid_t pid;
 
 	if (!*port) {
-		lfd = test_sctp_listener("127.0.0.1", true, port);
+		lfd = test_tcp_listener("127.0.0.1", port);
 	} else {
 		/* The same port again, for a restarted provider */
 		socklen_t len = test_sockaddr("127.0.0.1", *port, &ss);
 
 		lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC,
-			     IPPROTO_SCTP);
+			     IPPROTO_TCP);
 		if (lfd >= 0) {
 			setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one,
 				   sizeof(one));
-			if (esdm_tls_sctp_prepare(lfd) ||
-			    bind(lfd, (struct sockaddr *)&ss, len) < 0 ||
+			if (bind(lfd, (struct sockaddr *)&ss, len) < 0 ||
 			    listen(lfd, 16) < 0) {
 				close(lfd);
 				lfd = -1;
@@ -114,7 +112,7 @@ static pid_t serve_start(uint16_t *port, const char *settings,
 	pid = test_daemon_start(serve_path, argv, &lfd, 1,
 				settings ? env : NULL);
 	close(lfd);
-	/* Serving once its socket is set up for SCTP-AUTH: a moment */
+	/* Serving once it set itself up: a moment */
 	test_sleep_ms(300);
 	return pid;
 }
@@ -257,7 +255,7 @@ static void test_forwarding(uint16_t port, bool dtls)
 	}
 	CHECK(obj && json_object_object_get_ex(obj, "server", &v) &&
 		      json_object_object_get_ex(v, "transport", &v) &&
-		      !strcmp(json_object_get_string(v), "sctp"),
+		      !strcmp(json_object_get_string(v), "tcp"),
 	      "STATUS of the remote server: %.*s", (int)textlen,
 	      text ? text : "");
 	CHECK(obj && json_object_object_get_ex(obj, "server", &v) &&
@@ -520,9 +518,6 @@ int main(int argc, char *argv[])
 	relay_path = argv[1];
 	serve_path = argv[2];
 	signal(SIGPIPE, SIG_IGN);
-
-	if (!test_sctp_available())
-		return 77;
 
 	if (!mkdtemp(test_dir) || chmod(test_dir, 0755)) {
 		printf("Cannot create the directory: %s\n", strerror(errno));

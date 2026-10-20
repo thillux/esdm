@@ -75,10 +75,8 @@ ML-KEM from 3.7 on and CAs on ML-DSA-87 from 3.6 on - Botan refuses a
 certificate of its own on ML-DSA, as it has no signature scheme of TLS for it.
 A group the TLS stack lacks is left out rather than failing the start, and a
 peer without ML-KEM is served with (EC)DHE; the debug log tells what the TLS
-stack has and the group of each connection. The DTLS 1.2 over SCTP of
-es-ext-net has neither - both are defined for TLS 1.3 only, and none of the
-TLS stacks has DTLS 1.3 -, refuses a certificate on ML-DSA at the start and
-takes the certificates of a CA on ML-DSA-87
+stack has and the group of each connection. es-ext-net, on the same TLS 1.3,
+has all of it
 
 * libesdm_egd_client: network modes - esdm_egd_client_alloc_net() with an
 extensible configuration, plain TCP, which keeps the syscall discipline of the
@@ -157,30 +155,32 @@ tests/es_ebpf_testing
 * Add external entropy sources on the network (meson option es-ext-net, Linux
 only, with the TLS stack of OpenSSL, GnuTLS or Botan): the provider server of
 libesdm_es_ext - and with it every provider program, esdm-es-pkcs11 included -
-serves on SCTP with --listen or socket activation
-(esdm_es_ext_server_alloc_net()), and
-the new esdm-es-ext-relay on the host of the ESDM serves a local provider
-socket the ESDM reads as any ExternalSocket source and forwards INFO, SELFTEST,
-GET_ENTROPY and STATUS one to one, checked as the ESDM checks them, so the
-esdm-server keeps leaving the network namespace and parses no certificate.
-DTLS 1.2 over SCTP as RFC 6083 has it - every record one SCTP message, DTLS
-from the first message on - with mutual authentication by certificates and
-the checks of the server name, the CRLs (--crl, --crl_check_all,
---crl_allow_expired) and the rotation on SIGHUP and file change of egd-net,
-shared with it; the association authenticates its DATA and FORWARD-TSN chunks
-with SCTP-AUTH, keyed from the TLS exporter EXPORTER_DTLS_OVER_SCTP with the
-key switch of RFC 6083 and draft-ietf-tsvwg-dtls-over-sctp-bis, on every TLS
-stack and interoperable with OpenSSL's own DTLS over SCTP, enabled per socket
-(Linux 5.4 or later, else net.sctp.auth_enable=1), and a peer without it is
-refused. The provider bounds its connections in all, in their handshake, per
-source address and per client certificate, in time, and by an allowlist of
-source networks (--allow), and tells "sctp" as its "transport" and the
-SHA-256 of the client certificate as its "peer" in its status; the relay
+serves on TCP with --listen or socket activation
+(esdm_es_ext_server_alloc_net()), and the new esdm-es-ext-relay on the host of
+the ESDM serves a local provider socket the ESDM reads as any ExternalSocket
+source and forwards INFO, SELFTEST, GET_ENTROPY and STATUS one to one, checked
+as the ESDM checks them, so the esdm-server keeps leaving the network
+namespace and parses no certificate. TLS 1.3 from the first message on, the
+messages of the Unix domain socket inside with the length of each part in
+front, with mutual authentication by certificates and the checks of the server
+name, the CRLs (--crl, --crl_check_all, --crl_allow_expired), the rotation on
+SIGHUP and file change and the post-quantum key exchange and certificates of
+egd-net, shared with it. The provider bounds its connections in all, in their
+handshake, per source address and per client certificate, in time, and by an
+allowlist of source networks (--allow), and tells "tcp" as its "transport" and
+the SHA-256 of the client certificate as its "peer" in its status; the relay
 answers INFO with an errno while the provider is not reachable and bounds
 every step upstream below the timeout of the ESDM (--timeout_ms). Unit
 esdm-es-ext-relay.service (system user esdm-es-ext-relay, which the ESDM
 accepts with --es_ext_socket_uid), connecting to port 7379 (es-ext-net-port)
 by default; see esdm-es-ext-relay(8) and NETWORK in libesdm_es_ext(3)
+
+* es-ext-net: TLS 1.3 on TCP instead of DTLS 1.2 on SCTP with SCTP-AUTH -
+incompatible with the 1.2.4 development versions: a provider listens, and the
+relay connects, on TCP, neither needs the kernel module sctp, a firewall
+passes TCP to port 7379, and the status tells "tcp" as the "transport"; the
+key exchange of ML-KEM and certificates on ML-DSA-87, which DTLS 1.2 had no
+place for, are those of egd-net now
 
 * Incompatible with the 1.2.4 development versions, whose PKCS#11 entropy source was part of the ESDM: esdm-tool --pkcs11-pin and --pkcs11-token-label, esdm-server --pkcs11_module, esdm_rpcc_set_pkcs11_config[_int]() of libesdm_rpc_client, esdm_config_es_pkcs11_entropy_rate[_set]() of libesdm and the meson options es_pkcs11_pin and es_pkcs11_entropy_blocks are removed - the module, the token label and the PIN are configuration of esdm-es-pkcs11, and es_pkcs11_module_path, es_pkcs11_token_label and es_pkcs11_entropy_rate are its defaults; the slot of the RPC call stays as RpcReservedSetPkcs11Config, which the server answers with -EOPNOTSUPP, so that the calls after it keep their index on the wire
 
@@ -615,10 +615,6 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 * fix: egd-net: the esdm-egd-net-relay closes upstream connections to a server revoked by reloaded CRLs or whose certificate expired, and with all slots taken serves a new connection at the expense of the least recently used connection of the user holding the most; the esdm-es-ext-relay checks an upstream connection whose handshake spanned a reload of its CRLs
 
 * fix: TLS: a chain has to end in a self-signed trust anchor with GnuTLS as well, so an intermediate CA alone in --ca is refused by every TLS stack; the Botan backend reads the private key into memory that is wiped, and the egd-net units set LimitCORE=0; ExecReload of the units signals with the kill of /bin/sh, so systemctl reload works on NixOS
-
-* fix: es-ext-net with OpenSSL: a flight of the DTLS handshake beyond 4 KiB - long chains, large keys or signatures, a CA on ML-DSA - failed the handshake, as OpenSSL writes a flight in parts of 4 KiB that cut its records, which the SCTP layer took for no records; the parts are collected into records again
-
-* es-ext-net with GnuTLS: the replay detection of DTLS is on, as with OpenSSL and Botan - against RFC 6083 section 3.3, which rules it out for records SCTP delivers out of order, which the one ordered stream used never does - so a record sent twice is dropped rather than delivered twice
 
 * fix: External ES socket: every new connection to a provider runs its self test before the provider is credited, so a restarted provider is tested at once; the ESDM status waits at most 500 ms for the STATUS of a provider, which keeps its connection and has its late answer shown when it arrives, and no longer reconnects to a provider; retry, probe and backoff deadlines are kept in nanoseconds rather than whole seconds; a status or name with C1 controls or Unicode bidirectional controls is refused
 

@@ -30,11 +30,11 @@ host as it starts, and parses no certificate. The relay serves it a local
 provider socket instead, which the ESDM reads through one of its provider
 socket sources as any other provider
 .RB ( "esdm\-server \-\-es_ext_socket" ),
-and forwards each request over SCTP with DTLS and certificates:
+and forwards each request over TCP with TLS and certificates:
 .PP
 .nf
 	esdm\-server \-\-\-unix socket\-\-\-> esdm\-es\-ext\-relay
-		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> provider program
+		\-\-\-TCP, TLS 1.3, certificates\-\-\-> provider program
 .fi
 .PP
 The requests of the ESDM \- INFO, SELFTEST, GET_ENTROPY and STATUS, see
@@ -44,11 +44,11 @@ unchanged: the ESDM shows the source under the name the remote provider
 declares, credits it at the rate the remote provider declares \- unless one is
 configured for the source \- and shows the status of the remote provider, whose
 server tells
-.B sctp
+.B tcp
 as its
 .BR transport .
 The relay answers STARTDTLS itself: the local socket has its own opportunistic
-DTLS, as any provider socket, and the network its own DTLS with certificates.
+DTLS, as any provider socket, and the network its own TLS with certificates.
 Every answer is checked as the ESDM checks it before it is passed back; one
 that breaks the protocol ends the connection.
 .PP
@@ -108,13 +108,12 @@ The ESDM sees the relay as the user it ran as when it created its socket. Run
 it as a user of its own \- as the shipped unit does \- rather than as root,
 which the ESDM accepts without being told.
 .SH TRANSPORT
-SCTP, one-to-one style, over IPv4 or IPv6, to port @ES_EXT_NET_PORT@ unless
-told otherwise; with DTLS 1.2 as RFC 6083 maps it onto SCTP, and SCTP-AUTH \-
-see
+TCP over IPv4 or IPv6, to port @ES_EXT_NET_PORT@ unless told otherwise; with
+TLS 1.3 \- see
 .B NETWORK
 in
 .BR libesdm_es_ext (3).
-The relay is the DTLS client: it presents its certificate, and verifies that
+The relay is the TLS client: it presents its certificate, and verifies that
 of the provider against the trust anchors of
 .BR \-\-ca ,
 that it is issued for the name of the provider \- the host of
@@ -129,13 +128,6 @@ the provider's chain is checked against the CRLs as the
 checks its clients', see
 .B REVOCATION
 there: fail closed, as part of the verification of the TLS stack.
-.PP
-A provider whose association does not authenticate its DATA chunks with
-SCTP-AUTH is refused before the handshake. The kernel needs SCTP (module
-.BR sctp );
-a kernel before Linux 5.4 also needs the sysctl
-.BR net.sctp.auth_enable=1 ,
-without which the relay logs an error naming it and fails the connections.
 .SH OPTIONS
 .TP
 .BR \-C ", " \-\-connect " \fIHOST[:PORT]\fR"
@@ -169,7 +161,7 @@ the user the ESDM runs as unless told otherwise
 .RB ( "esdm\-server \-\-username" ).
 .TP
 .B \-\-no_dtls
-Do not offer DTLS on the local socket. The DTLS upstream is not affected.
+Do not offer DTLS on the local socket. The TLS upstream is not affected.
 .TP
 .BI \-\-cert " FILE"
 Certificate of the relay, PEM, optionally followed by the intermediate

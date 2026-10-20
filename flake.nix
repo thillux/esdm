@@ -1490,17 +1490,16 @@
 
         # External entropy sources on the network, between two hosts: "source"
         # serves the example provider of the tree, reading /dev/urandom, on
-        # SCTP - built against libesdm_es_ext of the OpenSSL build, as a
-        # provider of its own making is, and run by a socket and a service
-        # unit of the site, socket activated; "esdm" runs the ESDM (Botan)
-        # and reads it through the esdm-es-ext-relay of its unit. Neither host
-        # sets a sysctl for SCTP-AUTH: the daemons enable it per socket.
+        # TCP with TLS 1.3 - built against libesdm_es_ext of the OpenSSL
+        # build, as a provider of its own making is, and run by a socket and a
+        # service unit of the site, socket activated; "esdm" runs the ESDM
+        # (Botan) and reads it through the esdm-es-ext-relay of its unit.
         #
         # Phases: the source credited at the rate it declares, the status of
         # the remote provider passed through; the TLS stacks against each
         # other - the relay of OpenSSL against the provider of GnuTLS, GnuTLS
-        # against Botan - and against OpenSSL's own DTLS over SCTP
-        # (s_client and s_server -sctp, which need net.sctp.auth_enable);
+        # against Botan - and against openssl s_client and s_server, the
+        # messages framed by hand;
         # rotation of the relay's and of the provider's certificate, and a
         # broken rotation that leaves the service up; revocation of the
         # relay's certificate by a CRL taken up while the provider runs; a
@@ -1531,14 +1530,8 @@
               }))
             ];
 
-            # OpenSSL with its own DTLS over SCTP, to check against
-            opensslSctp = pkgs.openssl.overrideAttrs (prev: {
-              pname = "openssl-sctp";
-              configureFlags = prev.configureFlags ++ [ "enable-sctp" ];
-              buildInputs = (prev.buildInputs or [ ]) ++ [ pkgs.lksctp-tools ];
-              doCheck = false;
-            });
-            openssl = "${opensslSctp.bin}/bin/openssl";
+            # openssl s_client and s_server, to check against
+            openssl = "${pkgs.openssl.bin}/bin/openssl";
 
             # The example provider of the tree, built against the installed
             # header and libesdm_es_ext of @pkg - the TLS stack of its
@@ -1614,7 +1607,7 @@
             '';
           in
           pkgs.testers.nixosTest {
-            name = "External entropy sources on the network, DTLS over SCTP";
+            name = "External entropy sources on the network, TLS over TCP";
 
             nodes.esdm =
               { ... }:
@@ -1624,7 +1617,6 @@
                   enableLinuxCompatServices = false;
                   package = esdm;
                 };
-                boot.kernelModules = [ "sctp" ];
 
                 # The user the relay runs as, which the ESDM accepts. The
                 # package ships it as a sysusers.d file, which a NixOS
@@ -1666,19 +1658,14 @@
             nodes.source =
               { ... }:
               {
-                boot.kernelModules = [ "sctp" ];
-
                 # No ESDM here: the example provider on the network, socket
-                # activated - SCTP of the one-to-one style - by units of the
-                # site, as libesdm_es_ext(3) has them. The service is enabled
-                # next to its socket: the provider sets the socket up for
-                # SCTP-AUTH as it starts, and refuses the associations the
-                # kernel set up before.
+                # activated - TCP - by units of the site, as libesdm_es_ext(3)
+                # has them. The service is enabled next to its socket.
                 systemd.sockets.${provider} = {
                   wantedBy = [ "sockets.target" ];
                   socketConfig = {
                     ListenStream = toString port;
-                    SocketProtocol = "sctp";
+                    NoDelay = true;
                     Backlog = 16;
                   };
                 };
@@ -1708,7 +1695,7 @@
                     ProtectHome = true;
                     ProtectKernelTunables = true;
                     ProtectSystem = "strict";
-                    # SCTP over IPv4 or IPv6, and the logging
+                    # TCP over IPv4 or IPv6, and the logging
                     RestrictAddressFamilies = "AF_UNIX AF_INET AF_INET6";
                     SystemCallArchitectures = "native";
                   };
@@ -1720,11 +1707,13 @@
                   "crl.pem" = "int-empty.crl";
                 };
 
-                # SCTP, which a rule for TCP does not pass: the provider of
-                # the units, and the ones of the other TLS stacks
-                networking.firewall.extraCommands = ''
-                  ip46tables -A nixos-fw -p sctp --dport ${toString port}:${toString (port + 2)} -j nixos-fw-accept
-                '';
+                # The provider of the units, and the ones of the other TLS
+                # stacks
+                networking.firewall.allowedTCPPorts = [
+                  port
+                  (port + 1)
+                  (port + 2)
+                ];
 
                 environment.systemPackages = [ pkgs.python3 ];
                 virtualisation = {
@@ -1785,7 +1774,7 @@
                       if (f"connected (uid {relay_uid}), DTLS" in es["status"]
                               and "failing" not in es["status"]
                               and es["available_entropy"] > 0
-                              and server.get("transport") == "sctp"
+                              and server.get("transport") == "tcp"
                               and (peer is None or server.get("peer") == peer)):
                           return es
                       time.sleep(1)
@@ -1798,10 +1787,6 @@
               esdm.wait_for_unit("esdm-server.service")
               esdm.wait_for_unit("esdm-es-ext-relay.service")
               relay_uid = esdm.succeed("id -u esdm-es-ext-relay").strip()
-
-              # Nothing set for SCTP-AUTH
-              for m in (esdm, source):
-                  m.succeed("test $(cat /proc/sys/net/sctp/auth_enable) = 0")
 
               # Installed by the package, next to the unit - and no unit
               # of a generic provider on the network, which is a program of
@@ -1870,17 +1855,15 @@
                       assert out["rate"] == 32 and out["get_entropy"] == 0, out
                       assert out["bytes"] == 32 and out["bits"] == 32, out
 
-              with subtest("Against OpenSSL's own DTLS over SCTP"):
-                  # OpenSSL enables SCTP-AUTH by the sysctl only
-                  esdm.succeed("sysctl -w net.sctp.auth_enable=1")
-
+              with subtest("Against openssl s_client and s_server"):
                   # s_client against the providers of all three TLS stacks,
-                  # asking INFO - the byte in front, as every message has -
-                  # until it is stopped, after the answer
+                  # asking INFO - its length and the byte in front, as every
+                  # part of a message has - until it is stopped, after the
+                  # answer
                   for p in (${toString port}, ${toString (port + 1)}, ${toString (port + 2)}):
                       out = esdm.succeed(
-                          "{ (printf '\\000ESEX\\001\\000\\005\\000\\000\\000\\000\\000'; sleep 3) | "
-                          f"timeout 15 ${openssl} s_client -sctp -dtls1_2 -connect source:{p} "
+                          "{ (printf '\\000\\015\\000ESEX\\001\\000\\005\\000\\000\\000\\000\\000'; sleep 3) | "
+                          f"timeout 15 ${openssl} s_client -tls1_3 -connect source:{p} "
                           "-cert ${dir}/client.crt -key ${dir}/client.key -cert_chain ${dir}/client.crt "
                           "-CAfile ${dir}/ca.crt -verify_return_error -verify_hostname source "
                           "-ign_eof 2>&1 || true; } | tr -c '[:print:]\\n' '.'"
@@ -1894,7 +1877,7 @@
                   # its path, which the PATH of a unit does not find.
                   esdm.succeed(
                       "systemd-run --unit=s-server sh -c '${pkgs.coreutils}/bin/sleep 3600 | "
-                      "${openssl} s_server -sctp -dtls1_2 -accept 127.0.0.1:7390 "
+                      "${openssl} s_server -tls1_3 -accept 127.0.0.1:7390 "
                       "-cert ${pki}/server.crt -key ${pki}/server.key -CAfile ${pki}/ca.crt "
                       "-Verify 2 -verify_return_error > /run/s_server.log 2>&1'"
                   )
@@ -1921,7 +1904,6 @@
                           f"test $(grep -a -c ESEX /run/s_server.log) -ge {i + 1}", 30
                       )
                   esdm.succeed("systemctl stop s-server.service")
-                  esdm.succeed("sysctl -w net.sctp.auth_enable=0")
 
               relay = "esdm-es-ext-relay.service"
               provider = "${provider}.service"
@@ -3467,7 +3449,7 @@
                     # module, which the VM of mkEsdmCdevCheck runs
                     "-Desdm-cdev-check=enabled"
                     # External entropy sources on the network: the provider
-                    # server on SCTP with DTLS and certificates, and
+                    # server on TCP with TLS and certificates, and
                     # esdm-es-ext-relay. See mkEsExtNetCheck.
                     "-Des-ext-net=enabled"
                   ];
@@ -3891,9 +3873,8 @@
               ++ [
                 "-Dcrypto_backend=openssl"
                 # The DTLS and the TLS of egd-net by OpenSSL, which the
-                # builtin backend has not - and the DTLS over SCTP of the
-                # external entropy sources on the network, whose tests skip
-                # where the kernel of the build host has no SCTP
+                # builtin backend has not - and the TLS of the external
+                # entropy sources on the network
                 "-Ddtls=enabled"
                 "-Degd-net-tls=enabled"
                 "-Des-ext-net=enabled"

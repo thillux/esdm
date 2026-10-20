@@ -98,7 +98,7 @@ const char *esdm_dtls_backend_cipher(void *conn);
 
 /*
  * The records of a connection that are not the ones of the backend above: the
- * DTLS with certificates of esdm_tls.h, see esdm_dtls_tls.c. Its functions are
+ * TLS with certificates of esdm_tls.h, see esdm_dtls_tls.c. Its functions are
  * those of the backend, and:
  *
  *  - want: what a step that returned -EAGAIN waits for, POLLIN or POLLOUT

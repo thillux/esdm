@@ -19,7 +19,7 @@
 
 /*
  * The backend independent part of esdm_dtls.h: messages of any size on top of
- * the records of the backend - or of the DTLS with certificates, see
+ * the records of the backend - or of the TLS with certificates, see
  * esdm_dtls_tls.c -, and the busy marker of the thread.
  */
 

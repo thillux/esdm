@@ -336,11 +336,10 @@ esdm-server --es_ext_socket /run/esdm-es-a.socket \
 
 A provider may serve the ESDM of another host (meson option `es-ext-net`,
 Linux, with the TLS stack of OpenSSL, GnuTLS or Botan): every provider program
-of `libesdm_es_ext` - `esdm-es-pkcs11` as well - serves on SCTP with
-`--listen`, or on sockets handed over by socket activation, with DTLS 1.2 as
-RFC 6083 maps it onto SCTP, certificates on both sides and SCTP-AUTH keyed
-from the DTLS session. The `esdm-server` still reaches no network and parses
-no certificate: the `esdm-es-ext-relay` of its host serves it a local
+of `libesdm_es_ext` - `esdm-es-pkcs11` as well - serves on TCP with
+`--listen`, or on sockets handed over by socket activation, with TLS 1.3 and
+certificates on both sides, as egd-net has it. The `esdm-server` still
+reaches no network and parses no certificate: the `esdm-es-ext-relay` of its host serves it a local
 provider socket and forwards each request.
 
 ```
@@ -363,9 +362,7 @@ The ESDM credits the source at the rate the remote provider declares unless
 one is configured for it: accepting the user of the relay is trusting every
 holder of a certificate the relay accepts for the provider. The provider bounds
 its connections and takes an allowlist of client networks; both ends take up
-renewed certificates and CRLs without a restart, as egd-net does. The kernel
-needs SCTP, and SCTP-AUTH, which the daemons enable per socket since Linux 5.4.
-See `esdm-es-ext-relay(8)` and NETWORK in `libesdm_es_ext(3)`; the unit of the
+renewed certificates and CRLs without a restart, as egd-net does. See `esdm-es-ext-relay(8)` and NETWORK in `libesdm_es_ext(3)`; the unit of the
 relay is `esdm-es-ext-relay.service`. A provider on the network is a program
 of the site's making, run by units of the site's own - `libesdm_es_ext(3)`
 shows a socket and a service unit for it.
@@ -556,7 +553,7 @@ The ESDM consists of the following components:
   `esdm-egd-net-server(8)` and `esdm-egd-net-relay(8)`.
 
 * `esdm-es-ext-relay` (meson option `es-ext-net`): the other direction - an
-  external entropy source on another host, served there on SCTP by a provider
+  external entropy source on another host, served there on TCP by a provider
   program of `libesdm_es_ext`, such as `esdm-es-pkcs11`, read by the ESDM of
   this host through a local provider socket. See
   [External Entropy Sources on the Network] and `esdm-es-ext-relay(8)`.

@@ -1241,9 +1241,8 @@ int main(int argc, char *argv[])
 
 	lfd_num = esdm_net_listen_fds(lfds, ESDM_NET_MAX_LISTEN);
 	for (i = 0; i < listen_num; i++) {
-		if (esdm_net_listen(listen_args[i], IPPROTO_TCP,
-				    SERVER_BACKLOG, NULL, lfds, &lfd_num,
-				    ESDM_NET_MAX_LISTEN))
+		if (esdm_net_listen(listen_args[i], SERVER_BACKLOG, lfds,
+				    &lfd_num, ESDM_NET_MAX_LISTEN))
 			goto out;
 	}
 	if (!lfd_num) {

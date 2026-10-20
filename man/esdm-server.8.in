@@ -336,7 +336,7 @@ when it reads a provider. A provider on another host \- a provider program of
 .BR libesdm_es_ext (3),
 such as
 .BR esdm\-es\-pkcs11 (8),
-serving on SCTP with DTLS and certificates \- is read through the
+serving on TCP with TLS and certificates \- is read through the
 .BR esdm\-es\-ext\-relay (8)
 of this host (meson option
 .BR es\-ext\-net ),

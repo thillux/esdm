@@ -1403,7 +1403,7 @@ its host serves it a local provider socket, which the ESDM reads and checks
 as any other provider - by the user the relay runs as -, and forwards each
 request to a provider served on the network by the provider server of
 `libesdm_es_ext`, i.e. a provider program such as `esdm-es-pkcs11` started
-with `--listen` or by socket activation, as depicted in figure @fig:dtls-sctp.
+with `--listen` or by socket activation.
 
 #par(first-line-indent: 0pt)[The relay forwards the requests INFO, SELFTEST,
 GET_ENTROPY and STATUS one to one rather than serving them from callbacks of
@@ -1420,56 +1420,25 @@ below the 2 seconds the ESDM gives a request. Accepting the user of the relay
 means trusting the rate every holder of a certificate the relay accepts for
 the provider declares, unless a rate is configured for the source.]
 
-The transport is SCTP of the one-to-one style with DTLS 1.2 as RFC 6083 maps
-it onto SCTP (`common/esdm_tls_sctp.c`, `common/esdm_tls.h`): every DTLS
-record is one SCTP message on stream 0, ordered, the DTLS does not retransmit,
-and every message is DTLS from the first one on - the STARTDTLS of the Unix
-domain socket has no place there. Both sides authenticate with certificates,
-the client checks the name of the server, and CRLs are checked within the
-verification of the TLS stack with the code of the EGD protocol over the
-network: the TLS with certificates, its rotation on SIGHUP and when the files
-change, and its revocation checks are one implementation for TLS over TCP and
-DTLS over SCTP, for every TLS stack, the transport an option of the context.
-The post-quantum algorithms are those of TLS 1.3 only: over TCP, the key
-exchange prefers the groups of ML-KEM - SecP384r1MLKEM1024, MLKEM1024, but no
-hybrid whose conventional half falls short of 192 bits - to (EC)DHE, and
-certificates may be on ML-DSA-87, as far as the TLS stack has them - not on
-ML-DSA-44 or ML-DSA-65, which are refused in a chain as well; DTLS 1.2 over
-SCTP keeps to ECDHE with ECDSA or RSA certificates, which a CA on ML-DSA-87
-may issue, as none of the TLS stacks implements DTLS 1.3.
-
-#par(first-line-indent: 0pt)[The SCTP association authenticates its DATA and
-FORWARD-TSN chunks with SCTP-AUTH (RFC 4895): both ends require it with
-`SCTP_AUTH_CHUNK` before they connect or listen, and refuse an association
-whose peer does not authenticate them. The handshake runs under key 0, the
-empty key. Before it sends its ChangeCipherSpec, each side waits until the peer
-acknowledged all it sent (`SCTP_SENDER_DRY_EVENT`, RFC 6083 section 4.7) and
-installs key 1, the 64 bytes of the TLS exporter `EXPORTER_DTLS_OVER_SCTP`
-without a context; the server makes it the active key after its
-ChangeCipherSpec, the client after its Finished, and both delete key 0 once
-the handshake is complete - the key handling of
-draft-ietf-tsvwg-dtls-over-sctp-bis for DTLS 1.2, and the one of OpenSSL's own
-DTLS over SCTP, with which all three TLS stacks interoperate. The key comes
-from `SSL_export_keying_material()` of OpenSSL and `gnutls_prf_rfc5705()` of
-GnuTLS; Botan exports keys only once its channel is active, so its key is
-computed with the TLS 1.2 PRF of the session from the master secret and the
-randoms of the handshake, and compared with Botan's export once the handshake
-completed - as the exports of the other stacks are, a mismatch failing the
-connection. The DTLS is not renegotiated, so the key is set once per
-association. Linux enables SCTP-AUTH per socket (`SCTP_AUTH_SUPPORTED`) since
-5.4; on an older kernel without the sysctl `net.sctp.auth_enable=1`, the
-daemons fail with an error naming it.]
-
-#figure(
-  image("../figures/dtls-sctp-auth.svg", width: 85%),
-  caption: [External Entropy Source on the Network: DTLS over SCTP with
-    SCTP-AUTH],
-) <fig:dtls-sctp>
+The transport is TCP with TLS 1.3 (`common/esdm_tls.h`), and every message is
+TLS from the first one on - the STARTDTLS of the Unix domain socket has no
+place there. The messages are those of the Unix domain socket, cut into the
+same parts with the byte in front; as TCP keeps no boundaries, each part
+travels with its length in front, two bytes (`common/esdm_dtls_tls.c`). Both
+sides authenticate with certificates, the client checks the name of the
+server, and CRLs are checked within the verification of the TLS stack with the
+code of the EGD protocol over the network: the TLS with certificates, its
+rotation on SIGHUP and when the files change, its revocation checks and its
+post-quantum algorithms are one implementation for both, for every TLS stack.
+The key exchange prefers the groups of ML-KEM - SecP384r1MLKEM1024, MLKEM1024,
+but no hybrid whose conventional half falls short of 192 bits - to (EC)DHE,
+and certificates may be on ML-DSA-87, as far as the TLS stack has them - not
+on ML-DSA-44 or ML-DSA-65, which are refused in a chain as well.
 
 The listener of the provider faces the network, so it bounds its connections
 as the EGD network server does: in all, in their handshake in all and per
 source address, per client certificate, by a handshake and an idle timeout,
-and by an allowlist of source networks. Its status tells `sctp` as the
+and by an allowlist of source networks. Its status tells `tcp` as the
 `transport` of the server and the SHA-256 of the client certificate as its
 `peer`. After every reload of the TLS files, provider and relay check their
 established connections against the new CRLs and close those of a revoked

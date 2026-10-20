@@ -154,16 +154,6 @@ jobs:
       if: contains(matrix.backend.opts, '-Des_pkcs11=enabled')
       run: sudo apt-get install -y libp11-dev softhsm2
 
-    # The tests of es-ext-net skip on a kernel without SCTP. The module may
-    # only come with the extra modules of the runner's kernel.
-    - name: Load SCTP
-      if: contains(matrix.backend.opts, '-Des-ext-net=enabled')
-      run: |
-        sudo modprobe sctp \
-          || { sudo apt-get install -y "linux-modules-extra-$(uname -r)" \
-               && sudo modprobe sctp; } \
-          || echo "::notice::no SCTP on this runner - the es-ext-net tests skip"
-
     - name: Install Jitter RNG
       run: |
         wget -O jent.tar.gz https://github.com/smuellerDD/jitterentropy-library/archive/refs/tags/v${JITTERENTROPY_VERSION}.tar.gz

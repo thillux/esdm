@@ -39,7 +39,7 @@ making instead, and the protocol below lets a provider be written without the
 library at all.
 .BR esdm\-es\-pkcs11 (8)
 is a provider program of this library. A provider may serve the ESDM of
-another host as well, on SCTP with DTLS and certificates \- see
+another host as well, on TCP with TLS and certificates \- see
 .BR NETWORK .
 .PP
 An ESDM may be built with several provider socket sources (meson option
@@ -321,7 +321,7 @@ callback of the source.
 .SS Provider server on the network
 A library built with the meson option
 .B es\-ext\-net
-serves a source to the ESDM of other hosts as well, on SCTP with DTLS and
+serves a source to the ESDM of other hosts as well, on TCP with TLS and
 certificates \- see
 .BR NETWORK .
 The other functions of the provider server apply to such a server as well,
@@ -331,7 +331,7 @@ which returns
 .B \-EINVAL
 \- a client is known by its certificate \- and
 .BR esdm_es_ext_server_set_dtls (),
-which cannot switch the DTLS of the network off.
+which cannot switch the TLS of the network off.
 .TP
 .BI "void esdm_es_ext_server_net_config_init(struct esdm_es_ext_server_net_config *" cfg );
 Set
@@ -348,13 +348,13 @@ caller built against an older header does not know.
 .BI "int esdm_es_ext_server_alloc_net(const struct esdm_es_ext_plugin *" plugin ", const struct esdm_es_ext_server_net_config *" cfg ", struct esdm_es_ext_server **" server );
 As
 .BR esdm_es_ext_server_alloc (),
-on the SCTP sockets of
+on the TCP sockets of
 .IR cfg :
 the addresses of
 .I listen
 \- "HOST:PORT", "[IPv6]:PORT", ":PORT" \- and the listening sockets of
 .I listen_fds
-handed over, SCTP of the one-to-one style. Loads the certificate, key, trust
+handed over. Loads the certificate, key, trust
 anchors and CRLs of
 .IR cfg ,
 binds the listeners and calls the
@@ -362,9 +362,7 @@ binds the listeners and calls the
 callback of the source: a daemon drops its privileges afterwards. Returns
 .B \-EINVAL
 for a configuration that does not parse or TLS files that do not load \- both
-logged \-,
-.B \-EPROTONOSUPPORT
-without SCTP in the kernel, and
+logged \-, and
 .B \-EOPNOTSUPP
 in a library built without
 .BR es\-ext\-net .
@@ -410,7 +408,7 @@ my\-provider \-\-listen [\fIHOST\fR]:\fIPORT\fR [\-\-cert \fIFILE\fR] [\-\-key \
 With
 .B \-\-listen
 or sockets handed over by socket activation, it serves the source to the ESDM
-of other hosts instead \- on SCTP, with DTLS and certificates, see
+of other hosts instead \- on TCP, with TLS and certificates, see
 .BR NETWORK .
 .PP
 The source is set up \- its
@@ -542,7 +540,7 @@ or with
 on every address. May be given up to 16 times. Sockets handed over by socket
 activation
 .RB ( LISTEN_FDS )
-\- SCTP of the one-to-one style \- are served next to these. The relays
+\- TCP \- are served next to these. The relays
 connect to port @ES_EXT_NET_PORT@ by default (meson option
 .BR es\-ext\-net\-port ).
 .TP
@@ -570,9 +568,7 @@ those of
 .B REVOCATION
 in
 .BR esdm\-egd\-net\-server (8),
-and so are the alerts a refused client is told \- but by a provider of the
-Botan backend, whose DTLS 1.2 server tells every client whose certificate it
-refuses bad_certificate. Its log tells why.
+and so are the alerts a refused client is told.
 .TP
 .B \-\-crl_check_all
 Require a CRL for every CA certificate of a client's chain as well, not only
@@ -595,7 +591,7 @@ such as
 .B 192.0.2.0/24
 or
 .BR 2001:db8::/48 ,
-or from a single address. May be given up to 64 times. An association from
+or from a single address. May be given up to 64 times. A connection from
 anywhere else is closed right after it was accepted. The default is every
 address.
 .TP
@@ -683,11 +679,12 @@ or of the source, null for none;
 .B transport
 .B unix
 on a UNIX domain socket,
-.B sctp
+.B tcp
 on the network;
 .TP
 .B dtls
-whether the connection asking runs DTLS \- always on the network;
+whether the connection asking is encrypted \- by its DTLS, and always on the
+network, by its TLS;
 .TP
 .B peer
 on the network only: the SHA-256 of the certificate of the client asking, in
@@ -720,16 +717,15 @@ requests:
 .PP
 .nf
 	esdm\-server \-\-\-unix socket\-\-\-> esdm\-es\-ext\-relay
-		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> provider program
+		\-\-\-TCP, TLS 1.3, certificates\-\-\-> provider program
 .fi
 .PP
-The transport is SCTP, one-to-one style, over IPv4 or IPv6, with DTLS 1.2 as
-RFC 6083 maps it onto SCTP:
+The transport is TCP over IPv4 or IPv6, with TLS 1.3:
 .IP \(bu 2
-Every DTLS record is one SCTP message, on stream 0, ordered; the requests and
-answers of the protocol below travel inside the DTLS from the first message on
-\- there is no STARTDTLS, and no message in the clear. SCTP retransmits, the
-DTLS does not.
+The requests and answers of the protocol below travel inside the TLS from the
+first message on \- there is no STARTDTLS, and no message in the clear. Each
+part of a message travels with its length in front, two bytes, as TCP keeps
+no boundaries.
 .IP \(bu 2
 Both sides authenticate with a certificate: the provider checks the client's
 against the trust anchors of
@@ -740,42 +736,17 @@ the relay checks the provider's, and that it is issued for the name it
 connects to. A client is known by the SHA-256 of its certificate, which the
 STATUS of the provider tells as
 .BR peer .
-The cipher suites are ECDHE with ECDSA or RSA certificates, and AES-GCM or
-ChaCha20-Poly1305. DTLS 1.2 has no post-quantum algorithms: the key exchange
-of ML-KEM and the signatures of ML-DSA are defined for TLS 1.3 only, and none
-of the TLS stacks has DTLS 1.3. A certificate on ML-DSA is refused at the
-start; the certificates may still be issued by a CA on ML-DSA-87, where the
-TLS stack verifies ML-DSA \- OpenSSL 3.5 and later, GnuTLS built with
-leancrypto, Botan 3.6 and later -, not by one on ML-DSA-44 or ML-DSA-65.
 .IP \(bu 2
-The association authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH
-(RFC 4895): both sides require it before the association is set up, and refuse
-a peer that does not. Each side offers HMAC-SHA-256 first, and HMAC-SHA-1
-after it, as RFC 4895 has every endpoint offer it \- Linux takes no list
-without. Linux authenticates the chunks it sends with the first HMAC of the
-peer's list it supports, and takes either of its own list from the peer:
-between the daemons of the ESDM, both directions use HMAC-SHA-256, while a
-peer offering HMAC-SHA-1 first is sent HMAC-SHA-1. Linux does not tell which
-HMAC an association uses, so the daemons cannot check it. The handshake runs
-under key 0, the empty key. Before it sends its ChangeCipherSpec, each side
-waits until the peer acknowledged everything it sent, and installs key 1: the
-64 bytes of the TLS exporter
-.B EXPORTER_DTLS_OVER_SCTP
-of the DTLS session, without a context. It makes key 1 the active one once its
-ChangeCipherSpec is sent \- the server \- or its Finished \- the client \- and
-deletes key 0 once the handshake is complete. Neither side renegotiates, so the
-key is set once per association. This is the key handling of RFC 6083 as
-draft\-ietf\-tsvwg\-dtls\-over\-sctp\-bis details it for DTLS 1.2, and the one
-of OpenSSL's own DTLS over SCTP.
+The key exchange prefers the post\-quantum groups of ML\-KEM \-
+SecP384r1MLKEM1024 and MLKEM1024, in this order \- to (EC)DHE alone, as far
+as the TLS stack has them: OpenSSL 3.5 and later, GnuTLS built with
+leancrypto, Botan 3.7 and later. Certificates may be on ML\-DSA\-87 where the
+TLS stack signs TLS 1.3 with ML\-DSA, and issued by a CA on ML\-DSA\-87 where
+it verifies ML\-DSA; ML\-DSA\-44 and ML\-DSA\-65 are not taken. All of it is
+the TLS of
+.BR esdm\-egd\-net\-server (8).
 .IP \(bu 2
-The kernel needs SCTP (module
-.BR sctp ),
-and SCTP-AUTH enabled on the sockets, which the daemons do themselves since
-Linux 5.4. An older kernel needs the sysctl
-.BR net.sctp.auth_enable=1 ;
-without it, the provider refuses to start, with an error naming the sysctl. A
-firewall in between has to pass SCTP to the port, which a rule for TCP does
-not.
+A firewall in between has to pass TCP to the port.
 .PP
 The listener faces the network, and anybody who can reach it may connect, so
 the connections are bounded \- a connection is closed at once when it would
@@ -845,7 +816,7 @@ is \-, so that the ESDM finds it at its initial seeding.
 .PP
 The ESDM ships no units for a provider on the network: such a provider is a
 program of the site's making. A socket unit and a service unit serve it on
-SCTP port @ES_EXT_NET_PORT@ of every address, as a user of its own
+TCP port @ES_EXT_NET_PORT@ of every address, as a user of its own
 .RB ( DynamicUser= ),
 with the TLS files as credentials from
 .IR /etc/esdm/es\-ext\-net/ :
@@ -857,7 +828,7 @@ Description=My external entropy source on the network, socket
 
 [Socket]
 ListenStream=@ES_EXT_NET_PORT@
-SocketProtocol=sctp
+NoDelay=yes
 Backlog=16
 
 [Install]
@@ -894,10 +865,7 @@ Enable the service rather than the socket alone:
 systemctl enable \-\-now my\-provider\-net.service
 .fi
 .PP
-The provider sets the socket up for SCTP-AUTH as it starts, and refuses the
-associations the kernel set up before \- a start by the first connection
-refuses that one, which the relay makes again on its own. A source reaching a
-device needs it granted
+A source reaching a device needs it granted
 .RB ( PrivateDevices=no ,
 .BR DeviceAllow= ,
 and the group of the device with
@@ -908,7 +876,7 @@ tells systemd nothing: use
 .B Type=exec
 then. Bind the socket to an address of its own with
 .BI ListenStream= ADDRESS : PORT ,
-and pass SCTP to the port in the firewall.
+and pass TCP to the port in the firewall.
 .SH SEVERAL SOURCES
 A provider program serves one source. An ESDM built with several provider
 socket sources (meson option
@@ -996,10 +964,10 @@ it declares in its answer to INFO, its
 \-
 .B unix
 or
-.B sctp
-\-,
-.B dtls
-of the connection asking and, on the network, the
+.B tcp
+\-, whether the connection asking is encrypted \-
+.BR dtls ,
+true on the network for its TLS \- and, on the network, the
 .B peer
 asking, the
 .B clients
@@ -1106,18 +1074,16 @@ the channel.
 A provider on another host is read through the
 .BR esdm\-es\-ext\-relay (8)
 of the ESDM's host, which forwards the requests of the ESDM one to one. On
-the network, the messages travel over SCTP of the one-to-one style, with DTLS
-1.2 as RFC 6083 maps it onto SCTP: every DTLS record is one SCTP message on
-stream 0, and every message is DTLS from the first one on \- no STARTDTLS, no
-message in the clear, and a STARTDTLS inside the DTLS is a request that breaks
-the protocol. Inside, the requests and responses are the ones above, carried
-by records with the byte in front. Both sides authenticate with a certificate,
-and the relay checks the name of the provider. The association authenticates
-its DATA and FORWARD-TSN chunks with SCTP-AUTH (RFC 4895), the key of which is
-exported from the DTLS session \- see
+the network, the messages travel over TCP with TLS 1.3, and every message is
+TLS from the first one on \- no STARTDTLS, no message in the clear, and a
+STARTDTLS inside the TLS is a request that breaks the protocol. Inside, the
+requests and responses are the ones above, cut into parts with the byte in
+front, and each part has its length in front, two bytes, big endian, as TCP
+keeps no boundaries. Both sides authenticate with a certificate, and the relay
+checks the name of the provider \- see
 .BR NETWORK .
 The STATUS of the server tells
-.B sctp
+.B tcp
 as its
 .BR transport ,
 and as its

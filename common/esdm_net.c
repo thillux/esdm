@@ -276,8 +276,7 @@ int esdm_net_listener_check(int fd, enum esdm_net_listener kind)
 		len = sizeof(int);
 		if (getsockopt(fd, SOL_SOCKET, SO_PROTOCOL, &protocol, &len) <
 			    0 ||
-		    protocol != (kind == ESDM_NET_LISTENER_SCTP ? IPPROTO_SCTP :
-								  IPPROTO_TCP))
+		    protocol != IPPROTO_TCP)
 			return -EPROTONOSUPPORT;
 	}
 
@@ -289,8 +288,7 @@ int esdm_net_listener_check(int fd, enum esdm_net_listener kind)
 	return 0;
 }
 
-int esdm_net_listen(const char *text, int protocol, int backlog,
-		    int (*prepare)(int fd), int *fds, int *num, int max)
+int esdm_net_listen(const char *text, int backlog, int *fds, int *num, int max)
 {
 	struct addrinfo hints, *res = NULL, *ai;
 	char *host = NULL, *port = NULL;
@@ -305,7 +303,7 @@ int esdm_net_listen(const char *text, int protocol, int backlog,
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = protocol;
+	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = AI_PASSIVE;
 
 	ret = getaddrinfo(host, port, &hints, &res);
@@ -324,7 +322,7 @@ int esdm_net_listen(const char *text, int protocol, int backlog,
 
 		fd = socket(ai->ai_family,
 			    ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			    protocol);
+			    IPPROTO_TCP);
 		if (fd < 0) {
 			ret = -errno;
 			if (ret == -EPROTONOSUPPORT ||
@@ -340,14 +338,6 @@ int esdm_net_listen(const char *text, int protocol, int backlog,
 		if (ai->ai_family == AF_INET6)
 			setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one,
 				   sizeof(one));
-
-		if (prepare) {
-			ret = prepare(fd);
-			if (ret) {
-				close(fd);
-				goto out;
-			}
-		}
 
 		if (bind(fd, ai->ai_addr, ai->ai_addrlen) < 0 ||
 		    listen(fd, backlog) < 0) {

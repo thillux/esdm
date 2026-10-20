@@ -20,8 +20,8 @@
 /*
  * Opportunistic DTLS on the SOCK_SEQPACKET connections of the ESDM: the RPC
  * interface and the external entropy source channel - and the messages of the
- * external entropy source channel on the network, on the DTLS with
- * certificates of esdm_tls.h, see "DTLS with certificates" below.
+ * external entropy source channel on the network, on the TLS with certificates
+ * of esdm_tls.h, see "TLS with certificates" below.
  *
  * The DTLS is provided by the TLS stack of the crypto backend the ESDM is
  * built with (meson options dtls and crypto_backend): OpenSSL, GnuTLS or
@@ -60,13 +60,12 @@
  * more parts follow, 0 for the last one. The connection is reliable and in
  * order, so the parts arrive as they were sent.
  *
- * DTLS with certificates: the external entropy sources served on the network
- * (meson option es-ext-net) speak the same messages on an SCTP association,
- * whose DTLS is the one of esdm_tls.h - DTLS 1.2 with certificates of both
- * sides, as RFC 6083 maps it onto SCTP, with SCTP-AUTH. A record is one user
- * message of SCTP, which keeps the boundaries, reliable and in order, as
- * SOCK_SEQPACKET does: the parts of a message, each with its byte in front,
- * are the same. esdm_dtls_alloc_tls() sets such a connection up, and
+ * TLS with certificates: the external entropy sources served on the network
+ * (meson option es-ext-net) speak the same messages on TCP, whose TLS is the
+ * one of esdm_tls.h - TLS 1.3 with certificates of both sides. The parts of a
+ * message, each with its byte in front, are the same; TCP keeps no boundaries,
+ * so each part travels with its length in front, two bytes, big endian, in the
+ * TLS stream. esdm_dtls_alloc_tls() sets such a connection up, and
  * esdm_dtls_tls() hands out its TLS connection, which tells who the peer is.
  *
  * Randomness: the TLS stack needs random numbers, and it takes them from the
@@ -90,7 +89,7 @@
 
 #include "config.h"
 
-#ifdef ESDM_TLS_SCTP
+#ifdef ESDM_ES_EXT_NET
 #include "esdm_tls.h"
 #endif
 
@@ -104,7 +103,7 @@ extern "C" {
 struct esdm_dtls_ctx;
 struct esdm_dtls;
 
-#if defined(ESDM_DTLS) || defined(ESDM_TLS_SCTP)
+#if defined(ESDM_DTLS) || defined(ESDM_ES_EXT_NET)
 
 /**
  * @brief Set up the DTLS of one side
@@ -209,22 +208,19 @@ const char *esdm_dtls_cipher(struct esdm_dtls *dtls);
  */
 bool esdm_dtls_busy(void);
 
-#ifdef ESDM_TLS_SCTP
+#ifdef ESDM_ES_EXT_NET
 
 /**
- * @brief Start the DTLS with certificates of a connection on SCTP
+ * @brief Start the TLS with certificates of a connection on TCP
  *
  * @param [in] ctx A context of esdm_tls_ctx_alloc() for the transport
- *		   ESDM_TLS_TRANSPORT_SCTP; the connection takes a reference
+ *		   ESDM_TLS_TRANSPORT_STREAM; the connection takes a reference
  *		   of its own
- * @param [in] fd The SCTP association, set up as esdm_tls_alloc() has it
+ * @param [in] fd The connected, non-blocking TCP socket
  * @param [in] max_msg The largest message the peer may send
  * @param [in] server_name The name a client expects the server to have,
  *			   ignored by a server - see esdm_tls_alloc()
- * @param [out] dtls The DTLS of the connection
- *
- * esdm_dtls_send() tells -EAGAIN for a message SCTP did not take all of:
- * esdm_tls_flush() of esdm_dtls_tls() sends the rest.
+ * @param [out] dtls The connection
  *
  * @return 0 on success, a negative errno otherwise - see esdm_tls_alloc()
  */
@@ -237,9 +233,9 @@ int esdm_dtls_alloc_tls(struct esdm_tls_ctx *ctx, int fd, size_t max_msg,
  */
 struct esdm_tls *esdm_dtls_tls(struct esdm_dtls *dtls);
 
-#endif /* ESDM_TLS_SCTP */
+#endif /* ESDM_ES_EXT_NET */
 
-#else /* ESDM_DTLS || ESDM_TLS_SCTP */
+#else /* ESDM_DTLS || ESDM_ES_EXT_NET */
 
 static inline int esdm_dtls_ctx_alloc(bool server, struct esdm_dtls_ctx **ctx)
 {
@@ -315,7 +311,7 @@ static inline bool esdm_dtls_busy(void)
 	return false;
 }
 
-#endif /* ESDM_DTLS || ESDM_TLS_SCTP */
+#endif /* ESDM_DTLS || ESDM_ES_EXT_NET */
 
 #ifdef __cplusplus
 }

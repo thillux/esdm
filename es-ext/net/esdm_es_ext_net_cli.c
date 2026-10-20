@@ -220,7 +220,7 @@ int es_ext_net_cli_drop_privileges(struct es_ext_net_cli *cli)
 void es_ext_net_cli_usage(FILE *out)
 {
 	fprintf(out,
-		"\nOn the network - SCTP, DTLS with certificates, RFC 6083:\n"
+		"\nOn the network - TCP, TLS 1.3 with certificates:\n"
 		"\t   --listen <[HOST]:PORT>\tServe on HOST, any address without,\n"
 		"\t\t\t\tPORT (relays connect to %u by default); may be\n"
 		"\t\t\t\trepeated\n"
