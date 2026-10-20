@@ -54,9 +54,9 @@
 		 ESDM_ES_EXT_PROTO_STATUS_MAX :                                \
 		 ESDM_ES_EXT_PROTO_MAX_DATA)
 
-/* The status of a plugin fits into the one of its provider */
+/* The status of a source fits into the one of its provider */
 #if ESDM_ES_EXT_STATUS_MAX > ESDM_ES_EXT_PROTO_STATUS_MAX
-#error "The status of a plugin has to fit into the status of a provider"
+#error "The status of a source has to fit into the status of a provider"
 #endif
 
 static inline void esdm_es_ext_put_le16(uint8_t *p, uint16_t v)
@@ -467,8 +467,8 @@ static inline int esdm_es_ext_proto_info_unpack(const uint8_t *in, size_t len,
 }
 
 /*
- * Is the struct a plugin library exports one this version of the API can use?
- * Any version up to the one of this header is.
+ * Are the callbacks of a source ones this version of the API can serve? Any
+ * version up to the one of this header is, with a get_entropy callback.
  *
  * @return 0 if so, -EPROTO otherwise
  */
@@ -484,9 +484,9 @@ esdm_es_ext_plugin_check(const struct esdm_es_ext_plugin *plugin)
 }
 
 /*
- * Does @plugin report a status? A member that a later version of the plugin
- * API adds is to be looked at only for a plugin of that version, whose struct
- * has it - all of these are in version 1.
+ * Does the source of @plugin report a status? A member that a later version of
+ * struct esdm_es_ext_plugin adds is to be looked at only for a source of that
+ * version, whose struct has it - all of these are in version 1.
  */
 static inline bool
 esdm_es_ext_plugin_has_status(const struct esdm_es_ext_plugin *plugin)
@@ -494,7 +494,7 @@ esdm_es_ext_plugin_has_status(const struct esdm_es_ext_plugin *plugin)
 	return plugin->status_json != NULL;
 }
 
-/* Does @plugin declare an entropy rate? */
+/* Does the source of @plugin declare an entropy rate? */
 static inline bool
 esdm_es_ext_plugin_has_entropy_rate(const struct esdm_es_ext_plugin *plugin)
 {
@@ -502,7 +502,7 @@ esdm_es_ext_plugin_has_entropy_rate(const struct esdm_es_ext_plugin *plugin)
 }
 
 /*
- * The entropy rate @plugin declares, the way both sides take it: at most
+ * The entropy rate the source of @plugin declares: at most
  * ESDM_ES_EXT_ENTROPY_RATE_MAX, ESDM_ES_EXT_PROTO_RATE_NONE for none. Called
  * after its init, with its context @ctx.
  */
@@ -536,12 +536,11 @@ static inline uint32_t esdm_es_ext_proto_rate(uint32_t rate)
 }
 
 /*
- * Ask @plugin for its status, the way both sides do: the JSON text, terminated,
- * into @buf of @buflen bytes. A text that is not terminated within the buffer,
- * or empty, counts as a failure. Whether it is JSON is left to the ESDM, which
- * parses it.
+ * Ask the source of @plugin for its status: the JSON text, terminated, into
+ * @buf of @buflen bytes. A text that is not terminated within the buffer, or
+ * empty, counts as a failure. Whether it is JSON is checked by the caller.
  *
- * @return the length of the text, -EOPNOTSUPP for a plugin without a status,
+ * @return the length of the text, -EOPNOTSUPP for a source without a status,
  *	   another negative errno if it failed
  */
 static inline ssize_t
@@ -577,10 +576,10 @@ esdm_es_ext_plugin_status(const struct esdm_es_ext_plugin *plugin, void *ctx,
 }
 
 /*
- * Ask @plugin for @buflen bytes, the way both sides do: the buffer is wiped
- * when the plugin fails, and a claim beyond the size of the data counts as a
- * failure - a plugin that cannot count its bits is not to be believed on the
- * bits either.
+ * Ask the source of @plugin for @buflen bytes: the buffer is wiped when the
+ * source fails, and a claim beyond the size of the data counts as a failure -
+ * a source that cannot count its bits is not to be believed on the bits
+ * either.
  *
  * @return 0 on success, a negative errno otherwise
  */

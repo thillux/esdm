@@ -4,7 +4,8 @@
 #
 # The relay serves a provider socket below, which the ESDM reads through one of
 # its provider socket sources, and forwards it over SCTP with DTLS and
-# certificates to esdm-es-ext-serve or esdm-es-pkcs11 serving on the network.
+# certificates to a provider program - esdm-es-pkcs11, or one of your own -
+# serving on the network.
 # Tell the ESDM about it with a drop-in of esdm-server.service, e.g.
 # /etc/systemd/system/esdm-server.service.d/es-ext-relay.conf:
 #

@@ -19,8 +19,8 @@
 
 /*
  * What the tests of the external entropy sources share: starting providers -
- * esdm-es-ext-serve processes - and waiting for them, and finding a source in
- * the JSON status of the ESDM.
+ * provider programs of the test - and waiting for them, and finding a source
+ * in the JSON status of the ESDM.
  */
 
 #ifndef _ES_EXT_TEST_UTIL_H
@@ -138,16 +138,16 @@ static inline bool es_ext_test_wait_socket(const char *path)
 }
 
 /*
- * Start esdm-es-ext-serve @serve serving @plugin on @socket for clients of the
- * user of the test - or, run as root, for the esdm-server, root and nobody -
- * with the arguments @extra in addition (NULL terminated, NULL for none) and
- * the settings @settings of the test plugin (see ES_EXT_TEST_PLUGIN_ENV, NULL
- * for none). Returns once the socket is there.
+ * Start the provider program @provider - one of the test source, see
+ * es_ext_test_plugin.c - on @socket for clients of the user of the test - or,
+ * run as root, for the esdm-server, root and nobody - with the arguments
+ * @extra in addition (NULL terminated, NULL for none) and the settings
+ * @settings of the test source (see ES_EXT_TEST_PLUGIN_ENV, NULL for none).
+ * Returns once the socket is there.
  *
  * @return the pid of the provider, -1 if it does not come up
  */
-static inline pid_t es_ext_test_serve(const char *serve, const char *plugin,
-				      const char *socket,
+static inline pid_t es_ext_test_serve(const char *provider, const char *socket,
 				      const char *const *extra,
 				      const char *settings)
 {
@@ -157,9 +157,7 @@ static inline pid_t es_ext_test_serve(const char *serve, const char *plugin,
 	pid_t pid;
 
 	snprintf(uid, sizeof(uid), "%u", (unsigned int)getuid());
-	argv[n++] = (char *)serve;
-	argv[n++] = "--plugin";
-	argv[n++] = (char *)plugin;
+	argv[n++] = (char *)provider;
 	argv[n++] = "--socket";
 	argv[n++] = (char *)socket;
 	if (getuid()) {

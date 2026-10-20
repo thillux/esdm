@@ -43,10 +43,10 @@
  *   own status out, a provider gone only its own source.
  *
  * The sources are compiled into the test, with a short retry interval and
- * timeout. The providers are esdm-es-ext-serve processes serving the test
- * plugin, steered through the environment.
+ * timeout. The providers are provider programs of the test source, steered
+ * through the environment.
  *
- * Usage: es_ext_multi_test <esdm-es-ext-serve> <test plugin>
+ * Usage: es_ext_multi_test <test provider> <bare test provider>
  */
 
 #define _GNU_SOURCE
@@ -72,8 +72,8 @@
 #error "The test needs two sources at least"
 #endif
 
-static const char *test_serve_bin;
-static const char *test_plugin;
+static const char *test_provider_bin;
+static const char *test_provider_bare_bin;
 
 static char test_dir[] = "/tmp/esdm-es-ext-multi-test-XXXXXX";
 static char test_socket[ESDM_EXT_SOCKET_NUM][sizeof(test_dir) + 32];
@@ -82,13 +82,13 @@ static char test_socket[ESDM_EXT_SOCKET_NUM][sizeof(test_dir) + 32];
 
 /*
  * Start a provider on the socket of source @i, with the arguments @extra and
- * the settings @settings of the test plugin - see es_ext_test_serve()
+ * the settings @settings of the test source - see es_ext_test_serve()
  */
 static pid_t test_serve(unsigned int i, const char *const *extra,
 			const char *settings)
 {
-	return es_ext_test_serve(test_serve_bin, test_plugin, test_socket[i],
-				 extra, settings);
+	return es_ext_test_serve(test_provider_bin, test_socket[i], extra,
+				 settings);
 }
 
 static uint32_t test_level(uint32_t rate, uint32_t bits)
@@ -148,8 +148,8 @@ static void test_table(void)
 }
 
 /*
- * Two provider socket sources, each connected to an esdm-es-ext-serve of its
- * own: one failing its self test, the other credited at its own rate; a uid
+ * Two provider socket sources, each connected to a provider of its own: one
+ * failing its self test, the other credited at its own rate; a uid
  * accepted by one only; a provider gone for one only.
  */
 static void test_providers(void)
@@ -290,7 +290,7 @@ static bool test_reader_start(struct test_reader *reader, pthread_t *thread)
 }
 
 /*
- * The names the providers declare: the one of --name, the one of the plugin -
+ * The names the providers declare: the one of --name, the one of the source -
  * the same for two of them. A provider restarted with another name shows it
  * once connected to again, the others keep theirs, and a status reader sees
  * the old name or the new one meanwhile.
@@ -390,9 +390,10 @@ static bool test_rate_is(const struct esdm_es_cb *es, uint32_t rate,
 
 /*
  * The rates of the provider socket sources, each of its own: declared by
- * esdm-es-ext-serve --entropy_rate, by the plugin it serves, by a plugin
- * declaring more than 256, or none - 0 then; configured for one source; a
- * provider restarted with another rate, read anew for its source only.
+ * --entropy_rate of the provider, by the source it serves, by a source
+ * declaring more than 256, or none - by a source without the callback - 0
+ * then; configured for one source, for all and taken back; a provider
+ * restarted with another rate, read anew for its source only.
  */
 static void test_provider_rates(void)
 {
@@ -409,12 +410,20 @@ static void test_provider_rates(void)
 	pid_t provider[4] = { -1, -1, -1, -1 };
 
 	for (i = 0; i < n; i++) {
-		/* The last one in the clear, the others over DTLS */
-		provider[i] = test_serve(i,
-					 !i	 ? rate_48 :
-					 i == 3 ? no_dtls :
-						  NULL,
-					 settings[i]);
+		/*
+		 * The last one in the clear, the others over DTLS; the third
+		 * without an entropy_rate callback
+		 */
+		if (i == 2)
+			provider[i] = es_ext_test_serve(test_provider_bare_bin,
+							test_socket[i], NULL,
+							settings[i]);
+		else
+			provider[i] = test_serve(i,
+						 !i	 ? rate_48 :
+						 i == 3 ? no_dtls :
+							  NULL,
+						 settings[i]);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
 		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
@@ -549,9 +558,9 @@ static bool test_plugin_null(struct json_object *provider)
 }
 
 /*
- * The status of each provider socket source its own: the fields of its
- * esdm-es-ext-serve - the name, the rate, the DTLS of its connection - and the
- * status of its plugin, null for none; cached for each source on its own; a
+ * The status of each provider socket source its own: the fields of the server
+ * of its provider - the name, the rate, the DTLS of its connection - and the
+ * status of its source, null for none; cached for each source on its own; a
  * slow provider keeps only its own status out, and is not asked for it for a
  * while; a provider gone affects only its own source.
  */
@@ -710,7 +719,7 @@ static void test_provider_status(void)
 /*
  * The JSON status of the ESDM lists each source once, under its name, with
  * its own configuration - and for a provider the fields of its own server, the
- * DTLS of its connection included, and the status of its plugin; the text
+ * DTLS of its connection included, and the status of its source; the text
  * status shows them in sections of their own.
  */
 static void test_status(void)
@@ -803,12 +812,12 @@ int main(int argc, char *argv[])
 	unsigned int i;
 
 	if (argc < 3) {
-		printf("usage: %s <esdm-es-ext-serve> <test plugin>\n",
+		printf("usage: %s <test provider> <bare test provider>\n",
 		       argv[0]);
 		return 1;
 	}
-	test_serve_bin = argv[1];
-	test_plugin = argv[2];
+	test_provider_bin = argv[1];
+	test_provider_bare_bin = argv[2];
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 

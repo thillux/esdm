@@ -21,27 +21,24 @@
  * External entropy sources for the ESDM - see libesdm_es_ext(3).
  *
  * An external entropy source is noise source code that is not part of the
- * ESDM. It is written once against struct esdm_es_ext_plugin below and handed
- * to the ESDM in one of two ways:
+ * ESDM. It is served to the ESDM by a provider: a process of its own, which the
+ * ESDM reads from over a Unix domain socket (esdm-server --es_ext_socket PATH,
+ * meson option es_ext_socket_path). The ESDM loads no code of a source into
+ * its own process.
  *
- * - As a plugin: a shared library exporting the struct under the name
- *   ESDM_ES_EXT_PLUGIN_SYMBOL. The ESDM loads it into its own process
- *   (esdm-server --es_ext_lib PATH, meson option es_ext_lib_path) and calls it
- *   directly. Nothing but this header is needed to build such a plugin.
+ * A provider is written against struct esdm_es_ext_plugin below - the
+ * callbacks of the source - and served with libesdm_es_ext: a program whose
+ * main() hands its callbacks to esdm_es_ext_provider_main() takes the command
+ * line of a provider and serves them, and esdm_es_ext_server_*() serve them
+ * from a program of its own making. The protocol is documented below for
+ * providers written without the library. A provider may run on another host
+ * as well, served on SCTP with mutually authenticated DTLS and read by the
+ * ESDM through the esdm-es-ext-relay of its own host (meson option
+ * es-ext-net) - see "Network" below.
  *
- * - As a provider: a process of its own that serves the plugin over a Unix
- *   domain socket with esdm_es_ext_server_*() of libesdm_es_ext. The ESDM
- *   connects to it (esdm-server --es_ext_socket PATH, meson option
- *   es_ext_socket_path). esdm-es-ext-serve(8) does so for a plugin library, so
- *   the same plugin can run either way. The protocol is documented below for
- *   providers written without the library. A provider may run on another host
- *   as well, served on SCTP with mutually authenticated DTLS and read by the
- *   ESDM through the esdm-es-ext-relay of its own host (meson option
- *   es-ext-net) - see "Network" below.
- *
- * Either way, the ESDM credits a block with the entropy the source claims for
- * it, but at most with what its configured entropy rate allows, and with
- * nothing for a block whose claim exceeds its size.
+ * The ESDM credits a block with the entropy the source claims for it, but at
+ * most with what its configured entropy rate allows, and with nothing for a
+ * block whose claim exceeds its size.
  */
 
 #ifndef _ESDM_ES_EXT_H
@@ -56,13 +53,13 @@ extern "C" {
 #endif
 
 /******************************************************************************
- * Plugin API
+ * The callbacks of a source
  ******************************************************************************/
 
 /*
- * Version of struct esdm_es_ext_plugin a plugin is written against. A later
- * version may add members at the end, and a plugin of an earlier one, whose
- * struct ends before them, is loaded all the same.
+ * Version of struct esdm_es_ext_plugin a source is written against. A later
+ * version may add members at the end, and a source of an earlier one, whose
+ * struct ends before them, is served all the same.
  */
 #define ESDM_ES_EXT_PLUGIN_VERSION 1
 
@@ -77,8 +74,8 @@ extern "C" {
 
 /*
  * The largest status a provider answers STATUS with: bytes of JSON text. The
- * provider server of libesdm_es_ext wraps the status of its plugin, of up to
- * ESDM_ES_EXT_STATUS_MAX bytes, into one of its own - see STATUS below.
+ * provider server of libesdm_es_ext wraps the status its source reports, of up
+ * to ESDM_ES_EXT_STATUS_MAX bytes, into one of its own - see STATUS below.
  */
 #define ESDM_ES_EXT_PROTO_STATUS_MAX 1024
 
@@ -88,61 +85,56 @@ extern "C" {
  */
 #define ESDM_ES_EXT_NAME_MAX 32
 
-/* The name a plugin library exports its struct esdm_es_ext_plugin under */
-#define ESDM_ES_EXT_PLUGIN_SYMBOL "esdm_es_ext_plugin"
-
-/* Makes the struct visible in a library built with -fvisibility=hidden */
-#define ESDM_ES_EXT_PLUGIN_EXPORT __attribute__((visibility("default")))
-
 /**
- * struct esdm_es_ext_plugin - an external entropy source
+ * struct esdm_es_ext_plugin - the callbacks of an external entropy source
  *
- * A plugin library defines exactly one of these, e.g.
+ * What a provider serves: the noise source behind it, handed to
+ * esdm_es_ext_provider_main() or esdm_es_ext_server_alloc(), e.g.
  *
- *	ESDM_ES_EXT_PLUGIN_EXPORT
- *	const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
+ *	static const struct esdm_es_ext_plugin my_source = {
  *		.version = ESDM_ES_EXT_PLUGIN_VERSION,
  *		.name = "my-noise-source",
  *		.get_entropy = my_get_entropy,
  *	};
  *
- * The callbacks are never called concurrently: the ESDM, and the provider
- * server of libesdm_es_ext, serialize them.
+ *	int main(int argc, char *argv[])
+ *	{
+ *		return esdm_es_ext_provider_main(&my_source, argc, argv);
+ *	}
  *
- * The ESDM loads a plugin and calls @init while it still has its privileges -
- * a device the plugin needs is to be opened there. The esdm-server has left
- * the mount, cgroup and network namespaces of the host by then already: @init
- * sees the file system of the host and reaches a Unix domain socket bound to a
- * path, but no network - no TCP or UDP endpoint, no abstract Unix domain
- * socket of the host. Afterwards the ESDM drops its privileges; @get_entropy
- * and the other callbacks run in that environment. A source that needs the
- * network is served by a provider instead, whose callbacks all run in the
- * process of the provider, as it was started.
+ * The struct keeps the name it had when a source could be loaded into the
+ * ESDM as a plugin library: providers are compiled against it.
+ *
+ * The callbacks are never called concurrently: the provider server of
+ * libesdm_es_ext serializes them. They all run in the process of the
+ * provider, @init with the privileges the provider was started with - a
+ * device the source needs is to be opened there: a provider program serving
+ * on the network drops its privileges right after it (--username).
  *
  * @version: ESDM_ES_EXT_PLUGIN_VERSION
  * @name: Name of the source: the ESDM shows the source under it in its
  *	  status, and in its log, in place of the name of the entropy source it
- *	  is loaded as - "ExternalLib", or "ExternalLib0", "ExternalLib1" and
- *	  so on in an ESDM with several - which the
+ *	  reads the provider with - "ExternalSocket", or "ExternalSocket0",
+ *	  "ExternalSocket1" and so on in an ESDM with several - which the
  *	  status keeps as the "instance" of the source. 1 to
  *	  ESDM_ES_EXT_NAME_MAX bytes of UTF-8 without control characters,
  *	  terminated by a NUL; a name that is none of that, or the name of
  *	  another entropy source of the ESDM, is refused, and the source shown
  *	  under its instance name. Two sources may declare the same name. May
- *	  be NULL.
+ *	  be NULL. The provider declares it in its answer to INFO, see below.
  * @init: Set the source up and return its context in *ctx, which is handed to
  *	  the other callbacks. Returns 0 or a negative errno, in which case the
- *	  source is not used. May be NULL.
+ *	  source is not served. May be NULL.
  * @fini: Tear the source down. May be NULL.
  * @get_entropy: Fill all @buflen bytes of @buf with data of the noise source
  *		 and set *@entropy_bits to the entropy they hold, at most
  *		 @buflen * 8. Returns 0, or a negative errno if the source could
  *		 not deliver - the data is discarded then. Must not block for
- *		 long: it runs while a DRNG waits for its seed.
+ *		 long: it runs while a DRNG of the ESDM waits for its seed.
  * @selftest: Check that the source still works, without consuming the data
  *	      the ESDM is handed. Returns 0 or a negative errno. Run before the
  *	      ESDM credits the source for the first time - at start up before
- *	      it seeds its DRNGs -, on every new connection of the ESDM to a
+ *	      it seeds its DRNGs -, on every new connection of the ESDM to the
  *	      provider - one that was not there at start up, or one restarted -
  *	      before the provider is credited, and on the interval of the ESDM
  *	      self tests. May be NULL.
@@ -152,20 +144,22 @@ extern "C" {
  *		 terminated by a NUL: { "device": "/dev/hwrng", "reads": 42 }.
  *		 @buflen leaves room for ESDM_ES_EXT_STATUS_MAX bytes of text.
  *		 Returns 0, -EMSGSIZE if the status does not fit, or another
- *		 negative errno. The ESDM shows it as the "provider" member of
- *		 the state of the source, and leaves out a status that is no
- *		 JSON object. Asked for when the ESDM status is, at most every
- *		 5 seconds, so it must not block for long. May be NULL.
+ *		 negative errno. The ESDM shows it as the "plugin" member of the
+ *		 status of the provider, the "provider" member of the state of
+ *		 the source - see STATUS below -, and leaves out a status that
+ *		 is no JSON object. Asked for when the ESDM status is, at most
+ *		 every 5 seconds, so it must not block for long. May be NULL.
  * @entropy_rate: The entropy rate the source declares for its data, bits of
  *		  entropy per 256 bits of data, 0 to
  *		  ESDM_ES_EXT_ENTROPY_RATE_MAX - a rate beyond is taken as
- *		  that. Called once after @init, so that the plugin can decide
- *		  from the hardware it found. A block of the source is credited
+ *		  that. Called once after @init, so that the source can decide
+ *		  from the hardware it found. The provider declares it in its
+ *		  answer to INFO, and the ESDM credits a block of the source
  *		  with what @get_entropy claims for it, at most with this rate -
  *		  unless a rate is configured for the source in the ESDM, which
- *		  takes precedence. Without it the default of the ESDM applies:
- *		  256 for a plugin loaded into the ESDM, 0 for one served by a
- *		  provider. May be NULL.
+ *		  takes precedence. Without it, the provider declares none, and
+ *		  the ESDM credits it at 0 unless configured otherwise. May be
+ *		  NULL.
  */
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -189,11 +183,12 @@ struct esdm_es_ext_plugin {
  *
  *	esdm-server                                  provider process
  *	+--------------------------+                 +-----------------------+
- *	| ExternalSocket n         |  SOCK_SEQPACKET | esdm-es-ext-serve,    |
- *	| connects, as the user it |---------------->| esdm-es-pkcs11, or a  |
- *	| dropped its privileges to|  Unix socket    | server of your own;   |
- *	| (nobody); checks the uid |                 | listens, checks the   |
- *	| of the provider          |                 | uid of the ESDM       |
+ *	| ExternalSocket n         |  SOCK_SEQPACKET | esdm-es-pkcs11, a     |
+ *	| connects, as the user it |---------------->| program of esdm_es_   |
+ *	| dropped its privileges to|  Unix socket    | ext_provider_main(),  |
+ *	| (nobody); checks the uid |                 | or one of your own;   |
+ *	| of the provider          |                 | listens, checks the   |
+ *	|                          |                 | uid of the ESDM       |
  *	+--------------------------+                 +-----------------------+
  *
  * A connection, from the ESDM's side:
@@ -281,18 +276,19 @@ struct esdm_es_ext_plugin {
  * not fit into the length -EMSGSIZE. The provider server of libesdm_es_ext
  * answers with an object of its own:
  *	{ "server": { ... }, "plugin": ... }
- * "plugin" being the status @status_json of its plugin reports - null for a
- * plugin without one, one that fails, or one that is no JSON object of up to
- * ESDM_ES_EXT_STATUS_MAX bytes, nested no deeper than 8 levels, and for one
- * that does not fit into the length next to the fields of the server - and
- * "server" what the server knows itself: its "version", the "plugin_api"
- * version of its plugin, the "name" and "entropy_rate" it declares in its
- * answer to INFO (null for none), the "transport" it serves on ("unix", or
- * "sctp" on the network, see "Network" below), whether the "dtls" of the
- * connection asking is on, on the network the "peer" asking - the SHA-256 of
- * its certificate -, the "clients" connected and the "client_slots" there
- * are, the "requests" served, the "selftest" verdict of the plugin ("passed",
- * "failed" or "none" before the first one) and its "uptime_seconds". A
+ * "plugin" being the status the @status_json callback of its source reports -
+ * null for a source without one, one that fails, or one that is no JSON
+ * object of up to ESDM_ES_EXT_STATUS_MAX bytes, nested no deeper than 8
+ * levels, and for one that does not fit into the length next to the fields of
+ * the server - and "server" what the server knows itself: its "version", the
+ * "plugin_api" version of the struct esdm_es_ext_plugin of its source, the
+ * "name" and "entropy_rate" it declares in its answer to INFO (null for none),
+ * the "transport" it serves on ("unix", or "sctp" on the network, see
+ * "Network" below), whether the "dtls" of the connection asking is on, on the
+ * network the "peer" asking - the SHA-256 of its certificate -, the "clients"
+ * connected and the "client_slots" there are, the "requests" served, the
+ * "selftest" verdict of the source ("passed", "failed" or "none" before the
+ * first one) and its "uptime_seconds". A
  * provider written without the library answers with an object of its own
  * making. The ESDM asks for it when its own status is asked for, at most
  * every 5 seconds - showing the last one in between - and not while a request
@@ -325,18 +321,20 @@ struct esdm_es_ext_plugin {
  *				without a NUL - none for a provider without a
  *				name
  * or with a negative errno and no data, which declares nothing. The ESDM shows
- * the source under the name as a plugin library under the @name of its plugin:
+ * the source under the name, as @name of struct esdm_es_ext_plugin describes:
  * a name that is not valid is not taken, and the source shown under its
- * instance name. It credits the provider at the rate it declares, as a plugin
- * library at the rate of its @entropy_rate, unless a rate is configured for
- * the source, and at 0 if the provider declares none: accepting the user a
- * provider runs as means trusting the rate it declares - an operator who does
- * not want that configures the rate of the source. esdm-es-ext-serve answers
- * with the name and the rate of its plugin, or the ones of its --name and
- * --entropy_rate options. A provider older than INFO closes the connection on
- * it: the ESDM connects again at once and does not ask on that connection, so
- * the provider keeps working without a name and a rate. Both are asked for on
- * every connection: a provider restarted may declare others.
+ * instance name. It credits the provider at the rate it declares, unless a
+ * rate is configured for the source, and at 0 if the provider declares none:
+ * accepting the user a provider runs as means trusting the rate it declares -
+ * an operator who does not want that configures the rate of the source. The
+ * provider server of libesdm_es_ext answers with the @name and the
+ * @entropy_rate of its source, or the ones set with
+ * esdm_es_ext_server_set_name() and esdm_es_ext_server_set_entropy_rate() -
+ * the --name and --entropy_rate options of a provider program. A provider
+ * older than INFO closes the connection on it: the ESDM connects again at once
+ * and does not ask on that connection, so the provider keeps working without
+ * a name and a rate. Both are asked for on every connection: a provider
+ * restarted may declare others.
  *
  * DTLS: an ESDM built with DTLS (meson option dtls) sends STARTDTLS as its
  * first request. A provider answering it with status 0 expects a DTLS 1.2
@@ -378,10 +376,10 @@ struct esdm_es_ext_plugin {
  *
  *	host of the ESDM                                  host of the provider
  *	+--------------+ SOCK_SEQPACKET +-------------+        +--------------+
- *	| esdm-server  |--------------->| esdm-es-ext-| SCTP   | esdm-es-ext- |
- *	| ExternalSock.| Unix socket,   | relay       |------->| serve,       |
- *	| checks the   | STARTDTLS and  | client cert,| DTLS   | esdm-es-     |
- *	| uid of the   | opportunistic  | checks the  | with   | pkcs11, ...  |
+ *	| esdm-server  |--------------->| esdm-es-ext-| SCTP   | esdm-es-     |
+ *	| ExternalSock.| Unix socket,   | relay       |------->| pkcs11, a    |
+ *	| checks the   | STARTDTLS and  | client cert,| DTLS   | provider     |
+ *	| uid of the   | opportunistic  | checks the  | with   | program, ... |
  *	| relay        | DTLS as above  | server name | certi- | checks the   |
  *	+--------------+                +-------------+ ficates| client cert  |
  *	                                                       +--------------+
@@ -444,19 +442,24 @@ struct esdm_es_ext_server;
  * @brief Serve an external entropy source on a Unix domain socket
  *
  * Creates the socket file @socket_path with the access mode @mode and calls the
- * @init callback of @plugin. An existing socket file at @socket_path is
+ * @init callback of @plugin. A program serving one source does all of this,
+ * and what follows, with esdm_es_ext_provider_main() - see below. An existing socket file at @socket_path is
  * replaced, any other file is not. The ESDM connects with its privileges
  * dropped (user nobody by default), so the socket has to be connectable for
  * that user - see esdm-server(8) on how the ESDM checks the provider in turn.
  *
- * @param [in] plugin The entropy source to serve. It is referenced, not copied,
- *		      until esdm_es_ext_server_free().
+ * @param [in] plugin The callbacks of the entropy source to serve, version 1
+ *		      to ESDM_ES_EXT_PLUGIN_VERSION with a @get_entropy callback.
+ *		      They are referenced, not copied, until
+ *		      esdm_es_ext_server_free().
  * @param [in] socket_path Path of the socket file
  * @param [in] mode Access mode of the socket file, e.g. 0666
  * @param [out] server The server, to be released with
  *		       esdm_es_ext_server_free()
  *
- * @return 0 on success, a negative errno otherwise
+ * @return 0 on success, -EPROTO for callbacks that do not fit this version of
+ *	   the API, another negative errno otherwise - the one @init returned
+ *	   included
  */
 int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *plugin,
 			     const char *socket_path, mode_t mode,
@@ -496,15 +499,15 @@ int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *server, uid_t uid);
 int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *server, int enable);
 
 /**
- * @brief Answer INFO with another name than the one of the plugin
+ * @brief Answer INFO with another name than the one of the source
  *
- * The server declares the @name of its plugin as the name of the source by
+ * The server declares the @name of its source as the name of the source by
  * default - see the INFO request above. A name set here is declared instead.
  *
  * @param [in] server The server, not running yet
  * @param [in] name 1 to ESDM_ES_EXT_NAME_MAX bytes of UTF-8 without control
  *		    characters, NUL-terminated; NULL to go back to the name of
- *		    the plugin
+ *		    the source
  *
  * @return 0 on success, -EINVAL for a name that is not valid
  */
@@ -512,16 +515,16 @@ int esdm_es_ext_server_set_name(struct esdm_es_ext_server *server,
 				const char *name);
 
 /**
- * @brief Answer INFO with another entropy rate than the one of the plugin
+ * @brief Answer INFO with another entropy rate than the one of the source
  *
- * The server declares the rate the @entropy_rate callback of its plugin
- * returns by default, none for a plugin without one - see the INFO request
+ * The server declares the rate the @entropy_rate callback of its source
+ * returns by default, none for a source without one - see the INFO request
  * above. A rate set here is declared instead.
  *
  * @param [in] server The server, not running yet
  * @param [in] rate Bits of entropy per 256 bits of data, 0 to
  *		    ESDM_ES_EXT_ENTROPY_RATE_MAX; ESDM_ES_EXT_PROTO_RATE_NONE to
- *		    go back to the rate of the plugin
+ *		    go back to the rate of the source
  *
  * @return 0 on success, -EINVAL for a rate out of range
  */
@@ -558,7 +561,7 @@ void esdm_es_ext_server_stop(struct esdm_es_ext_server *server);
  * @brief Release the server
  *
  * Closes the connections, removes the socket file and calls the @fini callback
- * of the plugin. Must not be called while esdm_es_ext_server_run() runs.
+ * of the source. Must not be called while esdm_es_ext_server_run() runs.
  *
  * @param [in] server The server, may be NULL
  */
@@ -567,7 +570,7 @@ void esdm_es_ext_server_free(struct esdm_es_ext_server *server);
 /******************************************************************************
  * Provider server on the network - libesdm_es_ext, meson option es-ext-net
  *
- * The provider server serves its plugin to the ESDM of another host as well:
+ * The provider server serves its source to the ESDM of another host as well:
  * on SCTP, with DTLS 1.2 whose client and server both authenticate with a
  * certificate, as RFC 6083 maps DTLS onto SCTP - see "Network" in the socket
  * protocol above. The ESDM reaches it through the esdm-es-ext-relay of its
@@ -692,7 +695,8 @@ void esdm_es_ext_server_net_config_init(
  * server on a Unix domain socket. A server on the network allows no uid -
  * the certificate of a client tells who it is - and offers no other DTLS.
  *
- * @param [in] plugin The entropy source to serve, see esdm_es_ext_server_alloc()
+ * @param [in] plugin The callbacks of the entropy source to serve, see
+ *		      esdm_es_ext_server_alloc()
  * @param [in] cfg The configuration; nothing of it is referenced after the
  *		   call returned
  * @param [out] server The server, to be released with
@@ -722,38 +726,54 @@ int esdm_es_ext_server_alloc_net(const struct esdm_es_ext_plugin *plugin,
 int esdm_es_ext_server_reload(struct esdm_es_ext_server *server);
 
 /******************************************************************************
- * Plugin loader - libesdm_es_ext
+ * Provider program - libesdm_es_ext
  ******************************************************************************/
 
-struct esdm_es_ext_plugin_handle;
-
 /**
- * @brief Load a plugin library
+ * @brief Run a provider program serving an external entropy source
  *
- * Loads the shared library @path and checks the struct esdm_es_ext_plugin it
- * exports: its version has to be 1 to ESDM_ES_EXT_PLUGIN_VERSION and it has to
- * have a @get_entropy callback. The @init callback is not called - the plugin is
- * meant to be handed to esdm_es_ext_server_alloc(), which does.
+ * The main() of a provider program: it takes the command line of @argc and
+ * @argv, sets up the source - calls the @init callback of @plugin - and
+ * serves it, on a Unix domain socket or, in a library built with es-ext-net,
+ * on the network, until SIGTERM or SIGINT - see libesdm_es_ext(3) for the
+ * options:
  *
- * @param [in] path Path of the plugin library
- * @param [out] handle Handle of the loaded library, to be released with
- *		       esdm_es_ext_plugin_unload()
- * @param [out] plugin The plugin, valid until the handle is released
+ *	-s, --socket PATH	the Unix domain socket to serve on
+ *	-m, --mode MODE		its access mode, 0666 by default
+ *	-u, --client_uid USER	the users served next to root, nobody by
+ *				default - see esdm_es_ext_server_allow_uid()
+ *	--no_dtls		no DTLS - see esdm_es_ext_server_set_dtls()
+ *	--name NAME		the name declared in place of @name
+ *	--entropy_rate BITS	the rate declared in place of @entropy_rate
+ *	--listen [HOST]:PORT, --cert, --key, --ca, ... the network, with the
+ *				sockets of socket activation as well - see
+ *				esdm_es_ext_server_alloc_net()
+ *	-v, -h, --version
  *
- * @return 0 on success, -ENOENT if the library cannot be loaded, -ENOEXEC if it
- *	   does not export a plugin, -EPROTO if the plugin does not fit this
- *	   version of the API
+ * SIGHUP takes up the TLS files again on the network, and ends the program on
+ * a Unix domain socket. The signals are blocked in every thread from the
+ * start, so that a thread the @init callback starts does not take them. On
+ * the network, a program started as root drops its privileges once the
+ * source is set up (--username, nobody by default). Once it serves, it tells
+ * systemd so where it runs as a service of Type=notify.
+ *
+ * The program is to call it once, from its main(), and return what it
+ * returns: it parses the command line with getopt_long(3), and serves one
+ * source per process. The library logs to stderr.
+ *
+ * @param [in] plugin The callbacks of the entropy source to serve, see
+ *		      esdm_es_ext_server_alloc()
+ * @param [in] argc The argument count of main()
+ * @param [in] argv The arguments of main(); argv[0] names the program in its
+ *		    usage
+ *
+ * @return the exit status of the program: 0 once a signal ended it, or for
+ *	   --help and --version; 1 for a command line that is wrong, a source
+ *	   that cannot be set up or served - told on stderr - or serving that
+ *	   failed
  */
-int esdm_es_ext_plugin_load(const char *path,
-			    struct esdm_es_ext_plugin_handle **handle,
-			    const struct esdm_es_ext_plugin **plugin);
-
-/**
- * @brief Unload a plugin library
- *
- * @param [in] handle Handle of the library, may be NULL
- */
-void esdm_es_ext_plugin_unload(struct esdm_es_ext_plugin_handle *handle);
+int esdm_es_ext_provider_main(const struct esdm_es_ext_plugin *plugin,
+			      int argc, char *argv[]);
 
 #ifdef __cplusplus
 }

@@ -18,22 +18,16 @@
  */
 
 /*
- * libesdm_es_ext: the plugin loader against good and broken plugin libraries,
- * and the provider server against a client speaking the protocol by hand -
- * correctly and not - and the example plugin, reading a device that delivers
- * and one that stalls.
- *
- * Usage: es_ext_lib_test <test plugin> <bad version> <no get_entropy>
- *	  <no plugin> <example plugin> <bare test plugin> <rated test plugin>
- *	  <example plugin reading a FIFO> <the FIFO>
+ * libesdm_es_ext: the provider server against a client speaking the protocol
+ * by hand - correctly and not - serving the test source, compiled into the
+ * test, and the same without the callbacks a source may leave out; and the
+ * callbacks it refuses to serve.
  */
 
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -52,53 +46,53 @@
 static char test_dir[] = "/tmp/esdm-es-ext-lib-test-XXXXXX";
 static char test_socket[sizeof(test_dir) + 32];
 
-static struct esdm_es_ext_test_control *test_control(const char *path)
-{
-	/* The library the loader opened, not a second copy */
-	void *dl = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
-	struct esdm_es_ext_test_control *ctl;
+extern struct esdm_es_ext_plugin es_ext_test_plugin;
+extern struct esdm_es_ext_test_control esdm_es_ext_test_control;
 
-	if (!dl)
-		return NULL;
-	ctl = dlsym(dl, ES_EXT_TEST_CONTROL_SYMBOL);
-	dlclose(dl);
+/*
+ * The control of the test source, as it is before a test sets anything - each
+ * test starts from there, as the counters tell what it asked of the source
+ */
+static struct esdm_es_ext_test_control *test_reset(void)
+{
+	struct esdm_es_ext_test_control *ctl = &esdm_es_ext_test_control;
+
+	memset(ctl, 0, sizeof(*ctl));
+	ctl->claim_bits = UINT32_MAX;
+	snprintf(ctl->name, sizeof(ctl->name), "%s", ES_EXT_TEST_NAME);
+	ctl->entropy_rate = ES_EXT_TEST_RATE_NONE;
+	es_ext_test_plugin.name = ctl->name;
 
 	return ctl;
 }
 
-static void test_loader(const char *good, const char *bad_version,
-			const char *no_get, const char *no_plugin,
-			const char *bare)
+/*
+ * Callbacks the server cannot serve: of a version it does not know, or
+ * without get_entropy. It refuses them before it calls anything of them, and
+ * leaves no socket behind.
+ */
+static void test_server_refused(void)
 {
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
+	struct esdm_es_ext_test_control *ctl = test_reset();
+	struct esdm_es_ext_plugin bad = es_ext_test_plugin;
+	struct esdm_es_ext_server *server = NULL;
+	struct stat sb;
 
-	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
-	CHECK(plugin && plugin->name && !strcmp(plugin->name, "es-ext-test"),
-	      "the test plugin was not found");
-	esdm_es_ext_plugin_unload(handle);
-
-	CHECK_EQ(esdm_es_ext_plugin_load(bad_version, &handle, &plugin),
+	bad.version = 0;
+	CHECK_EQ(esdm_es_ext_server_alloc(&bad, test_socket, 0600, &server),
 		 -EPROTO);
-	CHECK(handle == NULL && plugin == NULL,
-	      "a refused plugin was handed out");
-	CHECK_EQ(esdm_es_ext_plugin_load(no_get, &handle, &plugin), -EPROTO);
-	CHECK_EQ(esdm_es_ext_plugin_load(no_plugin, &handle, &plugin),
-		 -ENOEXEC);
-	CHECK_EQ(esdm_es_ext_plugin_load("/nonexistent/libnothing.so", &handle,
-					 &plugin),
-		 -ENOENT);
-	CHECK_EQ(esdm_es_ext_plugin_load(NULL, &handle, &plugin), -EINVAL);
-
-	/* A plugin without the callbacks it may leave out is loaded */
-	CHECK_EQ(esdm_es_ext_plugin_load(bare, &handle, &plugin), 0);
-	CHECK(plugin && !esdm_es_ext_plugin_has_status(plugin) &&
-		      !esdm_es_ext_plugin_has_entropy_rate(plugin),
-	      "the bare plugin is not taken as one");
-	esdm_es_ext_plugin_unload(handle);
-
-	/* Unloading nothing is fine */
-	esdm_es_ext_plugin_unload(NULL);
+	bad.version = ESDM_ES_EXT_PLUGIN_VERSION + 1;
+	CHECK_EQ(esdm_es_ext_server_alloc(&bad, test_socket, 0600, &server),
+		 -EPROTO);
+	bad.version = ESDM_ES_EXT_PLUGIN_VERSION;
+	bad.get_entropy = NULL;
+	CHECK_EQ(esdm_es_ext_server_alloc(&bad, test_socket, 0600, &server),
+		 -EPROTO);
+	CHECK_EQ(esdm_es_ext_server_alloc(NULL, test_socket, 0600, &server),
+		 -EPROTO);
+	CHECK(server == NULL, "a server was handed out");
+	CHECK_EQ(ctl->init_calls, 0);
+	CHECK(lstat(test_socket, &sb) < 0, "a refused source left a socket");
 }
 
 static void *test_server_thread(void *arg)
@@ -147,12 +141,11 @@ static bool test_closed(int fd)
 	return recv(fd, buf, sizeof(buf), 0) == 0;
 }
 
-static void test_server(const char *good)
+static void test_server(void)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
-	struct esdm_es_ext_test_control *ctl;
+	const struct esdm_es_ext_plugin *plugin = &es_ext_test_plugin;
+	struct esdm_es_ext_test_control *ctl = test_reset();
 	struct esdm_es_ext_server *server;
 	const uint8_t *data;
 	pthread_t thread;
@@ -162,16 +155,6 @@ static void test_server(const char *good)
 	ssize_t n;
 	void *res;
 	int fd, fd2;
-
-	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
-	if (!plugin)
-		return;
-	ctl = test_control(good);
-	CHECK(ctl != NULL, "the control of the test plugin was not found");
-	if (!ctl) {
-		esdm_es_ext_plugin_unload(handle);
-		return;
-	}
 
 	/* An init that fails refuses to serve, and leaves no socket */
 	ctl->init_ret = -ENODEV;
@@ -193,7 +176,7 @@ static void test_server(const char *good)
 	CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0640, &server),
 		 0);
 	if (!server)
-		goto out;
+		return;
 	CHECK_EQ(ctl->init_calls, 2);
 
 	/* The mode asked for, whatever the umask */
@@ -323,9 +306,6 @@ stop:
 	CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0600, &server),
 		 0);
 	esdm_es_ext_server_free(server);
-
-out:
-	esdm_es_ext_plugin_unload(handle);
 }
 
 /*
@@ -410,7 +390,7 @@ static struct json_object *test_status_ask(int fd, uint32_t length,
  * status that does not fit what is asked for drops the part
  * of the plugin, never cuts the text short.
  */
-static void test_server_status(const char *good, const char *bare)
+static void test_server_status(void)
 {
 	static const char *const bad_status[] = {
 		"{\"a\":NaN}", "{\"a\":1e999}", "{\"\xff\":1}", "[1]",
@@ -419,17 +399,22 @@ static void test_server_status(const char *good, const char *bare)
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_RSP_DATA +
 		    1];
 	char big[ESDM_ES_EXT_STATUS_MAX + 2];
-	const char *paths[] = { good, bare };
+	/* The test source, and the same without status and rate */
+	struct esdm_es_ext_plugin bare = es_ext_test_plugin;
+	const struct esdm_es_ext_plugin *plugins[] = { &es_ext_test_plugin,
+						       &bare };
 	unsigned int i, j;
+
+	bare.status_json = NULL;
+	bare.entropy_rate = NULL;
 
 	memset(big, 'a', sizeof(big));
 	memcpy(big, "{\"x\":\"", 6);
 	memcpy(big + ESDM_ES_EXT_STATUS_MAX - 2, "\"}", 3);
 
 	for (i = 0; i < 2; i++) {
-		struct esdm_es_ext_plugin_handle *handle;
-		const struct esdm_es_ext_plugin *plugin;
-		struct esdm_es_ext_test_control *ctl;
+		const struct esdm_es_ext_plugin *plugin = plugins[i];
+		struct esdm_es_ext_test_control *ctl = test_reset();
 		struct esdm_es_ext_server *server;
 		struct json_object *obj, *fields, *part;
 		int64_t requests, uptime;
@@ -438,17 +423,11 @@ static void test_server_status(const char *good, const char *bare)
 		ssize_t n;
 		int fd;
 
-		CHECK_EQ(esdm_es_ext_plugin_load(paths[i], &handle, &plugin),
+		CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0600,
+						  &server),
 			 0);
-		if (!plugin)
+		if (!server)
 			continue;
-		ctl = test_control(paths[i]);
-		CHECK(ctl != NULL, "the control of %s was not found", paths[i]);
-		if (!ctl || esdm_es_ext_server_alloc(plugin, test_socket, 0600,
-						     &server)) {
-			esdm_es_ext_plugin_unload(handle);
-			continue;
-		}
 		CHECK_EQ(pthread_create(&thread, NULL, test_server_thread,
 					server),
 			 0);
@@ -630,7 +609,6 @@ stop:
 		esdm_es_ext_server_stop(server);
 		pthread_join(thread, NULL);
 		esdm_es_ext_server_free(server);
-		esdm_es_ext_plugin_unload(handle);
 	}
 }
 
@@ -638,19 +616,16 @@ stop:
  * With users allowed, only those and root are served: anybody else who can
  * connect is disconnected before taking a slot.
  */
-static void test_server_allow(const char *good)
+static void test_server_allow(void)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
+	const struct esdm_es_ext_plugin *plugin = &es_ext_test_plugin;
 	struct esdm_es_ext_server *server;
 	unsigned int round, i;
 	pthread_t thread;
 	int fd;
 
-	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
-	if (!plugin)
-		return;
+	test_reset();
 
 	/* Round 0 allows another user than the test's, round 1 the test's */
 	for (round = 0; round < 2; round++) {
@@ -699,8 +674,6 @@ static void test_server_allow(const char *good)
 
 		esdm_es_ext_server_free(server);
 	}
-
-	esdm_es_ext_plugin_unload(handle);
 }
 
 /*
@@ -709,11 +682,10 @@ static void test_server_allow(const char *good)
  * and with 0 by one that does, after which the server takes the next message
  * for the handshake: anything else ends the connection.
  */
-static void test_server_startdtls(const char *good)
+static void test_server_startdtls(void)
 {
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA + 1];
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
+	const struct esdm_es_ext_plugin *plugin = &es_ext_test_plugin;
 	struct esdm_es_ext_server *server;
 	const uint8_t *data;
 	unsigned int round;
@@ -723,9 +695,7 @@ static void test_server_startdtls(const char *good)
 	ssize_t n;
 	int fd;
 
-	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
-	if (!plugin)
-		return;
+	test_reset();
 
 	/* Round 0 without DTLS offered, round 1 with it, where it can be */
 	for (round = 0; round < 2; round++) {
@@ -791,7 +761,6 @@ static void test_server_startdtls(const char *good)
 	}
 
 	CHECK_EQ(esdm_es_ext_server_set_dtls(NULL, 0), -EINVAL);
-	esdm_es_ext_plugin_unload(handle);
 }
 
 /* The clients the server of the library serves at a time */
@@ -819,22 +788,19 @@ static bool test_served(int fd)
  * the longest: clients that only hold their slots do not lock out another
  * one - the ESDM connecting again.
  */
-static void test_server_slots(const char *good)
+static void test_server_slots(void)
 {
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
+	const struct esdm_es_ext_plugin *plugin = &es_ext_test_plugin;
 	struct esdm_es_ext_server *server;
 	int fds[TEST_SERVER_SLOTS], fd;
 	pthread_t thread;
 	unsigned int i;
 
-	CHECK_EQ(esdm_es_ext_plugin_load(good, &handle, &plugin), 0);
-	if (!plugin)
-		return;
+	test_reset();
 	CHECK_EQ(esdm_es_ext_server_alloc(plugin, test_socket, 0600, &server),
 		 0);
 	if (!server)
-		goto out;
+		return;
 	CHECK_EQ(pthread_create(&thread, NULL, test_server_thread, server), 0);
 
 	/* All slots taken, the first client idle the longest */
@@ -863,146 +829,10 @@ static void test_server_slots(const char *good)
 	esdm_es_ext_server_stop(server);
 	pthread_join(thread, NULL);
 	esdm_es_ext_server_free(server);
-
-out:
-	esdm_es_ext_plugin_unload(handle);
 }
 
-/* The example plugin of es-ext/example, built to read /dev/urandom */
-static void test_example(const char *path)
+int main(void)
 {
-	struct esdm_es_ext_plugin_handle *handle;
-	const struct esdm_es_ext_plugin *plugin;
-	char status[ESDM_ES_EXT_STATUS_MAX + 1];
-	uint8_t buf[32];
-	uint32_t bits;
-	void *ctx = NULL;
-
-	CHECK_EQ(esdm_es_ext_plugin_load(path, &handle, &plugin), 0);
-	if (!plugin)
-		return;
-
-	CHECK_EQ(plugin->init(&ctx), 0);
-	CHECK_EQ(plugin->selftest(ctx), 0);
-	CHECK_EQ(esdm_es_ext_plugin_get(plugin, ctx, buf, sizeof(buf), &bits),
-		 0);
-	CHECK_EQ(bits, sizeof(buf));
-
-	/* Its status names the device, and counts the read */
-	CHECK_EQ(esdm_es_ext_plugin_status(plugin, ctx, status, sizeof(status)),
-		 (ssize_t)strlen(status));
-	CHECK(!strcmp(status,
-		      "{\"device\":\"/dev/urandom\",\"reads\":1,\"failures\":0}"),
-	      "unexpected status of the example: %s", status);
-	plugin->fini(ctx);
-
-	esdm_es_ext_plugin_unload(handle);
-}
-
-struct test_example_get {
-	const struct esdm_es_ext_plugin *plugin;
-	void *ctx;
-	uint8_t buf[32];
-	uint32_t bits;
-	int ret;
-	atomic_bool done;
-};
-
-static void *test_example_get_thread(void *arg)
-{
-	struct test_example_get *get = arg;
-
-	get->ret = get->plugin->get_entropy(get->ctx, get->buf,
-					    sizeof(get->buf), &get->bits);
-	atomic_store(&get->done, true);
-	return NULL;
-}
-
-/*
- * Read the example, built to read @fifo, in a thread of its own: whether it
- * returned within @ms
- */
-static bool test_example_get(struct test_example_get *get, unsigned int ms)
-{
-	const struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
-	pthread_t thread;
-	unsigned int i;
-
-	atomic_store(&get->done, false);
-	if (pthread_create(&thread, NULL, test_example_get_thread, get))
-		return false;
-	for (i = 0; i < ms / 10 && !atomic_load(&get->done); i++)
-		nanosleep(&ts, NULL);
-	if (!atomic_load(&get->done)) {
-		/* Left blocked: the process ends with it */
-		pthread_detach(thread);
-		return false;
-	}
-	pthread_join(thread, NULL);
-	return true;
-}
-
-/*
- * The example plugin reading a device that stalls - a FIFO the test keeps
- * open and writes nothing to, @path built into the copy of the example: a
- * request gives up within the time it has, rather than block the seeding
- * that asked for ever, and is served once the device delivers again
- */
-static void test_example_stalled(const char *path, const char *fifo)
-{
-	struct esdm_es_ext_plugin_handle *handle;
-	struct test_example_get get = { 0 };
-	const struct esdm_es_ext_plugin *plugin;
-	uint8_t data[32];
-	int fd;
-
-	unlink(fifo);
-	CHECK(!mkfifo(fifo, 0600), "cannot create %s: %s", fifo,
-	      strerror(errno));
-	/* Read and written: the example finds a writer that writes nothing */
-	fd = open(fifo, O_RDWR | O_CLOEXEC);
-	CHECK(fd >= 0, "cannot open %s: %s", fifo, strerror(errno));
-	if (fd < 0)
-		goto out;
-
-	CHECK_EQ(esdm_es_ext_plugin_load(path, &handle, &plugin), 0);
-	if (!plugin)
-		goto out;
-	CHECK_EQ(plugin->init(&get.ctx), 0);
-	get.plugin = plugin;
-
-	CHECK(test_example_get(&get, 5000),
-	      "the example blocks on a device that stalls");
-	if (!atomic_load(&get.done))
-		goto out;
-	CHECK_EQ(get.ret, -ETIMEDOUT);
-
-	/* The device delivers again */
-	memset(data, 0x42, sizeof(data));
-	CHECK_EQ(write(fd, data, sizeof(data)), (ssize_t)sizeof(data));
-	CHECK(test_example_get(&get, 5000),
-	      "the example blocks on a device that delivers");
-	CHECK_EQ(get.ret, 0);
-	CHECK_EQ(get.bits, sizeof(get.buf));
-	CHECK_MEM_EQ(get.buf, data, sizeof(data));
-
-	plugin->fini(get.ctx);
-	esdm_es_ext_plugin_unload(handle);
-
-out:
-	if (fd >= 0)
-		close(fd);
-	unlink(fifo);
-}
-
-int main(int argc, char *argv[])
-{
-	if (argc < 10) {
-		printf("usage: %s <test plugin> <bad version> <no get_entropy> <no plugin> <example plugin> <bare test plugin> <rated test plugin> <example plugin reading a FIFO> <the FIFO>\n",
-		       argv[0]);
-		return 1;
-	}
-
 	if (!mkdtemp(test_dir)) {
 		printf("cannot create a directory - skipping\n");
 		return 77;
@@ -1013,14 +843,12 @@ int main(int argc, char *argv[])
 	/* The mode is set by the library, not left to the umask */
 	umask(0077);
 
-	test_loader(argv[1], argv[2], argv[3], argv[4], argv[6]);
-	test_server(argv[1]);
-	test_server_status(argv[1], argv[6]);
-	test_server_allow(argv[1]);
-	test_server_slots(argv[1]);
-	test_server_startdtls(argv[1]);
-	test_example(argv[5]);
-	test_example_stalled(argv[8], argv[9]);
+	test_server_refused();
+	test_server();
+	test_server_status();
+	test_server_allow();
+	test_server_slots();
+	test_server_startdtls();
 
 	unlink(test_socket);
 	rmdir(test_dir);

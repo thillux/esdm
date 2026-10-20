@@ -18,18 +18,19 @@
  */
 
 /*
- * An external entropy source plugin for the tests, steered by the test through
- * esdm_es_ext_test_control, which the plugin exports next to the plugin
- * itself. Its data is a counter, one byte value per call, so that a test can
- * tell which call delivered a buffer.
+ * An external entropy source for the tests, steered by the test through
+ * esdm_es_ext_test_control. Its data is a counter, one byte value per call, so
+ * that a test can tell which call delivered a buffer.
  *
- * Built as a plugin library (shared_module) and, with ES_EXT_TEST_PLUGIN_STATIC
- * defined, compiled into a test that serves it in process. With
- * ES_EXT_TEST_PLUGIN_BARE defined, it has neither a status nor an entropy rate
- * callback - the members are NULL.
+ * Compiled into a test that serves it in process, or - with
+ * ES_EXT_TEST_PROVIDER defined - into a provider program of its own, which
+ * serves it with esdm_es_ext_provider_main() and is steered through the
+ * environment, see ES_EXT_TEST_PLUGIN_ENV. With ES_EXT_TEST_PLUGIN_BARE
+ * defined, it has neither a status nor an entropy rate callback - the members
+ * are NULL.
  *
- * It declares no entropy rate unless the test sets one, which the plugin of
- * ES_EXT_TEST_PLUGIN_RATED does by default: a plugin declaring its name,
+ * It declares no entropy rate unless the test sets one, which the source of
+ * ES_EXT_TEST_PLUGIN_RATED does by default: a source declaring its name,
  * es-ext-rated, and a rate of 128 bits per 256 bits.
  */
 
@@ -50,7 +51,6 @@ static void es_ext_test_sleep(unsigned int ms)
 	nanosleep(&ts, NULL);
 }
 
-ESDM_ES_EXT_PLUGIN_EXPORT
 struct esdm_es_ext_test_control esdm_es_ext_test_control = {
 	.claim_bits = UINT32_MAX,
 #ifdef ES_EXT_TEST_PLUGIN_RATED
@@ -67,16 +67,10 @@ static uint32_t es_ext_test_entropy_rate(void *ctx);
 #endif
 
 /*
- * The plugin, not const: a test sets the name it declares, @name of the
+ * The source, not const: a test sets the name it declares, @name of the
  * control by default - or NULL for none.
  */
-#ifdef ES_EXT_TEST_PLUGIN_STATIC
-#define ES_EXT_TEST_PLUGIN es_ext_test_plugin
-#else
-#define ES_EXT_TEST_PLUGIN esdm_es_ext_plugin
-ESDM_ES_EXT_PLUGIN_EXPORT
-#endif
-extern struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN;
+extern struct esdm_es_ext_plugin es_ext_test_plugin;
 
 /* Take the settings of ES_EXT_TEST_PLUGIN_ENV, if there are any */
 static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
@@ -101,8 +95,10 @@ static void es_ext_test_env(struct esdm_es_ext_test_control *ctl)
 		if (!strcmp(setting, "name")) {
 			/* An empty one declares none */
 			snprintf(ctl->name, sizeof(ctl->name), "%s", val);
-			ES_EXT_TEST_PLUGIN.name = val[0] ? ctl->name : NULL;
-		} else if (!strcmp(setting, "selftest_ret"))
+			es_ext_test_plugin.name = val[0] ? ctl->name : NULL;
+		} else if (!strcmp(setting, "init_ret"))
+			ctl->init_ret = (int)n;
+		else if (!strcmp(setting, "selftest_ret"))
 			ctl->selftest_ret = (int)n;
 		else if (!strcmp(setting, "get_ret"))
 			ctl->get_ret = (int)n;
@@ -144,7 +140,7 @@ static int es_ext_test_init(void **ctx)
 
 #ifndef ES_EXT_TEST_PLUGIN_BARE
 	/* Asked after the init: the rate the test set, or none */
-	ES_EXT_TEST_PLUGIN.entropy_rate =
+	es_ext_test_plugin.entropy_rate =
 		ctl->entropy_rate == ES_EXT_TEST_RATE_NONE ?
 			NULL :
 			es_ext_test_entropy_rate;
@@ -231,10 +227,7 @@ static int es_ext_test_status_json(void *ctx, char *buf, size_t buflen)
 }
 #endif /* ES_EXT_TEST_PLUGIN_BARE */
 
-#ifndef ES_EXT_TEST_PLUGIN_STATIC
-ESDM_ES_EXT_PLUGIN_EXPORT
-#endif
-struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
+struct esdm_es_ext_plugin es_ext_test_plugin = {
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
 	.name = esdm_es_ext_test_control.name,
 	.init = es_ext_test_init,
@@ -246,3 +239,11 @@ struct esdm_es_ext_plugin ES_EXT_TEST_PLUGIN = {
 	.entropy_rate = es_ext_test_entropy_rate,
 #endif
 };
+
+#ifdef ES_EXT_TEST_PROVIDER
+/* A provider program, as one of its own making is - see the file header */
+int main(int argc, char *argv[])
+{
+	return esdm_es_ext_provider_main(&es_ext_test_plugin, argc, argv);
+}
+#endif

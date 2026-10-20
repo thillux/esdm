@@ -21,12 +21,12 @@
  * An external entropy source on the network, end to end: the esdm-server
  * reads its ExternalSocket source from the provider socket of the
  * esdm-es-ext-relay, which forwards over SCTP with DTLS and certificates to
- * esdm-es-ext-serve serving the rated test plugin.
+ * the provider program of the rated test source.
  *
  *  - the source is connected, shown under the name the remote provider
  *    declares and credited at the rate it declares;
  *  - its status in the ESDM is the one of the remote server - transport
- *    "sctp" - and of the remote plugin, passed through;
+ *    "sctp" - and of the remote source, passed through;
  *  - it delivers - with the ESDM's privileges dropped, as the relay serves
  *    the user nobody next to root;
  *  - the remote provider restarted between two seedings: the next one is
@@ -38,7 +38,7 @@
  * puts itself in namespaces of its own.
  *
  * Usage: es_ext_net_esdm_test <esdm-server> <esdm-es-ext-relay>
- *			       <esdm-es-ext-serve> <rated test plugin>
+ *			       <rated test provider>
  */
 
 #define _GNU_SOURCE
@@ -69,14 +69,14 @@
 static char test_dir[] = "/tmp/esdm-es-ext-net-esdm-test-XXXXXX";
 static char test_socket[sizeof(test_dir) + 32];
 
-static const char *server_path, *relay_path, *serve_path, *plugin_path;
+static const char *server_path, *relay_path, *serve_path;
 
-/* esdm-es-ext-serve on 127.0.0.1:*@port, picked by the kernel if 0 */
+/* The provider on 127.0.0.1:*@port, picked by the kernel if 0 */
 static pid_t serve_start(uint16_t *port)
 {
-	char *argv[] = { (char *)serve_path, "--plugin", (char *)plugin_path,
-			 "--cert", PKI("server.crt"), "--key",
-			 PKI("server.key"), "--ca", PKI("ca.crt"), NULL };
+	char *argv[] = { (char *)serve_path, "--cert", PKI("server.crt"),
+			 "--key", PKI("server.key"), "--ca", PKI("ca.crt"),
+			 NULL };
 	struct sockaddr_storage ss;
 	int lfd, one = 1;
 	pid_t pid;
@@ -243,15 +243,14 @@ int main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
-	if (argc != 5) {
-		printf("Usage: %s <esdm-server> <esdm-es-ext-relay> <esdm-es-ext-serve> <rated test plugin>\n",
+	if (argc != 4) {
+		printf("Usage: %s <esdm-server> <esdm-es-ext-relay> <rated test provider>\n",
 		       argv[0]);
 		return 1;
 	}
 	server_path = argv[1];
 	relay_path = argv[2];
 	serve_path = argv[3];
-	plugin_path = argv[4];
 	signal(SIGPIPE, SIG_IGN);
 
 	if (getuid()) {

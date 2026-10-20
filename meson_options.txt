@@ -1199,9 +1199,10 @@ when this was written.
 option('es-ext-net', type: 'feature', value: 'disabled',
        description: '''Serve external entropy sources over the network.
 
-The provider server of libesdm_es_ext gains a network mode, which
-esdm-es-ext-serve and esdm-es-pkcs11 offer with --listen: the entropy source
-is served on SCTP with mutually authenticated DTLS 1.2, as RFC 6083 has it -
+The provider server of libesdm_es_ext gains a network mode, which every
+provider program of the library - esdm-es-pkcs11, and one of
+esdm_es_ext_provider_main() - offers with --listen: the entropy source is
+served on SCTP with mutually authenticated DTLS 1.2, as RFC 6083 has it -
 SCTP-AUTH for the chunks, DTLS for the records, certificates and CRLs as the
 TLS of egd-net has them. The esdm-es-ext-relay is built as well: it serves a
 local provider socket, which the ESDM reads as one of its ExternalSocket
@@ -1219,19 +1220,20 @@ Linux only, with SCTP (the kernel module sctp) on both hosts.
 option('es-ext-net-port', type: 'integer', min: 1, max: 65535, value: 7379,
        description: '''SCTP port of a provider served on the network (default: 7379)
 
-The port the units of esdm-es-ext-serve listen on, the esdm-es-ext-relay
-connects to unless told otherwise, and the man pages name. No port is
-assigned to the external entropy source protocol; 7379, next to the 7378 of
-egd-net, was unassigned by IANA when this was written.
+The port the esdm-es-ext-relay connects to unless told otherwise, and the man
+pages name. No port is assigned to the external entropy source protocol;
+7379, next to the 7378 of egd-net, was unassigned by IANA when this was
+written.
 ''')
 
 option('esdm-es-ext', type: 'feature', value: 'enabled',
        description: '''Enable the external entropy source library
 
 libesdm_es_ext and its header esdm_es_ext.h are what an external entropy
-source is developed against: the plugin API the ESDM loads a plugin library
-with (es_ext), and the provider server serving such a source on a Unix domain
-socket the ESDM connects to. See libesdm_es_ext(3).''')
+source is developed against: the callbacks of a source, the provider server
+serving them on a Unix domain socket the ESDM connects to (es_ext), and the
+provider program around it - a program serving a source is its callbacks and
+a main() calling esdm_es_ext_provider_main(). See libesdm_es_ext(3).''')
 
 # WARNING: handle all of these options with care as they may lead to an increased
 # number of failed RPC replies to the client without random data or higher load

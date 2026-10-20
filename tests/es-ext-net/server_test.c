@@ -18,10 +18,10 @@
  */
 
 /*
- * The network mode of the provider server of libesdm_es_ext, as
- * esdm-es-ext-serve offers it, serving the test plugin on SCTP with DTLS and
- * certificates - its socket handed over by socket activation, bound here to a
- * port the kernel picked:
+ * The network mode of the provider server of libesdm_es_ext, as a provider
+ * program - esdm_es_ext_provider_main() - offers it, serving the test source
+ * on SCTP with DTLS and certificates - its socket handed over by socket
+ * activation, bound here to a port the kernel picked:
  *
  *  - the requests inside the DTLS, the fields of STATUS on the network - the
  *    transport and the peer asking -, and the refusals: STARTDTLS, a client
@@ -39,7 +39,7 @@
  * Needs no privileges. Skips (77) in a build without es-ext-net, and on a
  * kernel without SCTP.
  *
- * Usage: es_ext_net_server_test <esdm-es-ext-serve> <test plugin>
+ * Usage: es_ext_net_server_test <test provider>
  */
 
 #define _GNU_SOURCE
@@ -54,7 +54,6 @@
 #ifdef ESDM_ES_EXT_NET
 
 static const char *serve_path;
-static const char *plugin_path;
 
 /* A client context of the test PKI, by the base name of its files */
 static struct esdm_tls_ctx *client_of(const char *name)
@@ -82,7 +81,7 @@ struct server {
 };
 
 /*
- * Start esdm-es-ext-serve on a listener of 127.0.0.1, with the certificate
+ * Start the provider on a listener of 127.0.0.1, with the certificate
  * @cert and its key @key - the test PKI's server by default - and the options
  * @extra, NULL-terminated. Wait until it serves.
  *
@@ -101,8 +100,6 @@ static int server_start(struct server *s, const char *cert, const char *key,
 		return -1;
 
 	argv[n++] = (char *)serve_path;
-	argv[n++] = "--plugin";
-	argv[n++] = (char *)plugin_path;
 	argv[n++] = "--cert";
 	argv[n++] = (char *)(cert ? cert : PKI("server.crt"));
 	argv[n++] = "--key";
@@ -531,19 +528,13 @@ static void test_rotation(void)
 
 static void test_options(void)
 {
-	char *const no_files[] = { (char *)serve_path, "--plugin",
-				   (char *)plugin_path,	 "--listen",
-				   "127.0.0.1:0",	 NULL };
-	char *const mixed[] = { (char *)serve_path, "--plugin",
-				(char *)plugin_path,
-				"--socket",	    "/tmp/x.sock",
-				"--listen",	    "127.0.0.1:0",
-				NULL };
-	char *const net_without_listen[] = { (char *)serve_path, "--plugin",
-					     (char *)plugin_path,
-					     "--socket",	 "/tmp/x.sock",
-					     "--allow",
-					     "127.0.0.1",	 NULL };
+	char *const no_files[] = { (char *)serve_path, "--listen",
+				   "127.0.0.1:0", NULL };
+	char *const mixed[] = { (char *)serve_path, "--socket", "/tmp/x.sock",
+				"--listen", "127.0.0.1:0", NULL };
+	char *const net_without_listen[] = { (char *)serve_path, "--socket",
+					     "/tmp/x.sock", "--allow",
+					     "127.0.0.1", NULL };
 	pid_t pid;
 
 	printf("Provider server on the network: options refused\n");
@@ -564,13 +555,11 @@ int main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
-	if (argc != 3) {
-		printf("Usage: %s <esdm-es-ext-serve> <test plugin>\n",
-		       argv[0]);
+	if (argc != 2) {
+		printf("Usage: %s <test provider>\n", argv[0]);
 		return 1;
 	}
 	serve_path = argv[1];
-	plugin_path = argv[2];
 	signal(SIGPIPE, SIG_IGN);
 
 	if (!test_sctp_available())

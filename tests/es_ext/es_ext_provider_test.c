@@ -18,33 +18,40 @@
  */
 
 /*
- * esdm-es-ext-serve against a client speaking the protocol: it serves the
- * plugin library it is given on the socket it is given, with the mode asked
- * for, until it is terminated, and removes the socket then. What it cannot
- * serve - no plugin, a plugin that does not fit, a mode that is none - it
- * refuses to start with.
+ * A provider program - esdm_es_ext_provider_main() of libesdm_es_ext, in a
+ * program serving the test source - against a client speaking the protocol:
+ * it serves its source on the socket it is given, with the mode asked for,
+ * until it is terminated, and removes the socket then. What it cannot serve -
+ * no socket, a source whose init fails, a mode that is none, a command line
+ * that is wrong - it refuses to start with.
  *
- * It answers INFO with the name of its plugin, or the one of --name, and
+ * It answers INFO with the name of its source, or the one of --name, and
  * refuses to start with a --name that is no valid name. A request that breaks
  * the protocol closes the connection.
  *
- * It answers STATUS with fields of its own next to the status of its plugin,
- * in the clear and inside a DTLS session: its version, the plugin API, the
- * name and the rate it declares, the DTLS of the connection, its clients and
- * slots, the requests served, the self test verdict and its uptime - and the
- * status of the plugin as it reports it, or null for none, an error, a status
- * that is no valid JSON object and one that is too large, never cut short.
+ * It answers STATUS with fields of its own next to the status of its source,
+ * in the clear and inside a DTLS session: its version, the API version of the
+ * source, the name and the rate it declares, the DTLS of the connection, its
+ * clients and slots, the requests served, the self test verdict and its
+ * uptime - and the status of the source as it reports it, or null for none,
+ * an error, a status that is no valid JSON object and one that is too large,
+ * never cut short.
  *
- * Usage: es_ext_serve_test <esdm-es-ext-serve> <test plugin> <bad version>
- *			    <rated plugin>
+ * And the example of es-ext/example, a provider program as one of its own
+ * making is built, reading a device that delivers and one that stalls.
+ *
+ * Usage: es_ext_provider_test <test provider> <rated test provider>
+ *			       <example> <example reading a FIFO> <the FIFO>
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -63,7 +70,7 @@
 #include "esdm_es_ext_json.h"
 #include "esdm_es_ext_proto.h"
 
-static char test_dir[] = "/tmp/esdm-es-ext-serve-test-XXXXXX";
+static char test_dir[] = "/tmp/esdm-es-ext-provider-test-XXXXXX";
 static char test_socket[sizeof(test_dir) + 32];
 
 /* Started with an empty environment, as the test suite runs its daemons */
@@ -117,13 +124,12 @@ static int test_connect(void)
 	return fd;
 }
 
-static void test_serve(const char *serve, const char *plugin)
+static void test_serve(const char *serve)
 {
 	char uid[16];
-	char *const argv[] = { (char *)serve, "--plugin",	(char *)plugin,
-			       "--socket",    test_socket,	"--mode",
-			       "0640",	      "--client_uid", uid,
-			       NULL };
+	char *const argv[] = { (char *)serve,  "--socket", test_socket,
+			       "--mode",       "0640",	   "--client_uid",
+			       uid,	       NULL };
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	const uint8_t *data;
@@ -161,7 +167,7 @@ static void test_serve(const char *serve, const char *plugin)
 					 &status, &bits, &data),
 				 0);
 			CHECK_EQ(status, 0);
-			/* The test plugin claims all bits by default */
+			/* The test source claims all bits by default */
 			CHECK_EQ(bits, 256);
 		}
 
@@ -183,10 +189,9 @@ static void test_serve(const char *serve, const char *plugin)
  * Without --client_uid, root and nobody are served - the ESDM as it runs by
  * default - and nobody else.
  */
-static void test_default_clients(const char *serve, const char *plugin)
+static void test_default_clients(const char *serve)
 {
-	char *const argv[] = { (char *)serve, "--plugin", (char *)plugin,
-			       "--socket", test_socket, NULL };
+	char *const argv[] = { (char *)serve, "--socket", test_socket, NULL };
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN], rsp[64];
 	struct passwd *pw = getpwnam("nobody");
 	pid_t pid;
@@ -219,12 +224,12 @@ static void test_default_clients(const char *serve, const char *plugin)
 }
 
 /* With --no_dtls, a STARTDTLS is refused and the client goes on in the clear */
-static void test_no_dtls(const char *serve, const char *plugin)
+static void test_no_dtls(const char *serve)
 {
 	char uid[16];
-	char *const argv[] = { (char *)serve, "--plugin",  (char *)plugin,
-			       "--socket",    test_socket, "--client_uid",
-			       uid,	      "--no_dtls", NULL };
+	char *const argv[] = { (char *)serve, "--socket",  test_socket,
+			       "--client_uid", uid,	   "--no_dtls",
+			       NULL };
 	uint8_t req[ESDM_ES_EXT_PROTO_REQ_LEN];
 	uint8_t rsp[ESDM_ES_EXT_PROTO_RSP_LEN + ESDM_ES_EXT_PROTO_MAX_DATA];
 	const uint8_t *data;
@@ -265,26 +270,25 @@ static void test_no_dtls(const char *serve, const char *plugin)
 
 /*
  * INFO, byte for byte, in the clear and inside the DTLS session: the name of
- * the plugin without its NUL - or the one of --name - and the rate its
+ * the source without its NUL - or the one of --name - and the rate its
  * entropy_rate callback declares - or the one of --entropy_rate - or none, no
  * entropy. A request that breaks the protocol closes the connection.
  */
-static void test_info(const char *serve, const char *plugin,
-		      const char *rated)
+static void test_info(const char *serve, const char *rated)
 {
 	static const struct {
-		const char *plugin_of;
+		const char *source_of;
 		const char *name_opt;
 		const char *rate_opt;
 		const char *name;
 		uint32_t rate;
 	} rounds[] = {
-		/* The name of the plugin, no rate */
+		/* The name of the source, no rate */
 		{ "test", NULL, NULL, ES_EXT_TEST_NAME,
 		  ESDM_ES_EXT_PROTO_RATE_NONE },
 		/* Both of the options */
 		{ "test", "Quelle \xc3\xa4", "100", "Quelle \xc3\xa4", 100 },
-		/* A plugin declaring both */
+		/* A source declaring both */
 		{ "rated", NULL, NULL, ES_EXT_TEST_RATED_NAME,
 		  ES_EXT_TEST_RATED_RATE },
 		/* The options take precedence */
@@ -310,9 +314,7 @@ static void test_info(const char *serve, const char *plugin,
 
 	for (i = 0; i < sizeof(rounds) / sizeof(rounds[0]); i++) {
 		n_args = 0;
-		argv[n_args++] = serve;
-		argv[n_args++] = "--plugin";
-		argv[n_args++] = strcmp(rounds[i].plugin_of, "rated") ? plugin :
+		argv[n_args++] = strcmp(rounds[i].source_of, "rated") ? serve :
 									rated;
 		argv[n_args++] = "--socket";
 		argv[n_args++] = test_socket;
@@ -399,21 +401,21 @@ static void test_info(const char *serve, const char *plugin,
 	}
 
 	/* A --name or an --entropy_rate that is none: refused at start up */
-	argv[7] = "--name";
-	argv[9] = NULL;
+	argv[5] = "--name";
+	argv[7] = NULL;
 	for (i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
 		struct stat sb;
 
-		argv[8] = bad_names[i];
+		argv[6] = bad_names[i];
 		CHECK_EQ(test_run((char *const *)argv), 1);
 		CHECK(lstat(test_socket, &sb) < 0,
 		      "a refused --name %u left a socket behind", i);
 	}
-	argv[7] = "--entropy_rate";
+	argv[5] = "--entropy_rate";
 	for (i = 0; i < sizeof(bad_rates) / sizeof(bad_rates[0]); i++) {
 		struct stat sb;
 
-		argv[8] = bad_rates[i];
+		argv[6] = bad_rates[i];
 		CHECK_EQ(test_run((char *const *)argv), 1);
 		CHECK(lstat(test_socket, &sb) < 0,
 		      "a refused --entropy_rate %u left a socket behind", i);
@@ -483,7 +485,10 @@ static bool test_field_bool(struct json_object *obj, const char *key,
 	       json_object_get_boolean(val) == want;
 }
 
-/* The "plugin" part: its member @key is @want - or it is null for NULL */
+/*
+ * The "plugin" part - the status of the source: its member @key is @want - or
+ * it is null for NULL
+ */
 static bool test_plugin_part(struct json_object *obj, const char *key,
 			     const char *want)
 {
@@ -506,13 +511,12 @@ static void test_print(const char *what, struct json_object *obj)
 }
 
 /*
- * The fields of the server, as --name, --entropy_rate and the plugin have
+ * The fields of the server, as --name, --entropy_rate and the source have
  * them, in the clear and inside the DTLS session the server offers, and in the
  * clear with --no_dtls: the DTLS of the connection asking, the clients coming
  * and going, the requests, the self test verdict, the uptime growing.
  */
-static void test_status_fields(const char *serve, const char *plugin,
-			       const char *rated)
+static void test_status_fields(const char *serve, const char *rated)
 {
 	const char *const named[] = { "--name", "Feld", "--entropy_rate", "77",
 				      NULL };
@@ -532,7 +536,7 @@ static void test_status_fields(const char *serve, const char *plugin,
 #ifdef ESDM_DTLS
 		dtls = round == 1;
 #endif
-		pid = es_ext_test_serve(serve, plugin, test_socket,
+		pid = es_ext_test_serve(serve, test_socket,
 					round == 2 ? no_dtls : named, NULL);
 		CHECK(pid > 0, "the provider did not come up");
 		if (pid <= 0)
@@ -568,7 +572,7 @@ static void test_status_fields(const char *serve, const char *plugin,
 		CHECK(test_field_is(obj, "selftest", "none"),
 		      "a self test is reported before one");
 		CHECK(test_plugin_part(obj, "plugin", ES_EXT_TEST_NAME),
-		      "the status of the plugin is not in it");
+		      "the status of the source is not in it");
 		requests = test_field_int(obj, "requests");
 		uptime = test_field_int(obj, "uptime_seconds");
 		CHECK(requests >= 0 && uptime >= 0,
@@ -608,10 +612,9 @@ static void test_status_fields(const char *serve, const char *plugin,
 		es_ext_test_terminate(pid);
 	}
 
-	/* The name and the rate of the plugin, a self test failing */
-	pid = es_ext_test_serve(serve, rated, test_socket, NULL,
-				"selftest_ret=-19");
-	CHECK(pid > 0, "the provider of the rated plugin did not come up");
+	/* The name and the rate of the source, a self test failing */
+	pid = es_ext_test_serve(rated, test_socket, NULL, "selftest_ret=-19");
+	CHECK(pid > 0, "the provider of the rated source did not come up");
 	if (pid > 0) {
 		uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
 
@@ -622,7 +625,7 @@ static void test_status_fields(const char *serve, const char *plugin,
 		CHECK(test_field_is(obj, "name", ES_EXT_TEST_RATED_NAME) &&
 			      test_field_int(obj, "entropy_rate") ==
 				      ES_EXT_TEST_RATED_RATE,
-		      "the name and the rate of the plugin are not reported");
+		      "the name and the rate of the source are not reported");
 		CHECK(test_field_is(obj, "selftest", "failed"),
 		      "the failed self test is not reported");
 		json_object_put(obj);
@@ -632,12 +635,12 @@ static void test_status_fields(const char *serve, const char *plugin,
 }
 
 /*
- * The status of the plugin within the one of the server, in the clear and
+ * The status of the source within the one of the server, in the clear and
  * inside a DTLS session: a JSON object as it reports it - the largest one of
  * ESDM_ES_EXT_STATUS_MAX bytes included - and null for none, an error, a
  * status with NaN or that is no UTF-8, and one too large.
  */
-static void test_status_plugin(const char *serve, const char *plugin)
+static void test_status_plugin(const char *serve)
 {
 	static const struct {
 		const char *settings;
@@ -659,7 +662,7 @@ static void test_status_plugin(const char *serve, const char *plugin)
 	pid_t pid;
 
 	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		pid = es_ext_test_serve(serve, plugin, test_socket, NULL,
+		pid = es_ext_test_serve(serve, test_socket, NULL,
 					cases[i].settings);
 		CHECK(pid > 0, "the provider of case %u did not come up", i);
 		if (pid <= 0)
@@ -691,7 +694,7 @@ static void test_status_plugin(const char *serve, const char *plugin)
 			else
 				CHECK(test_plugin_part(obj, "plugin",
 						       cases[i].want),
-				      "case %u: the status of the plugin is not taken",
+				      "case %u: the status of the source is not taken",
 				      i);
 			json_object_put(obj);
 			es_ext_test_client_close(&c);
@@ -701,43 +704,215 @@ static void test_status_plugin(const char *serve, const char *plugin)
 	}
 }
 
-static void test_refusals(const char *serve, const char *plugin,
-			  const char *bad_version)
+/*
+ * What the provider cannot serve, it refuses to start with - exit status 1,
+ * and no socket left behind: no socket, a source whose init fails, a mode or a
+ * user that is none, an argument it does not take, an option it does not know
+ * - --plugin, of the plugin libraries no more - and the options of the network
+ * without it.
+ */
+static void test_refusals(const char *serve)
 {
 	char *const no_args[] = { (char *)serve, NULL };
-	char *const no_socket[] = { (char *)serve, "--plugin", (char *)plugin,
-				    NULL };
-	char *const bad_plugin[] = { (char *)serve,	  "--plugin",
-				     (char *)bad_version, "--socket",
-				     test_socket,	  NULL };
-	char *const missing[] = {
-		(char *)serve, "--plugin",  "/nonexistent/libnothing.so",
-		"--socket",    test_socket, NULL
-	};
-	char *const bad_mode[] = { (char *)serve, "--plugin",  (char *)plugin,
-				   "--socket",	  test_socket, "--mode",
-				   "0999",	  NULL };
+	char *const socket[] = { (char *)serve, "--socket", test_socket, NULL };
+	char *const bad_mode[] = { (char *)serve, "--socket", test_socket,
+				   "--mode", "0999", NULL };
+	char *const bad_uid[] = { (char *)serve, "--socket", test_socket,
+				  "--client_uid", "no-such-user-esdm-test",
+				  NULL };
+	char *const stray[] = { (char *)serve, "--socket", test_socket,
+				"stray", NULL };
+	char *const plugin[] = { (char *)serve, "--plugin",
+				 "/nonexistent/libnothing.so", "--socket",
+				 test_socket, NULL };
+	char *const net_option[] = { (char *)serve, "--socket", test_socket,
+				     "--idle_timeout", "5", NULL };
 	char *const version[] = { (char *)serve, "--version", NULL };
-	char *const bad_uid[] = { (char *)serve,  "--plugin", (char *)plugin,
-				  "--socket",	  test_socket, "--client_uid",
-				  "no-such-user-esdm-test", NULL };
+	char *const help[] = { (char *)serve, "--help", NULL };
+	char *const init_fails[] = { "ESDM_ES_EXT_TEST_PLUGIN=init_ret=-19",
+				     NULL };
 	struct stat sb;
 
 	CHECK_EQ(test_run(no_args), 1);
-	CHECK_EQ(test_run(no_socket), 1);
-	CHECK_EQ(test_run(bad_plugin), 1);
-	CHECK_EQ(test_run(missing), 1);
+	CHECK_EQ(es_ext_test_wait(es_ext_test_spawn(socket, init_fails)), 1);
 	CHECK_EQ(test_run(bad_mode), 1);
 	CHECK_EQ(test_run(bad_uid), 1);
+	CHECK_EQ(test_run(stray), 1);
+	CHECK_EQ(test_run(plugin), 1);
+	CHECK_EQ(test_run(net_option), 1);
 	CHECK(lstat(test_socket, &sb) < 0,
 	      "a refused start left a socket behind");
 	CHECK_EQ(test_run(version), 0);
+	CHECK_EQ(test_run(help), 0);
+}
+
+/* Is the string member @key of @obj @want? */
+static bool test_member_is(struct json_object *obj, const char *key,
+			   const char *want)
+{
+	struct json_object *val = NULL;
+
+	return json_object_object_get_ex(obj, key, &val) &&
+	       json_object_is_type(val, json_type_string) &&
+	       !strcmp(json_object_get_string(val), want);
+}
+
+/* The integer member @key of @obj, -1 for none */
+static int64_t test_member_int(struct json_object *obj, const char *key)
+{
+	struct json_object *val = NULL;
+
+	return json_object_object_get_ex(obj, key, &val) &&
+			       json_object_is_type(val, json_type_int) ?
+		       json_object_get_int64(val) :
+		       -1;
+}
+
+/* The status of the source within the answer to STATUS of @c, or NULL */
+static struct json_object *test_source_status(struct es_ext_test_client *c,
+					      struct json_object **obj)
+{
+	struct json_object *source = NULL;
+
+	*obj = test_status_of(c);
+	if (!*obj || !json_object_object_get_ex(*obj, "plugin", &source))
+		return NULL;
+	return source;
+}
+
+/*
+ * The example of es-ext/example, built to read /dev/urandom: served as it is
+ * when built on its own, it declares its name and its rate, delivers with one
+ * bit of entropy per byte, and reports the device and its reads
+ */
+static void test_example(const char *example)
+{
+	uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX];
+	struct es_ext_test_client c;
+	struct json_object *obj, *source;
+	const uint8_t *data;
+	const char *name;
+	size_t namelen;
+	uint32_t rate = 0, bits = 0;
+	int32_t status = -1;
+	pid_t pid;
+	ssize_t n;
+
+	pid = es_ext_test_serve(example, test_socket, NULL, NULL);
+	CHECK(pid > 0, "the example did not come up");
+	if (pid <= 0)
+		return;
+	CHECK_EQ(es_ext_test_client_open(&c, test_socket, false), 0);
+
+	n = es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_INFO, 0, rsp,
+				       sizeof(rsp));
+	CHECK_EQ(esdm_es_ext_proto_info_unpack(rsp, n > 0 ? (size_t)n : 0,
+					       &status, &rate, &name,
+					       &namelen),
+		 0);
+	CHECK(!status && rate == 32 &&
+		      namelen == strlen("example (/dev/urandom)") &&
+		      !memcmp(name, "example (/dev/urandom)", namelen),
+	      "the example declares another name or rate");
+
+	CHECK_EQ(es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_SELFTEST, 0,
+					    rsp, sizeof(rsp)),
+		 ESDM_ES_EXT_PROTO_RSP_LEN);
+	n = es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_GET_ENTROPY, 32,
+				       rsp, sizeof(rsp));
+	CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 32);
+	CHECK_EQ(esdm_es_ext_proto_rsp_unpack(rsp, n > 0 ? (size_t)n : 0,
+					      ESDM_ES_EXT_PROTO_GET_ENTROPY, 32,
+					      &status, &bits, &data),
+		 0);
+	CHECK(!status && bits == 32,
+	      "the example does not deliver one bit per byte: %d, %u bits",
+	      (int)status, bits);
+
+	/* Its status names the device, and counts the read */
+	source = test_source_status(&c, &obj);
+	test_print("status of the example", obj);
+	CHECK(source && json_object_object_length(source) == 3 &&
+		      test_member_is(source, "device", "/dev/urandom") &&
+		      test_member_int(source, "reads") == 1 &&
+		      test_member_int(source, "failures") == 0,
+	      "unexpected status of the example");
+	json_object_put(obj);
+
+	es_ext_test_client_close(&c);
+	es_ext_test_terminate(pid);
+}
+
+/*
+ * The example reading a device that stalls - a FIFO the test keeps open and
+ * writes nothing to, @fifo built into the copy of the example: a request gives
+ * up within the time it has, rather than block the seeding that asked for
+ * ever, and is served once the device delivers again
+ */
+static void test_example_stalled(const char *example, const char *fifo)
+{
+	uint8_t rsp[ES_EXT_TEST_CLIENT_RSP_MAX], written[32];
+	struct es_ext_test_client c;
+	const uint8_t *data = NULL;
+	uint32_t bits = 0;
+	int32_t status = 0;
+	pid_t pid = -1;
+	ssize_t n;
+	int fd;
+
+	unlink(fifo);
+	CHECK(!mkfifo(fifo, 0600), "cannot create %s: %s", fifo,
+	      strerror(errno));
+	/* Read and written: the example finds a writer that writes nothing */
+	fd = open(fifo, O_RDWR | O_CLOEXEC);
+	CHECK(fd >= 0, "cannot open %s: %s", fifo, strerror(errno));
+	if (fd < 0)
+		goto out;
+
+	pid = es_ext_test_serve(example, test_socket, NULL, NULL);
+	CHECK(pid > 0, "the example reading a FIFO did not come up");
+	if (pid <= 0)
+		goto out;
+	CHECK_EQ(es_ext_test_client_open(&c, test_socket, false), 0);
+
+	n = es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_GET_ENTROPY, 32,
+				       rsp, sizeof(rsp));
+	CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN);
+	if (n > 0)
+		CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+				 rsp, (size_t)n, ESDM_ES_EXT_PROTO_GET_ENTROPY,
+				 32, &status, &bits, &data),
+			 0);
+	CHECK_EQ(status, -ETIMEDOUT);
+
+	/* The device delivers again */
+	memset(written, 0x42, sizeof(written));
+	CHECK_EQ(write(fd, written, sizeof(written)), (ssize_t)sizeof(written));
+	n = es_ext_test_client_request(&c, ESDM_ES_EXT_PROTO_GET_ENTROPY, 32,
+				       rsp, sizeof(rsp));
+	CHECK_EQ(n, ESDM_ES_EXT_PROTO_RSP_LEN + 32);
+	if (n > 0)
+		CHECK_EQ(esdm_es_ext_proto_rsp_unpack(
+				 rsp, (size_t)n, ESDM_ES_EXT_PROTO_GET_ENTROPY,
+				 32, &status, &bits, &data),
+			 0);
+	CHECK(!status && bits == 32 && data &&
+		      !memcmp(data, written, sizeof(written)),
+	      "the example does not deliver what the device holds again");
+
+	es_ext_test_client_close(&c);
+
+out:
+	es_ext_test_terminate(pid);
+	if (fd >= 0)
+		close(fd);
+	unlink(fifo);
 }
 
 int main(int argc, char *argv[])
 {
-	if (argc < 5) {
-		printf("usage: %s <esdm-es-ext-serve> <test plugin> <bad version> <rated plugin>\n",
+	if (argc < 6) {
+		printf("usage: %s <test provider> <rated test provider> <example> <example reading a FIFO> <the FIFO>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -749,16 +924,18 @@ int main(int argc, char *argv[])
 	snprintf(test_socket, sizeof(test_socket), "%s/provider.socket",
 		 test_dir);
 
-	test_refusals(argv[1], argv[2], argv[3]);
-	test_serve(argv[1], argv[2]);
-	test_default_clients(argv[1], argv[2]);
-	test_no_dtls(argv[1], argv[2]);
-	test_info(argv[1], argv[2], argv[4]);
-	test_status_fields(argv[1], argv[2], argv[4]);
-	test_status_plugin(argv[1], argv[2]);
+	test_refusals(argv[1]);
+	test_serve(argv[1]);
+	test_default_clients(argv[1]);
+	test_no_dtls(argv[1]);
+	test_info(argv[1], argv[2]);
+	test_status_fields(argv[1], argv[2]);
+	test_status_plugin(argv[1]);
+	test_example(argv[3]);
+	test_example_stalled(argv[4], argv[5]);
 
 	unlink(test_socket);
 	rmdir(test_dir);
 
-	return common_test_result("es_ext_serve");
+	return common_test_result("es_ext_provider");
 }

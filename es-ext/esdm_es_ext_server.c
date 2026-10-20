@@ -18,13 +18,13 @@
  */
 
 /*
- * The provider side of the external entropy source protocol: a plugin served
- * on a Unix domain socket the ESDM connects to, or on the network - see
- * esdm_es_ext.h.
+ * The provider side of the external entropy source protocol: the callbacks of
+ * a source - struct esdm_es_ext_plugin - served on a Unix domain socket the
+ * ESDM connects to, or on the network - see esdm_es_ext.h.
  *
  * The server is one thread polling the listening sockets and its clients, and
- * serving one request at a time. That is all the plugin API allows anyway, as
- * its callbacks are never called concurrently, and all the ESDM needs: it
+ * serving one request at a time. That is all the callbacks of a source allow
+ * anyway, as they are never called concurrently, and all the ESDM needs: it
  * sends one request at a time per connection.
  *
  * On the network, the DTLS of a connection - with certificates, on SCTP, see
@@ -183,21 +183,21 @@ struct esdm_es_ext_server {
 
 	/*
 	 * The name INFO declares, empty for none: the one set with
-	 * esdm_es_ext_server_set_name(), or that of the plugin
+	 * esdm_es_ext_server_set_name(), or that of the source
 	 */
 	char name[ESDM_ES_EXT_NAME_MAX + 1];
 
 	/*
 	 * The rate INFO declares: the one set with
-	 * esdm_es_ext_server_set_entropy_rate(), else the one of the plugin,
+	 * esdm_es_ext_server_set_entropy_rate(), else the one of the source,
 	 * ESDM_ES_EXT_PROTO_RATE_NONE for none
 	 */
 	uint32_t rate;
 	uint32_t plugin_rate;
 
 	/*
-	 * What the server answers STATUS with next to the status of the plugin:
-	 * the requests served, the verdict of the last self test of the plugin
+	 * What the server answers STATUS with next to the status of the source:
+	 * the requests served, the verdict of the last self test of the source
 	 * - 0 passed, < 0 failed, 1 none yet - and when it was set up,
 	 * monotonic nanoseconds
 	 */
@@ -855,11 +855,11 @@ static int esdm_es_ext_server_startdtls(struct esdm_es_ext_server *server,
 }
 
 /*
- * The status of the plugin as JSON object, NULL for none: for a plugin without
+ * The status of the source as JSON object, NULL for none: for a source without
  * one, one whose status fails, and one whose status is no JSON object of up to
  * ESDM_ES_EXT_STATUS_MAX bytes, nested no deeper than
  * ESDM_ES_EXT_STATUS_MAX_DEPTH - checked as the ESDM checks the status of a
- * plugin it loads.
+ * provider.
  */
 static struct json_object *
 esdm_es_ext_server_plugin_status(struct esdm_es_ext_server *server)
@@ -943,7 +943,7 @@ esdm_es_ext_server_fields(struct esdm_es_ext_server *server, unsigned int i)
 
 /*
  * Answer a STATUS request of client @i for at most @length bytes, the status
- * going into @data: the fields of the server, and the status of its plugin -
+ * going into @data: the fields of the server, and the status of its source -
  * left out, as null, if both do not fit into @length together. The text is
  * never cut short: half a JSON object is none.
  *
@@ -993,7 +993,7 @@ static int esdm_es_ext_server_status(struct esdm_es_ext_server *server,
 }
 
 /*
- * Take the name of the plugin as the name INFO declares, if it is a valid one
+ * Take the name of the source as the name INFO declares, if it is a valid one
  * - see @name of struct esdm_es_ext_plugin.
  */
 static void esdm_es_ext_server_plugin_name(struct esdm_es_ext_server *server)
@@ -1006,7 +1006,7 @@ static void esdm_es_ext_server_plugin_name(struct esdm_es_ext_server *server)
 	else if (server->plugin->name)
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ANY,
-			"External ES provider: the name of the plugin is no name of 1 to %u bytes of UTF-8 without control characters, INFO declares none\n",
+			"External ES provider: the name of the source is no name of 1 to %u bytes of UTF-8 without control characters, INFO declares none\n",
 			ESDM_ES_EXT_NAME_MAX);
 }
 
@@ -1107,7 +1107,7 @@ out:
 }
 
 /*
- * The server with nothing set up yet but its plugin and its slots - see
+ * The server with nothing set up yet but its source and its slots - see
  * esdm_es_ext_server_free() for undoing it.
  */
 static int esdm_es_ext_server_new(const struct esdm_es_ext_plugin *plugin,
@@ -1154,7 +1154,7 @@ static int esdm_es_ext_server_new(const struct esdm_es_ext_plugin *plugin,
 	return 0;
 }
 
-/* Set the plugin up, and what it declares of itself */
+/* Set the source up, and what it declares of itself */
 static int esdm_es_ext_server_init_plugin(struct esdm_es_ext_server *s)
 {
 	const struct esdm_es_ext_plugin *plugin = s->plugin;
@@ -1168,7 +1168,7 @@ static int esdm_es_ext_server_init_plugin(struct esdm_es_ext_server *s)
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_ANY,
 				"External ES provider: initialization of %s failed: %s\n",
-				plugin->name ? plugin->name : "the plugin",
+				plugin->name ? plugin->name : "the source",
 				strerror(-ret));
 			return ret;
 		}
@@ -1179,13 +1179,13 @@ static int esdm_es_ext_server_init_plugin(struct esdm_es_ext_server *s)
 	s->plugin_rate = esdm_es_ext_plugin_entropy_rate(plugin, s->ctx);
 
 	/*
-	 * Whether the ESDM credits the rate the plugin declares is its
+	 * Whether the ESDM credits the rate the source declares is its
 	 * business - worth a line for whoever starts the provider all the same
 	 */
 	if (s->plugin_rate != ESDM_ES_EXT_PROTO_RATE_NONE)
 		esdm_logger(
 			LOGGER_STATUS, LOGGER_C_ANY,
-			"External ES provider: the plugin declares an entropy rate of %u bits per 256 bits\n",
+			"External ES provider: the source declares an entropy rate of %u bits per 256 bits\n",
 			s->plugin_rate);
 
 	return 0;

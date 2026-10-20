@@ -21,22 +21,21 @@
  * The external entropy sources of the esdm-server, as configured on its
  * command line.
  *
- * - --es_ext_socket connects to a provider served by esdm-es-ext-serve. Once
- *   the provider was restarted, the daemon - its privileges dropped by then -
- *   connects to it again on demand.
+ * - --es_ext_socket connects to a provider - a provider program of the test
+ *   source. Once the provider was restarted, the daemon - its privileges
+ *   dropped by then - connects to it again on demand.
  * - In a build with several sources, the options given several times
  *   configure one source each, the n-th occurrence the n-th source: each
  *   source has its own provider and rate, and is listed under its own
  *   instance name in the JSON and the text status.
- * - A source is shown under the name its provider declares, which
- *   esdm-es-ext-serve --name overrides; two sources may declare the same name.
+ * - A source is shown under the name its provider declares, which --name of
+ *   the provider overrides; two sources may declare the same name.
  *
  * Skipped (77) unless run as root, as the esdm-server refuses to start
  * otherwise. The daemon claims the fixed socket, semaphore and IPC names, so
  * the test puts itself in namespaces of its own.
  *
- * Usage: es_ext_server_test <esdm-server> <esdm-es-ext-serve> <test plugin>
- *			     <rated plugin>
+ * Usage: es_ext_server_test <esdm-server> <test provider> <rated test provider>
  */
 
 #define _GNU_SOURCE
@@ -146,11 +145,10 @@ static bool test_wait_socket(void)
 	return false;
 }
 
-static void test_socket_provider(const char *server, const char *serve,
-				 const char *plugin)
+static void test_socket_provider(const char *server, const char *serve)
 {
-	char *const serve_argv[] = { (char *)serve, "--plugin",	 (char *)plugin,
-				     "--socket",    test_socket, NULL };
+	char *const serve_argv[] = { (char *)serve, "--socket", test_socket,
+				     NULL };
 	char *const server_argv[] = { (char *)server, "-f", "--es_ext_socket",
 				      test_socket, NULL };
 	static char status[65536];
@@ -177,8 +175,8 @@ static void test_socket_provider(const char *server, const char *serve,
 	      "the source is not shown under the name of the provider (%.400s)",
 	      es ? es : "");
 	/*
-	 * Its status: the fields of esdm-es-ext-serve and the status it
-	 * fetches from the plugin
+	 * Its status: the fields of the provider server and the status it
+	 * fetches from the source
 	 */
 	CHECK(es && strstr(es, "\n Provider properties:\n"
 			       "  Server properties:\n") != NULL &&
@@ -255,10 +253,10 @@ static const char *test_json_text(struct json_object *obj)
  * option for the n-th source: each with its own provider, name and rate - the
  * rate of the provider where the occurrence is auto, the one given otherwise -
  * and the first provider failing its self test. The third, where the build has
- * one, is credited at the rate its plugin declares.
+ * one, is credited at the rate its source declares.
  */
 static void test_several(const char *server, const char *serve,
-			 const char *plugin, const char *rated)
+			 const char *rated)
 {
 	const char *const serve0[] = { "--entropy_rate", "200", NULL };
 	const char *const serve1[] = { "--name", "es-ext-test", NULL };
@@ -284,13 +282,12 @@ static void test_several(const char *server, const char *serve,
 	}
 	server_argv[args] = NULL;
 
-	provider[0] = es_ext_test_serve(serve, plugin, socket[0], serve0,
+	provider[0] = es_ext_test_serve(serve, socket[0], serve0,
 					"selftest_ret=-19;name=Quelle A");
-	provider[1] = es_ext_test_serve(serve, plugin, socket[1], serve1,
+	provider[1] = es_ext_test_serve(serve, socket[1], serve1,
 					"rate=96;name=overridden");
 	if (n > 2)
-		provider[2] = es_ext_test_serve(serve, rated, socket[2], NULL,
-						NULL);
+		provider[2] = es_ext_test_serve(rated, socket[2], NULL, NULL);
 	for (i = 0; i < n; i++)
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 
@@ -312,7 +309,7 @@ static void test_several(const char *server, const char *serve,
 	CHECK(root != NULL, "the JSON status is no JSON");
 
 	/*
-	 * The name of the plugin, the rate of --entropy_rate of the provider -
+	 * The name of the source, the rate of --entropy_rate of the provider -
 	 * credited with nothing, as it fails its self test
 	 */
 	es = es_ext_test_status_es(root, "ExternalSocket0");
@@ -329,7 +326,7 @@ static void test_several(const char *server, const char *serve,
 
 	/*
 	 * The name of --name - the name of the third source as well - and the
-	 * rate of the option, not the one of the plugin
+	 * rate of the option, not the one of the source
 	 */
 	es = es_ext_test_status_es(root, "ExternalSocket1");
 	CHECK(test_json_str_is(es, "name", "es-ext-test") &&
@@ -342,7 +339,7 @@ static void test_several(const char *server, const char *serve,
 	      "ExternalSocket1 is not credited at the rate of its option: %s",
 	      test_json_text(es));
 
-	/* The name and the rate the plugin declares, for auto */
+	/* The name and the rate the source declares, for auto */
 	if (n > 2) {
 		es = es_ext_test_status_es(root, "ExternalSocket2");
 		CHECK(test_json_str_is(es, "name", "es-ext-rated") &&
@@ -356,7 +353,7 @@ static void test_several(const char *server, const char *serve,
 			      test_json_int(es,
 					    "entropy_rate_per_256_data_bits") ==
 				      128,
-		      "ExternalSocket2 is not credited at the rate of its plugin: %s",
+		      "ExternalSocket2 is not credited at the rate of its source: %s",
 		      test_json_text(es));
 	}
 	json_object_put(root);
@@ -394,8 +391,8 @@ int main(int argc, char *argv[])
 {
 	int ret;
 
-	if (argc < 5) {
-		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> <rated plugin>\n",
+	if (argc < 4) {
+		printf("usage: %s <esdm-server> <test provider> <rated test provider>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -427,9 +424,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	test_socket_provider(argv[1], argv[2], argv[3]);
+	test_socket_provider(argv[1], argv[2]);
 #if ESDM_EXT_SOCKET_NUM >= 2
-	test_several(argv[1], argv[2], argv[3], argv[4]);
+	test_several(argv[1], argv[2], argv[3]);
 #endif
 
 	esdm_rpcc_fini_unpriv_service();

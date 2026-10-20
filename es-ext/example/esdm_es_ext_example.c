@@ -18,12 +18,12 @@
  */
 
 /*
- * An example external entropy source plugin - see libesdm_es_ext(3).
+ * An example provider of an external entropy source - see libesdm_es_ext(3).
  *
  * It reads a character device delivering noise, /dev/hwrng unless
  * ESDM_ES_EXT_EXAMPLE_DEVICE names another one at build time, and claims one
  * bit of entropy per byte read - the entropy rate it declares as well, 32 bits
- * per 256 bits of data. A real plugin claims and declares what the assessment
+ * per 256 bits of data. A real source claims and declares what the assessment
  * of its noise source supports. The ESDM shows it under its name, and its
  * status, which names the device and counts the reads.
  *
@@ -32,16 +32,26 @@
  * without blocking, a device that stalls given EXAMPLE_READ_TIMEOUT_MS to
  * deliver, as the hwrng source of the ESDM does.
  *
- * Build it as a shared library:
+ * The callbacks of the source are all a provider program needs: its main()
+ * hands them to esdm_es_ext_provider_main() of libesdm_es_ext, which takes
+ * the command line of a provider and serves them. Build it against the
+ * library:
  *
- *	cc -shared -fPIC -fvisibility=hidden -o esdm_es_ext_example.so \
- *		esdm_es_ext_example.c $(pkg-config --cflags esdm_es_ext)
+ *	cc -o esdm-es-ext-example esdm_es_ext_example.c \
+ *		$(pkg-config --cflags --libs esdm_es_ext)
  *
- * and load it into the ESDM, or serve it from a process of its own:
+ * and serve it to the ESDM on a socket the ESDM reads, as root - the device
+ * is opened by the init - or as a user that may read the device, whom the
+ * ESDM is told to accept:
  *
- *	esdm-server --es_ext_lib ./esdm_es_ext_example.so
- *	esdm-es-ext-serve --plugin ./esdm_es_ext_example.so \
- *		--socket /run/esdm-es-ext-example.socket
+ *	esdm-es-ext-example --socket /run/esdm-es-ext-example.socket
+ *	esdm-server --es_ext_socket /run/esdm-es-ext-example.socket
+ *
+ * or, with a library built with es-ext-net, to the esdm-es-ext-relay of the
+ * host of an ESDM on the network:
+ *
+ *	esdm-es-ext-example --listen :7379 --cert provider.crt \
+ *		--key provider.key --ca ca.crt
  */
 
 #include <errno.h>
@@ -53,7 +63,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Where the ESDM installs it, as a plugin built on its own includes it */
+/* Where the ESDM installs it, as a provider built on its own includes it */
 #include <esdm/esdm_es_ext.h>
 
 #ifndef ESDM_ES_EXT_EXAMPLE_DEVICE
@@ -71,8 +81,9 @@ struct example_ctx {
 };
 
 /*
- * Runs while the ESDM still has its privileges: the device is opened here, as
- * the daemon may not be able to open it later.
+ * Runs with the privileges the provider was started with: the device is opened
+ * here, as a provider on the network, started as root, drops them right
+ * afterwards.
  */
 static int example_init(void **ctx)
 {
@@ -171,9 +182,10 @@ static int example_selftest(void *ctx)
 
 /*
  * The entropy rate of the source, bits per 256 bits of data, asked for once
- * after the init: the ESDM credits a block at most at this rate, unless a rate
- * is configured for the source there. A plugin may decide it from what its
- * init found - one bit per byte here, as the claims of example_get_entropy().
+ * after the init and declared to the ESDM: it credits a block at most at this
+ * rate, unless a rate is configured for the source there. A source may decide
+ * it from what its init found - one bit per byte here, as the claims of
+ * example_get_entropy().
  */
 static uint32_t example_entropy_rate(void *ctx)
 {
@@ -197,8 +209,7 @@ static int example_status_json(void *ctx, char *buf, size_t buflen)
 	return (size_t)len < buflen ? 0 : -EMSGSIZE;
 }
 
-ESDM_ES_EXT_PLUGIN_EXPORT
-const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
+static const struct esdm_es_ext_plugin example_source = {
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
 	.name = "example (" ESDM_ES_EXT_EXAMPLE_DEVICE ")",
 	.init = example_init,
@@ -208,3 +219,8 @@ const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
 	.status_json = example_status_json,
 	.entropy_rate = example_entropy_rate,
 };
+
+int main(int argc, char *argv[])
+{
+	return esdm_es_ext_provider_main(&example_source, argc, argv);
+}

@@ -18,12 +18,12 @@
  */
 
 /*
- * The network mode on the command line of the daemons serving a provider
- * with libesdm_es_ext - esdm-es-ext-serve and esdm-es-pkcs11: the options of
+ * The network mode on the command line of a provider program -
+ * esdm_es_ext_provider_main(), and esdm-es-pkcs11 with it: the options of
  * esdm_es_ext_server_alloc_net(), named as those of the esdm-egd-net-server
  * where they mean the same, the sockets of socket activation, and the drop of
- * the privileges. Compiled into each of them - no API of the library: a
- * provider of its own fills struct esdm_es_ext_server_net_config itself.
+ * the privileges. Part of libesdm_es_ext, but no API of it: a provider of its
+ * own making fills struct esdm_es_ext_server_net_config itself.
  */
 
 #ifndef ESDM_ES_EXT_NET_CLI_H
@@ -44,7 +44,7 @@
 extern "C" {
 #endif
 
-/* The option codes, out of the way of those of a daemon */
+/* The option codes, out of the way of those of a program */
 enum {
 	ES_EXT_NET_OPT_LISTEN = 0x1000,
 	ES_EXT_NET_OPT_CERT,
@@ -65,7 +65,7 @@ enum {
 	ES_EXT_NET_OPT_GROUPNAME,
 };
 
-/* The entries of the options, for the struct option array of a daemon */
+/* The entries of the options, for the struct option array of a program */
 #define ES_EXT_NET_CLI_OPTIONS                                                 \
 	{ "listen", required_argument, NULL, ES_EXT_NET_OPT_LISTEN },          \
 		{ "cert", required_argument, NULL, ES_EXT_NET_OPT_CERT },      \
@@ -132,14 +132,14 @@ int es_ext_net_cli_option(struct es_ext_net_cli *cli, int opt,
 void es_ext_net_cli_usage(FILE *out);
 
 /*
- * Does the daemon serve on the network? It does with --listen, and when it
+ * Does the program serve on the network? It does with --listen, and when it
  * was handed listening sockets by socket activation - which are taken over
  * here.
  */
 bool es_ext_net_cli_wanted(struct es_ext_net_cli *cli);
 
 /*
- * Set the verbosity of the daemon once its mode is known: @count times -v
+ * Set the verbosity of the program once its mode is known: @count times -v
  * above the default of the mode. On the network, warnings and errors are
  * logged without -v, as by the other daemons on the network - a rotation that
  * does not load, a client beyond a bound -; on a Unix domain socket, the
@@ -148,9 +148,10 @@ bool es_ext_net_cli_wanted(struct es_ext_net_cli *cli);
 void es_ext_net_cli_verbosity(bool net, unsigned int count);
 
 /*
- * Serve @plugin on the network: the files resolved - a name without a slash a
- * credential of the service, the credentials "cert", "key" and "ca" without
- * the options -, the server allocated, see esdm_es_ext_server_alloc_net().
+ * Serve the source of @plugin on the network: the files resolved - a name
+ * without a slash a credential of the service, the credentials "cert", "key"
+ * and "ca" without the options -, the server allocated, see
+ * esdm_es_ext_server_alloc_net().
  *
  * @return 0, or -1 after telling on stderr what is wrong
  */
@@ -160,7 +161,7 @@ int es_ext_net_cli_server(struct es_ext_net_cli *cli,
 
 /*
  * Started as root, become the user of --username (default nobody) for good -
- * once the server holds its sockets and files and its plugin is set up, as
+ * once the server holds its sockets and files and its source is set up, as
  * the esdm-egd-net-server does.
  *
  * @return 0, or -1 after telling on stderr

@@ -29,12 +29,13 @@
  * certificates, see esdm_es_ext_server_alloc_net().
  *
  * The messages are forwarded as they are, one to one - rather than served by
- * the provider server of libesdm_es_ext with a plugin forwarding them: what
+ * the provider server of libesdm_es_ext with callbacks forwarding them: what
  * the remote provider declares in its answer to INFO is to reach the ESDM as
- * declared, and declared anew on every connection, which a plugin declares
- * once as it is set up; its answer to STATUS is to reach the ESDM as it is,
- * up to the size of a status of a provider, which the status of a plugin is
- * no match for, and not wrapped into the status of a server of its own; and
+ * declared, and declared anew on every connection, which the callbacks of a
+ * source declare once as it is set up; its answer to STATUS is to reach the
+ * ESDM as it is, up to the size of a status of a provider, which the status
+ * of a source is no match for, and not wrapped into the status of a server of
+ * its own; and
  * the status and the entropy claimed of every answer are the remote
  * provider's. What the relay forwards back is checked as the ESDM checks it,
  * so that the remote side can do nothing a local provider could not.

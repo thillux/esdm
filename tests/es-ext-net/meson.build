@@ -23,8 +23,8 @@ test('DTLS over SCTP', es_ext_net_dtls_test, timeout: 120,
 
 include_dirs_es_ext_net_test = [ include_dirs_server, include_dirs_es_ext ]
 
-# The network mode of the provider server, as esdm-es-ext-serve has it,
-# serving the test plugin: its bounds, allowlist, timeouts and rotation. Needs
+# The network mode of the provider server, as a provider program has it,
+# serving the test source: its bounds, allowlist, timeouts and rotation. Needs
 # no privileges.
 es_ext_net_server_test = executable(
 		'es_ext_net_server_test',
@@ -37,7 +37,7 @@ es_ext_net_server_test = executable(
 	)
 
 # The esdm-es-ext-relay between a client speaking the protocol as the ESDM
-# does and esdm-es-ext-serve on the network. Needs no privileges.
+# does and a provider program on the network. Needs no privileges.
 es_ext_net_relay_test = executable(
 		'es_ext_net_relay_test',
 		[ 'relay_test.c' ],
@@ -49,10 +49,9 @@ es_ext_net_relay_test = executable(
 	)
 
 test('External ES relay', es_ext_net_relay_test,
-	args: [ esdm_es_ext_relay.full_path(), esdm_es_ext_serve.full_path(),
-		es_ext_test_plugin_rated.full_path() ],
-	depends: [ esdm_es_ext_relay, esdm_es_ext_serve,
-		   es_ext_test_plugin_rated ],
+	args: [ esdm_es_ext_relay.full_path(),
+		es_ext_test_provider_rated.full_path() ],
+	depends: [ esdm_es_ext_relay, es_ext_test_provider_rated ],
 	timeout: 300, suite: 'es-ext-net')
 
 if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
@@ -74,16 +73,14 @@ if get_option('es_ext').enabled() and get_option('esdm-server').enabled()
 	test('External ES on the network read by the ESDM',
 		es_ext_net_esdm_test,
 		args: [ esdm_server.full_path(), esdm_es_ext_relay.full_path(),
-			esdm_es_ext_serve.full_path(),
-			es_ext_test_plugin_rated.full_path() ],
+			es_ext_test_provider_rated.full_path() ],
 		env: [ 'ESDM_SERVER=' + esdm_server.full_path() ],
-		depends: [ esdm_server, esdm_es_ext_relay, esdm_es_ext_serve,
-			   es_ext_test_plugin_rated ],
+		depends: [ esdm_server, esdm_es_ext_relay,
+			   es_ext_test_provider_rated ],
 		timeout: 300, suite: 'es-ext-net')
 endif
 
 test('External ES provider on the network', es_ext_net_server_test,
-	args: [ esdm_es_ext_serve.full_path(),
-		es_ext_test_plugin.full_path() ],
-	depends: [ esdm_es_ext_serve, es_ext_test_plugin ],
+	args: [ es_ext_test_provider.full_path() ],
+	depends: [ es_ext_test_provider ],
 	timeout: 300, suite: 'es-ext-net')

@@ -19,9 +19,9 @@
 
 /*
  * The PKCS#11 entropy source of esdm-es-pkcs11(8): the random number generator
- * of a PKCS#11 token, read with C_GenerateRandom through libp11, as a plugin
- * of libesdm_es_ext that the daemon serves in its own process - see
- * esdm_es_ext.h on the plugin API and the provider server.
+ * of a PKCS#11 token, read with C_GenerateRandom through libp11, as the
+ * callbacks of a provider of libesdm_es_ext that the daemon serves - see
+ * esdm_es_ext.h on struct esdm_es_ext_plugin and the provider server.
  */
 
 #ifndef _ESDM_ES_PKCS11_H
@@ -71,7 +71,7 @@ struct esdm_es_pkcs11_config {
  */
 void esdm_es_pkcs11_configure(struct esdm_es_pkcs11_config *config);
 
-/* The source, to be handed to esdm_es_ext_server_alloc() */
+/* The source, to be served by the provider program of libesdm_es_ext */
 extern struct esdm_es_ext_plugin esdm_es_pkcs11_plugin;
 
 #endif /* _ESDM_ES_PKCS11_H */

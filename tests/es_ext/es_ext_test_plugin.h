@@ -23,21 +23,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* The name the test plugin exports its control under */
-#define ES_EXT_TEST_CONTROL_SYMBOL "esdm_es_ext_test_control"
-
 /* The name it declares unless the test sets another one */
 #define ES_EXT_TEST_NAME "es-ext-test"
 
 /* No entropy rate declared */
 #define ES_EXT_TEST_RATE_NONE UINT32_MAX
 
-/* What the plugin of ES_EXT_TEST_PLUGIN_RATED declares */
+/* What the source of ES_EXT_TEST_PLUGIN_RATED declares */
 #define ES_EXT_TEST_RATED_NAME "es-ext-rated"
 #define ES_EXT_TEST_RATED_RATE 128
 
 /*
- * What the test plugin does, set by the test, and what was asked of it.
+ * What the test source does, set by the test, and what was asked of it.
  *
  * @claim_bits: Entropy claimed for a buffer; UINT32_MAX claims all its bits
  * @init_ret: Return value of init
@@ -48,13 +45,13 @@
  * @status_unterminated: status_json fills its buffer without a NUL
  * @get_delay_ms: get_entropy takes this long, a request in progress meanwhile
  * @status_delay_ms: status_json takes this long
- * @name: The name the plugin declares, "es-ext-test" unless the test sets
- *	  another one - see the plugin, which may declare none
- * @entropy_rate: The rate the plugin declares, taken by its init:
+ * @name: The name the source declares, "es-ext-test" unless the test sets
+ *	  another one - see the source, which may declare none
+ * @entropy_rate: The rate the source declares, taken by its init:
  *		  ES_EXT_TEST_RATE_NONE for none
  * @status_buf: Room for a status of the environment, see below
  *
- * What a test changes or reads while the plugin runs in the thread of a
+ * What a test changes or reads while the source runs in the thread of a
  * provider it started is atomic: what the callbacks do, the delays, the
  * counters and what the callbacks were asked for - a status the test hands
  * over at @status_text is written before the pointer is stored. The rest is
@@ -86,17 +83,18 @@ struct esdm_es_ext_test_control {
 };
 
 /*
- * A plugin served by esdm-es-ext-serve runs in a process of its own, out of
- * reach of the control of the test: the test hands its settings over in this
- * environment variable instead, which the plugin reads in its init - a comma
- * separated list - separated by semicolons - of selftest_ret=N, get_ret=N,
- * claim_bits=N, get_delay_ms=N, status_delay_ms=N, name=NAME - an empty NAME
- * declares no name - rate=N, the entropy rate it declares, status_ret=N,
- * status=TEXT, the status it reports, and status_size=N, a status of N bytes.
+ * A source served by a provider program of the test runs in a process of its
+ * own, out of reach of the control of the test: the test hands its settings
+ * over in this environment variable instead, which the source reads in its
+ * init - a list separated by semicolons of init_ret=N, selftest_ret=N,
+ * get_ret=N, claim_bits=N, get_delay_ms=N, status_delay_ms=N, name=NAME - an
+ * empty NAME declares no name - rate=N, the entropy rate it declares,
+ * status_ret=N, status=TEXT, the status it reports, and status_size=N, a
+ * status of N bytes.
  */
 #define ES_EXT_TEST_PLUGIN_ENV "ESDM_ES_EXT_TEST_PLUGIN"
 
-/* The status of the test plugin unless the test sets another one */
+/* The status of the test source unless the test sets another one */
 #define ES_EXT_TEST_STATUS "{\"plugin\":\"es-ext-test\",\"healthy\":true}"
 
 #endif /* _ES_EXT_TEST_PLUGIN_H */

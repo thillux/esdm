@@ -19,13 +19,12 @@
 
 /*
  * The status of an external entropy source as JSON, taken the way both sides
- * take it: the ESDM, which shows the status of a plugin or a provider in its
- * own status, and the provider server of libesdm_es_ext, which wraps the
- * status of its plugin into the one it answers STATUS with. Both link json-c.
+ * take it: the ESDM, which shows the status of a provider in its own status,
+ * and the provider server of libesdm_es_ext, which wraps the status of its
+ * source into the one it answers STATUS with. Both link json-c.
  *
- * The status comes from code that is not part of the ESDM, and from another
- * process for a provider: it is taken as the JSON object it has to be, or not
- * at all. json-c is not strict enough for that on its own, even in its strict
+ * The status comes from code that is not part of the ESDM, in another
+ * process: it is taken as the JSON object it has to be, or not at all. json-c is not strict enough for that on its own, even in its strict
  * mode: it takes NaN, Infinity and -Infinity for numbers and writes them out
  * again as they came, and it takes a member name of any bytes. Either would
  * make a status JSON that a strict parser refuses.
@@ -44,11 +43,12 @@
 #include "esdm_es_ext_proto.h"
 
 /*
- * The deepest nesting the status of a plugin may have, in objects and arrays
- * one in the other, the status object itself counted. The status becomes a
- * part of the ESDM status, which is no place for a document nested without
- * bounds. The status of a provider may be nested one level deeper: the
- * provider server of libesdm_es_ext wraps the status of its plugin.
+ * The deepest nesting the status of a source - its @status_json callback - may
+ * have, in objects and arrays one in the other, the status object itself
+ * counted. The status becomes a part of the ESDM status, which is no place for
+ * a document nested without bounds. The status of a provider may be nested one
+ * level deeper: the provider server of libesdm_es_ext wraps the status of its
+ * source.
  */
 #define ESDM_ES_EXT_STATUS_MAX_DEPTH 8
 

@@ -47,7 +47,7 @@ if get_option('esdm-aux-client').enabled()
 endif
 
 if get_option('esdm-es-ext').enabled()
-	man_pages += [ 'libesdm_es_ext.3', 'esdm-es-ext-serve.8' ]
+	man_pages += [ 'libesdm_es_ext.3' ]
 endif
 
 if get_option('es_pkcs11').enabled()

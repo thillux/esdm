@@ -19,8 +19,8 @@
 
 /*
  * The esdm-es-ext-relay between a client of its local provider socket -
- * speaking the protocol as the ESDM does - and esdm-es-ext-serve serving the
- * rated test plugin on the network:
+ * speaking the protocol as the ESDM does - and the provider program of the
+ * rated test source on the network:
  *
  *  - every request forwarded one to one, in the clear and inside the local
  *    DTLS: INFO with the name and the rate of the remote provider, SELFTEST,
@@ -38,8 +38,7 @@
  * Needs no privileges. Skips (77) in a build without es-ext-net, and on a
  * kernel without SCTP.
  *
- * Usage: es_ext_net_relay_test <esdm-es-ext-relay> <esdm-es-ext-serve>
- *				<rated test plugin>
+ * Usage: es_ext_net_relay_test <esdm-es-ext-relay> <rated test provider>
  */
 
 #define _GNU_SOURCE
@@ -59,14 +58,13 @@
 
 static const char *relay_path;
 static const char *serve_path;
-static const char *plugin_path;
 
 static char test_dir[] = "/tmp/esdm-es-ext-relay-test-XXXXXX";
 static char test_socket[sizeof(test_dir) + 32];
 
 /*
- * Start esdm-es-ext-serve on 127.0.0.1:@port - 0 for a port picked by the
- * kernel, *@port receives it - with the plugin settings @settings and the
+ * Start the provider on 127.0.0.1:@port - 0 for a port picked by the kernel,
+ * *@port receives it - with the settings @settings of the test source and the
  * options @extra, NULL-terminated.
  */
 static pid_t serve_start(uint16_t *port, const char *settings,
@@ -101,8 +99,6 @@ static pid_t serve_start(uint16_t *port, const char *settings,
 		return -1;
 
 	argv[n++] = (char *)serve_path;
-	argv[n++] = "--plugin";
-	argv[n++] = (char *)plugin_path;
 	argv[n++] = "--cert";
 	argv[n++] = PKI("server.crt");
 	argv[n++] = "--key";
@@ -270,7 +266,7 @@ static void test_forwarding(uint16_t port, bool dtls)
 	      "STATUS tells no peer");
 	CHECK(obj && json_object_object_get_ex(obj, "plugin", &v) &&
 		      json_object_is_type(v, json_type_object),
-	      "STATUS of the remote plugin is missing");
+	      "STATUS of the remote source is missing");
 	json_object_put(obj);
 
 	es_ext_test_client_close(&c);
@@ -377,7 +373,7 @@ static void test_slow_and_wrong(void)
 	      (unsigned long long)(test_now_ms() - start));
 	es_ext_test_client_close(&c);
 	test_daemon_stop(relay);
-	/* Still in the plugin, which holds up its server */
+	/* Still in the source, which holds up its server */
 	test_daemon_stop(serve);
 
 	/* The relay expects another name than the provider's certificate's */
@@ -516,14 +512,13 @@ int main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
-	if (argc != 4) {
-		printf("Usage: %s <esdm-es-ext-relay> <esdm-es-ext-serve> <rated test plugin>\n",
+	if (argc != 3) {
+		printf("Usage: %s <esdm-es-ext-relay> <rated test provider>\n",
 		       argv[0]);
 		return 1;
 	}
 	relay_path = argv[1];
 	serve_path = argv[2];
-	plugin_path = argv[3];
 	signal(SIGPIPE, SIG_IGN);
 
 	if (!test_sctp_available())

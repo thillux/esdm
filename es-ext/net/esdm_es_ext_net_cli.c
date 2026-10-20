@@ -222,7 +222,8 @@ void es_ext_net_cli_usage(FILE *out)
 	fprintf(out,
 		"\nOn the network - SCTP, DTLS with certificates, RFC 6083:\n"
 		"\t   --listen <[HOST]:PORT>\tServe on HOST, any address without,\n"
-		"\t\t\t\tPORT (%u by default in the units); may be repeated\n"
+		"\t\t\t\tPORT (relays connect to %u by default); may be\n"
+		"\t\t\t\trepeated\n"
 		"\t\t\t\t(default: the sockets of socket activation)\n"
 		"\t   --cert <FILE>\tCertificate of the provider, PEM\n"
 		"\t   --key <FILE>\t\tIts private key, PEM, PKCS#8\n"
