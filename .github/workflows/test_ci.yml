@@ -762,3 +762,137 @@ jobs:
           test "${lines}" -eq "${bytes}" \
             || { echo "::error::${src}: esdm-extractlsb produced ${bytes} bytes for ${lines} deltas"; exit 1; }
         done
+
+  # Distributions other than Ubuntu, in their container images: Arch Linux
+  # and openSUSE Tumbleweed with the newest toolchains and libraries, Debian
+  # stable, Fedora, SUSE Linux Enterprise Server 15 SP7 and 16.0 and Red Hat
+  # Enterprise Linux 9 and 10. The SLES and RHEL images are the BCI and UBI
+  # ones, whose repositories hold a part of the distribution only -
+  # .github/scripts/distro-deps.sh builds what is missing. Each in the
+  # configuration of the build job with the OpenSSL of the distribution, and
+  # in the default one; with the other backends a distribution packages as
+  # well: Botan 3 on Arch and Fedora, leancrypto on Arch and Tumbleweed, and
+  # GnuTLS on Fedora and Tumbleweed, which build it with the FIPS 140 mode
+  # the GnuTLS backend needs.
+  distro:
+    name: ${{ matrix.distro.name }} / ${{ matrix.config.name }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.distro.image }}
+      # For the privileged run, what the build job has as root on the
+      # runner: the CUSE device, the kernel's entropy interfaces, and the
+      # unshare(2) of the servers and tests, which the default seccomp
+      # profile of a container refuses.
+      options: --privileged
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - &archlinux
+            name: archlinux
+            image: archlinux:latest
+          - name: debian-stable
+            image: debian:stable
+          - &fedora
+            name: fedora
+            image: fedora:latest
+          - &tumbleweed
+            name: opensuse-tumbleweed
+            image: opensuse/tumbleweed:latest
+          - name: sles-15.7
+            image: registry.suse.com/bci/bci-base:15.7
+          - name: sles-16.0
+            image: registry.suse.com/bci/bci-base:16.0
+          - name: rhel-9
+            image: registry.access.redhat.com/ubi9/ubi:latest
+          - name: rhel-10
+            image: registry.access.redhat.com/ubi10/ubi:latest
+        config:
+          - name: openssl
+            opts: >-
+              -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+              -Dcrypto_backend=openssl
+              -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+          - name: default
+            opts: ""
+        include:
+          - distro: *archlinux
+            config:
+              name: botan
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=botan
+                -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+          - distro: *archlinux
+            config:
+              name: leancrypto
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=leancrypto -Degd-net=enabled
+          - distro: *fedora
+            config:
+              name: botan
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=botan
+                -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+          - distro: *fedora
+            config: &gnutls
+              name: gnutls
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=gnutls
+                -Ddtls=enabled -Degd-net=enabled -Des-ext-net=enabled
+          - distro: *tumbleweed
+            config: *gnutls
+          - distro: *tumbleweed
+            config:
+              name: leancrypto
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=leancrypto -Degd-net=enabled
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install the dependencies
+      run: bash .github/scripts/distro-deps.sh
+
+    # The job runs as root in the container: the unprivileged run is that of
+    # a user of its own, who builds as well, so that the build tree is theirs.
+    - name: Meson setup
+      run: |
+        useradd -m builder
+        chown -R builder .
+        # ESDM_DISTRO_OPTS is a list of options, split on purpose
+        # shellcheck disable=SC2086
+        runuser -u builder -- \
+          meson setup build -Dtestmode=enabled \
+                            ${{ matrix.config.opts }} ${ESDM_DISTRO_OPTS}
+
+    - name: Meson compile
+      run: runuser -u builder -- meson compile -C build
+
+    - name: Meson test
+      run: runuser -u builder -- meson test -v -C build
+
+    - name: Meson test (privileged)
+      run: |
+        # See the build job: re-run what skipped unprivileged as root - but
+        # the cuse suite: the device files of the CUSE frontends appear in
+        # the devtmpfs of the runner, not in the /dev of the container. The
+        # build job runs them on the runner itself.
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build cuse)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
+        if [ "${#skipped[@]}" -eq 0 ]; then
+          echo "::error::no test skipped unprivileged - is this run privileged already?"
+          exit 1
+        fi
+        printf 'skipped unprivileged, now run as root: %s\n' "${skipped[@]}"
+        meson test -v -C build --no-rebuild "${skipped[@]}"

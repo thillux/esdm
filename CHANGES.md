@@ -613,7 +613,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: with a jitterentropy before 3.7.0, the RPC call for the status of the Jitter RNG answers with the empty report {} again instead of failing with -ENOENT
 
-* ci: the nix workflow builds esdm_es and esdm_cdev against every kernel of nixpkgs on x86_64 and aarch64, boots the esdm_cdev and eBPF VM tests of each kernel next to the esdm_es one, and runs every other check of the flake; the test CI runs on Ubuntu 26.04 next to 24.04, on x86_64 and arm64
+* ci: the nix workflow builds esdm_es and esdm_cdev against every kernel of nixpkgs on x86_64 and aarch64, boots the esdm_cdev and eBPF VM tests of each kernel next to the esdm_es one, and runs every other check of the flake; the test CI runs on Ubuntu 26.04 next to 24.04, on x86_64 and arm64, and in containers of Arch Linux, Debian stable, Fedora, openSUSE Tumbleweed, SUSE Linux Enterprise Server 15 SP7 and 16.0 and Red Hat Enterprise Linux 9 and 10, with the OpenSSL of each, the default configuration and the Botan, GnuTLS and leancrypto a distribution packages
 
 Changes 1.2.3
 * Fix handling of non-blocking server response

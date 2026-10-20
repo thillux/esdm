@@ -10,18 +10,27 @@
 # of those forms. So the logged name is matched against the test names the
 # build directory defines instead of being taken apart.
 #
-# usage: skipped-tests.py <builddir>
+# The tests of the suites given after the build directory are left out.
+#
+# usage: skipped-tests.py <builddir> [<suite>...]
 
 import json
 import subprocess
 import sys
 
 builddir = sys.argv[1]
+left_out = sys.argv[2:]
 
+# stdout and universal_newlines rather than capture_output and text, which
+# need Python 3.7: SLES 15 has 3.6
 tests = json.loads(subprocess.run(
 	[ 'meson', 'introspect', '--tests', builddir ],
-	check=True, capture_output=True, text=True).stdout)
+	check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout)
 names = { test['name'] for test in tests }
+# A suite is listed as "<project>:<suite>"
+left_out_names = { test['name'] for test in tests
+		   if any(suite.split(':')[-1] in left_out
+			  for suite in test['suite']) }
 
 skipped = set()
 with open(f'{builddir}/meson-logs/testlog.json') as log:
@@ -39,6 +48,8 @@ with open(f'{builddir}/meson-logs/testlog.json') as log:
 			sys.exit(f'skipped test "{logged}" is not one of the build')
 		# The longest match, should a test name be the tail of another
 		skipped.add(max(matches, key=len))
+
+skipped -= left_out_names
 
 for name in sorted(skipped):
 	# "meson test" reads a colon as the project separator and newer versions
