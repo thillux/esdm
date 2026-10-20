@@ -597,6 +597,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: TLS: a chain has to end in a self-signed trust anchor with GnuTLS as well, so an intermediate CA alone in --ca is refused by every TLS stack; the Botan backend reads the private key into memory that is wiped, and the egd-net units set LimitCORE=0; ExecReload of the units signals with the kill of /bin/sh, so systemctl reload works on NixOS
 
+* fix: es-ext-net with OpenSSL: a flight of the DTLS handshake beyond 4 KiB - long chains, large keys or signatures, a CA on ML-DSA - failed the handshake, as OpenSSL writes a flight in parts of 4 KiB that cut its records, which the SCTP layer took for no records; the parts are collected into records again
+
 * fix: External ES socket: every new connection to a provider runs its self test before the provider is credited, so a restarted provider is tested at once; the ESDM status waits at most 500 ms for the STATUS of a provider, which keeps its connection and has its late answer shown when it arrives, and no longer reconnects to a provider; retry, probe and backoff deadlines are kept in nanoseconds rather than whole seconds; a status or name with C1 controls or Unicode bidirectional controls is refused
 
 * fix: esdm-es-pkcs11: only a login the token refuses because of the PIN drops the PIN, other login failures keep it and retry; a token reporting its user PIN on the final try is not logged in to (status pin "final_try"); a PIN given on the command line is not repeated in error messages

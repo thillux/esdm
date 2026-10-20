@@ -90,6 +90,12 @@ struct esdm_tls_openssl_ctx {
 struct esdm_tls_openssl_conn {
 	SSL *ssl;
 	struct esdm_tls_sctp *sctp;
+	/*
+	 * SCTP: a record OpenSSL wrote a part of, collected until it is
+	 * complete - see esdm_tls_openssl_sctp_write()
+	 */
+	uint8_t *wpart;
+	size_t wpart_len;
 	esdm_tls_backend_check check;
 	void *check_arg;
 	char error[ESDM_TLS_TEXT_LEN];
@@ -163,35 +169,102 @@ static int esdm_tls_openssl_bio_create(BIO *bio)
 	return 1;
 }
 
-/* SCTP: one record per call, through the association, see esdm_tls_sctp.h */
+/* The header of a DTLS record, its length in the last two bytes */
+#define ESDM_TLS_OPENSSL_DTLS_HDR 13
+
+/* The length of the DTLS record whose header is at @hdr */
+static size_t esdm_tls_openssl_rec_len(const uint8_t *hdr)
+{
+	return ESDM_TLS_OPENSSL_DTLS_HDR + ((size_t)hdr[11] << 8 | hdr[12]);
+}
+
+/*
+ * SCTP: the records written, through the association - see esdm_tls_sctp.h.
+ * Each is queued as a whole, never refused for want of room in the socket.
+ *
+ * A record may come in parts: OpenSSL collects a flight of the handshake in a
+ * buffering BIO of 4 KiB in front of this one, and writes it whenever it is
+ * full, cutting a record where the 4 KiB end. A flight beyond - long chains,
+ * large keys and signatures, ML-DSA among them - has records in parts, which
+ * are collected here until complete. Every byte is taken.
+ */
 static int esdm_tls_openssl_sctp_write(BIO *bio, const char *buf, int len)
 {
+	struct esdm_tls_openssl_conn *c = BIO_get_data(bio);
+	const uint8_t *in = (const uint8_t *)buf;
+	size_t left, want, n;
 	int ret;
 
 	BIO_clear_retry_flags(bio);
 	if (len < 0)
 		return -1;
+	left = (size_t)len;
 
-	/* Queued, never refused for want of room in the socket */
-	ret = esdm_tls_sctp_queue(BIO_get_data(bio), (const uint8_t *)buf,
-				  (size_t)len);
-	if (ret) {
-		errno = -ret;
-		return -1;
+	while (left) {
+		/* Whole records, while none is in parts */
+		if (!c->wpart_len && left >= ESDM_TLS_OPENSSL_DTLS_HDR &&
+		    esdm_tls_openssl_rec_len(in) <= left) {
+			n = esdm_tls_openssl_rec_len(in);
+			ret = esdm_tls_sctp_queue(c->sctp, in, n);
+			if (ret)
+				goto err;
+			in += n;
+			left -= n;
+			continue;
+		}
+
+		if (!c->wpart) {
+			c->wpart = malloc(ESDM_TLS_SCTP_MSG_MAX);
+			if (!c->wpart) {
+				ret = -ENOMEM;
+				goto err;
+			}
+		}
+
+		/* The header first, then the rest of the record it tells */
+		want = c->wpart_len < ESDM_TLS_OPENSSL_DTLS_HDR ?
+			       ESDM_TLS_OPENSSL_DTLS_HDR :
+			       esdm_tls_openssl_rec_len(c->wpart);
+		if (want > ESDM_TLS_SCTP_MSG_MAX) {
+			ret = -EPROTO;
+			goto err;
+		}
+		n = want - c->wpart_len;
+		if (n > left)
+			n = left;
+		memcpy(c->wpart + c->wpart_len, in, n);
+		c->wpart_len += n;
+		in += n;
+		left -= n;
+
+		if (c->wpart_len < ESDM_TLS_OPENSSL_DTLS_HDR ||
+		    c->wpart_len < esdm_tls_openssl_rec_len(c->wpart))
+			continue;
+
+		ret = esdm_tls_sctp_queue(c->sctp, c->wpart, c->wpart_len);
+		c->wpart_len = 0;
+		if (ret)
+			goto err;
 	}
 
 	return len;
+
+err:
+	c->wpart_len = 0;
+	errno = -ret;
+	return -1;
 }
 
 static int esdm_tls_openssl_sctp_read(BIO *bio, char *buf, int len)
 {
+	struct esdm_tls_openssl_conn *c = BIO_get_data(bio);
 	ssize_t n;
 
 	BIO_clear_retry_flags(bio);
 	if (len <= 0)
 		return -1;
 
-	n = esdm_tls_sctp_recv(BIO_get_data(bio), (uint8_t *)buf, (size_t)len);
+	n = esdm_tls_sctp_recv(c->sctp, (uint8_t *)buf, (size_t)len);
 	if (n == -EAGAIN) {
 		BIO_set_retry_read(bio);
 		return -1;
@@ -996,7 +1069,7 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 		bio = BIO_new(esdm_tls_openssl_sctp_meth);
 		if (!bio)
 			goto err;
-		BIO_set_data(bio, sctp);
+		BIO_set_data(bio, c);
 		SSL_set_bio(c->ssl, bio, bio);
 
 		/*
@@ -1055,6 +1128,7 @@ void esdm_tls_backend_conn_free(void *conn)
 	if (!c)
 		return;
 	SSL_free(c->ssl);
+	free(c->wpart);
 	free(c);
 }
 
