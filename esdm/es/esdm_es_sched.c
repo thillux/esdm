@@ -373,9 +373,26 @@ static int esdm_sched_seed_monitor(void)
 	return 0;
 }
 
+/*
+ * The most the source can be credited with: whether it is, rather than what the
+ * kernel holds at the moment - curr_entropy tells that. The ES manager takes a
+ * source without entropy for one that is not validated, and collects it into
+ * the buffer credited with nothing (esdm_es_approved()). Once the monitor
+ * filled the cache, which drains the kernel, the source held nothing for a
+ * while - and a seeding put a credited block of the cache into that buffer:
+ * entropy spent without being counted. The kernel collects until it holds
+ * what is asked for, so a source that is credited may be credited with the
+ * security strength - or with what it holds beyond, which the DRBG
+ * post-processing of the add-on lets grow with its ring buffer: what a request
+ * may be worth is no more than the source has.
+ */
 static uint32_t esdm_sched_poolsize(void)
 {
-	return esdm_sched_entropylevel(esdm_security_strength());
+	if (!esdm_sched_enabled())
+		return 0;
+
+	return max_uint32(esdm_sched_entropylevel(esdm_security_strength()),
+			  esdm_security_strength());
 }
 
 /*
