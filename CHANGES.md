@@ -662,6 +662,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * TLS layer: the TLS stacks of all three backends reach their transport through one place, common/tls/esdm_tls_io.c - the BIO of OpenSSL, the push and pull functions of GnuTLS, the callbacks of Botan -, either the socket as before (send(2) with MSG_NOSIGNAL, recv(2), non-blocking) or buffers of the caller: esdm_dtls_alloc_mem() sets up the local DTLS on buffers, esdm_dtls_feed() hands in the messages the caller received, esdm_dtls_take() hands out what the DTLS wrote, to be sent by the caller - with io_uring, say. Everything else of the DTLS - the busy marker, the wiping of the plaintext, the parts of a message, the minimal mode - is the same on either
 
+* RPC server, io_uring event loop: connections with DTLS stay with the ring rather than being polled from the handshake on - their DTLS works on buffers (esdm_dtls_alloc_mem()), the multishot receive delivers its records, which are fed to it, and what it writes is sent by the ring; the sends queued for a connection - the records of an answer, a flight of the handshake - go to the kernel as one chain linked with IOSQE_IO_LINK, in order, but the records of an answer of several, which are each submitted as soon as the DTLS wrote them (esdm_dtls_set_part_cb()), so that the client decrypts one while the next is encrypted. Records are never deferred to a later round: a request of several of them is served once its last one is in. Not measured but for one check: 64 KiB answers to one client as fast as with the DTLS on the socket
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

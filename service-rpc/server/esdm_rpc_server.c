@@ -165,15 +165,14 @@ struct esdm_rpcs_connection {
 	TAILQ_ENTRY(esdm_rpcs_connection) poll_entry;
 #ifdef ESDM_RPC_IO_URING_MULTISHOT
 	/*
-	 * Served through the ring, see esdm_rpcs_loop: its requests arrive by
-	 * the multishot receive of the connection, armed - recv_armed - until
-	 * it ends, and its answers leave as sends of the ring, the one at
-	 * the head of tx_head in flight - tx_inflight - while the others wait
-	 * for it. A connection in the clear only: one switching to DTLS goes
-	 * over to the poll, its receive cancelled - recv_cancel, set while it
-	 * waits in the list rearm of the loop - before the answer to STARTDTLS
-	 * goes out. So is the receive of a client sending a request before
-	 * it has the answer of the one before, see esdm_rpcs_rx.
+	 * Served through the ring, see esdm_rpcs_loop: its requests - or the
+	 * records of its DTLS - arrive by the receive of the connection,
+	 * armed - recv_armed - until it ends, and its answers leave as sends
+	 * of the ring, those at the head of tx_head in flight - tx_inflight,
+	 * linked - while the others wait for them. The receive of a client
+	 * sending a request before it has the answer of the one before is
+	 * cancelled - recv_cancel, set while it waits in the list rearm of
+	 * the loop - until those are served, see esdm_rpcs_rx.
 	 */
 	bool ring_io;
 	bool recv_armed;
@@ -185,7 +184,8 @@ struct esdm_rpcs_connection {
 	bool recv_single;
 	bool recv_cancel;
 	bool recv_cancelled;
-	bool tx_inflight;
+	/* Sends in flight, linked - those of the first answers of tx_head */
+	unsigned int tx_inflight;
 	bool tx_queued;
 	/* The client ended the connection, or the server's SHUT_RD drained it */
 	bool rx_eof;
@@ -256,8 +256,15 @@ struct esdm_rpcs_write_buf {
 struct esdm_rpcs_tx {
 	struct esdm_rpcs_tx *next;
 	size_t len;
-	uint8_t buf[ESDM_RPC_MAX_MSG_SIZE]
-		__attribute__((aligned(sizeof(uint64_t))));
+	/* What is sent: buf, or the data of msg */
+	uint8_t *data;
+	/*
+	 * A record of the DTLS of the connection, ciphertext, see
+	 * esdm_rpcs_dtls_collect() - NULL for an answer packed into buf, which
+	 * holds ESDM_RPC_MAX_MSG_SIZE then
+	 */
+	struct esdm_dtls_msg *msg;
+	uint8_t buf[] __attribute__((aligned(sizeof(uint64_t))));
 };
 
 /* Answers of the worker kept for reuse, at most ESDM_RPCS_TX_CACHE */
@@ -273,14 +280,31 @@ static struct esdm_rpcs_tx *esdm_rpcs_tx_get(void)
 		esdm_rpcs_tx_cache = tx->next;
 		esdm_rpcs_tx_cached--;
 	} else {
-		tx = malloc(sizeof(*tx));
+		tx = malloc(sizeof(*tx) + ESDM_RPC_MAX_MSG_SIZE);
 		if (!tx)
 			return NULL;
 	}
 
 	tx->next = NULL;
+	tx->data = tx->buf;
+	tx->msg = NULL;
 	/* All of it is wiped should it go back before it is sent */
-	tx->len = sizeof(tx->buf);
+	tx->len = ESDM_RPC_MAX_MSG_SIZE;
+
+	return tx;
+}
+
+/* A record of the DTLS, see esdm_rpcs_tx: NULL if out of memory */
+static struct esdm_rpcs_tx *esdm_rpcs_tx_msg(struct esdm_dtls_msg *msg)
+{
+	struct esdm_rpcs_tx *tx = malloc(sizeof(*tx));
+
+	if (!tx)
+		return NULL;
+	tx->next = NULL;
+	tx->msg = msg;
+	tx->data = msg->data;
+	tx->len = msg->len;
 
 	return tx;
 }
@@ -289,6 +313,13 @@ static void esdm_rpcs_tx_put(struct esdm_rpcs_tx *tx)
 {
 	if (!tx)
 		return;
+
+	/* A record is ciphertext: nothing to wipe */
+	if (tx->msg) {
+		free(tx->msg);
+		free(tx);
+		return;
+	}
 
 	memset_secure(tx->buf, 0, tx->len);
 	if (esdm_rpcs_tx_cached >= ESDM_RPCS_TX_CACHE) {
@@ -313,19 +344,22 @@ static void esdm_rpcs_tx_cache_free(void)
 }
 
 /*
- * Give up the answers of a connection that is closed - but the one whose send
- * is in flight, which its completion gives up
+ * Give up the answers of a connection that is closed - but those whose sends
+ * are in flight, which their completions give up
  */
 static void esdm_rpcs_tx_drop(struct esdm_rpcs_connection *rpc_conn)
 {
-	struct esdm_rpcs_tx *tx = rpc_conn->tx_head, *next;
+	struct esdm_rpcs_tx *tx = rpc_conn->tx_head, *last = NULL, *next;
+	unsigned int i;
 
-	if (tx && rpc_conn->tx_inflight) {
-		next = tx->next;
-		tx->next = NULL;
-		rpc_conn->tx_tail = tx;
-		rpc_conn->tx_num = 1;
-		tx = next;
+	for (i = 0; i < rpc_conn->tx_inflight && tx; i++) {
+		last = tx;
+		tx = tx->next;
+	}
+	if (last) {
+		last->next = NULL;
+		rpc_conn->tx_tail = last;
+		rpc_conn->tx_num = rpc_conn->tx_inflight;
 	} else {
 		rpc_conn->tx_head = rpc_conn->tx_tail = NULL;
 		rpc_conn->tx_num = 0;
@@ -348,6 +382,8 @@ static void esdm_rpcs_tx_drop(struct esdm_rpcs_connection *rpc_conn)
 
 static int esdm_rpcs_tx_queue(struct esdm_rpcs_connection *rpc_conn,
 			      struct esdm_rpcs_tx *tx, size_t len);
+static int esdm_rpcs_dtls_collect(struct esdm_rpcs_connection *rpc_conn);
+static void esdm_rpcs_dtls_part(void *arg);
 
 /*
  * A request the ring received for a connection that has one in the round
@@ -795,6 +831,11 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 	 */
 	if (rpc_conn->dtls_state == esdm_rpcs_dtls_active) {
 		errsv = -esdm_dtls_send(rpc_conn->dtls, data, len);
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+		/* The records to the sends of the ring */
+		if (!errsv && rpc_conn->ring_io)
+			errsv = -esdm_rpcs_dtls_collect(rpc_conn);
+#endif
 		if (!errsv) {
 			esdm_logger(LOGGER_DEBUG2, LOGGER_C_ANY,
 				    "%zu bytes written encrypted\n", len);
@@ -817,7 +858,7 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 	if (rpc_conn->ring_io) {
 		struct esdm_rpcs_tx *tx;
 
-		if (len > sizeof(tx->buf))
+		if (len > ESDM_RPC_MAX_MSG_SIZE)
 			return -EINVAL;
 		tx = esdm_rpcs_tx_get();
 		if (!tx) {
@@ -912,8 +953,10 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 #ifdef ESDM_RPC_IO_URING_MULTISHOT
 	struct esdm_rpcs_tx *tx = NULL;
 
-	BUILD_BUG_ON(sizeof(tx->buf) != sizeof(esdm_rpcs_reqbuf));
-	if (rpc_conn->ring_io) {
+	BUILD_BUG_ON(ESDM_RPC_MAX_MSG_SIZE != sizeof(esdm_rpcs_reqbuf));
+	/* In the clear: an encrypted answer goes out as the records of it */
+	if (rpc_conn->ring_io &&
+	    rpc_conn->dtls_state != esdm_rpcs_dtls_active) {
 		tx = esdm_rpcs_tx_get();
 		if (!tx) {
 			ret = -ENOMEM;
@@ -1189,8 +1232,23 @@ static int esdm_rpcs_startdtls(struct esdm_rpcs_connection *rpc_conn,
 	    !esdm_peer_limit_get(&esdm_rpcs_dtls_limit, rpc_conn->peer_account))
 		goto refuse;
 
-	if (esdm_dtls_alloc(ctx, rpc_conn->child_fd, ESDM_RPC_MAX_MSG_SIZE,
-			    &dtls)) {
+	/*
+	 * Through the ring, the records are received and sent by the ring as
+	 * the requests in the clear are, the DTLS on buffers - see
+	 * esdm_rpcs_ring_dtls().
+	 */
+#ifdef ESDM_RPC_IO_URING_MULTISHOT
+	if (rpc_conn->ring_io) {
+		ret = esdm_dtls_alloc_mem(ctx, ESDM_RPC_MAX_MSG_SIZE, &dtls);
+		/* The records of a large answer sent as they come */
+		if (!ret)
+			esdm_dtls_set_part_cb(dtls, esdm_rpcs_dtls_part,
+					      rpc_conn);
+	} else
+#endif
+		ret = esdm_dtls_alloc(ctx, rpc_conn->child_fd,
+				      ESDM_RPC_MAX_MSG_SIZE, &dtls);
+	if (ret) {
 		esdm_peer_limit_put(&esdm_rpcs_dtls_limit,
 				    rpc_conn->peer_account);
 		goto refuse;
@@ -1973,14 +2031,15 @@ static bool esdm_rpcs_handoff(struct esdm_rpc_thread *thread,
  * have all of them served in one round and leave no buffer to the others. See
  * esdm_rpcs_rx and esdm_rpcs_uring_recv().
  *
- * Connections with DTLS - from the answer to the probe that follows STARTDTLS
- * on - are polled as above: the TLS stack reads and writes their socket
- * itself. The receive of a connection switching to DTLS is cancelled, in the
- * submission ahead of the send of the answer to the probe, so that none of the
- * records of the handshake the client starts once it has the answer ends up
- * in a buffer of the ring. Where the kernel has no buffer rings, the worker
- * polls all of its connections; where it has no multishot receive (Linux
- * 5.19), each receive takes one request.
+ * Connections with DTLS stay with the ring: their DTLS is on buffers - see
+ * esdm_dtls_alloc_mem() and esdm_rpcs_ring_dtls() -, fed the records the
+ * receive delivers, and what it writes is sent by the ring, the sends of a
+ * connection submitted as a chain linked in order, see esdm_rpcs_uring_send()
+ * - but the records of an answer of several, each sent as it is written, see
+ * esdm_rpcs_dtls_part(). Records are never deferred: a request of several of
+ * them is served once the last one is in. Where the kernel has no buffer
+ * rings, the worker polls all of its connections; where it has no multishot receive (Linux 5.19), each receive
+ * takes one request.
  *
  * The listening socket is not polled while the worker takes no new connection,
  * see esdm_rpcs_handler(). With epoll, it is taken out of the epoll instance;
@@ -2576,31 +2635,63 @@ static bool esdm_rpcs_uring_recv(struct esdm_rpcs_loop *loop,
 	return true;
 }
 
-/* Submit the send of the first answer of @rpc_conn */
+/* The sends of one connection submitted at most at once, linked */
+#define ESDM_RPCS_TX_CHAIN 32
+
+/*
+ * Submit the sends of @rpc_conn not submitted yet: the messages of the socket
+ * queued for it, in order, each linked to the next (IOSQE_IO_LINK) so that the
+ * kernel sends them one after the other - the last records of an answer of the
+ * DTLS and a flight of its handshake, answers of several requests in the
+ * clear. A send that fails cancels those linked behind it. One message is one
+ * send: a SOCK_SEQPACKET socket takes no bundle of them as messages of their
+ * own. Sends in flight already were submitted earlier and complete as they
+ * are issued - MSG_DONTWAIT -, so these go out after them.
+ */
 static bool esdm_rpcs_uring_send(struct esdm_rpcs_loop *loop,
 				 struct esdm_rpcs_connection *rpc_conn)
 {
 	struct esdm_rpcs_tx *tx = rpc_conn->tx_head;
-	struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+	unsigned int n = 0, num = rpc_conn->tx_num - rpc_conn->tx_inflight;
 
-	if (!sqe)
+	for (n = 0; tx && n < rpc_conn->tx_inflight; n++)
+		tx = tx->next;
+	n = 0;
+	if (!num)
+		return true;
+	if (num > ESDM_RPCS_TX_CHAIN)
+		num = ESDM_RPCS_TX_CHAIN;
+	/* A chain does not span two submissions */
+	if (io_uring_sq_space_left(&loop->ring) < num)
+		io_uring_submit(&loop->ring);
+	if (io_uring_sq_space_left(&loop->ring) < num)
 		return false;
 
-	io_uring_prep_send(sqe, rpc_conn->child_fd, tx->buf, tx->len,
-			   MSG_NOSIGNAL | MSG_DONTWAIT);
-	io_uring_sqe_set_data64(sqe, (uint64_t)(uintptr_t)rpc_conn |
-					     ESDM_RPCS_TAG_SEND);
-	rpc_conn->tx_inflight = true;
-	loop->sends++;
+	for (; tx && n < num; tx = tx->next, n++) {
+		struct io_uring_sqe *sqe = io_uring_get_sqe(&loop->ring);
+
+		io_uring_prep_send(sqe, rpc_conn->child_fd, tx->data, tx->len,
+				   MSG_NOSIGNAL | MSG_DONTWAIT);
+		io_uring_sqe_set_data64(sqe, (uint64_t)(uintptr_t)rpc_conn |
+						     ESDM_RPCS_TAG_SEND);
+		if (n + 1 < num)
+			sqe->flags |= IOSQE_IO_LINK;
+	}
+	rpc_conn->tx_inflight += n;
+	loop->sends += n;
 
 	return true;
 }
 
-/* Have the first answer of @rpc_conn sent with the next wait */
+/*
+ * Have the answers of @rpc_conn not submitted yet sent with the next wait -
+ * behind those in flight, whose sends, with MSG_DONTWAIT, completed as they
+ * were submitted, their completions only not taken yet
+ */
 static void esdm_rpcs_uring_txq_add(struct esdm_rpcs_loop *loop,
 				    struct esdm_rpcs_connection *rpc_conn)
 {
-	if (rpc_conn->tx_queued || rpc_conn->tx_inflight || !rpc_conn->tx_head)
+	if (rpc_conn->tx_queued || rpc_conn->tx_num <= rpc_conn->tx_inflight)
 		return;
 
 	TAILQ_INSERT_TAIL(&loop->txq, rpc_conn, tx_entry);
@@ -2618,14 +2709,8 @@ static void esdm_rpcs_uring_txq_del(struct esdm_rpcs_loop *loop,
 }
 
 /*
- * Cancel the receive of a connection going over to the poll, ahead of the send
- * of its answer, see esdm_rpcs_loop. The entries of a submission are issued in
- * their order, and the cancellation of a receive waiting for the socket is
- * done once it is issued - no record the client sends once it has the answer
- * reaches the receive. Not linked to the send: the send would be issued by the
- * task work of the cancellation, which a ring with IORING_SETUP_DEFER_TASKRUN
- * runs only once the worker waits for more than the completions already
- * posted - not while a client waits for the answer.
+ * Cancel the receive of a connection with requests deferred, see esdm_rpcs_rx:
+ * what its client sends meanwhile stays in the socket.
  */
 static void esdm_rpcs_uring_recv_cancel(struct esdm_rpcs_loop *loop,
 					struct esdm_rpcs_connection *rpc_conn)
@@ -2698,7 +2783,7 @@ static void esdm_rpcs_uring_recv_again(struct esdm_rpcs_loop *loop,
  */
 static bool esdm_rpcs_uring_defer(struct esdm_rpcs_loop *loop,
 				  struct esdm_rpcs_connection *rpc_conn,
-				  const uint8_t *buf, size_t len)
+				  const uint8_t *buf, size_t len, bool hold)
 {
 	struct esdm_rpcs_rx *rx;
 
@@ -2721,7 +2806,8 @@ static bool esdm_rpcs_uring_defer(struct esdm_rpcs_loop *loop,
 	 * A message cut short keeps a size beyond the buffer, which
 	 * esdm_rpcs_process() refuses - one byte stands for the rest.
 	 */
-	memcpy(rx->data, buf, min_size(len, ESDM_RPC_MAX_MSG_SIZE));
+	if (len)
+		memcpy(rx->data, buf, min_size(len, ESDM_RPC_MAX_MSG_SIZE));
 	if (len > ESDM_RPC_MAX_MSG_SIZE)
 		rx->data[ESDM_RPC_MAX_MSG_SIZE] = 0;
 
@@ -2737,6 +2823,9 @@ static bool esdm_rpcs_uring_defer(struct esdm_rpcs_loop *loop,
 		TAILQ_INSERT_TAIL(&loop->deferq, rpc_conn, defer_entry);
 		rpc_conn->deferred = true;
 	}
+
+	if (!hold)
+		return true;
 
 	/* No more until they are served, and then one at a time */
 	rpc_conn->recv_single = true;
@@ -2820,25 +2909,6 @@ static void esdm_rpcs_uring_void(struct esdm_rpcs_loop *loop,
 }
 
 /*
- * A connection served through the ring is to be polled from now on - it
- * switched to DTLS, see esdm_rpcs_serve_ring()
- */
-static void esdm_rpcs_uring_to_poll(struct esdm_rpcs_loop *loop,
-				    struct esdm_rpcs_connection *rpc_conn)
-{
-	rpc_conn->ring_io = false;
-	if (rpc_conn->recv_armed && !rpc_conn->recv_cancelled)
-		rpc_conn->recv_cancel = true;
-
-	/* Taken off the queue to arm its receive, if it was, to be polled */
-	if (rpc_conn->poll_queued) {
-		TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
-		rpc_conn->poll_queued = false;
-	}
-	esdm_rpcs_uring_rearm(loop, rpc_conn);
-}
-
-/*
  * The completion of the receive of @rpc_conn: a request into a buffer of the
  * ring - an event of the round -, or the end of the receive.
  */
@@ -2875,13 +2945,14 @@ static void esdm_rpcs_uring_recv_done(struct esdm_rpcs_loop *loop,
 			esdm_rpcs_uring_buf_put(loop, (unsigned int)bid,
 						(size_t)res);
 			events[*n].events = EPOLLERR;
-		} else if (rpc_conn->rx_round == loop->round ||
-			   rpc_conn->rx_defer_head) {
+		} else if ((rpc_conn->rx_round == loop->round ||
+			    rpc_conn->rx_defer_head) &&
+			   rpc_conn->dtls_state < esdm_rpcs_dtls_handshake) {
 			/* One per round, see esdm_rpcs_rx */
 			bool deferred = esdm_rpcs_uring_defer(
 				loop, rpc_conn,
 				esdm_rpcs_uring_buf(loop, (unsigned int)bid),
-				(size_t)res);
+				(size_t)res, true);
 
 			esdm_rpcs_uring_buf_put(loop, (unsigned int)bid,
 						(size_t)res);
@@ -2913,7 +2984,7 @@ static void esdm_rpcs_uring_recv_done(struct esdm_rpcs_loop *loop,
 		return;
 	}
 
-	/* Going over to the poll, which tells the rest */
+	/* Polled, which tells the rest */
 	if (!rpc_conn->ring_io)
 		return;
 
@@ -2976,7 +3047,8 @@ static void esdm_rpcs_uring_send_done(struct esdm_rpcs_loop *loop,
 	struct esdm_rpcs_tx *tx = rpc_conn->tx_head;
 	size_t len = 0;
 
-	rpc_conn->tx_inflight = false;
+	if (rpc_conn->tx_inflight)
+		rpc_conn->tx_inflight--;
 	if (tx) {
 		len = tx->len;
 		rpc_conn->tx_head = tx->next;
@@ -3001,6 +3073,9 @@ static void esdm_rpcs_uring_send_done(struct esdm_rpcs_loop *loop,
 				       "the client does not read its answers" :
 				       strerror(-res));
 		events[*n].events = EPOLLERR;
+	} else if (rpc_conn->tx_inflight) {
+		/* The rest of the chain is still on its way */
+		return;
 	} else if (rpc_conn->tx_head) {
 		esdm_rpcs_uring_txq_add(loop, rpc_conn);
 		return;
@@ -3056,6 +3131,92 @@ static int esdm_rpcs_tx_queue(struct esdm_rpcs_connection *rpc_conn,
 	esdm_rpcs_uring_txq_add(loop, rpc_conn);
 
 	return 0;
+}
+
+/*
+ * The records of the DTLS of @rpc_conn, on buffers, to its sends: what the DTLS
+ * wrote since they were taken last - an answer, a flight of the handshake, an
+ * alert. Records rather than answers: bounded by ESDM_RPCS_TX_RECORDS, a
+ * client not reading its answers is closed beyond, as by
+ * esdm_rpcs_tx_queue().
+ *
+ * @return 0, or a negative errno - the connection is closed then
+ */
+#define ESDM_RPCS_TX_RECORDS (ESDM_RPCS_TX_MAX * 8)
+static int esdm_rpcs_dtls_queue(struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpcs_loop *loop = esdm_rpcs_cur_loop;
+	struct esdm_dtls_msg *m, *next;
+	int ret = 0;
+
+	for (m = esdm_dtls_take(rpc_conn->dtls); m; m = next) {
+		struct esdm_rpcs_tx *tx = NULL;
+
+		next = m->next;
+		m->next = NULL;
+		if (!ret && (!loop || rpc_conn->child_fd < 0 ||
+			     rpc_conn->tx_num >= ESDM_RPCS_TX_RECORDS))
+			ret = -EAGAIN;
+		if (!ret) {
+			tx = esdm_rpcs_tx_msg(m);
+			if (!tx)
+				ret = -ENOMEM;
+		}
+		if (ret) {
+			free(m);
+			continue;
+		}
+
+		if (rpc_conn->tx_tail)
+			rpc_conn->tx_tail->next = tx;
+		else
+			rpc_conn->tx_head = tx;
+		rpc_conn->tx_tail = tx;
+		rpc_conn->tx_num++;
+	}
+
+	return ret;
+}
+
+static int esdm_rpcs_dtls_collect(struct esdm_rpcs_connection *rpc_conn)
+{
+	int ret = esdm_rpcs_dtls_queue(rpc_conn);
+
+	if (ret) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "Sending the records to client FD %d failed: %s\n",
+			    rpc_conn->child_fd,
+			    ret == -EAGAIN ?
+				    "the client does not read its answers" :
+				    strerror(-ret));
+		esdm_rpcs_conn_close(rpc_conn, false);
+		return ret;
+	}
+
+	esdm_rpcs_uring_txq_add(esdm_rpcs_cur_loop, rpc_conn);
+	return 0;
+}
+
+/*
+ * A record of an answer of several written by the DTLS of @arg, the connection,
+ * see esdm_dtls_set_part_cb(): sent right away, one system call for it, so
+ * that its client decrypts it while the next one is encrypted - collected and
+ * sent with the wait for the next round, the records of an answer of 64 KiB
+ * cost a seventh more time until it arrived at one client. The last record goes
+ * with the wait, as the one record of a small answer does. Called inside the
+ * DTLS: a failure leaves the connection to be closed once the DTLS returned.
+ */
+static void esdm_rpcs_dtls_part(void *arg)
+{
+	struct esdm_rpcs_connection *rpc_conn = arg;
+	struct esdm_rpcs_loop *loop = esdm_rpcs_cur_loop;
+
+	if (!loop || rpc_conn->child_fd < 0 || esdm_rpcs_dtls_queue(rpc_conn))
+		return;
+
+	esdm_rpcs_uring_txq_del(loop, rpc_conn);
+	if (esdm_rpcs_uring_send(loop, rpc_conn))
+		io_uring_submit(&loop->ring);
 }
 
 #else /* ESDM_RPC_IO_URING_MULTISHOT */
@@ -3461,8 +3622,13 @@ static void esdm_rpcs_loop_close(struct esdm_rpcs_loop *loop)
 		{
 			TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
 #ifdef ESDM_RPC_IO_URING_MULTISHOT
-			/* The answer whose send was in flight */
-			esdm_rpcs_tx_put(rpc_conn->tx_head);
+			/* The answers whose sends were in flight */
+			while (rpc_conn->tx_head) {
+				struct esdm_rpcs_tx *tx = rpc_conn->tx_head;
+
+				rpc_conn->tx_head = tx->next;
+				esdm_rpcs_tx_put(tx);
+			}
 #endif
 			free(rpc_conn);
 		}
@@ -3643,6 +3809,79 @@ static bool esdm_rpcs_idle_reapable(struct esdm_rpcs_connection *rpc_conn,
 
 #ifdef ESDM_RPC_IO_URING_MULTISHOT
 /*
+ * A message the ring received for @rpc_conn, whose DTLS is on buffers - see
+ * esdm_dtls_alloc_mem(): a record of the handshake, or of a request. Fed to
+ * the DTLS, which takes the handshake as far as it can, or hands out the
+ * requests complete with it - several records each beyond
+ * ESDM_DTLS_PART_SIZE -, each served as one read off the socket. What the
+ * DTLS wrote goes to the sends of the ring. A step of the handshake put off
+ * for the budget of the round, see ESDM_RPCS_HANDSHAKE_BUDGET_NS, leaves the
+ * record with the DTLS and is taken in the next round, deferred without a
+ * record of its own. @received is 0 for that.
+ *
+ * @return 0, or a negative errno if the connection is to be closed
+ */
+static int esdm_rpcs_ring_dtls(struct esdm_rpcs_loop *loop,
+			       struct esdm_rpcs_connection *rpc_conn,
+			       const uint8_t *buf, ssize_t received)
+{
+	ssize_t n;
+	int ret = 0, cret;
+
+	if (received > 0 &&
+	    esdm_dtls_feed(rpc_conn->dtls, buf, (size_t)received))
+		return -ENOMEM;
+
+	if (rpc_conn->dtls_state == esdm_rpcs_dtls_handshake) {
+		ret = esdm_rpcs_handshake(rpc_conn);
+		/* Its flight, or the alert of a failure */
+		cret = esdm_rpcs_dtls_collect(rpc_conn);
+		if (cret)
+			return cret;
+		if (ret == -EAGAIN) {
+			/* Put off for the budget: the records are still there */
+			if (esdm_dtls_pending(rpc_conn->dtls) &&
+			    !esdm_rpcs_uring_defer(loop, rpc_conn, NULL, 0,
+						   false))
+				return -ENOMEM;
+			return 0;
+		}
+		if (ret)
+			return ret;
+	}
+
+	while (!ret && rpc_conn->dtls_state == esdm_rpcs_dtls_active &&
+	       esdm_dtls_pending(rpc_conn->dtls)) {
+		n = esdm_dtls_recv(rpc_conn->dtls, esdm_rpcs_reqbuf,
+				   sizeof(esdm_rpcs_reqbuf));
+		/* The rest of a request of several records still to come */
+		if (n == -EAGAIN)
+			break;
+		if (n < 0) {
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+				    "Receiving on client FD %d failed: %s\n",
+				    rpc_conn->child_fd, strerror((int)-n));
+			ret = (int)n;
+			break;
+		}
+
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n", n);
+		ret = esdm_rpcs_process(rpc_conn, esdm_rpcs_reqbuf, n);
+		/* Idle from the answer on, see esdm_rpcs_read() */
+		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+	}
+
+	/* An alert the DTLS answered with, say */
+	if (rpc_conn->child_fd >= 0) {
+		cret = esdm_rpcs_dtls_collect(rpc_conn);
+		if (!ret)
+			ret = cret;
+	}
+
+	return ret;
+}
+
+/*
  * esdm_rpcs_serve() for a connection served through the ring, or with an event
  * of the ring left: answer the request the ring received, as event @ev of the
  * round, and close the connection if its client is gone or it failed - or, left
@@ -3670,15 +3909,14 @@ static void esdm_rpcs_serve_ring(struct esdm_rpc_thread *thread,
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Received %zd bytes\n",
 			    received);
 
-		/*
-		 * After the probe, the client sends no request in the clear
-		 * - its handshake follows the answer to the probe
-		 */
 		if (!rpc_conn->ring_io || rpc_conn->child_fd < 0) {
 			memset_secure(buf, 0,
 				      min_size((size_t)received,
 					       ESDM_RPC_MAX_MSG_SIZE));
 			ret = -EPROTO;
+		} else if (rpc_conn->dtls_state >= esdm_rpcs_dtls_handshake) {
+			/* After the probe, records of the DTLS - ciphertext */
+			ret = esdm_rpcs_ring_dtls(loop, rpc_conn, buf, received);
 		} else {
 			bool probe = rpc_conn->dtls_state ==
 				     esdm_rpcs_dtls_probe;
@@ -3700,14 +3938,6 @@ static void esdm_rpcs_serve_ring(struct esdm_rpc_thread *thread,
 			free(loop->rx_deferred[ev]);
 		}
 
-		/*
-		 * The probe answered: the handshake follows, which the DTLS
-		 * reads off the socket itself. Both answers leave by the ring,
-		 * in order, after the cancellation of the receive.
-		 */
-		if (!ret && rpc_conn->ring_io &&
-		    rpc_conn->dtls_state == esdm_rpcs_dtls_handshake)
-			esdm_rpcs_uring_to_poll(loop, rpc_conn);
 	}
 
 	if (revents & ESDM_RPCS_EV_EOF)

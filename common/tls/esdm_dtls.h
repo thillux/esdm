@@ -203,6 +203,23 @@ void esdm_dtls_feed_eof(struct esdm_dtls *dtls);
 struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls);
 
 /**
+ * @brief Have a DTLS of esdm_dtls_alloc_mem() tell when a record of a message
+ *	  is written that more records follow
+ *
+ * A message larger than ESDM_DTLS_PART_SIZE is several records.
+ * esdm_dtls_send() calls @cb with @arg after each of them but the last, so that
+ * the caller can take it with esdm_dtls_take() and send it while the next one
+ * is encrypted - its peer decrypting the one before meanwhile. The last record
+ * is taken once esdm_dtls_send() returned, as a message of one record is. @cb
+ * is called with the busy marker of the thread set, see esdm_dtls_busy().
+ *
+ * @param [in] cb The call, NULL for none
+ * @param [in] arg What it is handed
+ */
+void esdm_dtls_set_part_cb(struct esdm_dtls *dtls, void (*cb)(void *arg),
+			   void *arg);
+
+/**
  * @brief Release the DTLS of a connection, may be NULL
  *
  * The socket is not closed, and no closing alert is sent: the connection is
@@ -348,6 +365,14 @@ static inline struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls)
 {
 	(void)dtls;
 	return NULL;
+}
+
+static inline void esdm_dtls_set_part_cb(struct esdm_dtls *dtls,
+					 void (*cb)(void *arg), void *arg)
+{
+	(void)dtls;
+	(void)cb;
+	(void)arg;
 }
 
 static inline void esdm_dtls_free(struct esdm_dtls *dtls)

@@ -1888,13 +1888,28 @@ request not served yet - so that it is not closed as idle or to make room -
 is told by the completions of its receive as well, as a request the ring
 received is not in the socket any more.
 
-A connection switching to DTLS is read by its TLS stack from the handshake
-on: its receive is cancelled once the probe is answered, in the submission
-ahead of the send of that answer, so that no record of the handshake ends up
-in a buffer of the ring, and the connection is polled from then on. Moving
-the DTLS into the ring as well needs its records read from and written to
-buffers the server owns - the TLS stack on memory BIOs rather than on the
-socket.]
+A connection switching to DTLS stays with the ring: its DTLS is set up on
+buffers (`esdm_dtls_alloc_mem()`) rather than on the socket. Every record the
+receive delivers is handed to the DTLS, which takes the handshake on or hands
+out a request once its last record is in, and what the DTLS wrote - a flight
+of the handshake, the records of an answer, an alert - is taken and sent by
+the ring: the sends queued for a connection go to the kernel as a chain
+linked with `IOSQE_IO_LINK`, so that they leave in order, one message of the
+socket each. The records of an answer of several - beyond
+`ESDM_DTLS_PART_SIZE` - are each submitted as soon as the DTLS wrote it
+(`esdm_dtls_set_part_cb()`), one `io_uring_enter()` each, so that the client
+decrypts one while the next one is encrypted; collected and sent at once, an
+answer of 64 KiB took a seventh longer to arrive at a single client. The
+records of a connection are never deferred to a later round:
+a request of several records is served once its last one arrived. A step of
+the handshake put off for the budget of the round keeps the records with the
+DTLS and is taken in the next round.]
+
+#par(first-line-indent: 0pt)[The TLS stacks reach their transport through
+`common/tls/esdm_tls_io.c` alone - the BIO of OpenSSL, the push and pull
+functions of GnuTLS, the callbacks of Botan: on the socket, one `send()` with
+`MSG_NOSIGNAL` or `recv()` per call, or on buffers of the caller, who hands in
+what it received and takes what was written.]
 
 #par(first-line-indent: 0pt)[With the meson option `dtls` (disabled per
 default), the connections between the processes of the ESDM are protected

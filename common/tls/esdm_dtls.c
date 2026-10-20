@@ -70,6 +70,10 @@ struct esdm_dtls {
 	 */
 	struct esdm_tls_io io;
 
+	/* A record of several of a message written, see esdm_dtls_set_part_cb() */
+	void (*part_cb)(void *arg);
+	void *part_arg;
+
 	/* What a step that returned -EAGAIN waits for */
 	short want;
 
@@ -345,6 +349,18 @@ void esdm_dtls_feed_eof(struct esdm_dtls *dtls)
 }
 
 DSO_PUBLIC
+void esdm_dtls_set_part_cb(struct esdm_dtls *dtls, void (*cb)(void *arg),
+			   void *arg)
+{
+	struct esdm_tls_io *io = esdm_dtls_io(dtls);
+
+	if (!io || io->fd >= 0)
+		return;
+	dtls->part_cb = cb;
+	dtls->part_arg = arg;
+}
+
+DSO_PUBLIC
 struct esdm_dtls_msg *esdm_dtls_take(struct esdm_dtls *dtls)
 {
 	struct esdm_tls_io *io = esdm_dtls_io(dtls);
@@ -489,6 +505,9 @@ int esdm_dtls_send(struct esdm_dtls *dtls, const void *buf, size_t len)
 		ret = esdm_dtls_rec_send(dtls, rec, part + 1);
 		p += part;
 		len -= part;
+		/* To be sent while the next one is encrypted */
+		if (!ret && len && dtls->part_cb)
+			dtls->part_cb(dtls->part_arg);
 	} while (!ret && len);
 	/* What the records hold of it goes out now */
 	if (!ret)

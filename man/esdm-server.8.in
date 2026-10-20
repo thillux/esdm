@@ -449,9 +449,11 @@ answers, submitted together with the wait for the next round: one system call
 per round rather than a read and a write per request and the wait. A client
 sending requests without waiting for the answers has them served one per
 round, as everybody else, and a message larger than a request ends its
-connection. Connections with DTLS, which the TLS stack reads and writes
-itself, have a poll of the ring, armed again in the same system call that waits
-for the next round, as do all connections with
+connection. The records of connections with DTLS are received and sent by the
+ring alike, the DTLS working on buffers of the daemon rather than on the
+socket - the records of a large answer each sent as soon as it is encrypted.
+All connections have a poll of the ring, armed again in the same system call
+that waits for the next round, with
 .B \-\-no_io_uring_multishot
 or where the kernel has no buffer rings (before Linux 5.19); without multishot
 receives (Linux 5.19) the ring takes one request per receive.

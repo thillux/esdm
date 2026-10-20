@@ -1289,12 +1289,12 @@ connections - a request, a new connection, its idle timer - with an epoll
 instance of its own. With this option, it waits with an io_uring of its own
 instead. Where the kernel has multishot receives into buffer rings (Linux 6.0)
 and liburing is 2.4 or later, the ring receives the requests of the
-connections in the clear and sends their answers, submitted with the wait for
-the next events - one system call per round of a worker. The connections with
-DTLS, whose TLS stack reads and writes the socket itself, and all of them with
-esdm-server --no_io_uring_multishot or an older kernel, have a poll of the
-ring, armed again in the same system call that waits for the next events, and
-are read and written as with epoll.
+connections and sends their answers - the records of the DTLS of a connection
+alike, its TLS stack working on buffers rather than on the socket -,
+submitted with the wait for the next events: one system call per round of a
+worker. With esdm-server --no_io_uring_multishot or an older kernel, all
+connections have a poll of the ring, armed again in the same system call that
+waits for the next events, and are read and written as with epoll.
 
 Needs liburing 2.2 or later, found with pkg-config, and Linux. epoll remains:
 a worker that cannot set up its io_uring - a kernel without it or with
