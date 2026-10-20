@@ -17,12 +17,12 @@
  * DAMAGE.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -32,19 +32,25 @@
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 #include "../es_state_check.h"
+#include "es_irq_events.h"
 #include "esdm_logger.h"
 
+/* Reads from the disk per round, each one interrupt of the block device */
+#define ES_IRQ_EBPF_TEST_READS 4000
+
 /*
- * Generate interrupt and softirq events: short sleeps arm hrtimers whose
- * expiry raises timer interrupts and softirqs on the local CPU.
+ * Generate interrupt events. The program is attached to irq_handler_entry,
+ * which the handlers of device interrupts pass - not the local timer interrupt
+ * that expiring hrtimers raise, so sleeping creates no event for it. See
+ * es_irq_events.h.
  */
 static void create_irq_events(void)
 {
-	struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
-	unsigned int i;
+	int ret = es_irq_events(ES_IRQ_EBPF_TEST_READS);
 
-	for (i = 0; i < 5000; i++)
-		nanosleep(&ts, NULL);
+	if (ret)
+		printf("ES InterruptEBPF - info: no interrupt events created: %s\n",
+		       strerror(-ret));
 }
 
 /* Drain the ring buffer into the conditioning pool */
@@ -108,16 +114,17 @@ static int es_irq_ebpf_getdata(void)
 {
 	struct entropy_es eb_es;
 	uint8_t zero[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
-	uint32_t loops;
+	uint32_t loops, delivered = 0;
 
 	memset(&zero, 0, sizeof(zero));
 
 	/*
-	 * The interrupt ES observes only hardware and soft interrupts, which are
-	 * far sparser than context switches - especially in a lightly loaded VM
-	 * - so it commonly credits well below the full security strength per
-	 * extraction. The test therefore checks that the pipeline delivers
-	 * conditioned data and that the accounting stays self-consistent, rather
+	 * The interrupt ES observes only device interrupts, which are far
+	 * sparser than context switches - especially in a lightly loaded VM -
+	 * so it may credit below the full security strength per extraction,
+	 * even with the events created before. The test therefore checks that
+	 * the pipeline delivers conditioned data, that the accounting stays
+	 * self-consistent and that some entropy is credited at all, rather
 	 * than demanding a fixed entropy amount.
 	 */
 	for (loops = 0; loops < 3; loops++) {
@@ -141,6 +148,18 @@ static int es_irq_ebpf_getdata(void)
 
 		printf("ES InterruptEBPF - pass: get_ent delivered %u bits\n",
 		       eb_es.e_bits);
+		if (eb_es.e_bits)
+			delivered++;
+	}
+
+	/*
+	 * Each iteration creates device interrupts before it asks, so a source
+	 * that never credits any entropy is broken - not merely sparse.
+	 */
+	if (!delivered) {
+		printf("ES InterruptEBPF - fail: get_ent did not credit entropy in any of %u iterations\n",
+		       loops);
+		return 1;
 	}
 
 	return 0;
