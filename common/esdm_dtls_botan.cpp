@@ -31,26 +31,27 @@
  * reports an errno.
  */
 
+#include <algorithm>
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <botan/ec_group.h>
-#include <botan/ecdsa.h>
+#include <botan/credentials_manager.h>
 #include <botan/secmem.h>
 #include <botan/system_rng.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_client.h>
+#include <botan/tls_external_psk.h>
 #include <botan/tls_policy.h>
 #include <botan/tls_server.h>
 #include <botan/tls_session.h>
 #include <botan/tls_session_manager_noop.h>
 #include <botan/version.h>
-#include <botan/x509self.h>
 
 #include <sys/socket.h>
 
@@ -62,7 +63,9 @@ namespace
 {
 
 /*
- * DTLS 1.2 exactly, ECDHE with ECDSA, AEAD ciphers only, no renegotiation;
+ * DTLS 1.2 exactly: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 of RFC 8442 on
+ * brainpoolP512r1, or on secp521r1 with a peer that does not offer it - the
+ * OpenSSL and GnuTLS backends, which offer secp521r1 only; no renegotiation;
  * the link MTU of esdm_dtls_backend.h, as nothing is fragmented on the
  * connection.
  */
@@ -70,7 +73,7 @@ class Esdm_Dtls_Policy final : public Botan::TLS::Policy {
     public:
 	std::vector<std::string> allowed_ciphers() const override
 	{
-		return { "AES-256/GCM", "ChaCha20Poly1305", "AES-128/GCM" };
+		return { "AES-256/GCM" };
 	}
 
 	std::vector<std::string> allowed_macs() const override
@@ -78,26 +81,22 @@ class Esdm_Dtls_Policy final : public Botan::TLS::Policy {
 		return { "AEAD" };
 	}
 
-	std::vector<std::string> allowed_signature_hashes() const override
-	{
-		return { "SHA-384", "SHA-256" };
-	}
-
 	std::vector<std::string> allowed_key_exchange_methods() const override
 	{
-		return { "ECDH" };
+		return { "ECDHE_PSK" };
 	}
 
+	/* A PSK suite signs nothing: the key exchange authenticates it */
 	std::vector<std::string> allowed_signature_methods() const override
 	{
-		return { "ECDSA" };
+		return { "IMPLICIT" };
 	}
 
 	std::vector<Botan::TLS::Group_Params>
 	key_exchange_groups() const override
 	{
-		return { Botan::TLS::Group_Params::X25519,
-			 Botan::TLS::Group_Params::SECP256R1 };
+		return { Botan::TLS::Group_Params::BRAINPOOL512R1,
+			 Botan::TLS::Group_Params::SECP521R1 };
 	}
 
 	bool allow_tls12() const override
@@ -146,65 +145,53 @@ class Esdm_Dtls_Policy final : public Botan::TLS::Policy {
 };
 
 /*
- * The ephemeral key and certificate of a server; a client has none and trusts
- * nobody - unauthenticated, see esdm_dtls.h.
+ * The pre-shared key of either side and its identity, see
+ * esdm_dtls_backend.h; no certificate. A server knows no other identity, and
+ * refuses a client with another one.
  */
 class Esdm_Dtls_Credentials final : public Botan::Credentials_Manager {
     public:
-	explicit Esdm_Dtls_Credentials(Botan::RandomNumberGenerator &rng)
-	{
-		auto group = Botan::EC_Group::from_name("secp256r1");
-		Botan::X509_Cert_Options opts("esdm");
-		auto now = std::chrono::system_clock::now();
-
-		m_key = std::make_shared<Botan::ECDSA_PrivateKey>(rng, group);
-		opts.start = Botan::X509_Time(now - std::chrono::hours(1));
-		opts.end =
-			Botan::X509_Time(now + std::chrono::hours(24 * 3650));
-		m_cert = std::make_unique<Botan::X509_Certificate>(
-			Botan::X509::create_self_signed_cert(opts, *m_key,
-							     "SHA-256", rng));
-	}
-
-	Esdm_Dtls_Credentials() = default;
-
-	std::vector<Botan::X509_Certificate>
-	find_cert_chain(const std::vector<std::string> &cert_key_types,
-			const std::vector<Botan::AlgorithmIdentifier>
-				&cert_signature_schemes,
-			const std::vector<Botan::X509_DN> &acceptable_CAs,
-			const std::string &type,
-			const std::string &context) override
-	{
-		(void)cert_signature_schemes;
-		(void)acceptable_CAs;
-		(void)context;
-
-		if (!m_cert || type != "tls-server")
-			return {};
-		for (const auto &kt : cert_key_types) {
-			if (kt == "ECDSA")
-				return { *m_cert };
-		}
-		return {};
-	}
-
-	std::shared_ptr<Botan::Private_Key>
-	private_key_for(const Botan::X509_Certificate &cert,
-			const std::string &type,
-			const std::string &context) override
+	std::string psk_identity(const std::string &type,
+				 const std::string &context,
+				 const std::string &identity_hint) override
 	{
 		(void)type;
 		(void)context;
+		(void)identity_hint;
 
-		if (m_cert && cert == *m_cert)
-			return m_key;
-		return nullptr;
+		return ESDM_DTLS_PSK_IDENTITY;
 	}
 
-    private:
-	std::shared_ptr<Botan::Private_Key> m_key;
-	std::unique_ptr<Botan::X509_Certificate> m_cert;
+	/*
+	 * Where psk() of TLS 1.2 looks the key up. psk() stays Botan's: it
+	 * asks the empty dtls_cookie_secret() for the secret of the DTLS
+	 * cookies, see Esdm_Dtls_Policy. A PSK of TLS 1.2 has no PRF of its
+	 * own.
+	 */
+	std::vector<Botan::TLS::ExternalPSK>
+	find_preshared_keys(std::string_view host,
+			    Botan::TLS::Connection_Side whoami,
+			    const std::vector<std::string> &identities,
+			    const std::optional<std::string> &prf) override
+	{
+		std::vector<Botan::TLS::ExternalPSK> psks;
+
+		(void)host;
+		(void)whoami;
+		(void)prf;
+
+		if (!identities.empty() &&
+		    std::find(identities.begin(), identities.end(),
+			      ESDM_DTLS_PSK_IDENTITY) == identities.end())
+			return psks;
+
+		psks.emplace_back(
+			ESDM_DTLS_PSK_IDENTITY, "SHA-384",
+			Botan::secure_vector<uint8_t>(
+				esdm_dtls_psk,
+				esdm_dtls_psk + sizeof(esdm_dtls_psk)));
+		return psks;
+	}
 };
 
 struct Esdm_Dtls_Ctx {
@@ -264,23 +251,6 @@ class Esdm_Dtls_Callbacks final : public Botan::TLS::Callbacks {
 		const Botan::TLS::Session_Summary &session) override
 	{
 		m_cipher = session.ciphersuite().to_string();
-	}
-
-	/* Unauthenticated, see esdm_dtls.h: any certificate is fine */
-	void tls_verify_cert_chain(
-		const std::vector<Botan::X509_Certificate> &cert_chain,
-		const std::vector<std::optional<Botan::OCSP::Response> >
-			&ocsp_responses,
-		const std::vector<Botan::Certificate_Store *> &trusted_roots,
-		Botan::Usage_Type usage, std::string_view hostname,
-		const Botan::TLS::Policy &policy) override
-	{
-		(void)cert_chain;
-		(void)ocsp_responses;
-		(void)trusted_roots;
-		(void)usage;
-		(void)hostname;
-		(void)policy;
 	}
 
 	int take_send_error()
@@ -371,9 +341,7 @@ int esdm_dtls_backend_ctx_new(bool server, void **ctx)
 
 		c->server = server;
 		c->rng = std::make_shared<Botan::System_RNG>();
-		c->creds = server ? std::make_shared<Esdm_Dtls_Credentials>(
-					    *c->rng) :
-				    std::make_shared<Esdm_Dtls_Credentials>();
+		c->creds = std::make_shared<Esdm_Dtls_Credentials>();
 		c->policy = std::make_shared<const Esdm_Dtls_Policy>();
 		c->sessions =
 			std::make_shared<Botan::TLS::Session_Manager_Noop>();
