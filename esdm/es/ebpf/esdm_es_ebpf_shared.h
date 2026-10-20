@@ -47,8 +47,10 @@ enum esdm_ebpf_rec_type {
 /*
  * Deltas one CPU collects before handing them over. The programs flush the
  * buffer when it is full and, for a CPU that falls quiet with a partially
- * filled one, after the idle deadline of the flush timer - so a collected
- * delta never lingers unaccounted.
+ * filled one, after the idle deadline of the flush timer of the CPU - pinned
+ * to it where the kernel can (6.7 and later), and armed anew by the next event
+ * when it is not pending when it should - so a collected delta does not
+ * linger unaccounted for longer than about two deadlines.
  *
  * Must be a power of two.
  */
@@ -149,6 +151,13 @@ struct esdm_ebpf_percpu_state {
 	__u32 pos; /* next entry in rec.delta */
 	__u32 timer_inited; /* flush timer of this CPU set up? */
 	__u64 last_event_ns; /* monotonic time of the last collected event */
+	/*
+	 * Monotonic time the flush timer of this CPU fires at, 0 while it is
+	 * not pending; and whether the kernel cannot pin it to the CPU
+	 */
+	__u64 timer_due_ns;
+	__u32 timer_unpinned;
+	__u32 timer_pad;
 
 	/* GCD (timer granularity) removal state */
 	__u64 gcd_val; /* computed divisor, 0 while still learning */

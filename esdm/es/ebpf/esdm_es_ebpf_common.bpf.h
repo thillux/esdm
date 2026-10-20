@@ -247,13 +247,50 @@ esdm_ebpf_submit_raw(struct esdm_ebpf_percpu_state *state, __u64 delta)
 #endif /* ESDM_ES_EBPF_TESTING */
 
 /*
+ * BPF_F_TIMER_CPU_PIN of the UAPI (Linux 6.7): the timer fires on the CPU that
+ * started it. Spelled out, as the UAPI headers the programs are built with may
+ * be older than that - it is an enumerator there, which no #ifdef finds.
+ */
+#define ESDM_EBPF_TIMER_CPU_PIN (1ULL << 1)
+
+/*
+ * Start the flush timer @elem of the current CPU, whose state is @state, to
+ * fire in @ns: pinned to the CPU where the kernel can, and recording when it
+ * fires - or, should it not have started, that it is not pending. A kernel
+ * before 6.7 refuses the flag with -EINVAL, upon which the timers of this CPU
+ * go unpinned.
+ */
+static __always_inline long
+esdm_ebpf_timer_start(struct esdm_ebpf_percpu_state *state,
+		      struct esdm_ebpf_timer_elem *elem, __u64 ns)
+{
+	long ret = -EINVAL;
+
+	if (!state->timer_unpinned) {
+		ret = bpf_timer_start(&elem->timer, ns,
+				      ESDM_EBPF_TIMER_CPU_PIN);
+		if (ret == -EINVAL)
+			state->timer_unpinned = 1;
+	}
+	if (state->timer_unpinned)
+		ret = bpf_timer_start(&elem->timer, ns, 0);
+
+	state->timer_due_ns = ret ? 0 : bpf_ktime_get_ns() + ns;
+	return ret;
+}
+
+/*
  * Flush timer callback: submit a partially filled collection buffer once the
  * CPU has been idle for the configured deadline. This prevents the collected
  * data of quiet CPUs from lingering unaccounted in the collection buffer.
  *
- * The timer normally fires on the CPU that armed it; after a (rare) hrtimer
- * migration it flushes the state of the CPU it runs on, which is harmless as
- * the entropy accounting is strictly based on delivered event counts.
+ * The timer of a CPU is pinned to it, so the state at hand is the one of the
+ * CPU it was armed for. Unpinned - a kernel before 6.7 - an hrtimer migration
+ * may have it fire on another CPU, whose state is none of its business, and
+ * which cannot touch the state of the CPU it is for while that CPU may be
+ * collecting: it starts the timer again, for the next deadline. Should that
+ * fail, or the timer get lost otherwise, the next event of the CPU arms it
+ * anew, see esdm_ebpf_collect().
  */
 static int esdm_ebpf_timer_cb(void *map, __u32 *key,
 			      struct esdm_ebpf_timer_elem *elem)
@@ -263,16 +300,24 @@ static int esdm_ebpf_timer_cb(void *map, __u32 *key,
 	__u64 now, idle_ns;
 
 	(void)map;
-	(void)key;
+
+	if (*key != bpf_get_smp_processor_id()) {
+		bpf_timer_start(&elem->timer, esdm_ebpf_cfg.flush_deadline_ns,
+				0);
+		return 0;
+	}
 
 	state = bpf_map_lookup_elem(&esdm_ebpf_state, &zero);
 	if (!state)
 		return 0;
 
+	/* It fired */
+	state->timer_due_ns = 0;
+
 	/* Do not touch the state while an event is being processed */
 	if (state->in_progress) {
-		bpf_timer_start(&elem->timer, esdm_ebpf_cfg.flush_deadline_ns,
-				0);
+		esdm_ebpf_timer_start(state, elem,
+				      esdm_ebpf_cfg.flush_deadline_ns);
 		return 0;
 	}
 	state->in_progress = 1;
@@ -284,22 +329,32 @@ static int esdm_ebpf_timer_cb(void *map, __u32 *key,
 		if (idle_ns >= esdm_ebpf_cfg.flush_deadline_ns)
 			esdm_ebpf_submit_batch(state);
 		else
-			bpf_timer_start(
-				&elem->timer,
-				esdm_ebpf_cfg.flush_deadline_ns - idle_ns, 0);
+			esdm_ebpf_timer_start(state, elem,
+					      esdm_ebpf_cfg.flush_deadline_ns -
+						      idle_ns);
 	}
 
 	state->in_progress = 0;
 	return 0;
 }
 
-/* Arm the flush timer of the current CPU, initializing it on first use */
+/*
+ * Arm the flush timer of the current CPU, initializing it on first use, unless
+ * it is pending: it is armed for the first event of a buffer, and again by any
+ * later one when it should have fired a deadline ago - one that did not start,
+ * or got lost to a migration, does not leave the buffer to linger until it is
+ * full.
+ */
 static __always_inline void
-esdm_ebpf_timer_arm(struct esdm_ebpf_percpu_state *state)
+esdm_ebpf_timer_arm(struct esdm_ebpf_percpu_state *state, __u64 now_ns)
 {
 	struct esdm_ebpf_timer_elem *elem;
 	__u32 cpu = bpf_get_smp_processor_id();
 	long ret;
+
+	if (state->timer_due_ns &&
+	    now_ns < state->timer_due_ns + esdm_ebpf_cfg.flush_deadline_ns)
+		return;
 
 	elem = bpf_map_lookup_elem(&esdm_ebpf_timers, &cpu);
 	if (!elem)
@@ -316,7 +371,7 @@ esdm_ebpf_timer_arm(struct esdm_ebpf_percpu_state *state)
 		state->timer_inited = 1;
 	}
 
-	bpf_timer_start(&elem->timer, esdm_ebpf_cfg.flush_deadline_ns, 0);
+	esdm_ebpf_timer_start(state, elem, esdm_ebpf_cfg.flush_deadline_ns);
 }
 
 /*
@@ -431,8 +486,8 @@ static __always_inline void esdm_ebpf_collect(void)
 
 			if (state->pos >= ESDM_EBPF_BATCH_EVENTS)
 				esdm_ebpf_submit_batch(state);
-			else if (state->pos == 1)
-				esdm_ebpf_timer_arm(state);
+			else
+				esdm_ebpf_timer_arm(state, now_ns);
 		}
 	}
 
