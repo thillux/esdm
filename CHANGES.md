@@ -607,6 +607,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * tests: sanitizer findings and crashes in daemons the tests start fail the test; the RPC regression tests of tests/fuzz run in every build; each public header is compiled on its own; the test environments wait for daemons to accept connections
 
+* fix: esdm_cdev on Linux 7.3, whose kernel threads look paths up in an empty root of their own: the module connects to the ESDM and reads the kernel's boot_id in the file system context of init again, instead of failing both with -ENOENT and serving every read from the kernel's RNG
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

@@ -171,9 +171,11 @@ long after the ESDM came back.
   Connecting in the context of the process reading a device would let a
   process in a container, with a mount namespace or root of its own, have the
   module talk to whatever it put at that path. The module connects from its
-  workqueue only, whose kernel threads share the file system context of init
-  and run with the initial credentials. Once connected, requests are carried
-  out in the caller's context, which no path lookup is part of.
+  workqueue only, whose kernel threads run with the initial credentials and
+  look the path up in the file system context of init - they share it, and
+  since Linux 7.3, where kernel threads have an empty root of their own, they
+  take it for the lookup. Once connected, requests are carried out in the
+  caller's context, which no path lookup is part of.
 * **The module is root towards the ESDM.** The ESDM takes the credentials of
   its peer at connect time, so it honours the entropy claims and the
   privileged commands of the module. The module therefore checks the

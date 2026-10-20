@@ -18,7 +18,11 @@
  * module's workqueue only. Its workers are kernel threads, forked by kthreadd
  * with CLONE_FS: they share the fs_struct of init, i.e. its root and working
  * directory in the initial mount namespace, also after the initramfs handed
- * over to the real root, and they run with the initial credentials.
+ * over to the real root, and they run with the initial credentials. Since
+ * Linux 7.3 kernel threads no longer share init's fs_struct: theirs has an
+ * empty root (nullfs), where every lookup fails with -ENOENT, and a kernel
+ * thread takes the one of init for a lookup with scoped_with_init_fs(),
+ * which the work below does around everything it runs.
  *
  * That makes the module's connections root's: the ESDM takes the peer
  * credentials at connect time, and honours the entropy claims and the
@@ -53,6 +57,7 @@
 
 #include <linux/completion.h>
 #include <linux/err.h>
+#include <linux/fs_struct.h>
 #include <linux/jiffies.h>
 #include <linux/minmax.h>
 #include <linux/mm.h>
@@ -162,7 +167,13 @@ static void esdm_cdev_initcall_work(struct work_struct *work)
 	struct esdm_cdev_initcall *ic =
 		container_of(work, struct esdm_cdev_initcall, work);
 
+	/* The file system context of init, see "Connecting" above */
+#ifdef scoped_with_init_fs
+	scoped_with_init_fs()
+		ic->ret = ic->fn(ic->out);
+#else
 	ic->ret = ic->fn(ic->out);
+#endif
 	complete(&ic->done);
 	esdm_cdev_initcall_put(ic);
 }
