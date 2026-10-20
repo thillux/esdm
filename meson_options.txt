@@ -374,8 +374,12 @@ bit of entropy. It determines the RCT and APT cutoffs applied inside the
 eBPF program.
 
 Set it from the min-entropy measured with the es_ebpf_testing support:
-OSR = ceil(1 / H), rounded up so that the cutoffs are never less strict
-than the measurement warrants. The value must be consistent with
+OSR = ceil(1 / H), rounded up so that the source is never credited with
+more entropy per event than the measurement warrants. The cutoffs grow
+with the OSR, so the rounding makes them looser than 1 / H itself would:
+the tests assume less entropy per event than measured, and tolerate longer
+runs and more frequent values before they fail. The value must be
+consistent with
 es_sched_ebpf_entropy_rate: as 256 bits of data are four events, a rate of
 4 / OSR bits per 256 data bits is the most the assessment supports. The
 accounting caps anything above that and the server logs a warning.
@@ -453,8 +457,12 @@ bit of entropy. It determines the RCT and APT cutoffs applied inside the
 eBPF program.
 
 Set it from the min-entropy measured with the es_ebpf_testing support:
-OSR = ceil(1 / H), rounded up so that the cutoffs are never less strict
-than the measurement warrants. The value must be consistent with
+OSR = ceil(1 / H), rounded up so that the source is never credited with
+more entropy per event than the measurement warrants. The cutoffs grow
+with the OSR, so the rounding makes them looser than 1 / H itself would:
+the tests assume less entropy per event than measured, and tolerate longer
+runs and more frequent values before they fail. The value must be
+consistent with
 es_irq_ebpf_entropy_rate: as 256 bits of data are four events, a rate of
 4 / OSR bits per 256 data bits is the most the assessment supports. The
 accounting caps anything above that and the server logs a warning.

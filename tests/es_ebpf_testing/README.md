@@ -145,8 +145,12 @@ The same measurement determines the oversampling rate the SP800-90B
 health tests are parameterized with, configured at build time
 (`-Des_sched_ebpf_osr=N`, `-Des_irq_ebpf_osr=N`). It is the number of
 events required per bit of entropy, `OSR = ceil(1 / H)` for the measured
-min-entropy `H` per event - rounded **up**, so the RCT and APT cutoffs are
-never less strict than the measurement warrants. Keep it consistent with
+min-entropy `H` per event - rounded **up**, so the source is never credited
+with more entropy per event than the measurement warrants. The RCT and APT
+cutoffs grow with the OSR, so the rounding makes them looser than `1 / H`
+itself would: the tests assume less entropy per event than measured, and
+tolerate longer runs and more frequent values before they fail. Keep it
+consistent with
 the entropy rate: an event contributes its 64 bit delta, so 256 bits of data
 are four events and a rate above `4 / OSR` claims more than the assessment
 supports - the accounting caps it and the server logs a warning on startup.
