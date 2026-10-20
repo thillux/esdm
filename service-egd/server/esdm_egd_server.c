@@ -867,7 +867,12 @@ static int esdm_egd_write_heap(struct esdm_egd_conn *conn, uint8_t *buf,
  * @generated reports how much was produced, which matters for the prediction
  * resistance generator: it hands out no more than was just delivered, so a
  * short answer is normal, and discarding it to start over would waste entropy
- * and never converge on a large request.
+ * and never converge on a large request. It is shared with the other workers
+ * and the RPC server, which take turns at it: the generation waits for one
+ * block of each request ahead of it rather than finding it taken, and hands
+ * out one block where another request waits for its turn - see
+ * esdm_get_random_bytes_pr_noblock(). Nothing generated thus means that the
+ * entropy sources did not deliver, never that the generator was busy.
  *
  * @return 0 when @len bytes were produced, -EAGAIN when fewer were (the
  *	   caller decides whether to answer short or to come back for more),

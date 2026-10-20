@@ -146,6 +146,21 @@ if get_option('esdm-server').enabled()
 	test('EGD server prediction resistance budget',
 		egd_server_pr_budget_test, timeout: 300)
 
+	# The same with several workers, one client flooding the prediction
+	# resistance DRNG and others asking for a block each. Timed, so not
+	# alongside other tests.
+	egd_server_pr_fairness_test = executable(
+			'egd_server_pr_fairness_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_pr_fairness_test.c' ],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server prediction resistance fairness',
+		egd_server_pr_fairness_test, timeout: 120, is_parallel: false)
+
 	# The per-UID connection accounting shared by the RPC and EGD servers,
 	# compiled into the test to inspect its table. Needs no server.
 	egd_peer_limit_test = executable(

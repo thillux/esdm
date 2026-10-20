@@ -1148,9 +1148,9 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
  * (esdm_get_seed()). Unbound, a client spreading such requests over a few
  * hundred connections holds up every other client of that worker for seconds
  * per round. The prediction resistant DRNG and the seed collection serve one
- * caller at a time anyway (esdm_pr_lock, and the lock of esdm_get_seed()), so
- * the bound costs no throughput of either, only how long a worker may be tied
- * to them at a stretch. Both kinds of calls share it: what holds up the other
+ * caller at a time anyway (in turns, and under the lock of esdm_get_seed()),
+ * so the bound costs no throughput of either, only how long a worker may be
+ * tied to them at a stretch. Both kinds of calls share it: what holds up the other
  * clients is the time spent on them together.
  *
  * A time rather than a number of requests, as the cost of one depends on the

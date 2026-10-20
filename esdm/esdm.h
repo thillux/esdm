@@ -144,6 +144,10 @@ ssize_t esdm_get_random_bytes_full_noblock(uint8_t *buf, size_t nbytes);
  * than requested by the caller. Also, the caller MUST be prepared that this
  * call returns 0 bytes, i.e. it did not generate data.
  *
+ * The callers take turns at the prediction resistance DRNG, in the order they
+ * came: while others wait for theirs, a turn lasts one block of the security
+ * strength, i.e. one seeding. This call takes as many turns as it needs.
+ *
  * @buf: buffer to store the random bytes
  * @nbytes: size of the buffer
  *
@@ -154,6 +158,11 @@ ssize_t esdm_get_random_bytes_pr(uint8_t *buf, size_t nbytes);
 /**
  * @brief see esdm_get_random_bytes_pr except that in case of blocking,
  * it returns -EAGAIN.
+ *
+ * It returns -EAGAIN while the ESDM is not operational. It does wait for its
+ * turn at the prediction resistance DRNG - no longer than one block of each
+ * caller ahead of it - but takes only that one: with others waiting, it
+ * returns after one block, and the caller asks again for the rest.
  */
 ssize_t esdm_get_random_bytes_pr_noblock(uint8_t *buf, size_t nbytes);
 

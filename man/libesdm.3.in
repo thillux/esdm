@@ -127,10 +127,17 @@ reseed, for which it waits.
 .TP
 .BI "ssize_t esdm_get_random_bytes_pr(uint8_t *" buf ", size_t " nbytes ");"
 Random data with prediction resistance: the DRNG is reseeded from the entropy
-sources for this request.
+sources for this request, and hands out no more than the entropy collected
+for it \- possibly fewer bytes than asked for, or none. The callers take turns
+at this DRNG in the order they came; while others wait for theirs, a turn lasts
+one block of the security strength.
 .TP
 .BI "ssize_t esdm_get_random_bytes_pr_noblock(uint8_t *" buf ", size_t " nbytes ");"
-The same, but returning an error instead of blocking.
+The same, but returning
+.B \-EAGAIN
+while the ESDM is not operational, and taking a single turn: it waits for it
+no longer than one block of each caller ahead of it, and with others waiting it
+returns after one block, the caller asking again for the rest.
 .TP
 .BI "ssize_t esdm_get_seed(uint64_t *" buf ", size_t " nbytes ", enum esdm_get_seed_flags " flags ");"
 Fill

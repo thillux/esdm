@@ -147,13 +147,59 @@ DECLARE_WAIT_QUEUE(esdm_init_wait);
 static atomic_int esdm_drng_mgr_terminate = 0;
 
 /*
- * Single throttle shared by the blocking and non-blocking prediction-resistant
- * entry points so that only one PR request is ever in flight - a precaution so
- * a caller cannot flood the slow PR DRNG and starve the others. It must be
- * file-scope: two separate function-local statics would each permit one call,
- * allowing two concurrent PR requests and weakening the rate limit.
+ * Turns at the prediction resistance DRNG, shared by the blocking and the
+ * non-blocking entry points: one request is served at a time, as each block it
+ * generates takes a seeding of its own, and the requests are served in the
+ * order they arrived - a ticket each, served when esdm_pr_turn_serving reaches
+ * it. A turn lasts one block - a seeding's worth, see esdm_drng_get() - while
+ * another request waits for one, and as long as the request needs while none
+ * does.
+ *
+ * A lock taken with a trylock used to stand here, and a request finding it
+ * taken was answered -EAGAIN. Its callers - an EGD worker, an RPC worker -
+ * took that for entropy not being there and came back later, while the request
+ * holding it was served block after block, and its client could pipeline the
+ * next one into the moment of the release: one client of one worker kept the
+ * prediction resistant requests of every other worker out for as long as it
+ * kept asking.
  */
-static DEFINE_MUTEX_W_UNLOCKED(esdm_pr_lock);
+static _Atomic uint64_t esdm_pr_turn_next = 0;
+static _Atomic uint64_t esdm_pr_turn_serving = 0;
+static DECLARE_WAIT_QUEUE(esdm_pr_turn_wait);
+
+static bool esdm_pr_turn_mine(void *ticket)
+{
+	return atomic_load(&esdm_pr_turn_serving) == *(uint64_t *)ticket;
+}
+
+/* Wait for a turn at the prediction resistance DRNG */
+static void esdm_pr_turn_take(void)
+{
+	uint64_t ticket = atomic_fetch_add(&esdm_pr_turn_next, 1);
+
+	/*
+	 * Checked under the lock of the queue that the turn is handed on
+	 * under, so the handover cannot fall between check and wait.
+	 */
+	while (!esdm_pr_turn_mine(&ticket))
+		thread_wait_queue_wait_pred(&esdm_pr_turn_wait, NULL,
+					    esdm_pr_turn_mine, &ticket);
+}
+
+/* Hand the turn on to the next request */
+static void esdm_pr_turn_give(void)
+{
+	atomic_fetch_add(&esdm_pr_turn_serving, 1);
+	thread_wake_all_locked(&esdm_pr_turn_wait);
+}
+
+/* Does another request wait for a turn while this one has it? */
+static bool esdm_pr_turn_wanted(void)
+{
+	return atomic_load(&esdm_pr_turn_next) -
+		       atomic_load(&esdm_pr_turn_serving) >
+	       1;
+}
 
 /*
  * Source of the seed time offsets that keep the DRNGs from all falling due for
@@ -2030,6 +2076,12 @@ static void esdm_drng_atfork_child(void)
 	atomic_fetch_add(&esdm_drng_fork_gen, 1);
 	atomic_store(&esdm_drng_reseed_worker_active, false);
 	atomic_store(&esdm_drng_reseed_worker_wakeup, 0);
+
+	/*
+	 * Whatever request held a turn at the PR DRNG or waited for one, it
+	 * was one of the parent's threads - the next one is this process's.
+	 */
+	atomic_store(&esdm_pr_turn_serving, atomic_load(&esdm_pr_turn_next));
 }
 
 static void esdm_drng_atfork_register(void)
@@ -2208,13 +2260,7 @@ static bool esdm_drng_node_spent(struct esdm_drng *drng)
 static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			     size_t outbuflen)
 {
-	/* produce max. 128 Byte in pr mode without yielding */
-	const size_t pr_yield_iterations =
-		128 / (esdm_security_strength() >> 3);
-	/* should be greater than 1 for speedup */
-	assert(pr_yield_iterations > 1);
 	ssize_t processed = 0;
-	size_t iterations = 0;
 	bool pr = (drng == &esdm_drng_pr) ? true : false;
 	/* The DRNG was reseeded for the first block below already */
 	bool reseeded = false;
@@ -2526,9 +2572,14 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			 * the initial oversampling key off that state.
 			 */
 			atomic_store(&drng->fully_seeded, false);
-			if (outbuflen &&
-			    iterations++ % pr_yield_iterations == 0)
-				sched_yield();
+
+			/*
+			 * One block per turn while another request waits for
+			 * one - see esdm_pr_turn_take(). What is left of this
+			 * request is the caller's to ask for again.
+			 */
+			if (outbuflen && esdm_pr_turn_wanted())
+				goto out;
 		}
 	}
 
@@ -2933,24 +2984,41 @@ out:
 	return ret ? ret : (ssize_t)buflen;
 }
 
+/*
+ * Generate from the prediction resistance DRNG in turns, see
+ * esdm_pr_turn_take(). A request that gave its turn to another one before it
+ * was done takes the next turn when @block is set; without, it returns what it
+ * got - the turn is waited for either way, which takes no longer than one
+ * block of each request ahead of it.
+ */
+static ssize_t esdm_get_random_bytes_pr_turns(uint8_t *buf, size_t nbytes,
+					      bool block)
+{
+	size_t done = 0;
+	ssize_t ret;
+
+	nbytes = min_size(nbytes, SSIZE_MAX);
+
+	do {
+		esdm_pr_turn_take();
+		ret = esdm_drng_get_sleep(buf + done, nbytes - done, true);
+		esdm_pr_turn_give();
+
+		/* Nothing more: an error, or too little entropy just now */
+		if (ret <= 0)
+			break;
+		done += (size_t)ret;
+	} while (block && done < nbytes);
+
+	return done ? (ssize_t)done : ret;
+}
+
 DSO_PUBLIC
 ssize_t esdm_get_random_bytes_pr(uint8_t *buf, size_t nbytes)
 {
-	ssize_t ret;
-
 	esdm_drng_sleep_while_nonoperational(0);
 
-	/*
-	 * We only allow one call in flight which is a precaution that
-	 * a caller cannot flood the RPC lines with requests to the slow
-	 * PR DRNG and cause a denial of service to the others.
-	 */
-	if (mutex_w_trylock(&esdm_pr_lock) != 0)
-		return -EAGAIN;
-
-	ret = esdm_drng_get_sleep(buf, nbytes, true);
-	mutex_w_unlock(&esdm_pr_lock);
-	return ret;
+	return esdm_get_random_bytes_pr_turns(buf, nbytes, true);
 }
 
 DSO_PUBLIC
@@ -2961,18 +3029,7 @@ ssize_t esdm_get_random_bytes_pr_noblock(uint8_t *buf, size_t nbytes)
 	if (ret)
 		return ret;
 
-	/*
-	 * We only allow one call in flight which is a precaution that
-	 * a caller cannot flood the RPC lines with requests to the slow
-	 * PR DRNG and cause a denial of service to the others.
-	 */
-	if (mutex_w_trylock(&esdm_pr_lock) != 0) {
-		return -EAGAIN;
-	}
-	ret = esdm_drng_get_sleep(buf, nbytes, true);
-	mutex_w_unlock(&esdm_pr_lock);
-
-	return ret;
+	return esdm_get_random_bytes_pr_turns(buf, nbytes, false);
 }
 
 DSO_PUBLIC

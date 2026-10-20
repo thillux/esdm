@@ -53,8 +53,10 @@ bool esdm_rpc_client_is_privileged(void *closure_data);
  * a worker serves the requests of all its ready connections one after the
  * other, and each of these generations costs reseeds, so they are bounded per
  * round of the worker's event loop. Beyond the bound, -EAGAIN is returned
- * without generating anything - the answer the clients already get while
- * another worker holds the PR DRNG, and retry on.
+ * without generating anything - the answer the clients get while the ESDM is
+ * not operational, and retry on. A request of another worker using the PR
+ * DRNG is no reason for it: the generation waits for its turn there, one
+ * block of each request ahead of it.
  *
  * @return as esdm_get_random_bytes_pr_noblock()
  */
