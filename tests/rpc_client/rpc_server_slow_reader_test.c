@@ -69,6 +69,14 @@
  */
 #define TEST_SLOW_CONNS 600
 /*
+ * The descriptor limit of the test and of the server it starts: the slow
+ * connections, the client's and some to spare. The server keeps up to half of
+ * its limit for other uses than the unprivileged connections - with the soft
+ * limit of 1024 that systemd sets, it had slots for 512 of them only and
+ * closed the least recently used ones to make room for the others.
+ */
+#define TEST_NOFILE (2 * (TEST_SLOW_CONNS + 256))
+/*
  * Size of the answers. Small, so that what the server has to do per round stays
  * small next to waiting for the clients, and so that each answer takes the same
  * space in the send buffer: a large one is partly held in pages, and how many
@@ -411,18 +419,25 @@ int main(void)
 	ssize_t rc;
 	int ret;
 
-	ret = test_server_start();
-	if (ret)
-		return ret;
-
-	/* The slow connections, the client's and some to spare */
-	if (!getrlimit(RLIMIT_NOFILE, &rl) &&
-	    rl.rlim_cur < TEST_SLOW_CONNS + 256) {
-		rl.rlim_cur = TEST_SLOW_CONNS + 256;
+	/*
+	 * Before the server starts, which takes the limit over, see
+	 * TEST_NOFILE.
+	 */
+	if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_cur < TEST_NOFILE) {
+		rl.rlim_cur = TEST_NOFILE;
 		if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
 			rl.rlim_cur = rl.rlim_max;
 		setrlimit(RLIMIT_NOFILE, &rl);
 	}
+	if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur < TEST_NOFILE) {
+		printf("The descriptor limit cannot be raised to %u - skipping\n",
+		       TEST_NOFILE);
+		return 77;
+	}
+
+	ret = test_server_start();
+	if (ret)
+		return ret;
 
 	ret = esdm_rpcc_init_unpriv_service(NULL);
 	if (ret) {
