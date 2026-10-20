@@ -190,13 +190,25 @@ struct esdm_egd_serve_conn {
  */
 int esdm_egd_serve(const struct esdm_egd_serve_conn *conn);
 
+struct esdm_egd_serve_thread;
+
 /**
  * @brief The threads of the connections of a daemon
+ *
+ * The threads are joined rather than detached: a thread that returned from
+ * its function still has its end to run - the destructors of its thread
+ * specific data, such as the buffers of the RPC client, and of the thread
+ * local objects of the TLS stack. The daemon is to exit only after that, or
+ * it races them with the handlers exit(3) runs, which delete the keys of that
+ * data and tear down the state of the libraries.
  */
 struct esdm_egd_serve_pool {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	/* Threads whose function has not returned yet */
 	unsigned int threads;
+	/* Threads whose function returned, to be joined */
+	struct esdm_egd_serve_thread *ended;
 	/* Set by esdm_egd_serve_pool_stop(), for the loops of the threads */
 	atomic_bool stop;
 };
@@ -205,13 +217,14 @@ struct esdm_egd_serve_pool {
 	{ .lock = PTHREAD_MUTEX_INITIALIZER,                                   \
 	  .cond = PTHREAD_COND_INITIALIZER,                                    \
 	  .threads = 0,                                                        \
+	  .ended = NULL,                                                       \
 	  .stop = false }
 
 /**
  * @brief Start a thread serving a connection
  *
- * The thread is detached; @fn calls esdm_egd_serve_pool_done() as the last
- * thing it does with the pool.
+ * The thread runs @fn with @arg. Once @fn returned, the thread is joined by
+ * the next esdm_egd_serve_pool_spawn() or by esdm_egd_serve_pool_stop().
  *
  * @return 0, or a negative errno - the connection is the caller's then
  */
@@ -219,19 +232,16 @@ int esdm_egd_serve_pool_spawn(struct esdm_egd_serve_pool *pool,
 			      void *(*fn)(void *), void *arg);
 
 /**
- * @brief A thread of the pool is done
- */
-void esdm_egd_serve_pool_done(struct esdm_egd_serve_pool *pool);
-
-/**
  * @brief Stop the pool: tell the threads, and wait for them
  *
  * Their connections are to be shut down by the caller before, so that the
  * threads waiting for their clients wake up.
  *
- * @param [in] wait_ms Bound of the wait
+ * @param [in] wait_ms Bound of the wait for the functions of the threads to
+ *		       return
  *
- * @return the number of threads still running after the wait
+ * @return the number of threads still running after the wait. When it is 0,
+ *	   every thread of the pool has ended, its end included.
  */
 unsigned int esdm_egd_serve_pool_stop(struct esdm_egd_serve_pool *pool,
 				      unsigned int wait_ms);

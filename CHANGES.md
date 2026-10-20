@@ -601,6 +601,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: the kernel IRQ add-on loaded after the ESDM started caps the credit of the kernel RNG as well; the interrupt and scheduler sources stay credited while their cache has drained the kernel, so cached blocks are no longer spent uncounted; the per-CPU flush timer of the eBPF sources is pinned to its CPU on Linux 6.7+ and armed anew when lost; the example ES plugin reads its device without blocking, with 1 s per request at most
 
+* fix: esdm-egd-net-server, esdm-egd-net-relay and esdm-es-ext-relay join the threads of their connections before they exit, rather than exit while a thread still runs its end: the RPC client buffers of a connection of the esdm-egd-net-server leaked then, as the exit deleted their thread specific data key under the thread, and a sanitizer build exited with an error
+
 * esdm-server --groupname, the --groupname of esdm-egd-net-relay, esdm-egd-net-server, esdm-es-ext-relay, esdm-es-ext-serve and esdm-es-pkcs11, and esdm-vhost-user-rng --group: the group becomes the group of the process after the privilege drop; it and the group of the user are the supplementary groups, so what the daemon may access is unchanged
 
 * tests: sanitizer findings and crashes in daemons the tests start fail the test; the RPC regression tests of tests/fuzz run in every build; each public header is compiled on its own; the test environments wait for daemons to accept connections

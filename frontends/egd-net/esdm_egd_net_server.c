@@ -750,7 +750,6 @@ static void *server_conn_thread(void *arg)
 
 out:
 	server_conn_release(conn);
-	esdm_egd_serve_pool_done(&server_pool);
 	return NULL;
 }
 

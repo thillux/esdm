@@ -443,7 +443,6 @@ static void *relay_conn_thread(void *arg)
 
 out:
 	relay_conn_release(conn);
-	esdm_egd_serve_pool_done(&relay_pool);
 	return NULL;
 }
 

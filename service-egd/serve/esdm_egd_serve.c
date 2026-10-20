@@ -547,39 +547,105 @@ int esdm_egd_serve(const struct esdm_egd_serve_conn *c)
 	return ret;
 }
 
+/* A thread of a pool */
+struct esdm_egd_serve_thread {
+	struct esdm_egd_serve_pool *pool;
+	void *(*fn)(void *);
+	void *arg;
+	/* Set once @fn returned, for the join */
+	pthread_t thread;
+	struct esdm_egd_serve_thread *next;
+};
+
+static void *esdm_egd_serve_pool_thread(void *arg)
+{
+	struct esdm_egd_serve_thread *t = arg;
+	struct esdm_egd_serve_pool *pool = t->pool;
+
+	t->fn(t->arg);
+
+	/*
+	 * Done with the pool, but not ended: what is left of the thread runs
+	 * after this - see struct esdm_egd_serve_pool. Whoever waits for the
+	 * pool joins it.
+	 */
+	pthread_mutex_lock(&pool->lock);
+	t->thread = pthread_self();
+	t->next = pool->ended;
+	pool->ended = t;
+	pool->threads--;
+	pthread_cond_broadcast(&pool->cond);
+	pthread_mutex_unlock(&pool->lock);
+
+	return NULL;
+}
+
+/*
+ * Join the threads whose function returned. Each has its end to run, no more,
+ * so this does not wait for a client.
+ */
+static void esdm_egd_serve_pool_reap(struct esdm_egd_serve_pool *pool)
+{
+	struct esdm_egd_serve_thread *t;
+
+	pthread_mutex_lock(&pool->lock);
+	t = pool->ended;
+	pool->ended = NULL;
+	pthread_mutex_unlock(&pool->lock);
+
+	while (t) {
+		struct esdm_egd_serve_thread *next = t->next;
+
+		pthread_join(t->thread, NULL);
+		free(t);
+		t = next;
+	}
+}
+
 int esdm_egd_serve_pool_spawn(struct esdm_egd_serve_pool *pool,
 			      void *(*fn)(void *), void *arg)
 {
+	struct esdm_egd_serve_thread *t;
 	pthread_attr_t attr;
 	pthread_t thread;
 	int ret;
 
+	/*
+	 * The threads of the connections ended since the last one: at most as
+	 * many as were running then, so they never add up.
+	 */
+	esdm_egd_serve_pool_reap(pool);
+
+	t = calloc(1, sizeof(*t));
+	if (!t)
+		return -ENOMEM;
+	t->pool = pool;
+	t->fn = fn;
+	t->arg = arg;
+
 	ret = pthread_attr_init(&attr);
-	if (ret)
+	if (ret) {
+		free(t);
 		return -ret;
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	}
 	pthread_attr_setstacksize(&attr, ESDM_EGD_SERVE_STACK);
 
 	pthread_mutex_lock(&pool->lock);
 	pool->threads++;
 	pthread_mutex_unlock(&pool->lock);
 
-	ret = pthread_create(&thread, &attr, fn, arg);
+	ret = pthread_create(&thread, &attr, esdm_egd_serve_pool_thread, t);
 	pthread_attr_destroy(&attr);
 	if (ret) {
-		esdm_egd_serve_pool_done(pool);
+		pthread_mutex_lock(&pool->lock);
+		pool->threads--;
+		pthread_cond_broadcast(&pool->cond);
+		pthread_mutex_unlock(&pool->lock);
+		free(t);
 		return -ret;
 	}
 
 	return 0;
-}
-
-void esdm_egd_serve_pool_done(struct esdm_egd_serve_pool *pool)
-{
-	pthread_mutex_lock(&pool->lock);
-	pool->threads--;
-	pthread_cond_broadcast(&pool->cond);
-	pthread_mutex_unlock(&pool->lock);
 }
 
 unsigned int esdm_egd_serve_pool_stop(struct esdm_egd_serve_pool *pool,
@@ -606,6 +672,13 @@ unsigned int esdm_egd_serve_pool_stop(struct esdm_egd_serve_pool *pool,
 	}
 	left = pool->threads;
 	pthread_mutex_unlock(&pool->lock);
+
+	/*
+	 * Their ends too: the caller exits once this returned, and the handlers
+	 * exit(3) runs delete the keys of the thread specific data a thread
+	 * still has to free - it leaks it then.
+	 */
+	esdm_egd_serve_pool_reap(pool);
 
 	return left;
 }

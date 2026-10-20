@@ -113,7 +113,9 @@
 
 struct relay_conn {
 	int fd;
+	/* Set by its thread once it is done serving, see relay_reap() */
 	pthread_t thread;
+	struct relay_conn *ended_next;
 	bool root;
 	/* Gone for another client, see relay_accept() */
 	bool evicted;
@@ -176,10 +178,19 @@ static pthread_mutex_t relay_conns_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct relay_conn_list relay_conns = TAILQ_HEAD_INITIALIZER(relay_conns);
 static unsigned int relay_conn_num = 0;
 
-/* The threads, and the end of them */
+/*
+ * The threads, and the end of them. A thread done serving still has its end
+ * to run - the destructors of its thread specific data and thread local
+ * objects, those of the TLS stack among them. It is joined, so that the
+ * process does not exit before: the handlers exit(3) runs would race it,
+ * deleting the keys of that data and tearing down the state of the libraries.
+ */
 static pthread_mutex_t relay_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t relay_pool_cond = PTHREAD_COND_INITIALIZER;
+/* Threads still serving */
 static unsigned int relay_threads = 0;
+/* Threads done serving, to be joined - by their connections */
+static struct relay_conn *relay_ended = NULL;
 static atomic_bool relay_stop = false;
 
 /*
@@ -666,6 +677,7 @@ static bool relay_upstream_gone(struct relay_conn *conn)
 	return n != -EAGAIN;
 }
 
+/* Close the connection; its memory is left to the caller */
 static void relay_conn_release(struct relay_conn *conn)
 {
 	pthread_mutex_lock(&relay_conns_lock);
@@ -676,7 +688,28 @@ static void relay_conn_release(struct relay_conn *conn)
 	relay_upstream_close(conn);
 	esdm_dtls_free(conn->dtls);
 	close(conn->fd);
-	free(conn);
+}
+
+/*
+ * Join the threads done serving, and free their connections. Each has its
+ * end to run, no more, so this does not wait for a client.
+ */
+static void relay_reap(void)
+{
+	struct relay_conn *conn;
+
+	pthread_mutex_lock(&relay_pool_lock);
+	conn = relay_ended;
+	relay_ended = NULL;
+	pthread_mutex_unlock(&relay_pool_lock);
+
+	while (conn) {
+		struct relay_conn *next = conn->ended_next;
+
+		pthread_join(conn->thread, NULL);
+		free(conn);
+		conn = next;
+	}
 }
 
 static void *relay_conn_thread(void *arg)
@@ -716,7 +749,11 @@ static void *relay_conn_thread(void *arg)
 
 	relay_conn_release(conn);
 
+	/* Done serving, not ended: see relay_pool_lock */
 	pthread_mutex_lock(&relay_pool_lock);
+	conn->thread = pthread_self();
+	conn->ended_next = relay_ended;
+	relay_ended = conn;
 	relay_threads--;
 	pthread_cond_broadcast(&relay_pool_cond);
 	pthread_mutex_unlock(&relay_pool_lock);
@@ -761,6 +798,12 @@ static void relay_accept(int lfd)
 	char peer[64];
 	bool root;
 	int fd, ret;
+
+	/*
+	 * The threads of the connections ended since the last one: at most as
+	 * many as were running then, so they never add up.
+	 */
+	relay_reap();
 
 	fd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 	if (fd < 0)
@@ -818,19 +861,17 @@ static void relay_accept(int lfd)
 	pthread_mutex_unlock(&relay_pool_lock);
 
 	{
-		pthread_attr_t attr;
+		pthread_t thread;
 
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-		ret = -pthread_create(&conn->thread, &attr, relay_conn_thread,
-				      conn);
-		pthread_attr_destroy(&attr);
+		/* Joined by relay_reap() once it is done serving */
+		ret = -pthread_create(&thread, NULL, relay_conn_thread, conn);
 	}
 	if (ret) {
 		esdm_logger(LOGGER_WARN, LOGGER_C_ANY,
 			    "%s: cannot start a thread for %s: %s\n",
 			    RELAY_NAME, peer, strerror(-ret));
 		relay_conn_release(conn);
+		free(conn);
 		pthread_mutex_lock(&relay_pool_lock);
 		relay_threads--;
 		pthread_mutex_unlock(&relay_pool_lock);
@@ -1391,6 +1432,8 @@ int main(int argc, char *argv[])
 			_exit(0);
 		}
 		pthread_mutex_unlock(&relay_pool_lock);
+		/* Their ends too, before the handlers exit(3) runs */
+		relay_reap();
 	}
 
 out:
