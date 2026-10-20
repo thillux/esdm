@@ -149,7 +149,7 @@
   [esdm-kernel-seeder: reseeds the kernel RNG every 120 seconds],
   [esdm-tool: status (text / JSON), self test, wait until fully seeded],
   [Auxiliary client library: notification when the ESDM needs entropy],
-  [esdm-es-ext-serve: serves an external entropy source to the ESDM],
+  [libesdm_es_ext: a provider program is its source and one main()],
 ))
 
 // ---------------------------------------------------------------- slide 8
@@ -332,8 +332,8 @@
   [PKCS\#11 token via libp11 – esdm-es-pkcs11 provider, PIN as credential],
   [Kernel Jitter RNG: kernel crypto API RNG, name configurable],
   [External entropy sources developed against libesdm_es_ext], (
-    [ExternalLib: plugin library loaded into the esdm-server],
-    [ExternalSocket: provider process on a Unix domain socket, \ e.g. esdm-es-ext-serve – opportunistic DTLS],
+    [ExternalSocket: provider process on a Unix domain socket – opportunistic DTLS],
+    [A provider program: its callbacks and esdm_es_ext_provider_main() – \ no code of a source in the esdm-server],
     [Credit capped by a configured rate – a provider is uncredited by default],
   ),
   [Slow sources: asynchronous buffer of entropy blocks, \ sources fetched in parallel during a reseed],

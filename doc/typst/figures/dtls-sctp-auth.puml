@@ -15,7 +15,7 @@ hide footbox
 
 participant "esdm-server" as E
 participant "esdm-es-ext-relay\n(DTLS client)" as R
-participant "esdm-es-ext-serve\n(DTLS server)" as P
+participant "provider program\n(DTLS server)" as P
 
 E -> R: INFO\n(local provider socket, uid of the relay checked)
 R -> P: INIT, SCTP-AUTH required for DATA and FORWARD-TSN

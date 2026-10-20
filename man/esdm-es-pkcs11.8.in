@@ -49,7 +49,12 @@ and
 The ESDM itself needs nothing that knows of PKCS#11: the PKCS#11 module \-
 code of the token vendor \- runs in this process, with the privileges the
 token needs rather than with those of the ESDM, and the PIN is a secret of
-this process alone.
+this process alone. It is a provider program of
+.BR libesdm_es_ext (3):
+the PKCS#11 source served by the provider program of the library, whose
+command line \- see
+.B PROVIDER PROGRAMS
+there \- it takes next to the options of the token.
 .PP
 The daemon loads the PKCS#11 module and takes the first slot holding an
 initialized token with a random number generator \- with
@@ -106,7 +111,9 @@ then logs out of the token, wipes the PIN, removes the socket and exits with
 status 0. On the network,
 .B SIGHUP
 reloads the TLS files. A configuration it cannot run with \- no module, an invalid option,
-a PIN that cannot be read \- ends it at start up with exit status 1.
+a PIN that cannot be read \- ends it at start up with exit status 1. The
+daemon logs the module it loads, and the name of the source and the socket it
+serves on once it serves.
 .SH THE PIN
 The PIN is never given on the command line, where every user of the machine
 reads it, nor at build time. It is the first line of a file:
@@ -163,7 +170,8 @@ by default the one of the build (meson option
 128 bits per 256 bits of data unless configured otherwise). The ESDM credits
 the source at this rate unless a rate is configured for the source in the ESDM
 .RB ( "esdm\-server \-\-es_ext_socket_entropy_rate" ),
-which takes precedence.
+which takes precedence. The source claims for each block what this rate
+allows, and declares the rate as well.
 .SH STATUS
 The daemon answers the STATUS request of the ESDM, which shows the answer as
 the
@@ -172,8 +180,10 @@ member of the source in its own status, with the fields of the provider server
 of
 .BR libesdm_es_ext (3)
 \- see
-.BR esdm\-es\-ext\-serve (8)
-\- in
+.B Status
+under
+.B PROVIDER PROGRAMS
+there \- in
 .B server
 and those of the PKCS#11 source in
 .BR plugin :
@@ -322,8 +332,12 @@ The further options of the network \-
 .B \-\-username
 and
 .B \-\-groupname
-\- are those of
-.BR esdm\-es\-ext\-serve (8).
+\- are those of every provider program, see
+.B Options
+under
+.B PROVIDER PROGRAMS
+in
+.BR libesdm_es_ext (3).
 .TP
 .BR \-v ", " \-\-verbose
 Verbose logging; repeat for more. On the network, warnings and errors are
@@ -338,9 +352,9 @@ Print the version.
 A token on one host serves the ESDM of others: with
 .BR \-\-listen ,
 the daemon serves it on SCTP, with DTLS 1.2 and certificates on both sides and
-SCTP-AUTH, exactly as
-.BR esdm\-es\-ext\-serve (8)
-serves a plugin \- see
+SCTP-AUTH, as every provider program of
+.BR libesdm_es_ext (3)
+serves its source \- see
 .B NETWORK
 there, for the transport, the bounds of the connections, the rotation of the
 TLS files and the CRLs. The ESDM of the other host reads it through its
@@ -386,8 +400,9 @@ The ESDM reads the daemon through one of its provider socket sources: the
 build has
 .B es_ext_socket_num
 of them (meson option, 1 by default), each configured with the n\-th
-occurrence of the options below. A build with another provider \- an
-.BR esdm\-es\-ext\-serve (8)
+occurrence of the options below. A build with another provider \- a provider
+program of
+.BR libesdm_es_ext (3)
 \- next to the PKCS#11 daemon needs one more, as does a second token served by
 a second daemon.
 .TP
@@ -498,7 +513,6 @@ esdm\-server \-\-es_ext_socket /run/esdm\-es\-pkcs11.socket
 .fi
 .SH SEE ALSO
 .BR esdm\-server (8),
-.BR esdm\-es\-ext\-serve (8),
 .BR esdm\-es\-ext\-relay (8),
 .BR libesdm_es_ext (3),
 .BR systemd.exec (5),

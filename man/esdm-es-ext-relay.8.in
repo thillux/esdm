@@ -15,14 +15,14 @@ esdm\-es\-ext\-relay \- read an external entropy source on another host
 .SH DESCRIPTION
 .B esdm\-es\-ext\-relay
 serves the ESDM of its host an external entropy source of another host: a
-provider served on the network by
-.BR esdm\-es\-ext\-serve (8)
-or
+provider program of
+.BR libesdm_es_ext (3)
+\- such as
 .BR esdm\-es\-pkcs11 (8)
-\- see
+\- serving its source on the network, see
 .B NETWORK
 in
-.BR esdm\-es\-ext\-serve (8).
+.BR libesdm_es_ext (3).
 The
 .BR esdm\-server (8)
 does not reach the network itself \- it leaves the network namespace of its
@@ -34,7 +34,7 @@ and forwards each request over SCTP with DTLS and certificates:
 .PP
 .nf
 	esdm\-server \-\-\-unix socket\-\-\-> esdm\-es\-ext\-relay
-		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> esdm\-es\-ext\-serve
+		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> provider program
 .fi
 .PP
 The requests of the ESDM \- INFO, SELFTEST, GET_ENTROPY and STATUS, see
@@ -101,7 +101,7 @@ ESDM's alone. Another local client is served only when it runs as root or as a
 user of
 .B \-\-client_uid
 \- see
-.BR esdm\-es\-ext\-serve (8)
+.BR libesdm_es_ext (3)
 on the slots of a provider.
 .PP
 The ESDM sees the relay as the user it ran as when it created its socket. Run
@@ -113,7 +113,7 @@ told otherwise; with DTLS 1.2 as RFC 6083 maps it onto SCTP, and SCTP-AUTH \-
 see
 .B NETWORK
 in
-.BR esdm\-es\-ext\-serve (8).
+.BR libesdm_es_ext (3).
 The relay is the DTLS client: it presents its certificate, and verifies that
 of the provider against the trust anchors of
 .BR \-\-ca ,
@@ -339,9 +339,8 @@ per provider, each on a socket of its own.
 .BR SIGTERM ,
 1 when the options, the TLS files or the socket do not allow it to start.
 .SH SEE ALSO
-.BR esdm\-es\-ext\-serve (8),
-.BR esdm\-es\-pkcs11 (8),
 .BR libesdm_es_ext (3),
+.BR esdm\-es\-pkcs11 (8),
 .BR esdm\-server (8),
 .BR esdm\-egd\-net\-server (8)
 .SH AUTHOR

@@ -64,10 +64,10 @@ provided with the data is correct:]
 - The random number generator of a TPM 2.0 accessed via its resource manager
   device.
 
-- External entropy sources developed outside of the ESDM which are loaded as a
-  plugin library or which are served by a process of their own over a Unix
-  domain socket - among them `esdm-es-pkcs11`, which serves the random number
-  generator of a PKCS\#11 token.
+- External entropy sources developed outside of the ESDM which are served by a
+  process of their own over a Unix domain socket - among them
+  `esdm-es-pkcs11`, which serves the random number generator of a PKCS\#11
+  token.
 
 #par(first-line-indent: 0pt)[The ESDM treats all external and internal entropy
 sources equally. It can handle the situations where one or more entropy
@@ -152,8 +152,8 @@ interface can be selectively enabled and disabled at compile time:
 
   The server must be started as root. It creates its sockets and its status
   shared memory segment while privileged, initializes the entropy sources
-  requiring privileges - e.g. it loads the eBPF programs or an external
-  entropy source plugin - and then permanently drops its
+  requiring privileges - e.g. it loads the eBPF programs - and then
+  permanently drops its
   privileges to an unprivileged user (option `--username`, `nobody` by
   default).
 
@@ -238,10 +238,11 @@ interface can be selectively enabled and disabled at compile time:
   and `libesdm-seed-src-provider.so` talk the RPC protocol,
   `libesdm-egd-provider.so` and `libesdm-egd-provider-pr.so` the EGD protocol.
 
-- `libesdm_es_ext.so` and `esdm-es-ext-serve`: The library defines the plugin
-  interface of external entropy sources (`esdm_es_ext.h`) and their socket
-  protocol; `esdm-es-ext-serve` serves such a plugin on a Unix domain socket
-  the ESDM server reads from.
+- `libesdm_es_ext.so`: The library external entropy sources are developed
+  against (`esdm_es_ext.h`): the callbacks of a source, their socket protocol,
+  the provider server serving them on a Unix domain socket the ESDM server
+  reads from - or on the network - and the provider program around it,
+  `esdm_es_ext_provider_main()`, the whole `main()` of a provider.
 
 - `esdm-getrawentropy`, `esdm-extractlsb` and `esdm-ebpf-collect`: Tools to
   obtain and process the raw noise data of the internal entropy sources for
@@ -330,8 +331,7 @@ The ESDM consists of the following components shown in figure
   + the Linux kernel HWRAND framework (/dev/hwrng),
   + the TPM 2.0,
   + the Jitter RNG of the Linux kernel crypto API,
-  + the external entropy sources served by a plugin library and by a provider
-    socket, and
+  + the external entropy sources served by a provider over its socket, and
   + the output of the auxiliary pool.
 
   The entropy estimate of the data of all entropy sources are added to form
@@ -1322,72 +1322,75 @@ rate is defined with the meson option `es_tpm2_entropy_rate` (256 per default).
 
 == External Entropy Sources - ESDM-external Entropy Sources <sec:ext-es>
 
-Noise sources that are not part of the ESDM are written against
-`esdm_es_ext.h` of `libesdm_es_ext` as a `struct esdm_es_ext_plugin` with an
-`init`, `fini`, `get_entropy`, `selftest` and `status_json` callback (meson
-option `es_ext`). Such a plugin is handed to the ESDM in one of two ways:
+Noise sources that are not part of the ESDM are served to the ESDM server by
+a provider: a process of its own the server reads from over a Unix domain
+socket (meson option `es_ext`; `--es_ext_socket` option of the server or meson
+option `es_ext_socket_path`) - the ExternalSocket entropy source. The ESDM
+loads no code of a source into its own process: the provider keeps its own
+privileges, address space and life cycle, and a source that crashes takes its
+provider down, which the server connects to again once it is back. The ESDM
+server accepts the provider only if it runs as root, or as the user given with
+`--es_ext_socket_uid` (meson option `es_ext_socket_peer_uid`), and asks it for
+DTLS on the connection as discussed in section @sec:rpc.
 
-- ExternalLib: As a plugin library loaded into the ESDM server
-  (`--es_ext_lib` option of the server or meson option `es_ext_lib_path`). Its
-  initialization runs while the server still has its privileges.
-
-- ExternalSocket: As a provider process the ESDM server reads from over a Unix
-  domain socket (`--es_ext_socket` option of the server or meson option
-  `es_ext_socket_path`), e.g. `esdm-es-ext-serve` serving a plugin library.
-  The ESDM server accepts the provider only if it runs as root, or as the user
-  given with `--es_ext_socket_uid` (meson option `es_ext_socket_peer_uid`).
-  The ESDM server asks the provider for DTLS on the connection as discussed in
-  section @sec:rpc.
+#par(first-line-indent: 0pt)[A provider is written against `esdm_es_ext.h` of
+`libesdm_es_ext`: the callbacks of the source as a
+`struct esdm_es_ext_plugin` - an `init`, `fini`, `get_entropy`, `selftest`,
+`status_json` and `entropy_rate` callback - and a `main()` handing them to
+`esdm_es_ext_provider_main()`, which takes the command line of a provider
+program - the socket, its mode, the users served, DTLS, the name and the rate
+declared, and the network mode - and serves them with the provider server of
+the library, which calls the callbacks one at a time. `esdm-es-pkcs11` is such
+a program with the options of its token next to the common ones, the example
+in `es-ext/example` another; a provider may as well be written without the
+library, as the socket protocol is documented.]
 
 #par(first-line-indent: 0pt)[A block is credited with the entropy the source
 claims for it, capped by the rate of the source: the one configured with
-`es_ext_lib_entropy_rate` or `es_ext_socket_entropy_rate` (or the options of
-the server), else the one the source declares - the `entropy_rate` callback of
-a plugin, or the answer of a provider to INFO - else 256 for
-a plugin and 0 for a provider, which is credited only once it declares or is
-configured a rate. Accepting the user a provider runs as means trusting the
-rate it declares; the status shows the rate of each source as `entropy_rate`
-and where it comes from as `entropy_rate_source`. A source claiming more than the block holds, or
+`es_ext_socket_entropy_rate` (or the option of the server), else the one the
+provider declares in its answer to INFO - the `entropy_rate` callback of its
+source, or `--entropy_rate` of a provider program - else 0, so that a provider
+is credited only once it declares or is configured a rate. Accepting the user
+a provider runs as means trusting the rate it declares; the status shows the
+rate of each source as `entropy_rate` and where it comes from as
+`entropy_rate_source`. A source claiming more than the block holds, or
 failing, is credited with nothing until it delivers again, and one failing its
 self test until a self test passes.]
 
-The ESDM has `es_ext_lib_num` plugin library sources and `es_ext_socket_num`
-provider socket sources, one each by default and up to 16 each. Each is an
-entropy source of its own with a slot of its own in the seed buffer, its own
-plugin or provider, entropy rate, accepted user and state, so that the ES
-manager, its monitor, the NTG.1 seeding strategy, the status and the seeding
-treat it like any other entropy source. A kind with one source calls it
-ExternalLib or ExternalSocket; with several, the names carry the index:
-ExternalLib0, ExternalLib1 and so on. The meson options above take comma
-separated lists whose i-th entry configures the i-th source - a single rate or
-uid applies to all sources of the kind - and each option of the ESDM server
-may be given once per source, its n-th occurrence configuring the n-th
-source. A plugin library serves one source, as the callbacks of a plugin are
-never called concurrently; several providers are served by several
-`esdm-es-ext-serve` processes on sockets of their own.
+The ESDM has `es_ext_socket_num` provider socket sources, one by default and up
+to 16. Each is an entropy source of its own with a slot of its own in the seed
+buffer, its own provider, entropy rate, accepted user and state, so that the
+ES manager, its monitor, the NTG.1 seeding strategy, the status and the
+seeding treat it like any other entropy source. One source is called
+ExternalSocket; with several, the names carry the index: ExternalSocket0,
+ExternalSocket1 and so on. The meson options above take comma separated lists
+whose i-th entry configures the i-th source - a single rate or uid applies to
+all sources - and each option of the ESDM server may be given once per source,
+its n-th occurrence configuring the n-th source. A provider serves one source;
+several providers are several processes on sockets of their own.
 
-A plugin declares the name of its source with the `name` member of its
-struct, a provider in its answer to the INFO request of the socket protocol,
-which the ESDM asks once per connection - `esdm-es-ext-serve` answers with the
-name of its plugin or the one given with `--name`. The ESDM shows the source
-under that name in its status and log, if it is 1 to 32 bytes of UTF-8
-without control characters and not the name of another entropy source; the
-name of its entry in the ES table, ExternalLib1 say, remains its `instance`
-in the status. Two sources may declare the same name.
+A provider declares the name of its source in its answer to the INFO request
+of the socket protocol, which the ESDM asks once per connection - a provider
+program of `libesdm_es_ext` answers with the `name` of the callbacks of its
+source or the one given with `--name`. The ESDM shows the source under that
+name in its status and log, if it is 1 to 32 bytes of UTF-8 without control
+characters and not the name of another entropy source; the name of its entry
+in the ES table, ExternalSocket1 say, remains its `instance` in the status.
+Two sources may declare the same name.
 
-The status a plugin reports with its `status_json` callback, a JSON object of
-up to 512 bytes, appears as the `provider` member of its source in the ESDM
-status. A provider answers the STATUS request with one of up to 1024 bytes:
-`esdm-es-ext-serve`, as any provider served by `libesdm_es_ext`, with
-`{"server": {...}, "plugin": ...}` - fields of the server, such as the name
-and the rate it declares, the DTLS of the connection, its clients, the
-requests served, the verdict of the last self test of its plugin and its
-uptime, next to the status of its plugin, null where there is none. The ESDM
-asks each source for its status at most every 5 seconds, never waiting for a
-source busy with a request. As a seeding waits for the source while it is
-asked, it waits for a provider half a second at the most: one answering later
-keeps its connection, and its answer, which comes in before the one to the
-next request, is taken off the connection and shown then.
+A provider answers the STATUS request with a JSON object of up to 1024 bytes,
+which appears as the `provider` member of its source in the ESDM status: a
+provider of `libesdm_es_ext` with `{"server": {...}, "plugin": ...}` - fields
+of the server, such as the name and the rate it declares, the DTLS of the
+connection, its clients, the requests served, the verdict of the last self
+test of its source and its uptime, next to the status the `status_json`
+callback of its source reports, a JSON object of up to 512 bytes, null where
+there is none. The ESDM asks each source for its status at most every 5
+seconds, never waiting for a source busy with a request. As a seeding waits
+for the source while it is asked, it waits for a provider half a second at
+the most: one answering later keeps its connection, and its answer, which
+comes in before the one to the next request, is taken off the connection and
+shown then.
 
 === External Entropy Sources on the Network <sec:ext-es-net>
 
@@ -1399,11 +1402,11 @@ reaches no network, and it parses no certificate. The `esdm-es-ext-relay` of
 its host serves it a local provider socket, which the ESDM reads and checks
 as any other provider - by the user the relay runs as -, and forwards each
 request to a provider served on the network by the provider server of
-`libesdm_es_ext`, i.e. `esdm-es-ext-serve` or `esdm-es-pkcs11` started with
-`--listen` or by socket activation, as depicted in figure @fig:dtls-sctp.
+`libesdm_es_ext`, i.e. a provider program such as `esdm-es-pkcs11` started
+with `--listen` or by socket activation, as depicted in figure @fig:dtls-sctp.
 
 #par(first-line-indent: 0pt)[The relay forwards the requests INFO, SELFTEST,
-GET_ENTROPY and STATUS one to one rather than serving them from a plugin of
+GET_ENTROPY and STATUS one to one rather than serving them from callbacks of
 its own: the name and the rate the ESDM credits a connection with are those
 the remote provider declared on that very connection - each local connection
 has an upstream connection of its own, opened when the ESDM asks INFO, which

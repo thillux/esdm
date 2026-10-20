@@ -5,64 +5,55 @@ libesdm_es_ext \- external entropy sources for the ESDM
 .nf
 .B #include <esdm/esdm_es_ext.h>
 .PP
+.BI "int esdm_es_ext_provider_main(const struct esdm_es_ext_plugin *" plugin ", int " argc ", char *" argv "[]);"
+.PP
 .B pkg\-config \-\-cflags \-\-libs esdm_es_ext
 .fi
 .SH DESCRIPTION
 An external entropy source is noise source code that is not part of the ESDM.
-It is written once, as a
-.B struct esdm_es_ext_plugin
-of the header
-.IR esdm_es_ext.h ,
-and handed to
+It is served to
 .BR esdm\-server (8)
-in one of two ways:
-.TP
-.B As a plugin library
-A shared library exporting the struct under the name
-.B esdm_es_ext_plugin
-.RB ( ESDM_ES_EXT_PLUGIN_SYMBOL ).
-The ESDM loads it into its own process and calls it directly; it is named
-with
-.B esdm\-server \-\-es_ext_lib
-.I PATH
-or the meson option
-.BR es_ext_lib_path .
-Building such a plugin needs the header only, not this library.
-.TP
-.B As a provider process
-A process of its own that serves the plugin on a UNIX domain socket with the
-provider server of this library. The ESDM connects to it; the socket is named
-with
+by a provider: a process of its own, which the ESDM reads over a UNIX domain
+socket, named with
 .B esdm\-server \-\-es_ext_socket
 .I PATH
 or the meson option
 .BR es_ext_socket_path .
-.BR esdm\-es\-ext\-serve (8)
-is such a provider for a plugin library, so the same plugin runs either way.
+The ESDM loads no code of a source into its own process: a provider keeps its
+own privileges, its own address space and its own life cycle, at the cost of a
+round trip per seed \- a source that crashes takes its provider down, not the
+ESDM, which connects again once the provider is back.
 .PP
-A plugin in the ESDM runs with the privileges and in the namespaces of the
-daemon and takes it down when it crashes; a provider keeps its own privileges,
-its own address space and its own life cycle, at the cost of a round trip per
-seed.
+A provider is written against this library: the callbacks of the source, a
+.B struct esdm_es_ext_plugin
+of the header
+.IR esdm_es_ext.h ,
+and a
+.BR main ()
+handing them to
+.BR esdm_es_ext_provider_main (),
+which takes the command line of a provider program and serves them \- see
+.BR "PROVIDER PROGRAMS" .
+The functions of the provider server serve them from a program of its own
+making instead, and the protocol below lets a provider be written without the
+library at all.
+.BR esdm\-es\-pkcs11 (8)
+is a provider program of this library. A provider may serve the ESDM of
+another host as well, on SCTP with DTLS and certificates \- see
+.BR NETWORK .
 .PP
-An ESDM may be built with several sources of each kind (meson options
-.B es_ext_lib_num
-and
+An ESDM may be built with several provider socket sources (meson option
 .BR es_ext_socket_num ,
-one each by default): each is an entropy source of its own, named
-.BR ExternalLib0 ,
-.BR ExternalLib1 ,
-\&...
+one by default): each is an entropy source of its own, named
 .BR ExternalSocket0 ,
+.BR ExternalSocket1 ,
 \&... in the status of the ESDM \- or
-.B ExternalLib
-and
 .B ExternalSocket
-as the one source of its kind \- with its own plugin or provider, entropy rate
-and state. A plugin library serves one source, as its callbacks are never
-called concurrently; a provider process serves one plugin, and several
-providers serve on sockets of their own.
-.SS The plugin
+as the one source \- with its own provider, entropy rate, accepted user and
+state. A provider serves one source, as its callbacks are never called
+concurrently; several providers serve on sockets of their own, see
+.BR "SEVERAL SOURCES" .
+.SS The callbacks of a source
 .nf
 struct esdm_es_ext_plugin {
 	uint32_t version;
@@ -77,34 +68,40 @@ struct esdm_es_ext_plugin {
 };
 .fi
 .PP
+The struct keeps the name it had when a source could be loaded into the ESDM
+as a plugin library: providers are compiled against it.
 .I version
 is
 .BR ESDM_ES_EXT_PLUGIN_VERSION ,
-1. A later version may add members at the end of the struct; a plugin of an
-earlier one, whose struct ends before them, is then loaded all the same.
+1. A later version may add members at the end of the struct; a source of an
+earlier one, whose struct ends before them, is then served all the same. The
+provider server refuses callbacks of a version it does not know, or without
+.IR get_entropy ,
+with
+.BR \-EPROTO .
 .PP
 .I name
-is the name of the source: the ESDM shows the source under it in its status
-\- the
+is the name of the source: the provider declares it in its answer to INFO, and
+the ESDM shows the source under it in its status \- the
 .B name
 member of the source \- and in its log, in place of the name of the entropy
-source the plugin is loaded as
-.RB ( ExternalLib ,
+source it reads the provider with
+.RB ( ExternalSocket ,
 or
-.BR ExternalLib0 ,
-.B ExternalLib1
+.BR ExternalSocket0 ,
+.B ExternalSocket1
 and so on with several), which the status keeps as the
 .B instance
 of the source. It is 1 to
 .B ESDM_ES_EXT_NAME_MAX
 (32) bytes of UTF-8 without control characters \- no C0, DEL or C1 code point,
 nor a bidirectional control (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066
-to U+2069) \- terminated by a NUL. A name that is none of that, or the name of another
-entropy source of the ESDM, is refused, not cut to size, and the source shown
-under its instance name, as is a plugin whose
+to U+2069) \- terminated by a NUL. A name that is none of that, or the name of
+another entropy source of the ESDM, is refused, not cut to size, and the
+source shown under its instance name, as is a source whose
 .I name
 is NULL. Two sources may declare the same name; their instances tell them
-apart. The ESDM takes the name when it initializes the plugin, after
+apart. The provider server takes the name when it sets the source up, after
 .IR init .
 .I get_entropy
 fills all
@@ -116,14 +113,15 @@ and sets
 to the entropy they hold, at most
 .IR buflen " * 8,"
 returning 0 \- or a negative errno if the source cannot deliver, upon which
-the data is discarded. It must not block for long, as a DRNG waits for the
-seed it is part of. The other callbacks may be NULL;
+the data is discarded. It must not block for long, as a DRNG of the ESDM waits
+for the seed it is part of, and the ESDM gives a provider 2 seconds per
+request. The other callbacks may be NULL;
 .I init
 returns the context handed to the others,
 .I selftest
 checks the source without consuming the data it delivers. It runs before the
 ESDM credits the source for the first time \- at start up before the ESDM
-seeds its DRNGs \-, on every new connection of the ESDM to a provider \- one
+seeds its DRNGs \-, on every new connection of the ESDM to the provider \- one
 that was not there at start up, or one restarted \- before the provider is
 credited, and on the interval of the ESDM self tests.
 .PP
@@ -137,83 +135,106 @@ as one JSON object terminated by a NUL, at most
 .I buflen
 leaves room. It returns 0,
 .B \-EMSGSIZE
-if the status does not fit, or another negative errno. The ESDM shows the
-object as the
+if the status does not fit, or another negative errno. The provider server
+answers STATUS with it as the
+.B plugin
+member of its own status, and the ESDM shows that as the
 .B provider
 member of the state of the source, in
 .BR esdm_status_json ()
 and as a section in the text of
-.BR esdm_status (),
-and leaves out a status that is no well-formed JSON object of up to 512 bytes
-and 8 levels of nesting, without NaN or infinities, and without a C1 control
-or a bidirectional control in a string or a member name, escaped or not:
-these would steer the terminal of whoever reads the status. It is asked
+.BR esdm_status ().
+A status that is no well-formed JSON object of up to 512 bytes and 8 levels of
+nesting, without NaN or infinities, and without a C1 control or a
+bidirectional control in a string or a member name, escaped or not, is left
+out: these would steer the terminal of whoever reads the status. It is asked
 for when the ESDM status is, at most every 5 seconds \- the last status
-obtained shown in between \- and not while
-a request of the ESDM to the source is in progress, the ESDM status going
-without it then. It must not block for long: the source waits for it, and so
-does a seeding.
+obtained shown in between \- and not while a request of the ESDM to the source
+is in progress, the ESDM status going without it then. It must not block for
+long: the source waits for it, and so does a seeding.
 .PP
-The callbacks are never called concurrently. The ESDM calls
+The callbacks are never called concurrently: the provider server calls them
+one at a time, from one thread. They all run in the process of the provider,
 .I init
-while it still has its privileges, so that a device the source needs is opened
-there \- but
-.BR esdm\-server (8)
-has left the mount, cgroup and network namespaces of the host by then already:
-.I init
-sees the file system of the host and can connect to a UNIX domain socket bound
-to a path, but has no network \- no TCP or UDP endpoint, no abstract UNIX
-domain socket of the host. The other callbacks run in the same namespaces,
-after the ESDM dropped its privileges. A source that needs the network is
-served by a provider instead: the provider server calls all callbacks in its
-own process, with the privileges and in the namespaces it was started with.
+with the privileges the provider was started with \- a device the source
+needs is to be opened there: a provider program serving on the network, started
+as root, drops its privileges right afterwards
+.RB ( \-\-username ).
 .SS Entropy credit
 The ESDM credits a block with the entropy the source claims for it, but at
 most with what the entropy rate of the source allows: the rate configured for
 the source
-.RB ( es_ext_lib_entropy_rate ,
-.BR es_ext_socket_entropy_rate ,
-the corresponding
-.BR esdm\-server (8)
-options, or
-.BR esdm_config_es_ext_lib_entropy_rate_set ()
-and
+.RB ( es_ext_socket_entropy_rate ,
+.BR "esdm\-server \-\-es_ext_socket_entropy_rate" ,
+or
 .BR esdm_config_es_ext_socket_entropy_rate_set ()
-of libesdm), else the rate the source declares itself, else a default \- 256
-for a plugin library, which takes its claims as they are, 0 for a provider, so
-that a provider declaring none is credited only once a rate is configured. The
-status of the source shows the rate as
+of libesdm), else the rate the provider declares, else 0, so that a provider
+declaring none is credited only once a rate is configured. The status of the
+source shows the rate as
 .B entropy_rate
 and where it comes from as
 .B entropy_rate_source
 .RB ( config ,
-.BR plugin ,
 .B provider
 or
 .BR default ).
 .PP
-A plugin declares its rate with
+A source declares its rate with
 .IR entropy_rate ,
 bits of entropy per 256 bits of data from 0 to
 .B ESDM_ES_EXT_ENTROPY_RATE_MAX
 (256); a rate beyond is taken as 256. It is called once after
 .IR init ,
-so that the plugin can decide from the hardware it found. A provider declares its rate in its answer to INFO, see
-below; the provider server of this library declares the one of the
-.I entropy_rate
-of its plugin, or the one set with
-.BR esdm_es_ext_server_set_entropy_rate ().
-A provider is another process, trusted for the user it runs as: accepting that
-user
+so that the source can decide from the hardware it found. The provider
+declares the rate in its answer to INFO, see below; the provider server of
+this library declares the one of
+.IR entropy_rate ,
+or the one set with
+.BR esdm_es_ext_server_set_entropy_rate ()
+\- the
+.B \-\-entropy_rate
+of a provider program. A provider is another process, trusted for the user it
+runs as: accepting that user
 .RB ( "esdm\-server \-\-es_ext_socket_uid" )
-means trusting the rate the provider declares as well. An operator who does not
-want that configures the rate of the source, which takes precedence. A claim beyond the size of the block is a failure: the
-block is discarded, and the source is credited with nothing until it delivers
-properly again \- the ESDM asks a failed source again on its own to find out.
-A source is credited with nothing before its first
+means trusting the rate the provider declares as well. An operator who does
+not want that configures the rate of the source, which takes precedence. A
+claim beyond the size of the block is a failure: the block is discarded, and
+the source is credited with nothing until it delivers properly again \- the
+ESDM asks a failed source again on its own to find out. A source is credited
+with nothing before its first
 .IR selftest ,
 and a source failing it with nothing until a self test passes.
 .SH FUNCTIONS
+.SS Provider program
+.TP
+.BI "int esdm_es_ext_provider_main(const struct esdm_es_ext_plugin *" plugin ", int " argc ", char *" argv "[]);"
+The
+.BR main ()
+of a provider program: take the command line of
+.I argc
+and
+.I argv
+\- see
+.BR "PROVIDER PROGRAMS" ,
+.I argv[0]
+naming the program in its usage \-, set the source up \- call the
+.I init
+callback of
+.I plugin
+\- and serve it, on a UNIX domain socket or, in a library built with the meson
+option
+.BR es\-ext\-net ,
+on the network, until the program is ended by a signal. Returns the exit
+status of the program: 0 once a signal ended it, or for
+.B \-\-help
+and
+.BR \-\-version ;
+1 for a command line that is wrong, a source that cannot be set up or served
+\- told on stderr \- or serving that failed. A program calls it once, from its
+.BR main (),
+and returns what it returns: it parses the command line with
+.BR getopt_long (3),
+serves one source per process, and logs to stderr.
 .SS Provider server
 .TP
 .BI "int esdm_es_ext_server_alloc(const struct esdm_es_ext_plugin *" plugin ", const char *" socket_path ", mode_t " mode ", struct esdm_es_ext_server **" server );
@@ -232,7 +253,11 @@ file is not
 .RB ( \-EEXIST ).
 The ESDM connects with its privileges dropped (user
 .B nobody
-by default), so the mode has to let that user connect.
+by default), so the mode has to let that user connect. Returns
+.B \-EPROTO
+for callbacks that do not fit this version of the API, and the errno
+.I init
+returns if it fails, leaving no socket behind.
 .TP
 .BI "int esdm_es_ext_server_allow_uid(struct esdm_es_ext_server *" server ", uid_t " uid );
 Serve only clients running as root or as an allowed user, up to 8 of them;
@@ -247,10 +272,10 @@ Declare
 .I name
 as the name of the source in the answer to INFO, in place of the
 .I name
-of the plugin, which the server declares by default \- if it is a valid one.
+of the source, which the server declares by default \- if it is a valid one.
 Returns
 .B \-EINVAL
-for a name that is not valid; NULL goes back to the name of the plugin. Call
+for a name that is not valid; NULL goes back to the name of the source. Call
 it before
 .BR esdm_es_ext_server_run ().
 .TP
@@ -260,12 +285,12 @@ Declare
 bits of entropy per 256 bits of data, 0 to 256, as the rate of the source in
 the answer to INFO, in place of the one the
 .I entropy_rate
-callback of the plugin returns, which the server declares by default \- none
-for a plugin without it. Returns
+callback of the source returns, which the server declares by default \- none
+for a source without it. Returns
 .B \-EINVAL
 for a rate beyond 256;
 .B ESDM_ES_EXT_PROTO_RATE_NONE
-goes back to the rate of the plugin. Call it before
+goes back to the rate of the source. Call it before
 .BR esdm_es_ext_server_run ().
 .TP
 .BI "int esdm_es_ext_server_set_dtls(struct esdm_es_ext_server *" server ", int " enable );
@@ -292,15 +317,15 @@ return. Callable from another thread and from a signal handler.
 Close the connections, remove the socket file \- the one created, not one
 another instance put there meanwhile \- and call the
 .I fini
-callback of the plugin.
+callback of the source.
 .SS Provider server on the network
 A library built with the meson option
 .B es\-ext\-net
-serves a plugin to the ESDM of other hosts as well, on SCTP with DTLS and
+serves a source to the ESDM of other hosts as well, on SCTP with DTLS and
 certificates \- see
-.B Network
-below. The other functions of the provider server apply to such a server as
-well, but
+.BR NETWORK .
+The other functions of the provider server apply to such a server as well,
+but
 .BR esdm_es_ext_server_allow_uid (),
 which returns
 .B \-EINVAL
@@ -334,7 +359,7 @@ anchors and CRLs of
 .IR cfg ,
 binds the listeners and calls the
 .I init
-callback of the plugin: a daemon drops its privileges afterwards. Returns
+callback of the source: a daemon drops its privileges afterwards. Returns
 .B \-EINVAL
 for a configuration that does not parse or TLS files that do not load \- both
 logged \-,
@@ -353,31 +378,549 @@ new CRLs revoke. Callable from another thread and from a signal handler.
 Returns
 .B \-EINVAL
 for a server on a UNIX domain socket.
-.SS Plugin loader
-.TP
-.BI "int esdm_es_ext_plugin_load(const char *" path ", struct esdm_es_ext_plugin_handle **" handle ", const struct esdm_es_ext_plugin **" plugin );
-Load the plugin library
-.I path
-and check the plugin it exports, without calling its
-.I init
-callback \- the plugin is meant for
-.BR esdm_es_ext_server_alloc (),
-which does. Returns
-.B \-ENOENT
-for a library that cannot be loaded,
-.B \-ENOEXEC
-for one exporting no plugin, and
-.B \-EPROTO
-for a plugin of a version beyond
-.B ESDM_ES_EXT_PLUGIN_VERSION
-or without
-.IR get_entropy .
-.TP
-.BI "void esdm_es_ext_plugin_unload(struct esdm_es_ext_plugin_handle *" handle );
-Unload the library.
 .SH RETURN VALUE
-The functions returning an int return 0 on success and a negative errno on
-failure.
+The functions of the provider server returning an int return 0 on success and
+a negative errno on failure;
+.BR esdm_es_ext_provider_main ()
+returns the exit status of the program.
+.SH PROVIDER PROGRAMS
+A program whose
+.BR main ()
+calls
+.BR esdm_es_ext_provider_main ()
+\- or
+.BR esdm\-es\-pkcs11 (8),
+which takes the options of its token next to these \- serves its source on
+the UNIX domain socket
+.I PATH
+of
+.BR \-\-socket ,
+which
+.B esdm\-server \-\-es_ext_socket
+.I PATH
+connects to:
+.PP
+.nf
+my\-provider \-\-socket \fIPATH\fR [\-\-mode \fIMODE\fR] [\-\-client_uid \fIUSER\fR]...
+	[\-\-name \fINAME\fR] [\-\-entropy_rate \fIBITS\fR] [\-v]
+my\-provider \-\-listen [\fIHOST\fR]:\fIPORT\fR [\-\-cert \fIFILE\fR] [\-\-key \fIFILE\fR]
+	[\-\-ca \fIFILE\fR] [\fIOPTIONS\fR]
+.fi
+.PP
+With
+.B \-\-listen
+or sockets handed over by socket activation, it serves the source to the ESDM
+of other hosts instead \- on SCTP, with DTLS and certificates, see
+.BR NETWORK .
+.PP
+The source is set up \- its
+.I init
+called \- before the socket is served; callbacks that do not fit, or an
+.I init
+that fails, end the program with exit status 1, as does a command line that
+is wrong. It serves until it receives
+.BR SIGTERM ,
+.B SIGINT
+or \- on a UNIX domain socket \-
+.BR SIGHUP ,
+then removes the socket, calls the
+.I fini
+callback and exits with status 0. On the network,
+.B SIGHUP
+reloads the TLS files. The signals are blocked in every thread from the start
+\- one that
+.I init
+starts included \- and taken by a thread of their own. Once it serves, the
+program tells systemd so where it runs as a service of
+.B Type=notify
+\- in a library built with the meson option
+.BR systemd .
+.PP
+The ESDM accepts a provider running as root, or as the user given with
+.BR "esdm\-server \-\-es_ext_socket_uid" .
+It connects with its privileges dropped once a connection was lost, so the
+socket has to let the user the ESDM runs as connect \- by default
+.BR nobody ,
+hence the default mode 0666. A more restrictive mode needs the ESDM to run with
+a group that is granted access
+.RB ( "esdm\-server \-\-groupname" ).
+.PP
+The
+.I name
+of the source \- or the one given with
+.B \-\-name
+\- is the name the ESDM shows the source under, which it asks the provider for
+on every connection (INFO request, see
+.BR PROTOCOL ).
+The rate the
+.I entropy_rate
+callback of the source declares \- or the one given with
+.B \-\-entropy_rate
+\- is the entropy rate the ESDM credits the provider at, unless a rate is
+configured for the source in the ESDM
+.RB ( "esdm\-server \-\-es_ext_socket_entropy_rate" ),
+which takes precedence. Without either, the provider declares none and the
+ESDM credits it at 0 unless configured otherwise. Note that whoever runs a
+provider of a user the ESDM accepts can declare any rate this way: the ESDM
+operator who does not want to trust that configures the rate of the source.
+The rate the source declares is logged at start up.
+.PP
+In turn, on a UNIX domain socket, only clients running as root or as a user
+given with
+.B \-\-client_uid
+are served \- by default root and
+.BR nobody ,
+the user the ESDM runs as unless told otherwise. Any other client is
+disconnected at once, so that it can neither take the few client slots the
+ESDM needs nor drain the noise source. Up to 8 clients are served at a time,
+see
+.BR esdm_es_ext_server_run ().
+.SS Options
+.TP
+.BR \-s ", " \-\-socket " \fIPATH\fR"
+Socket to serve on. A socket left at the path by an earlier instance is
+replaced, any other file is not. Required, but on the network \- a program
+with a socket of its own, as
+.BR esdm\-es\-pkcs11 (8),
+serves that one without it.
+.TP
+.BR \-m ", " \-\-mode " \fIMODE\fR"
+Access mode of the socket, octal. The default is 0666.
+.TP
+.BR \-u ", " \-\-client_uid " \fIUSER\fR"
+Serve clients running as
+.I USER
+\- a uid or a user name \- next to root. May be given up to 8 times; the
+default is
+.BR nobody ,
+or root alone without a user of that name. Give the user of
+.B esdm\-server \-\-username
+if the ESDM runs as another one.
+.TP
+.BI \-\-name " NAME"
+Declare
+.I NAME
+as the name of the source in place of its own: 1 to 32 bytes of UTF-8 without
+control characters. A name that is none of that is refused at start up, with
+exit status 1.
+.TP
+.BI \-\-entropy_rate " BITS"
+Declare
+.I BITS
+of entropy per 256 bits of data, 0 to 256, as the rate of the source in place
+of the one it declares itself. Anything else is refused at start up, with exit
+status 1.
+.TP
+.B \-\-no_dtls
+Do not offer DTLS to the clients. A library built with DTLS (meson option
+.BR dtls )
+offers it by default, see
+.BR DTLS .
+.PP
+.BR \-\-socket ,
+.BR \-\-mode ,
+.B \-\-client_uid
+and
+.B \-\-no_dtls
+are for a UNIX domain socket, and refused on the network. The options below
+are for the network, and refused without
+.B \-\-listen
+or sockets handed over \- in a library built with the meson option
+.BR es\-ext\-net :
+.TP
+.BI \-\-listen " [HOST]:PORT"
+Listen on
+.I PORT
+of
+.I HOST
+\- an address or a name; an IPv6 address in brackets, as in
+.BR [2001:db8::1]:@ES_EXT_NET_PORT@ .
+Without
+.IR HOST ,
+or with
+.BR * ,
+on every address. May be given up to 16 times. Sockets handed over by socket
+activation
+.RB ( LISTEN_FDS )
+\- SCTP of the one-to-one style \- are served next to these. The relays
+connect to port @ES_EXT_NET_PORT@ by default (meson option
+.BR es\-ext\-net\-port ).
+.TP
+.BI \-\-cert " FILE"
+Certificate of the provider, PEM, optionally followed by the intermediate
+certificates of its chain, issued for the name the relays connect to. It has
+to chain to the trust anchors of
+.B \-\-ca
+as well: the provider and its clients are issued in one trust domain.
+.TP
+.BI \-\-key " FILE"
+Its private key, PEM, unencrypted, PKCS#8.
+.TP
+.BI \-\-ca " FILE"
+Trust anchors the certificates of the clients have to chain to, PEM. A chain
+ends in a self\-signed one, see
+.B \-\-ca
+in
+.BR esdm\-egd\-net\-server (8).
+.TP
+.BI \-\-crl " FILE"
+CRLs, PEM; a file may hold several. May be given up to 16 times. Complete CRLs
+only, no delta CRLs nor ones with an issuing distribution point. The checks are
+those of
+.B REVOCATION
+in
+.BR esdm\-egd\-net\-server (8),
+and so are the alerts a refused client is told \- but by a provider of the
+Botan backend, whose DTLS 1.2 server tells every client whose certificate it
+refuses bad_certificate. Its log tells why.
+.TP
+.B \-\-crl_check_all
+Require a CRL for every CA certificate of a client's chain as well, not only
+for its own certificate.
+.TP
+.B \-\-crl_allow_expired
+Use a CRL past its nextUpdate with a warning, rather than refusing the clients
+it covers.
+.TP
+.BI \-\-reload_interval " SEC"
+Check the TLS files for a change this often, and take them up when they
+changed. 0 checks them on
+.B SIGHUP
+only. The default is 60.
+.TP
+.BI \-\-allow " CIDR"
+Serve only clients from the network
+.IR CIDR ,
+such as
+.B 192.0.2.0/24
+or
+.BR 2001:db8::/48 ,
+or from a single address. May be given up to 64 times. An association from
+anywhere else is closed right after it was accepted. The default is every
+address.
+.TP
+.BI \-\-max_connections " N"
+Connections served at a time, in all. The default is 64.
+.TP
+.BI \-\-max_handshakes " N"
+Connections in their handshake at a time. The default is 16.
+.TP
+.BI \-\-max_handshakes_per_source " N"
+The same per source address \- per /64 for IPv6. The default is 4.
+.TP
+.BI \-\-max_per_client " N"
+Connections per client certificate; one beyond is closed right after its
+handshake. The default is 4.
+.TP
+.BI \-\-handshake_timeout " SEC"
+A connection that did not complete its handshake by then is closed. The
+default is 10.
+.TP
+.BI \-\-idle_timeout " SEC"
+A connection whose client sent no request for this long is closed; 0 for
+never. The default is 600. The relay connects again with the next request of
+the ESDM.
+.TP
+.BI \-\-username " USER"
+User to switch to after the sockets are bound, the TLS files loaded and the
+source set up, when started as root. The default is
+.BR nobody .
+The files are read as that user when they are taken up later.
+.TP
+.BI \-\-groupname " GROUP"
+Group to switch to; it and the group of the user are the supplementary groups
+then. The default is none.
+.PP
+And on either:
+.TP
+.BR \-v ", " \-\-verbose
+Verbose logging; repeat for more. On the network, warnings and errors are
+logged without it, as by the other daemons on the network.
+.TP
+.BR \-h ", " \-\-help
+Print the usage.
+.TP
+.B \-\-version
+Print the name the program was started under and the version of the library.
+.SS Status
+A provider program answers the STATUS request of the ESDM, which shows the
+answer as the
+.B provider
+member of the source in its own status, with one JSON object of up to 1024
+bytes:
+.PP
+.nf
+	{ "server": { ... }, "plugin": ... }
+.fi
+.PP
+.B plugin
+is the status the source reports of itself with its
+.I status_json
+callback \- or null for a source without one, one failing, one whose status
+is no JSON object of up to 512 bytes, nested no deeper than 8 levels, without
+NaN or infinities and without a C1 control or a bidirectional control in a
+string \- see above \- and one that does not fit next to the fields of the
+server; never a status cut short.
+.B server
+holds the fields of the provider server itself:
+.TP
+.B version
+the version of
+.BR libesdm_es_ext ;
+.TP
+.B plugin_api
+the
+.I version
+of the struct esdm_es_ext_plugin of the source;
+.TP
+.BR name ", " entropy_rate
+the name and the entropy rate it declares in its answer to INFO, those of
+.B \-\-name
+and
+.B \-\-entropy_rate
+or of the source, null for none;
+.TP
+.B transport
+.B unix
+on a UNIX domain socket,
+.B sctp
+on the network;
+.TP
+.B dtls
+whether the connection asking runs DTLS \- always on the network;
+.TP
+.B peer
+on the network only: the SHA-256 of the certificate of the client asking, in
+lower case hex \- that of the
+.BR esdm\-es\-ext\-relay (8)
+the ESDM reads the provider through;
+.TP
+.BR clients ", " client_slots
+the clients connected, and how many it serves at a time;
+.TP
+.B requests
+the requests it served, of all clients;
+.TP
+.B selftest
+the verdict of the last self test of the source a client asked for:
+.BR passed ,
+.BR failed ,
+or
+.B none
+before the first;
+.TP
+.B uptime_seconds
+the time since it was started.
+.SH NETWORK
+A provider program serving on the network is read by the ESDM of another host
+through the
+.BR esdm\-es\-ext\-relay (8)
+of that host, which serves the ESDM a local provider socket and forwards its
+requests:
+.PP
+.nf
+	esdm\-server \-\-\-unix socket\-\-\-> esdm\-es\-ext\-relay
+		\-\-\-SCTP, DTLS 1.2, certificates\-\-\-> provider program
+.fi
+.PP
+The transport is SCTP, one-to-one style, over IPv4 or IPv6, with DTLS 1.2 as
+RFC 6083 maps it onto SCTP:
+.IP \(bu 2
+Every DTLS record is one SCTP message, on stream 0, ordered; the requests and
+answers of the protocol below travel inside the DTLS from the first message on
+\- there is no STARTDTLS, and no message in the clear. SCTP retransmits, the
+DTLS does not.
+.IP \(bu 2
+Both sides authenticate with a certificate: the provider checks the client's
+against the trust anchors of
+.B \-\-ca
+and the CRLs of
+.BR \-\-crl ,
+the relay checks the provider's, and that it is issued for the name it
+connects to. A client is known by the SHA-256 of its certificate, which the
+STATUS of the provider tells as
+.BR peer .
+The cipher suites are ECDHE with ECDSA or RSA certificates, and AES-GCM or
+ChaCha20-Poly1305. DTLS 1.2 has no post-quantum algorithms: the key exchange
+of ML-KEM and the signatures of ML-DSA are defined for TLS 1.3 only, and none
+of the TLS stacks has DTLS 1.3. A certificate on ML-DSA is refused at the
+start; the certificates may still be issued by a CA on ML-DSA-87, where the
+TLS stack verifies ML-DSA \- OpenSSL 3.5 and later, GnuTLS built with
+leancrypto, Botan 3.6 and later -, not by one on ML-DSA-44 or ML-DSA-65.
+.IP \(bu 2
+The association authenticates its DATA and FORWARD-TSN chunks with SCTP-AUTH
+(RFC 4895): both sides require it before the association is set up, and refuse
+a peer that does not. Each side offers HMAC-SHA-256 first, and HMAC-SHA-1
+after it, as RFC 4895 has every endpoint offer it \- Linux takes no list
+without. Linux authenticates the chunks it sends with the first HMAC of the
+peer's list it supports, and takes either of its own list from the peer:
+between the daemons of the ESDM, both directions use HMAC-SHA-256, while a
+peer offering HMAC-SHA-1 first is sent HMAC-SHA-1. Linux does not tell which
+HMAC an association uses, so the daemons cannot check it. The handshake runs
+under key 0, the empty key. Before it sends its ChangeCipherSpec, each side
+waits until the peer acknowledged everything it sent, and installs key 1: the
+64 bytes of the TLS exporter
+.B EXPORTER_DTLS_OVER_SCTP
+of the DTLS session, without a context. It makes key 1 the active one once its
+ChangeCipherSpec is sent \- the server \- or its Finished \- the client \- and
+deletes key 0 once the handshake is complete. Neither side renegotiates, so the
+key is set once per association. This is the key handling of RFC 6083 as
+draft\-ietf\-tsvwg\-dtls\-over\-sctp\-bis details it for DTLS 1.2, and the one
+of OpenSSL's own DTLS over SCTP.
+.IP \(bu 2
+The kernel needs SCTP (module
+.BR sctp ),
+and SCTP-AUTH enabled on the sockets, which the daemons do themselves since
+Linux 5.4. An older kernel needs the sysctl
+.BR net.sctp.auth_enable=1 ;
+without it, the provider refuses to start, with an error naming the sysctl. A
+firewall in between has to pass SCTP to the port, which a rule for TCP does
+not.
+.PP
+The listener faces the network, and anybody who can reach it may connect, so
+the connections are bounded \- a connection is closed at once when it would
+exceed a bound: in all
+.RB ( \-\-max_connections ),
+in their handshake
+.RB ( \-\-max_handshakes ,
+.BR \-\-max_handshakes_per_source ),
+for at most
+.BR \-\-handshake_timeout ,
+per client
+.RB ( \-\-max_per_client ),
+and silent for at most
+.BR \-\-idle_timeout .
+The networks of
+.B \-\-allow
+limit where the clients may come from.
+.PP
+Renewed TLS files are taken up without a restart: on
+.BR SIGHUP ,
+and when one of them changes, which the provider checks every
+.B \-\-reload_interval
+seconds. A reload builds a complete new context first \- the certificate and
+the key parse, the key belongs to the certificate, the certificate chains to
+the trust anchors, every CRL parses \- and only then replaces the context in
+use; otherwise the error is logged and the old context stays in service, so
+that a broken rotation never takes the service down. New handshakes use the
+new context, established connections keep theirs. After every reload, the
+provider checks the clients of its connections against the new CRLs and closes
+those of a revoked certificate; every 30 seconds, those whose certificate
+expired.
+.PP
+A file named without a slash is a credential of the service: it is taken from
+.BR $CREDENTIALS_DIRECTORY ,
+where systemd places what
+.B LoadCredential=
+names. Without
+.BR \-\-cert ,
+.B \-\-key
+and
+.BR \-\-ca ,
+the credentials
+.BR cert ,
+.B key
+and
+.B ca
+are used \- what the units of
+.B SYSTEMD
+load. The credentials are copies made when the service starts: a rotation
+without a restart needs the paths of the files, readable by the user of the
+service.
+.PP
+Whoever holds a client certificate the provider accepts draws on its noise
+source; the ESDM behind the relay credits the rate the provider declares \-
+see
+.B TRUST
+in
+.BR esdm\-es\-ext\-relay (8).
+.SH SYSTEMD
+A provider program on a UNIX domain socket is best a service of
+.B Type=notify
+ordered
+.B Before=esdm\-server.service
+\- as the unit of
+.BR esdm\-es\-pkcs11 (8)
+is \-, so that the ESDM finds it at its initial seeding.
+.PP
+The ESDM ships no units for a provider on the network: such a provider is a
+program of the site's making. A socket unit and a service unit serve it on
+SCTP port @ES_EXT_NET_PORT@ of every address, as a user of its own
+.RB ( DynamicUser= ),
+with the TLS files as credentials from
+.IR /etc/esdm/es\-ext\-net/ :
+.PP
+.nf
+# /etc/systemd/system/my\-provider\-net.socket
+[Unit]
+Description=My external entropy source on the network, socket
+
+[Socket]
+ListenStream=@ES_EXT_NET_PORT@
+SocketProtocol=sctp
+Backlog=16
+
+[Install]
+WantedBy=sockets.target
+
+# /etc/systemd/system/my\-provider\-net.service
+[Unit]
+Description=My external entropy source on the network
+Requires=my\-provider\-net.socket
+After=my\-provider\-net.socket
+
+[Service]
+Type=notify
+ExecStart=/usr/libexec/my\-provider \-\-allow 192.0.2.0/24
+ExecReload=/bin/kill \-HUP $MAINPID
+LoadCredential=cert:/etc/esdm/es\-ext\-net/server.crt
+LoadCredential=key:/etc/esdm/es\-ext\-net/server.key
+LoadCredential=ca:/etc/esdm/es\-ext\-net/ca.crt
+DynamicUser=yes
+Restart=on\-failure
+PrivateDevices=yes
+ProtectSystem=strict
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi\-user.target
+Also=my\-provider\-net.socket
+.fi
+.PP
+Enable the service rather than the socket alone:
+.PP
+.nf
+systemctl enable \-\-now my\-provider\-net.service
+.fi
+.PP
+The provider sets the socket up for SCTP-AUTH as it starts, and refuses the
+associations the kernel set up before \- a start by the first connection
+refuses that one, which the relay makes again on its own. A source reaching a
+device needs it granted
+.RB ( PrivateDevices=no ,
+.BR DeviceAllow= ,
+and the group of the device with
+.BR SupplementaryGroups= ).
+A library built without the meson option
+.B systemd
+tells systemd nothing: use
+.B Type=exec
+then. Bind the socket to an address of its own with
+.BI ListenStream= ADDRESS : PORT ,
+and pass SCTP to the port in the firewall.
+.SH SEVERAL SOURCES
+A provider program serves one source. An ESDM built with several provider
+socket sources (meson option
+.BR es_ext_socket_num )
+reads several providers, one per source: run one provider per source, each on
+a socket of its own, and give the ESDM one
+.B \-\-es_ext_socket
+per socket, the n-th for its n-th source \- see
+.BR esdm\-server (8).
+The processes are independent of each other: each is restarted, and fails, on
+its own, and the ESDM credits each of them at the rate configured for its
+source.
 .SH PROTOCOL
 The ESDM sends requests on its connection to the provider one at a time; the
 provider answers each with exactly one response. Requests and responses are
@@ -407,11 +950,9 @@ A response is 16 bytes: magic, version and type as in the request, the status
 (s32: 0 or a negative errno) and the entropy of the data (u32, at most 8 times
 the length for GET_ENTROPY, 0 otherwise); a GET_ENTROPY answered with status 0
 is followed by exactly the length bytes of data, a STATUS answered with status
-0 by the status of the source \- the JSON text of
-.IR status_json ,
-1 to length bytes without the NUL \- an INFO answered with status 0 by what
-the provider declares of itself, see below, and any other response by
-nothing.
+0 by the status of the provider \- JSON text of 1 to length bytes without a
+NUL \- an INFO answered with status 0 by what the provider declares of itself,
+see below, and any other response by nothing.
 .PP
 A message that breaks any of this ends the connection, and so does a request
 of a type the provider does not know.
@@ -422,31 +963,28 @@ status is one JSON object of up to the length asked for, at most
 .B ESDM_ES_EXT_PROTO_STATUS_MAX
 (1024) bytes, nested no deeper than 9 levels; the ESDM checks that it is a
 well-formed JSON object, without NaN or infinities and without a C1 control
-or a bidirectional control in a string \- as for the status of a plugin, see
-above \- before it shows it as the
+or a bidirectional control in a string \- as the provider server checks the
+status of its source, see above \- before it shows it as the
 .B provider
 member of the source. A provider with no status answers
 .BR \-EOPNOTSUPP ,
 one whose status does not fit into the length
 .BR \-EMSGSIZE .
 .PP
-The provider server of this library \- and so
-.BR esdm\-es\-ext\-serve (8)
-\- answers with an object of its own,
+The provider server of this library answers with an object of its own,
 .PP
 .nf
 	{ "server": { ... }, "plugin": ... }
 .fi
 .PP
 .B plugin
-being the status
+being the status the
 .I status_json
-of its plugin reports \- asked for into a buffer of
+callback of its source reports \- asked for into a buffer of
 .B ESDM_ES_EXT_STATUS_MAX
-(512) bytes and the NUL, and checked as the ESDM checks the status of a plugin
-it loads \- or null for none, a failing one, one that is no such object, and
-one that does not fit into the length next to the fields of the server, which
-are never cut short:
+(512) bytes and the NUL \- or null for none, a failing one, one that is no
+such object, and one that does not fit into the length next to the fields of
+the server, which are never cut short:
 .BR version ,
 .BR plugin_api ,
 the
@@ -471,11 +1009,13 @@ there are, the
 .B requests
 served, the
 .B selftest
-verdict of the plugin and the
+verdict of the source and the
 .B uptime_seconds
 \- see
-.BR esdm\-es\-ext\-serve (8).
-So a STATUS of a provider of this library is answered whether its plugin has a
+.B Status
+under
+.BR "PROVIDER PROGRAMS" .
+So a STATUS of a provider of this library is answered whether its source has a
 status or not. A provider written without the library answers with an object
 of its own making, within the same bounds.
 .PP
@@ -515,26 +1055,31 @@ is the rate the provider declares for its data, bits of entropy per 256 bits,
 is the name of the source without a NUL, no bytes for a provider without a
 name; or with a negative errno, such as
 .BR \-EOPNOTSUPP ,
-and no data, which declares nothing. The ESDM shows the source under the name
-as a plugin library under the
+and no data, which declares nothing. The ESDM shows the source under the name,
+and takes it only if it is valid as
 .I name
-of its plugin, and takes it only if it is valid in the same way; a name that is
-not valid is not taken, and the source shown under its instance name. It
-credits the provider at the rate unless a rate is configured for the source,
-taking a rate beyond 256 as 256. An answer of more than 36 bytes, or another
-answer that breaks the protocol, ends the connection as for any request. The
-provider server of this library answers with the
+of the callbacks of a source has it; a name that is not valid is not taken,
+and the source shown under its instance name. It credits the provider at the
+rate unless a rate is configured for the source, taking a rate beyond 256 as
+256. An answer of more than 36 bytes, or another answer that breaks the
+protocol, ends the connection as for any request. The provider server of this
+library answers with the
 .I name
 and the
 .I entropy_rate
-of its plugin, or the ones set with
+of its source, or the ones set with
 .BR esdm_es_ext_server_set_name ()
 and
-.BR esdm_es_ext_server_set_entropy_rate ().
-A provider older than INFO closes the connection on it, as on any request it
-does not know: the ESDM connects again at once without asking on the new
-connection, and uses the provider without a name and a rate. Both are asked
-for anew on every connection \- a provider restarted may declare others.
+.BR esdm_es_ext_server_set_entropy_rate ()
+\- those of
+.B \-\-name
+and
+.B \-\-entropy_rate
+of a provider program. A provider older than INFO closes the connection on it,
+as on any request it does not know: the ESDM connects again at once without
+asking on the new connection, and uses the provider without a name and a rate.
+Both are asked for anew on every connection \- a provider restarted may
+declare others.
 .SS DTLS
 An ESDM built with DTLS (meson option
 .BR dtls ,
@@ -570,9 +1115,7 @@ by records with the byte in front. Both sides authenticate with a certificate,
 and the relay checks the name of the provider. The association authenticates
 its DATA and FORWARD-TSN chunks with SCTP-AUTH (RFC 4895), the key of which is
 exported from the DTLS session \- see
-.B NETWORK
-in
-.BR esdm\-es\-ext\-serve (8).
+.BR NETWORK .
 The STATUS of the server tells
 .B sctp
 as its
@@ -581,14 +1124,12 @@ and as its
 .B peer
 the SHA-256 of the certificate of the client asking.
 .SH EXAMPLE
-A plugin library, built with
-.B cc \-shared \-fPIC
-and loaded with
-.BR "esdm\-server \-\-es_ext_lib /usr/lib/esdm/my_es.so" ,
-or served with
-.BR "esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/my_es.so \-\-socket /run/my\-es.socket" :
+A provider program: the callbacks of the source, and a
+.BR main ()
+serving them.
 .PP
 .nf
+#include <errno.h>
 #include <esdm/esdm_es_ext.h>
 
 static int my_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
@@ -604,17 +1145,52 @@ static int my_get_entropy(void *ctx, uint8_t *buf, size_t buflen,
 	return 0;
 }
 
-ESDM_ES_EXT_PLUGIN_EXPORT
-const struct esdm_es_ext_plugin esdm_es_ext_plugin = {
+static const struct esdm_es_ext_plugin my_source = {
 	.version = ESDM_ES_EXT_PLUGIN_VERSION,
-	.name = "my-noise-source",
+	.name = "my\-noise\-source",
 	.get_entropy = my_get_entropy,
 };
+
+int main(int argc, char *argv[])
+{
+	return esdm_es_ext_provider_main(&my_source, argc, argv);
+}
+.fi
+.PP
+Built against this library, and served to the ESDM:
+.PP
+.nf
+cc \-o my\-provider my_provider.c $(pkg\-config \-\-cflags \-\-libs esdm_es_ext)
+my\-provider \-\-socket /run/my\-es.socket
+esdm\-server \-\-es_ext_socket /run/my\-es.socket
+.fi
+.PP
+.I es\-ext/example/esdm_es_ext_example.c
+of the source tree is such a program, reading a device \- non-blocking, with
+a deadline per request \- with a self test, a status and a declared rate.
+.PP
+Two providers, served to an ESDM with two provider socket sources:
+.PP
+.nf
+/usr/libexec/a\-provider \-\-socket /run/esdm\-es\-a.socket
+/usr/libexec/b\-provider \-\-socket /run/esdm\-es\-b.socket
+esdm\-server \-\-es_ext_socket /run/esdm\-es\-a.socket \\
+	\-\-es_ext_socket /run/esdm\-es\-b.socket
+.fi
+.PP
+A provider on the network, for the relay of the ESDM host 192.0.2.10:
+.PP
+.nf
+my\-provider \-\-listen :@ES_EXT_NET_PORT@ \\
+	\-\-cert /etc/esdm/es\-ext\-net/server.crt \\
+	\-\-key /etc/esdm/es\-ext\-net/server.key \\
+	\-\-ca /etc/esdm/es\-ext\-net/ca.crt \-\-allow 192.0.2.10
 .fi
 .SH SEE ALSO
 .BR esdm\-server (8),
-.BR esdm\-es\-ext\-serve (8),
 .BR esdm\-es\-ext\-relay (8),
+.BR esdm\-es\-pkcs11 (8),
+.BR esdm\-egd\-net\-server (8),
 .BR libesdm (3)
 .SH AUTHOR
 Markus Theil <theil.markus@gmail.com>

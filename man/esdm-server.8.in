@@ -146,29 +146,6 @@ Disabled by default. The EGD protocol cannot ask for prediction resistance;
 the socket serves it with commands of the ESDM's own, see
 .BR "EGD PROTOCOL EXTENSIONS" .
 .TP
-.BR \-\-es_ext_lib " \fIPATH\fR"
-Load the plugin library
-.I PATH
-as external entropy source instead of the one the build was configured with
-(meson option
-.BR es_ext_lib_path ),
-see
-.B EXTERNAL ENTROPY SOURCES
-below. Like all options of the external entropy sources, it may be given once
-for each source of its kind the build has: the n-th occurrence configures the
-n-th source.
-.TP
-.BR \-\-es_ext_lib_entropy_rate " \fIBITS\fR"
-Credit a block of the plugin with at most
-.I BITS
-bits of entropy per 256 bits of data, 0 to 256, instead of the rate of the
-build (meson option
-.BR es_ext_lib_entropy_rate ),
-or \- with
-.B auto
-\- at the rate the plugin declares, 256 if it declares none. Without the option
-and the meson option, the plugin is credited at the rate it declares.
-.TP
 .BR \-\-es_ext_socket " \fIPATH\fR"
 Read the external entropy source a provider process serves on the UNIX domain
 socket
@@ -177,7 +154,9 @@ instead of the one the build was configured with (meson option
 .BR es_ext_socket_path ),
 see
 .B EXTERNAL ENTROPY SOURCES
-below.
+below. Like all options of the external entropy sources, it may be given once
+for each source the build has: the n-th occurrence configures the n-th
+source.
 .TP
 .BR \-\-es_ext_socket_entropy_rate " \fIBITS\fR"
 Credit a block of the provider with at most
@@ -219,74 +198,47 @@ build, that is what the daemon does anyway. See
 .B ENCRYPTION
 below.
 .SH EXTERNAL ENTROPY SOURCES
-Noise sources that are not part of the ESDM are written against
+Noise sources that are not part of the ESDM are served to the daemon by a
+provider: a process of its own, written against
 .BR libesdm_es_ext (3)
-as a plugin and handed to the daemon in one of two ways.
+\- the callbacks of the source, served by a provider program of the library,
+such as
+.BR esdm\-es\-pkcs11 (8)
+\- or speaking its protocol without it. The daemon loads no code of a source
+into its own process: it reads the provider over the UNIX domain socket given
+with
+.BR \-\-es_ext_socket .
 .PP
-A plugin library given with
-.B \-\-es_ext_lib
-is loaded into the daemon and its initialization callback run while the daemon
-still has its privileges \- a device the plugin reads is opened there. The
-daemon has left the mount, cgroup and network namespaces of the host before,
-so the callback reaches no network already: no TCP or UDP endpoint and no
-abstract UNIX domain socket of the host, only a socket bound to a path.
-Afterwards the plugin runs with the privileges and in the namespaces of the
-daemon. A library that cannot be loaded, exports no plugin of the supported
-version, or fails its initialization leaves the source switched off; the
-reason is logged.
-.PP
-The daemon has as many plugin library sources and provider socket sources as
-the build was configured with (meson options
-.B es_ext_lib_num
-and
+The daemon has as many provider socket sources as the build was configured
+with (meson option
 .BR es_ext_socket_num ,
-one of each by default, up to 16 each). Each is an entropy source of its own,
-with its own plugin or provider, entropy rate, accepted user and state, credited
-and failing on its own. The options of the external entropy sources configure
-one source each time they are given, the n-th occurrence of an option the n-th
-source of its kind, counted per option; an occurrence beyond the sources of the
-build is refused. With one source of a kind, it is called
-.B ExternalLib
-or
+one by default, up to 16). Each is an entropy source of its own, with its own
+provider, entropy rate, accepted user and state, credited and failing on its
+own. The options of the external entropy sources configure one source each
+time they are given, the n-th occurrence of an option the n-th source, counted
+per option; an occurrence beyond the sources of the build is refused. With one
+source, it is called
 .B ExternalSocket
 in the status; with several, they are called
-.BR ExternalLib0 ,
-.B ExternalLib1
-and so on. A source whose plugin or provider declares a name of its own is
-shown under that name in the status and in the log, its name in the ES table
-kept as its
+.BR ExternalSocket0 ,
+.B ExternalSocket1
+and so on. A source whose provider declares a name of its own is shown under
+that name in the status and in the log, its name in the ES table kept as its
 .B instance
 in the status \- see
 .BR libesdm_es_ext (3).
-A plugin library serves one source: a second source given the plugin
-another one uses refuses it. Several providers are served by several
-.BR esdm\-es\-ext\-serve (8)
-processes, each on a socket of its own:
+Several providers are several processes, each on a socket of its own:
 .PP
 .nf
-esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/a.so \-\-socket /run/esdm\-es\-a.socket
-esdm\-es\-ext\-serve \-\-plugin /usr/lib/esdm/b.so \-\-socket /run/esdm\-es\-b.socket
+/usr/libexec/a\-provider \-\-socket /run/esdm\-es\-a.socket
+/usr/libexec/b\-provider \-\-socket /run/esdm\-es\-b.socket
 esdm\-server \-\-es_ext_socket /run/esdm\-es\-a.socket \-\-es_ext_socket_entropy_rate 128 \\
 	\-\-es_ext_socket /run/esdm\-es\-b.socket \-\-es_ext_socket_entropy_rate 64
 .fi
 .PP
-Each block is credited with the entropy the plugin claims for it, but with at
-most what the configured rate allows. A plugin that fails to deliver, or claims
-more entropy than the block can hold, is credited with nothing until it
-delivers again; the daemon asks it again on its own, at most every 5 seconds,
-to find out. A plugin is credited with nothing before its first self test,
-which runs before the daemon seeds its DRNGs, and a plugin failing its self
-test with nothing until a self test passes.
-.PP
-A provider given with
-.B \-\-es_ext_socket
-is a process of its own serving the source with the provider server of
-.BR libesdm_es_ext (3),
-such as
-.BR esdm\-es\-ext\-serve (8).
-The daemon connects to it at start up and whenever the connection was lost,
-at most every 5 seconds after a failed attempt, and sends one request at a time.
-A connection the provider closed while it was idle \- the provider was
+The daemon connects to a provider at start up and whenever the connection was
+lost, at most every 5 seconds after a failed attempt, and sends one request at
+a time. A connection the provider closed while it was idle \- the provider was
 restarted, or made room for another client \- is made again at once.
 It checks the credentials of the provider on every connection: anybody who can
 create the socket file could otherwise feed the daemon with data credited as
@@ -297,51 +249,52 @@ was lost, so the socket has to let the user it runs as
 .RB ( \-\-username )
 connect. A provider that does not answer within 2 seconds, or answers what the
 protocol does not allow, is disconnected and not connected to again for 5
-seconds; one that is not connected, or failed, is credited with nothing until
-it delivers again, which the daemon finds out on its own. The same entropy credit
-applies as for a plugin, with the rate of
-.BR \-\-es_ext_socket_entropy_rate ,
-else the one the provider declares, else 0;
-every new connection to a provider \- one that is not there at start up, one
-restarted \- begins with a self test of it, and the provider is credited with
-nothing before that passed.
+seconds.
 .PP
-A plugin or a provider may declare the entropy rate of its data (the
-.I entropy_rate
-callback of a plugin, and the INFO request of the socket protocol, see
+Each block is credited with the entropy the provider claims for it, but with
+at most what the rate of the source allows. A provider that is not connected,
+fails to deliver, or claims more entropy than the block can hold, is credited
+with nothing until it delivers again; the daemon asks it again on its own, at
+most every 5 seconds, to find out. Every new connection to a provider \- the
+first one, one to a provider that is not there at start up, one to a provider
+restarted \- begins with a self test of it, and the provider is credited with
+nothing before that passed: at start up before the daemon seeds its DRNGs. A
+provider failing its self test is credited with nothing until a self test
+passes.
+.PP
+A provider may declare the entropy rate of its data (the INFO request of the
+socket protocol, see
 .BR libesdm_es_ext (3)):
 the daemon credits the source at that rate unless one is configured for the
-source, which takes precedence. The status of each source shows the rate it is
-credited at as
+source with
+.BR \-\-es_ext_socket_entropy_rate ,
+which takes precedence, and at 0 if the provider declares none. The status of
+each source shows the rate it is credited at as
 .B entropy_rate
 and where the rate comes from as
 .BR entropy_rate_source :
 .BR config ,
-.B plugin
-or
 .BR provider ,
 or
 .B default
-\- 256 for a plugin, 0 for a provider.
+\- 0.
 .PP
-A plugin, or a provider, may report a status of its own, a JSON object: the
-status of the daemon shows it as the
+A provider may report a status of its own, a JSON object: the status of the
+daemon shows it as the
 .B provider
 member of the state of the source, a section of its own in the text form
 .RB ( "esdm\-tool \-\-status" ).
 It is asked for at most every 5 seconds, the last one shown in between, and
 not while the source serves a request \- the status does not wait for a
 seeding. A seeding does wait for a status asked for, as the source serves one
-request at a time: for a plugin, as long as its status takes, for a provider
-half a second at the most \- the daemon waits for no more, and the provider
-keeps its connection. A provider answers one request after the other, so a
-seeding right after waits for the provider to answer the status first, and
-the answer is shown when it comes in. Such a provider is not asked for its
-status for a minute. The status is left out when it is no well-formed JSON
-object \- of up to 512 bytes for a plugin, of up to 1024 bytes for a provider,
-whose
-.BR esdm\-es\-ext\-serve (8)
-answers with fields of its own next to the status of its plugin \- and while
+request at a time, for half a second at the most \- the daemon waits for no
+more, and the provider keeps its connection. A provider answers one request
+after the other, so a seeding right after waits for the provider to answer the
+status first, and the answer is shown when it comes in. Such a provider is not
+asked for its status for a minute. The status is left out when it is no
+well-formed JSON object of up to 1024 bytes \- a provider of
+.BR libesdm_es_ext (3)
+answers with fields of its own next to the status of its source \- and while
 it is due but the source is busy. Each source has a status of its own, asked
 for, cached and left out on its own. The status connects to no provider: one
 that is not connected has none, until a seeding or the monitor of the sources
@@ -379,10 +332,10 @@ to its command line, which a drop\-in sets \- see
 .BR esdm\-es\-pkcs11 (8).
 .SS Sources on other hosts
 The daemon reaches no network: it has left the network namespace of the host
-when it reads a provider. A provider on another host \- an
-.BR esdm\-es\-ext\-serve (8)
-or
-.BR esdm\-es\-pkcs11 (8)
+when it reads a provider. A provider on another host \- a provider program of
+.BR libesdm_es_ext (3),
+such as
+.BR esdm\-es\-pkcs11 (8),
 serving on SCTP with DTLS and certificates \- is read through the
 .BR esdm\-es\-ext\-relay (8)
 of this host (meson option
@@ -636,7 +589,6 @@ exits with a non\-zero status when it cannot initialize the ESDM or the
 requested interfaces.
 .SH SEE ALSO
 .BR esdm\-tool (1),
-.BR esdm\-es\-ext\-serve (8),
 .BR esdm\-es\-pkcs11 (8),
 .BR esdm\-es\-ext\-relay (8),
 .BR esdm\-cuse\-random (8),
@@ -647,6 +599,7 @@ requested interfaces.
 .BR libesdm (3),
 .BR libesdm_rpc_client (3),
 .BR libesdm_egd_client (3),
+.BR libesdm_es_ext (3),
 .BR esdm\-egd\-net\-server (8),
 .BR esdm\-egd\-net\-relay (8)
 .SH AUTHOR

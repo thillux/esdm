@@ -91,21 +91,20 @@ to the ESDM applies:
     configuration option of `es_cpu`.
 
   - The Linux HWRAND entropy source (section @sec:hwrand), the TPM2 entropy
-    source (section @sec:tpm2) and the external entropy sources ExternalLib
-    and ExternalSocket (section @sec:ext-es) - the PKCS\#11 entropy source
+    source (section @sec:tpm2) and the external entropy sources
+    ExternalSocket (section @sec:ext-es) - the PKCS\#11 entropy source
     `esdm-es-pkcs11` (section @sec:pkcs11) among the latter - are used by the
     ESDM, if enabled and available. Their SP800-90B compliance must be
     assessed separately. If SP800-90B compliance cannot be demonstrated, they
     must be awarded to credit zero bits of entropy with the meson
     configuration options of `es_hwrand_entropy_rate`,
-    `es_tpm2_entropy_rate`, `es_ext_lib_entropy_rate` and
-    `es_ext_socket_entropy_rate` - which take precedence over the rate a
-    source declares, such as the one of `es_pkcs11_entropy_rate` - or by
-    completely disabling them by not selecting the meson configuration
-    options of `es_hwrand`, `es_tpm2` and `es_ext`. The rate options of the
-    external entropy sources take one rate for all sources of their kind, or
-    one per source for a build with several (`es_ext_lib_num`,
-    `es_ext_socket_num`), each of which is assessed on its own.
+    `es_tpm2_entropy_rate` and `es_ext_socket_entropy_rate` - which takes
+    precedence over the rate a source declares, such as the one of
+    `es_pkcs11_entropy_rate` - or by completely disabling them by not
+    selecting the meson configuration options of `es_hwrand`, `es_tpm2` and
+    `es_ext`. The rate option of the external entropy sources takes one rate
+    for all sources, or one per source for a build with several
+    (`es_ext_socket_num`), each of which is assessed on its own.
 
   - The kernel RNG entropy source is never credited with entropy when the
     oversampling is compiled in, as the kernel RNG is not considered
@@ -261,11 +260,10 @@ general configurations listed in the next section:
 
 - Adjust the entropy rates of the TPM2 and the external entropy sources - the
   PKCS\#11 one among them - the same way with the meson configuration options
-  of `es_tpm2_entropy_rate`, `es_ext_lib_entropy_rate` and
-  `es_ext_socket_entropy_rate`, depending on whether the respective source is
-  a physical entropy source. `es_pkcs11_entropy_rate` sets the rate
-  `esdm-es-pkcs11` declares, which the ESDM credits unless one is configured
-  for its source.
+  of `es_tpm2_entropy_rate` and `es_ext_socket_entropy_rate`, depending on
+  whether the respective source is a physical entropy source.
+  `es_pkcs11_entropy_rate` sets the rate `esdm-es-pkcs11` declares, which the
+  ESDM credits unless one is configured for its source.
 
 - If other hardware entropy sources are considered deliver entropy, they may
   inject data into the ESDM via the IOCTL `RNDADDENTROPY` or the
@@ -606,9 +604,9 @@ must be applied:
   `es_irq_ebpf_entropy_rate=0`, `es_sched_ebpf_entropy_rate=0`,
   `es_jent_entropy_rate=0`, `es_jent_kernel_entropy_rate=0`,
   `es_cpu_entropy_rate=0`, `es_kernel_entropy_rate=0`,
-  `es_hwrand_entropy_rate=0`, `es_tpm2_entropy_rate=0`,
-  `es_ext_lib_entropy_rate=0` and `es_ext_socket_entropy_rate=0` - for the
-  provider socket sources other than the one of the PTG.2 entropy source. Note, an entropy source with an entropy rate
+  `es_hwrand_entropy_rate=0`, `es_tpm2_entropy_rate=0` and
+  `es_ext_socket_entropy_rate=0` - for the provider socket sources other than
+  the one of the PTG.2 entropy source. Note, an entropy source with an entropy rate
   of 0 is not disabled: its data is still collected and handed to the DRNG as
   additional input as outlined in section @sec:sp80090c, but it is not
   credited with entropy. An entropy source is disabled by unsetting its
