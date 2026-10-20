@@ -61,10 +61,20 @@
 #endif
 
 /*
- * A provider that does not answer STATUS in time is disconnected as for any
- * request - and not asked for its status again for this many seconds: a
- * status taking that long would cost the connection, and hold up the
- * seedings for the timeout, whenever the ESDM status is asked for.
+ * How long the ESDM status waits for the status of a provider, the source held
+ * meanwhile - and a seeding waiting for it. A provider that does not answer
+ * STATUS by then keeps its connection: its answer is taken off it when the
+ * connection is used next. A fraction of the timeout of a request, so that a
+ * seeding behind it has time for its own request still.
+ */
+#ifndef ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS
+#define ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS (ESDM_EXT_SOCKET_TIMEOUT_MS / 4)
+#endif
+
+/*
+ * A provider that does not answer STATUS in time is not asked for its status
+ * again for this many seconds: a status taking that long would hold up a
+ * seeding whenever the ESDM status is asked for.
  */
 #ifndef ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC
 #define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 60

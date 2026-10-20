@@ -330,17 +330,24 @@ status of the daemon shows it as the
 member of the state of the source, a section of its own in the text form
 .RB ( "esdm\-tool \-\-status" ).
 It is asked for at most every 5 seconds, the last one shown in between, and
-not while the source serves a request \- neither the status nor the seeding
-waits for the other. It is left out when it is no well-formed JSON object \- of
-up to 512 bytes for a plugin, of up to 1024 bytes for a provider, whose
+not while the source serves a request \- the status does not wait for a
+seeding. A seeding does wait for a status asked for, as the source serves one
+request at a time: for a plugin, as long as its status takes, for a provider
+half a second at the most \- the daemon waits for no more, and the provider
+keeps its connection. A provider answers one request after the other, so a
+seeding right after waits for the provider to answer the status first, and
+the answer is shown when it comes in. Such a provider is not asked for its
+status for a minute. The status is left out when it is no well-formed JSON
+object \- of up to 512 bytes for a plugin, of up to 1024 bytes for a provider,
+whose
 .BR esdm\-es\-ext\-serve (8)
 answers with fields of its own next to the status of its plugin \- and while
 it is due but the source is busy. Each source has a status of its own, asked
-for, cached and left out on its own. A provider that does
-not know the request closes the connection on it; the daemon connects again at
-once and does not ask again until the connection is lost. One that does not
-answer it within 2 seconds is disconnected as for any request, and not asked
-for its status for a minute.
+for, cached and left out on its own. The status connects to no provider: one
+that is not connected has none, until a seeding or the monitor of the sources
+connects to it again, which they do at once when the connection was lost. A
+provider that does not know the request closes the connection on it; it is
+not asked on the connection made next.
 .PP
 A daemon built with DTLS (meson option
 .BR dtls )

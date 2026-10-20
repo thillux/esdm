@@ -151,7 +151,8 @@ these would steer the terminal of whoever reads the status. It is asked
 for when the ESDM status is, at most every 5 seconds \- the last status
 obtained shown in between \- and not while
 a request of the ESDM to the source is in progress, the ESDM status going
-without it then. It must not block for long: the source waits for it.
+without it then. It must not block for long: the source waits for it, and so
+does a seeding.
 .PP
 The callbacks are never called concurrently. The ESDM calls
 .I init
@@ -479,14 +480,21 @@ status or not. A provider written without the library answers with an object
 of its own making, within the same bounds.
 .PP
 The answer travels as one message \- with DTLS, as one record, as it is far
-smaller than the part a record carries. A provider older than STATUS closes the connection on it, as on any
-request it does not know: the ESDM connects again at once, still crediting the
-provider, and does not ask again until it connects the next time. A connection
-found closed when STATUS is sent, as one to a provider restarted meanwhile, is
-no such refusal: the ESDM connects again and asks on the new connection. A
-provider not answering STATUS within the timeout of a request is disconnected
-as for any request, connected to again after the retry interval, and not asked
-for its status for a minute.
+smaller than the part a record carries. A provider older than STATUS closes
+the connection on it, as on any request it does not know: the next request of
+the ESDM connects again at once, the provider still credited, and the ESDM
+does not ask for its status on that connection. A connection found closed
+when STATUS is sent, as one to a provider restarted meanwhile, is no such
+refusal: the provider is asked on the connection the next request makes. The
+ESDM status connects to no provider itself.
+.PP
+The ESDM status waits for the answer a quarter of the timeout of a request \-
+half a second \- at the most, as the source is held meanwhile, and a seeding
+waits for it. A provider that answers later keeps its connection: it answers
+one request after the other, so its answer comes in before the one to the next
+request, and the ESDM takes it off the connection and shows it then \- with
+the next request, before it, or with the next ESDM status. Such a provider is
+not asked for its status for a minute.
 .SS INFO
 The ESDM asks the provider what it declares of itself once per connection,
 before any other request but STARTDTLS: inside the DTLS session where there is

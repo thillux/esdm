@@ -54,12 +54,15 @@
  * - The status of the provider is the "provider" member of the state, if it
  *   is a JSON object. It is asked for at most once per interval, and not
  *   while a request is in progress - which neither the ESDM status nor the
- *   entropy available waits for. A provider that does not know STATUS - it
- *   closes the connection on it - is connected to again at once, and not
- *   asked again on that connection. One that was restarted is asked on a new
- *   connection at once. One that does not answer STATUS in time is
- *   disconnected as for any request, connected to again after the retry
- *   interval only - with DTLS - and not asked for its status for a while.
+ *   entropy available waits for. The ESDM status connects to no provider: a
+ *   provider that does not know STATUS - it closes the connection on it - is
+ *   connected to again by the next seeding, at once, and not asked on that
+ *   connection; one that was restarted is asked on the connection the next
+ *   seeding makes, at once. One that does not answer STATUS in time is not
+ *   waited for any longer, but keeps its connection: its answer, coming in
+ *   later, is taken off it by the next seeding, or the next ESDM status, and
+ *   shown - and the seeding is served. Nor is it asked for its status for a
+ *   while.
  *
  * The source is compiled into the test, with a short retry interval and
  * timeout so that the test does not have to wait for long.
@@ -69,7 +72,8 @@
 
 #define ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC 1
 #define ESDM_EXT_SOCKET_TIMEOUT_MS 300
-#define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 3
+#define ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS 50
+#define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 2
 
 /* The unit under test */
 #include "esdm_es_extsock.c"
@@ -749,11 +753,14 @@ static void test_status(void)
 
 /*
  * A provider restarted while the connection was idle: the request for its
- * status finds the connection gone, which is no refusal of STATUS - the
- * provider is connected to again and asked on the new connection at once.
+ * status finds the connection gone, which is no refusal of STATUS. The ESDM
+ * status goes without the status of the provider, and does not connect to it:
+ * the next seeding does, at once, and the provider is asked on the new
+ * connection.
  */
 static void test_status_restarted(void)
 {
+	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	struct json_object *state, *provider;
 
 	provider = test_provider(&state);
@@ -764,8 +771,16 @@ static void test_status_restarted(void)
 	CHECK_EQ(test_server_start(), 0);
 
 	provider = test_provider(&state);
+	CHECK(!provider, "a provider restarted has the status of the one before");
+	CHECK(es_state_str_has(state, "status", "not connected"),
+	      "the ESDM status connected to the restarted provider: %s",
+	      es_state_print(state));
+	json_object_put(state);
+
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	provider = test_provider(&state);
 	CHECK(provider != NULL,
-	      "the restarted provider was not asked on a new connection: %s",
+	      "the restarted provider was not asked on the new connection: %s",
 	      es_state_print(state));
 	CHECK(es_state_str_has(state, "status", "connected (uid"),
 	      "the restarted provider is not connected to: %s",
@@ -778,57 +793,100 @@ static void test_status_restarted(void)
 }
 
 /*
- * A provider whose status takes longer than a request may: it is busy with
- * it when it is given up on, and could not take a new connection - whose
- * STARTDTLS would time out and leave the connection unencrypted. It is
- * disconnected as for any request instead, the source held for no longer
- * than the timeout, connected to again after the retry interval, encrypted
- * if it can be, and not asked for its status again before its backoff is
- * over.
+ * A provider whose status takes longer than the ESDM status waits for it: the
+ * source is held for no longer than that, and the provider keeps its
+ * connection - it answers one request after the other. Its answer comes in
+ * later, before the one to the next request: taken off the connection by the
+ * next seeding - which is served on the connection - or by the next ESDM
+ * status, it is shown as the status of the provider. Nor is the provider
+ * asked for its status again before its backoff is over.
  */
 static void test_status_slow(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
+	/* Longer than the timeout of any request */
+	const unsigned int slow = 3 * ESDM_EXT_SOCKET_TIMEOUT_MS;
+	/* Answered well within the timeout of the request after it */
+	const unsigned int late = 2 * ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS;
 	struct json_object *state, *provider;
-	struct timespec start, end;
-	unsigned int calls;
+	unsigned int calls, selftests;
+	struct timespec start;
 	int64_t ms;
 
 	/* On a new connection, whatever was asked on the one before */
 	CHECK_EQ(esdm_es_ext_socket_set_path(0, test_good), 0);
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	/* Each connection tests the provider first: no new one is made */
+	selftests = ctl->selftest_calls;
 
-	ctl->status_delay_ms = 3 * ESDM_EXT_SOCKET_TIMEOUT_MS;
+	ctl->status_text = "{\"slow\":1}";
+	ctl->status_delay_ms = slow;
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	provider = test_provider(&state);
-	clock_gettime(CLOCK_MONOTONIC, &end);
+	ms = test_ms_since(&start);
 	ctl->status_delay_ms = 0;
-	ms = (int64_t)(end.tv_sec - start.tv_sec) * 1000 +
-	     (end.tv_nsec - start.tv_nsec) / 1000000;
 	CHECK(!provider, "a status too late is taken");
-	CHECK(es_state_str_has(state, "status", "not connected"),
-	      "a provider busy with its status was connected to again: %s",
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "a provider slow with its status was disconnected: %s",
 	      es_state_print(state));
 	json_object_put(state);
-	CHECK(ms < 2 * ESDM_EXT_SOCKET_TIMEOUT_MS,
+	CHECK(ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
 	      "a status too late held the source for %ld ms", (long)ms);
 
-	calls = ctl->status_calls;
-	test_wait_retry();
+	/*
+	 * Its answer comes in while the connection is idle - no end of it:
+	 * the next seeding takes it off, and is served on the connection
+	 */
+	test_wait_until(esdm_es_extsock_now() + (uint64_t)slow * 1000000);
 	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
-#ifdef ESDM_DTLS
-	CHECK(test_state_has("status", "DTLS"),
-	      "the provider is not connected to with DTLS again");
-#endif
+	CHECK_EQ(ctl->selftest_calls, selftests);
+	provider = test_provider_kept(&state);
+	CHECK(provider && es_state_int(provider, "slow", 0) == 1,
+	      "the late status of the provider is not shown: %s",
+	      es_state_print(state));
+	json_object_put(state);
 
+	calls = ctl->status_calls;
 	provider = test_provider(&state);
 	CHECK(!provider, "a provider was asked for its status in its backoff");
 	json_object_put(state);
 	CHECK_EQ(ctl->status_calls, calls);
 	test_wait_backoff();
+
+	/*
+	 * A seeding right after: it waits for the provider to answer the
+	 * status first, takes that off the connection, and gets its data
+	 */
+	ctl->status_text = "{\"slow\":2}";
+	ctl->status_delay_ms = late;
 	provider = test_provider(&state);
-	CHECK(provider != NULL, "a provider is not asked after its backoff");
 	json_object_put(state);
+	ctl->status_delay_ms = 0;
+	CHECK_EQ(test_get(bits, NULL), test_level(256, bits));
+	CHECK_EQ(ctl->selftest_calls, selftests);
+	provider = test_provider_kept(&state);
+	CHECK(provider && es_state_int(provider, "slow", 0) == 2,
+	      "the status answered before the data is not shown: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	test_wait_backoff();
+
+	/* No seeding in between: the next ESDM status takes it off */
+	ctl->status_text = "{\"slow\":3}";
+	ctl->status_delay_ms = late;
+	provider = test_provider(&state);
+	json_object_put(state);
+	ctl->status_delay_ms = 0;
+	test_wait_until(esdm_es_extsock_now() + (uint64_t)late * 1000000);
+	provider = test_provider(&state);
+	CHECK(provider && es_state_int(provider, "slow", 0) == 3,
+	      "the late status was not taken by the next ESDM status: %s",
+	      es_state_print(state));
+	json_object_put(state);
+	CHECK_EQ(ctl->selftest_calls, selftests);
+	CHECK(test_state_has("status", "connected (uid"),
+	      "the provider is not connected any more");
+	ctl->status_text = NULL;
 }
 
 static void *test_get_thread(void *arg)
@@ -950,9 +1008,10 @@ static void test_status_old_provider(void)
 {
 	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 	struct json_object *state, *provider;
-	struct timespec start, end;
 	unsigned int conns, requests;
+	struct timespec start;
 	pthread_t evil;
+	int64_t ms;
 
 	atomic_store(&test_evil_stop, false);
 	atomic_store(&test_evil_mode, TEST_EVIL_GOOD);
@@ -977,15 +1036,17 @@ static void test_status_old_provider(void)
 	json_object_put(state);
 	CHECK_EQ(atomic_load(&test_evil_connections), conns);
 
-	/* An old provider: connected again at once */
+	/*
+	 * An old provider: no status, and connected to again by the next
+	 * seeding at once - not by the ESDM status
+	 */
 	atomic_store(&test_evil_status, TEST_EVIL_STATUS_OLD);
 	provider = test_provider(&state);
 	CHECK(!provider, "an old provider reports a status");
-	CHECK(es_state_str_has(state, "status", "connected (uid"),
-	      "an old provider is not connected to again: %s",
+	CHECK(es_state_str_has(state, "status", "not connected"),
+	      "the ESDM status connected to an old provider again: %s",
 	      es_state_print(state));
 	json_object_put(state);
-	/* Accepted by the provider by the time it answered */
 	CHECK_EQ(test_get(bits, NULL), 8);
 	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
 
@@ -1005,26 +1066,24 @@ static void test_status_old_provider(void)
 	conns = atomic_load(&test_evil_connections);
 
 	/*
-	 * No answer: waited for no longer than a request, and disconnected as
-	 * for one - not connected to again before the retry interval, nor
-	 * asked for its status again before the backoff is over
+	 * No answer: waited for no longer than the ESDM status waits, and the
+	 * connection kept - the next seeding is answered on it, no answer to
+	 * STATUS coming before - nor asked for its status again before the
+	 * backoff is over
 	 */
 	atomic_store(&test_evil_status, TEST_EVIL_STATUS_SILENT);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	provider = test_provider(&state);
-	clock_gettime(CLOCK_MONOTONIC, &end);
+	ms = test_ms_since(&start);
 	CHECK(!provider, "a silent provider reports a status");
-	CHECK(es_state_str_has(state, "status", "not connected"),
-	      "a silent provider was connected to again at once: %s",
+	CHECK(es_state_str_has(state, "status", "connected (uid"),
+	      "a provider silent on STATUS was disconnected: %s",
 	      es_state_print(state));
 	json_object_put(state);
-	CHECK(end.tv_sec - start.tv_sec <= 1,
-	      "an unanswered status is waited for too long");
-	CHECK_EQ(test_get(bits, NULL), 0);
-	CHECK_EQ(atomic_load(&test_evil_connections), conns);
-	test_wait_retry();
+	CHECK(ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
+	      "an unanswered status is waited for %ld ms", (long)ms);
 	CHECK_EQ(test_get(bits, NULL), 8);
-	CHECK_EQ(atomic_load(&test_evil_connections), conns + 1);
+	CHECK_EQ(atomic_load(&test_evil_connections), conns);
 	requests = atomic_load(&test_evil_status_requests);
 	atomic_store(&test_evil_status, TEST_EVIL_STATUS_JSON);
 	provider = test_provider(&state);

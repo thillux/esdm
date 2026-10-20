@@ -297,10 +297,13 @@ struct esdm_es_ext_plugin {
  * making. The ESDM asks for it when its own status is asked for, at most
  * every 5 seconds - showing the last one in between - and not while a request
  * is in progress, going without it then. A provider older than STATUS closes
- * the connection on it: the ESDM connects again at once, and reports no status
- * of the provider until the connection is lost the next time. A provider that
- * does not answer STATUS in time is disconnected as for any request, and not
- * asked for its status for a minute.
+ * the connection on it: the next request of the ESDM connects again at once,
+ * and the ESDM reports no status of the provider until the connection is lost
+ * the next time. The ESDM waits for the answer a quarter of the timeout of a
+ * request at the most, as the source is held meanwhile; a provider answering
+ * later keeps its connection - its answer comes in before the one to the next
+ * request, and the ESDM takes it off the connection then - and is not asked
+ * for its status for a minute.
  *
  * INFO: what the provider declares of itself, which the ESDM asks for once
  * per connection - right after STARTDTLS and the DTLS handshake, inside the

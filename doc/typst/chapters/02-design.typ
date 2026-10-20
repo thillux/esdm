@@ -1382,7 +1382,10 @@ and the rate it declares, the DTLS of the connection, its clients, the
 requests served, the verdict of the last self test of its plugin and its
 uptime, next to the status of its plugin, null where there is none. The ESDM
 asks each source for its status at most every 5 seconds, never waiting for a
-source busy with a request.
+source busy with a request. As a seeding waits for the source while it is
+asked, it waits for a provider half a second at the most: one answering later
+keeps its connection, and its answer, which comes in before the one to the
+next request, is taken off the connection and shown then.
 
 === External Entropy Sources on the Network <sec:ext-es-net>
 
