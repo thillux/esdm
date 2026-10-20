@@ -92,6 +92,21 @@ void esdm_rpc_server_fini(void);
 void esdm_rpc_server_set_dtls(bool enable);
 
 /**
+ * @brief Wait for the events of the RPC connections with io_uring, or epoll
+ *
+ * With io_uring built (meson option rpc-io-uring), each worker thread of the
+ * RPC interfaces waits for the events of its connections with an io_uring of
+ * its own by default, and falls back to epoll where it cannot set one up.
+ * Switching it off has every worker wait with epoll. Takes effect for the
+ * workers started afterwards; to be called before esdm_rpc_server_init().
+ * Without io_uring built, the workers wait with epoll whatever is set here.
+ *
+ * @param [in] enable Wait with io_uring where possible (true) or with epoll
+ *		      (false)
+ */
+void esdm_rpc_server_set_io_uring(bool enable);
+
+/**
  * @brief Remove a left-over Unix domain socket of a previous server instance
  *
  * The socket is only removed when nothing is listening on it, probed by

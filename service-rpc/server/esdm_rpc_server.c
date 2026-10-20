@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <linux/sockios.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <protobuf-c/protobuf-c.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -75,6 +76,10 @@
 #include "queue.h"
 #include "systemd_support.h"
 #include "threading_support.h"
+
+#ifdef ESDM_RPC_IO_URING
+#include <liburing.h>
+#endif
 
 #ifndef TAILQ_FOREACH_SAFE
 #define TAILQ_FOREACH_SAFE(var, head, field, tvar)                             \
@@ -139,6 +144,21 @@ struct esdm_rpcs_connection {
 
 	/* list handling for cleanup */
 	TAILQ_ENTRY(esdm_rpcs_connection) tailq;
+
+#ifdef ESDM_RPC_IO_URING
+	/*
+	 * The poll of the io_uring of its worker, see esdm_rpcs_loop: armed -
+	 * its completion still to come -, waiting in the list of those to be
+	 * armed again, or - once the connection is closed - its cancellation
+	 * submitted. A connection closed with its poll armed is freed only
+	 * with the completion of the poll, which carries its address.
+	 */
+	bool poll_armed;
+	bool poll_queued;
+	bool poll_cancelled;
+	bool closed;
+	TAILQ_ENTRY(esdm_rpcs_connection) poll_entry;
+#endif
 };
 TAILQ_HEAD(esdm_rpcs_connection_list, esdm_rpcs_connection);
 
@@ -379,6 +399,14 @@ static struct esdm_dtls_ctx *esdm_rpcs_dtls_ctx_get(void)
 void esdm_rpc_server_set_dtls(bool enable)
 {
 	atomic_store(&esdm_rpcs_dtls_enabled, enable);
+}
+
+/* Do the workers wait with io_uring? See esdm_rpc_server_set_io_uring() */
+static atomic_bool esdm_rpcs_io_uring_enabled = true;
+
+void esdm_rpc_server_set_io_uring(bool enable)
+{
+	atomic_store(&esdm_rpcs_io_uring_enabled, enable);
 }
 
 /*
@@ -1129,19 +1157,30 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 }
 #endif /* ESDM_FUZZING */
 
-static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
+/*
+ * Close the connection and give up what it holds - but its memory, which the
+ * event loop may still be referring to, see esdm_rpcs_loop_del().
+ */
+static void esdm_rpcs_end_conn(struct esdm_rpcs_connection *rpc_conn)
 {
-	if (!rpc_conn)
-		return;
 	esdm_rpcs_conn_close(rpc_conn, true);
-	if (rpc_conn->peer_counted)
+	if (rpc_conn->peer_counted) {
 		esdm_peer_limit_put(&esdm_rpcs_peer_limit,
 				    rpc_conn->peer_account);
+		rpc_conn->peer_counted = false;
+	}
 	/*
 	 * No per-connection request buffer to wipe here anymore - the shared
 	 * per-worker esdm_rpcs_reqbuf is zeroized after every request in
 	 * esdm_rpcs_read()/esdm_rpcs_pack_internal().
 	 */
+}
+
+static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
+{
+	if (!rpc_conn)
+		return;
+	esdm_rpcs_end_conn(rpc_conn);
 	free(rpc_conn);
 }
 
@@ -1449,18 +1488,596 @@ static void esdm_rpcs_conn_put(struct esdm_rpc_thread *thread,
 }
 
 /*
- * Close a connection of @thread for good: out of the event loop of @epfd and
- * out of @list, its slot given up unless it was already.
+ * The event loop of a worker: what it waits for - its listening socket, its
+ * connections, its idle timer and the eventfd that ends it - and the wait for
+ * the events of its next round. The events of a round come as epoll events
+ * whichever way they were waited for: of a connection with its address as the
+ * data, of the others with the ESDM_RPCS_EVENT_* below.
+ *
+ * Two ways to wait, both telling when a descriptor is ready - the worker reads
+ * and writes its connections itself, as does the DTLS of a connection:
+ *
+ * epoll, the default: one epoll instance per worker, every descriptor in it
+ * level triggered. What is left unread is reported again in the next round -
+ * a request put off for the budget of the round, a connection left to drain,
+ * an event voided for a connection closed to make room, connections waiting
+ * beyond the ESDM_RPCS_MAX_ACCEPTS of a round.
+ *
+ * io_uring (meson option rpc-io-uring): one ring per worker, set up by the
+ * worker itself and used by nobody else. Each descriptor has a poll of the
+ * ring, one-shot: its completion is the event, and the poll is armed anew once
+ * the round served the event, in the system call that waits for the next ones
+ * - the re-armed polls and the wait go to the kernel together. A poll armed on
+ * a descriptor that is ready completes at once, so what is left unread is
+ * reported again in the next round, as by epoll. A multishot poll would not:
+ * it completes when the socket is woken, once per wakeup, and a request left
+ * in it would not be reported again - so only the idle timer, whose event is
+ * read in full each time, has one, where the kernel offers it. A connection
+ * closed while its poll is armed is kept in memory until the completion of the
+ * poll, which carries the address of the connection, cancelled by the next
+ * submission; the ring's teardown takes the remaining ones along at the exit.
+ *
+ * The listening socket is not polled while the worker takes no new connection,
+ * see esdm_rpcs_handler(). With epoll, it is taken out of the epoll instance;
+ * with io_uring, its poll is not armed again - one armed already completes
+ * when a client connects, and the worker looks at the socket once more,
+ * finding no slot and leaving the connection to another worker, as with epoll.
+ *
+ * Where io_uring cannot be set up - a kernel without it or with
+ * kernel.io_uring_disabled set, or a seccomp filter of a container or a service
+ * manager refusing it - the worker falls back to epoll, saying so once.
  */
-static void esdm_rpcs_conn_drop(struct esdm_rpc_thread *thread, int epfd,
+struct esdm_rpcs_loop {
+	/* The epoll instance, -1 while the worker waits with its io_uring */
+	int epfd;
+	int listen_fd;
+	int timer_fd;
+	int exit_fd;
+	/* Is the listening socket polled? See esdm_rpcs_loop_listen() */
+	bool listen_armed;
+#ifdef ESDM_RPC_IO_URING
+	bool uring;
+	struct io_uring ring;
+	/* The polls of the ring in flight for the descriptors but connections */
+	bool listen_polled;
+	bool timer_polled;
+	bool exit_polled;
+	/* The idle timer is polled multishot, until the kernel refuses it */
+	bool timer_multishot;
+	/* Connections whose poll is to be armed again with the next wait */
+	struct esdm_rpcs_connection_list rearm;
+	/*
+	 * Connections closed while their poll was armed, freed with its
+	 * completion - linked by their tailq, see esdm_rpcs_loop_del()
+	 */
+	struct esdm_rpcs_connection_list closed;
+#endif
+};
+
+/* Events a worker takes per round of its event loop */
+#define ESDM_RPCS_MAX_EVENTS 512
+
+/*
+ * The data of the events of a round but those of the connections - no address
+ * of a connection has these values
+ */
+#define ESDM_RPCS_EVENT_LISTEN 0
+#define ESDM_RPCS_EVENT_TIMER 1
+#define ESDM_RPCS_EVENT_EXIT 2
+/* An event of a connection closed before the event was handled */
+#define ESDM_RPCS_EVENT_STALE 3
+/* The completion of the cancellation of a poll, io_uring only */
+#define ESDM_RPCS_EVENT_CANCEL 4
+
+/* Ready to be torn down, see esdm_rpcs_loop_open() for the setup */
+static void esdm_rpcs_loop_init(struct esdm_rpcs_loop *loop)
+{
+	memset(loop, 0, sizeof(*loop));
+	loop->epfd = -1;
+	loop->listen_fd = -1;
+	loop->timer_fd = -1;
+	loop->exit_fd = -1;
+	loop->listen_armed = true;
+#ifdef ESDM_RPC_IO_URING
+	TAILQ_INIT(&loop->rearm);
+	TAILQ_INIT(&loop->closed);
+#endif
+}
+
+static int esdm_rpcs_epoll_open(struct esdm_rpcs_loop *loop)
+{
+	int ret;
+
+	loop->epfd = epoll_create1(EPOLL_CLOEXEC);
+	if (loop->epfd < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to create epoll instance: %s\n",
+			    strerror(-ret));
+		return ret;
+	}
+
+	/* server socket */
+	if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, loop->listen_fd,
+		      &(struct epoll_event){
+			      .events = EPOLLIN,
+			      .data.u64 = ESDM_RPCS_EVENT_LISTEN,
+		      }) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add server FD %d to epoll: %s\n",
+			    loop->listen_fd, strerror(-ret));
+		return ret;
+	}
+
+	/* timerfd for cleanup */
+	if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, loop->timer_fd,
+		      &(struct epoll_event){
+			      .events = EPOLLIN,
+			      .data.u64 = ESDM_RPCS_EVENT_TIMER,
+		      }) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add timer FD %d to epoll: %s\n",
+			    loop->timer_fd, strerror(-ret));
+		return ret;
+	}
+
+	/* eventfd for fast termination */
+	if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, loop->exit_fd,
+		      &(struct epoll_event){
+			      .events = EPOLLIN,
+			      .data.u64 = ESDM_RPCS_EVENT_EXIT,
+		      }) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add event FD %d to epoll: %s\n",
+			    loop->exit_fd, strerror(-ret));
+		return ret;
+	}
+
+	return 0;
+}
+
+#ifdef ESDM_RPC_IO_URING
+
+/*
+ * Flags of the ring a liburing too old to know them is not asked for: it would
+ * not use the ring the way they require.
+ */
+#ifndef IORING_SETUP_SUBMIT_ALL
+#define IORING_SETUP_SUBMIT_ALL 0
+#endif
+#ifndef IORING_SETUP_COOP_TASKRUN
+#define IORING_SETUP_COOP_TASKRUN 0
+#endif
+#ifndef IORING_SETUP_SINGLE_ISSUER
+#define IORING_SETUP_SINGLE_ISSUER 0
+#endif
+#ifndef IORING_SETUP_DEFER_TASKRUN
+#define IORING_SETUP_DEFER_TASKRUN 0
+#endif
+
+/*
+ * Size of the rings. A round re-arms the polls of at most ESDM_RPCS_MAX_EVENTS
+ * connections; should the submission queue run full all the same, what it
+ * holds is submitted on the way. Completions are in flight for at most one poll
+ * per connection, a worker holding ESDM_RPCS_MAX_WORKER_CONNECTIONS, and for
+ * the cancellations of polls - the kernel keeps what does not fit in the queue
+ * (IORING_FEAT_NODROP, which is required).
+ */
+#define ESDM_RPCS_URING_SQ_ENTRIES ESDM_RPCS_MAX_EVENTS
+#define ESDM_RPCS_URING_CQ_ENTRIES (2 * ESDM_RPCS_MAX_WORKER_CONNECTIONS)
+
+/* The fallback, or the ring, is reported once per process */
+static atomic_flag esdm_rpcs_uring_reported = ATOMIC_FLAG_INIT;
+
+static int esdm_rpcs_uring_open(struct esdm_rpcs_loop *loop)
+{
+	/*
+	 * Most wanted first: the completions processed as the worker waits
+	 * for them, by the worker - which is the only one submitting -, rather
+	 * than by interrupting it at once (Linux 6.1); the cooperative variant
+	 * of that (Linux 5.19); then whatever the kernel takes.
+	 */
+	static const unsigned int setup_flags[] = {
+		IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN |
+			IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN,
+		IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN,
+		0,
+	};
+	struct io_uring_params params;
+	unsigned int i;
+	int ret = -EINVAL;
+
+	BUILD_BUG_ON(POLLIN != EPOLLIN || POLLERR != EPOLLERR ||
+		     POLLHUP != EPOLLHUP || POLLRDHUP != EPOLLRDHUP);
+
+	for (i = 0; i < ARRAY_SIZE(setup_flags); i++) {
+		memset(&params, 0, sizeof(params));
+		params.flags = IORING_SETUP_CQSIZE | setup_flags[i];
+		params.cq_entries = ESDM_RPCS_URING_CQ_ENTRIES;
+		ret = io_uring_queue_init_params(ESDM_RPCS_URING_SQ_ENTRIES,
+						 &loop->ring, &params);
+		if (ret != -EINVAL)
+			break;
+	}
+
+	/*
+	 * Without IORING_FEAT_NODROP (Linux 5.5), a completion that does not
+	 * fit is dropped - and with it a connection, whose poll would never
+	 * be armed again.
+	 */
+	if (!ret && !(params.features & IORING_FEAT_NODROP)) {
+		io_uring_queue_exit(&loop->ring);
+		ret = -EOPNOTSUPP;
+	}
+
+	/*
+	 * Logged whatever the verbosity: whoever built it in is to see that it
+	 * is not used - in a container, say, which refuses io_uring.
+	 */
+	if (ret) {
+		if (!atomic_flag_test_and_set(&esdm_rpcs_uring_reported))
+			esdm_logger(
+				LOGGER_STATUS, LOGGER_C_RPC,
+				"io_uring cannot be set up for the RPC worker threads, waiting with epoll: %s\n",
+				strerror(-ret));
+		return ret;
+	}
+
+	/* Spares looking up the ring's descriptor in every system call */
+	(void)io_uring_register_ring_fd(&loop->ring);
+
+	loop->uring = true;
+	loop->timer_multishot = true;
+
+	if (!atomic_flag_test_and_set(&esdm_rpcs_uring_reported))
+		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
+			    "RPC worker threads wait with io_uring\n");
+
+	return 0;
+}
+
+/* An entry of the submission queue - NULL if it stays full */
+static struct io_uring_sqe *esdm_rpcs_uring_sqe(struct esdm_rpcs_loop *loop)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(&loop->ring);
+
+	if (!sqe) {
+		/* Full: hand what it holds to the kernel already */
+		io_uring_submit(&loop->ring);
+		sqe = io_uring_get_sqe(&loop->ring);
+	}
+
+	return sqe;
+}
+
+/* Submit a poll of @fd for @events, @data the data of its event */
+static bool esdm_rpcs_uring_poll(struct esdm_rpcs_loop *loop, int fd,
+				 unsigned int events, uint64_t data,
+				 bool multishot)
+{
+	struct io_uring_sqe *sqe = esdm_rpcs_uring_sqe(loop);
+
+	if (!sqe)
+		return false;
+
+	if (multishot)
+		io_uring_prep_poll_multishot(sqe, fd, events);
+	else
+		io_uring_prep_poll_add(sqe, fd, events);
+	io_uring_sqe_set_data64(sqe, data);
+
+	return true;
+}
+
+/* Have the poll of @rpc_conn armed with the next wait */
+static void esdm_rpcs_uring_rearm(struct esdm_rpcs_loop *loop,
+				  struct esdm_rpcs_connection *rpc_conn)
+{
+	if (rpc_conn->poll_armed || rpc_conn->poll_queued)
+		return;
+
+	TAILQ_INSERT_TAIL(&loop->rearm, rpc_conn, poll_entry);
+	rpc_conn->poll_queued = true;
+}
+
+/*
+ * Submit what is to be polled - every descriptor without a poll in flight but
+ * the listening socket while it is not to be - and the cancellations of the
+ * polls of closed connections. What finds no room in the submission queue is
+ * submitted with the next wait.
+ */
+static void esdm_rpcs_uring_arm(struct esdm_rpcs_loop *loop)
+{
+	struct esdm_rpcs_connection *rpc_conn, *tmp;
+	struct io_uring_sqe *sqe;
+
+	if (loop->listen_armed && !loop->listen_polled)
+		loop->listen_polled =
+			esdm_rpcs_uring_poll(loop, loop->listen_fd, POLLIN,
+					     ESDM_RPCS_EVENT_LISTEN, false);
+	if (!loop->timer_polled)
+		loop->timer_polled = esdm_rpcs_uring_poll(
+			loop, loop->timer_fd, POLLIN, ESDM_RPCS_EVENT_TIMER,
+			loop->timer_multishot);
+	if (!loop->exit_polled)
+		loop->exit_polled = esdm_rpcs_uring_poll(loop, loop->exit_fd,
+							 POLLIN,
+							 ESDM_RPCS_EVENT_EXIT,
+							 false);
+
+	TAILQ_FOREACH_SAFE(rpc_conn, &loop->rearm, poll_entry, tmp)
+	{
+		if (!esdm_rpcs_uring_poll(loop, rpc_conn->child_fd,
+					  POLLIN | POLLRDHUP,
+					  (uint64_t)(uintptr_t)rpc_conn, false))
+			break;
+		TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
+		rpc_conn->poll_queued = false;
+		rpc_conn->poll_armed = true;
+	}
+
+	TAILQ_FOREACH(rpc_conn, &loop->closed, tailq)
+	{
+		if (rpc_conn->poll_cancelled)
+			continue;
+		sqe = esdm_rpcs_uring_sqe(loop);
+		if (!sqe)
+			break;
+		io_uring_prep_cancel64(sqe, (uint64_t)(uintptr_t)rpc_conn, 0);
+		io_uring_sqe_set_data64(sqe, ESDM_RPCS_EVENT_CANCEL);
+		rpc_conn->poll_cancelled = true;
+	}
+}
+
+/*
+ * Wait for the completions of the polls, at most @maxevents of which are taken
+ * as the events of the round - the others stay in the completion queue for the
+ * next one. Returns the number of events, a negative errno if the wait failed,
+ * or a poll of a descriptor but a connection did.
+ */
+static int esdm_rpcs_uring_wait(struct esdm_rpcs_loop *loop,
+				struct epoll_event *events, int maxevents)
+{
+	struct esdm_rpcs_connection *rpc_conn;
+	struct io_uring_cqe *cqe;
+	unsigned int head, seen = 0;
+	int n = 0, ret;
+
+	esdm_rpcs_uring_arm(loop);
+
+	ret = io_uring_submit_and_wait(&loop->ring, 1);
+	/*
+	 * Completions the kernel could not post yet, see IORING_FEAT_NODROP:
+	 * those posted are taken first, which makes room.
+	 */
+	if (ret == -EBUSY || ret == -EAGAIN)
+		ret = 0;
+	if (ret < 0)
+		return ret;
+
+	ret = 0;
+	io_uring_for_each_cqe(&loop->ring, head, cqe)
+	{
+		uint64_t data = io_uring_cqe_get_data64(cqe);
+		int res = cqe->res;
+
+		if (n >= maxevents)
+			break;
+		seen++;
+
+		switch (data) {
+		case ESDM_RPCS_EVENT_CANCEL:
+			continue;
+		case ESDM_RPCS_EVENT_LISTEN:
+			loop->listen_polled = false;
+			break;
+		case ESDM_RPCS_EVENT_TIMER:
+			if (!(cqe->flags & IORING_CQE_F_MORE))
+				loop->timer_polled = false;
+			/* A kernel before Linux 5.13 refuses multishot */
+			if (res == -EINVAL && loop->timer_multishot) {
+				loop->timer_multishot = false;
+				continue;
+			}
+			break;
+		case ESDM_RPCS_EVENT_EXIT:
+			loop->exit_polled = false;
+			break;
+		default:
+			rpc_conn = (struct esdm_rpcs_connection *)(uintptr_t)
+				data;
+			rpc_conn->poll_armed = false;
+
+			/* The poll was the last reference to it */
+			if (rpc_conn->closed) {
+				TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
+				free(rpc_conn);
+				continue;
+			}
+
+			/* Polled again after this round served the event */
+			esdm_rpcs_uring_rearm(loop, rpc_conn);
+
+			/* A poll that failed is a connection that failed */
+			events[n].events = res < 0 ? EPOLLERR : (uint32_t)res;
+			events[n].data.u64 = 0;
+			events[n].data.ptr = rpc_conn;
+			n++;
+			continue;
+		}
+
+		if (res < 0) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+				    "Polling with io_uring failed: %s\n",
+				    strerror(-res));
+			ret = res;
+			break;
+		}
+
+		events[n].events = (uint32_t)res;
+		events[n].data.u64 = data;
+		n++;
+	}
+	io_uring_cq_advance(&loop->ring, seen);
+
+	return ret ? ret : n;
+}
+
+#endif /* ESDM_RPC_IO_URING */
+
+/*
+ * Set up the event loop of a worker polling @listen_fd, @timer_fd and
+ * @exit_fd, with io_uring where it is built, not switched off and can be set
+ * up, with epoll otherwise.
+ */
+static int esdm_rpcs_loop_open(struct esdm_rpcs_loop *loop, int listen_fd,
+			       int timer_fd, int exit_fd)
+{
+	loop->listen_fd = listen_fd;
+	loop->timer_fd = timer_fd;
+	loop->exit_fd = exit_fd;
+
+#ifdef ESDM_RPC_IO_URING
+	if (atomic_load(&esdm_rpcs_io_uring_enabled) &&
+	    !esdm_rpcs_uring_open(loop))
+		return 0;
+#endif
+
+	return esdm_rpcs_epoll_open(loop);
+}
+
+/* Wait for the events of the next round, see esdm_rpcs_loop */
+static int esdm_rpcs_loop_wait(struct esdm_rpcs_loop *loop,
+			       struct epoll_event *events, int maxevents)
+{
+	int nfds;
+
+#ifdef ESDM_RPC_IO_URING
+	if (loop->uring)
+		return esdm_rpcs_uring_wait(loop, events, maxevents);
+#endif
+
+	nfds = epoll_wait(loop->epfd, events, maxevents, -1);
+
+	return nfds < 0 ? -errno : nfds;
+}
+
+/* Poll the listening socket, or stop doing so, see esdm_rpcs_loop */
+static void esdm_rpcs_loop_listen(struct esdm_rpcs_loop *loop, bool armed)
+{
+	struct epoll_event lev = {
+		.events = armed ? EPOLLIN : 0,
+		.data.u64 = ESDM_RPCS_EVENT_LISTEN,
+	};
+
+	if (armed == loop->listen_armed)
+		return;
+
+#ifdef ESDM_RPC_IO_URING
+	if (loop->uring) {
+		loop->listen_armed = armed;
+		return;
+	}
+#endif
+
+	if (epoll_ctl(loop->epfd, EPOLL_CTL_MOD, loop->listen_fd, &lev) == 0)
+		loop->listen_armed = armed;
+}
+
+/* Poll a new connection; returns a negative errno if it cannot be */
+static int esdm_rpcs_loop_add(struct esdm_rpcs_loop *loop,
+			      struct esdm_rpcs_connection *rpc_conn)
+{
+	struct epoll_event ev = { .events = EPOLLIN | EPOLLRDHUP,
+				  .data.ptr = rpc_conn };
+
+#ifdef ESDM_RPC_IO_URING
+	/* From the end of this round on, like a connection whose event it served */
+	if (loop->uring) {
+		esdm_rpcs_uring_rearm(loop, rpc_conn);
+		return 0;
+	}
+#endif
+
+	if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, rpc_conn->child_fd, &ev) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/*
+ * Stop polling a connection that is closed for good. Returns whether it may
+ * be freed: one whose poll of the io_uring is still armed is taken over by the
+ * loop instead and freed with the completion of the poll - or at the end of the
+ * loop -, which carries its address.
+ */
+static bool esdm_rpcs_loop_del(struct esdm_rpcs_loop *loop,
+			       struct esdm_rpcs_connection *rpc_conn)
+{
+#ifdef ESDM_RPC_IO_URING
+	if (loop->uring) {
+		if (rpc_conn->poll_queued) {
+			TAILQ_REMOVE(&loop->rearm, rpc_conn, poll_entry);
+			rpc_conn->poll_queued = false;
+		}
+		if (!rpc_conn->poll_armed)
+			return true;
+
+		rpc_conn->closed = true;
+		TAILQ_INSERT_TAIL(&loop->closed, rpc_conn, tailq);
+		return false;
+	}
+#endif
+
+	epoll_ctl(loop->epfd, EPOLL_CTL_DEL, rpc_conn->child_fd, NULL);
+
+	return true;
+}
+
+/* Tear the event loop down, once its connections are dropped */
+static void esdm_rpcs_loop_close(struct esdm_rpcs_loop *loop)
+{
+#ifdef ESDM_RPC_IO_URING
+	if (loop->uring) {
+		struct esdm_rpcs_connection *rpc_conn, *tmp;
+
+		/* No completion comes any more, nothing refers to them */
+		io_uring_queue_exit(&loop->ring);
+		loop->uring = false;
+
+		TAILQ_FOREACH_SAFE(rpc_conn, &loop->closed, tailq, tmp)
+		{
+			TAILQ_REMOVE(&loop->closed, rpc_conn, tailq);
+			free(rpc_conn);
+		}
+	}
+#endif
+
+	if (loop->epfd >= 0) {
+		close(loop->epfd);
+		loop->epfd = -1;
+	}
+}
+
+/*
+ * Close a connection of @thread for good: out of the event loop @loop and out
+ * of @list, its slot given up unless it was already.
+ */
+static void esdm_rpcs_conn_drop(struct esdm_rpc_thread *thread,
+				struct esdm_rpcs_loop *loop,
 				struct esdm_rpcs_connection_list *list,
 				struct esdm_rpcs_connection *rpc_conn,
 				size_t *num)
 {
-	epoll_ctl(epfd, EPOLL_CTL_DEL, rpc_conn->child_fd, NULL);
 	TAILQ_REMOVE(list, rpc_conn, tailq);
 	esdm_rpcs_conn_put(thread, rpc_conn, num);
-	esdm_rpcs_release_conn(rpc_conn);
+	if (esdm_rpcs_loop_del(loop, rpc_conn))
+		esdm_rpcs_release_conn(rpc_conn);
+	else
+		esdm_rpcs_end_conn(rpc_conn);
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC, "num connections: %zu\n", *num);
 }
@@ -1500,7 +2117,8 @@ static bool esdm_rpcs_input_queued(const struct esdm_rpcs_connection *rpc_conn)
  *
  * @return true if the connection was closed, false if it is left to drain
  */
-static bool esdm_rpcs_reclaim(struct esdm_rpc_thread *thread, int epfd,
+static bool esdm_rpcs_reclaim(struct esdm_rpc_thread *thread,
+			      struct esdm_rpcs_loop *loop,
 			      struct esdm_rpcs_connection_list *list,
 			      struct esdm_rpcs_connection *rpc_conn,
 			      size_t *num)
@@ -1508,7 +2126,7 @@ static bool esdm_rpcs_reclaim(struct esdm_rpc_thread *thread, int epfd,
 	shutdown(rpc_conn->child_fd, SHUT_RD);
 
 	if (!esdm_rpcs_input_queued(rpc_conn)) {
-		esdm_rpcs_conn_drop(thread, epfd, list, rpc_conn, num);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
 		return true;
 	}
 
@@ -1528,9 +2146,6 @@ static bool esdm_rpcs_reclaim(struct esdm_rpc_thread *thread, int epfd,
 	return false;
 }
 
-/* An event of a connection closed before the event was handled */
-#define ESDM_RPCS_EVENT_STALE 3
-
 /*
  * Close a connection of the full worker @thread, whose connections are @list,
  * for a new one, which takes over its slot - see esdm_rpcs_reclaim(). The
@@ -1538,7 +2153,8 @@ static bool esdm_rpcs_reclaim(struct esdm_rpc_thread *thread, int epfd,
  * it: one left to drain is reported again in the next round. Returns false if
  * every connection has a request not read yet.
  */
-static bool esdm_rpcs_make_room(struct esdm_rpc_thread *thread, int epfd,
+static bool esdm_rpcs_make_room(struct esdm_rpc_thread *thread,
+				struct esdm_rpcs_loop *loop,
 				struct esdm_rpcs_connection_list *list,
 				struct epoll_event *pending, int num,
 				size_t *num_connections)
@@ -1559,7 +2175,7 @@ static bool esdm_rpcs_make_room(struct esdm_rpc_thread *thread, int epfd,
 			pending[i].data.u64 = ESDM_RPCS_EVENT_STALE;
 	}
 
-	esdm_rpcs_reclaim(thread, epfd, list, victim, num_connections);
+	esdm_rpcs_reclaim(thread, loop, list, victim, num_connections);
 
 	return true;
 }
@@ -1580,9 +2196,6 @@ static bool esdm_rpcs_idle_reapable(struct esdm_rpcs_connection *rpc_conn,
 
 	return !esdm_rpcs_input_queued(rpc_conn);
 }
-
-/* Events a worker takes per round of its event loop */
-#define ESDM_RPCS_MAX_EVENTS 512
 
 /*
  * Connections a worker accepts per round of its event loop, as far as its
@@ -1606,7 +2219,8 @@ static bool esdm_rpcs_idle_reapable(struct esdm_rpcs_connection *rpc_conn,
  * failed. @revents are the events of the connection, 0 for one just accepted.
  * @accept_paused is cleared when the connection is closed.
  */
-static void esdm_rpcs_serve(struct esdm_rpc_thread *thread, int epfd,
+static void esdm_rpcs_serve(struct esdm_rpc_thread *thread,
+			    struct esdm_rpcs_loop *loop,
 			    struct esdm_rpcs_connection_list *list,
 			    struct esdm_rpcs_connection *rpc_conn,
 			    uint32_t revents, size_t *num, bool *accept_paused)
@@ -1623,7 +2237,7 @@ static void esdm_rpcs_serve(struct esdm_rpc_thread *thread, int epfd,
 				 (EPOLLERR | EPOLLHUP | EPOLLRDHUP))) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 			    "Closing client FD %d\n", rpc_conn->child_fd);
-		esdm_rpcs_conn_drop(thread, epfd, list, rpc_conn, num);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
 		*accept_paused = false;
 		return;
 	}
@@ -1644,13 +2258,13 @@ static void esdm_rpcs_serve(struct esdm_rpc_thread *thread, int epfd,
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 			    "Closing incoming connection for FD %d\n",
 			    rpc_conn->child_fd);
-		esdm_rpcs_conn_drop(thread, epfd, list, rpc_conn, num);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
 		*accept_paused = false;
 	} else if (rpc_conn->closing && !esdm_rpcs_input_queued(rpc_conn)) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 			    "Closing drained connection for FD %d\n",
 			    rpc_conn->child_fd);
-		esdm_rpcs_conn_drop(thread, epfd, list, rpc_conn, num);
+		esdm_rpcs_conn_drop(thread, loop, list, rpc_conn, num);
 		*accept_paused = false;
 	} else if (!read_ret) {
 		/* Keep the list in the order of use */
@@ -1661,7 +2275,7 @@ static void esdm_rpcs_serve(struct esdm_rpc_thread *thread, int epfd,
 
 /*
  * Accept a connection on the listening socket of @thread and register it with
- * the event loop of @epfd and @list. The events of this round still to be
+ * the event loop @loop and @list. The events of this round still to be
  * handled are @num_pending of @pending - a full worker closes one of its
  * connections to make room for the new one, see ESDM_RPC_RESERVED_FDS.
  *
@@ -1672,7 +2286,8 @@ static void esdm_rpcs_serve(struct esdm_rpc_thread *thread, int epfd,
  *	   worker has a request not read yet; another negative errno when the
  *	   worker cannot go on.
  */
-static int esdm_rpcs_accept(struct esdm_rpc_thread *thread, int epfd,
+static int esdm_rpcs_accept(struct esdm_rpc_thread *thread,
+			    struct esdm_rpcs_loop *loop,
 			    struct esdm_rpcs_connection_list *list,
 			    struct epoll_event *pending, int num_pending,
 			    size_t *num, bool *accept_paused,
@@ -1744,7 +2359,7 @@ static int esdm_rpcs_accept(struct esdm_rpc_thread *thread, int epfd,
 	 * behind this one either - they stay queued for the next round.
 	 */
 	if (*num >= thread->max_connections &&
-	    !esdm_rpcs_make_room(thread, epfd, list, pending, num_pending,
+	    !esdm_rpcs_make_room(thread, loop, list, pending, num_pending,
 				 num)) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_RPC,
@@ -1759,26 +2374,23 @@ static int esdm_rpcs_accept(struct esdm_rpc_thread *thread, int epfd,
 	 * the connection before its first request is read.
 	 */
 	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
-	struct epoll_event ev = { .events = EPOLLIN | EPOLLRDHUP,
-				  .data.ptr = rpc_conn };
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, accepted_fd, &ev) < 0) {
-		switch (errno) {
+	ret = esdm_rpcs_loop_add(loop, rpc_conn);
+	if (ret < 0) {
+		switch (-ret) {
 		case ENOMEM:
 		case ENOSPC:
 			/* resource limit — reject this connection, keep running */
 			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 				    "Unable to add client FD %d to epoll: %s\n",
-				    accepted_fd, strerror(errno));
+				    accepted_fd, strerror(-ret));
 			esdm_rpcs_release_conn(rpc_conn);
 			return 0;
 		default:
 			/*
-			 * Capture errno before the logger and the cleanup
-			 * clobber it. This conn was never inserted into the
-			 * list, so the cleanup of the worker cannot reach it -
-			 * free/close here to avoid leaking the conn and its fd.
+			 * This conn was never inserted into the list, so the
+			 * cleanup of the worker cannot reach it - free/close
+			 * here to avoid leaking the conn and its fd.
 			 */
-			ret = -errno;
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_RPC,
 				"Unable to add client FD %d to epoll, exiting worker: %s\n",
@@ -1806,6 +2418,7 @@ static int esdm_rpcs_handler(void *args)
 	struct esdm_rpc_thread *thread = args;
 	struct esdm_rpcs_connection *tmp1;
 	struct esdm_rpcs_connection *tmp2;
+	struct esdm_rpcs_loop loop;
 	struct epoll_event events[ESDM_RPCS_MAX_EVENTS];
 	size_t max_connections = 0, num_connections = 0;
 	/*
@@ -1813,26 +2426,14 @@ static int esdm_rpcs_handler(void *args)
 	 * ESDM_RPC_RESERVED_FDS
 	 */
 	bool evict = false;
-	/*
-	 * The listening socket is level-triggered: while it is armed and a
-	 * connection is pending, epoll_wait keeps reporting it readable. Once the
-	 * per-worker connection cap is reached the accept branch below stops
-	 * accepting, so leaving it armed would spin the worker at 100% CPU. Track
-	 * the arm state and disarm/re-arm the listening FD as the cap is
-	 * crossed, which also gives real backpressure (pending clients stay
-	 * queued in the listen backlog instead of being dropped) and leaves the
-	 * connection to a worker with a free slot. Once all are full, a worker
-	 * that makes room by closing a connection keeps accepting instead.
-	 */
-	bool listen_armed = true;
 	/* accept() ran out of resources - see the accept path below */
 	bool accept_paused = false;
-	int epfd = -1;
 	int tfd = -1;
 	int ret = 0;
 
 	/* Initialized first - the cleanup at out: walks the list. */
 	TAILQ_INIT(&rpc_conn_list);
+	esdm_rpcs_loop_init(&loop);
 
 	if (thread == NULL) {
 		ret = -EINVAL;
@@ -1845,28 +2446,6 @@ static int esdm_rpcs_handler(void *args)
 
 	max_connections = thread->max_connections;
 	evict = !thread->proto->privileged;
-
-	epfd = epoll_create1(EPOLL_CLOEXEC);
-	if (epfd < 0) {
-		ret = -errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to create epoll instance: %s\n",
-			    strerror(-ret));
-		goto out;
-	}
-
-	/* server socket */
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, thread->proto->server_listening_fd,
-		      &(struct epoll_event){
-			      .events = EPOLLIN,
-			      .data.ptr = NULL,
-		      }) < 0) {
-		ret = -errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add server FD %d to epoll: %s\n",
-			    thread->proto->server_listening_fd, strerror(-ret));
-		goto out;
-	}
 
 	/* cleanup timer */
 	tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -1888,68 +2467,49 @@ static int esdm_rpcs_handler(void *args)
 		goto out;
 	}
 
-	/* timerfd for cleanup */
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, tfd,
-		      &(struct epoll_event){
-			      .events = EPOLLIN,
-			      .data.u64 = 1 /* no ptr will have this value */
-		      }) < 0) {
-		ret = -errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add timer FD %d to epoll: %s\n", tfd,
-			    strerror(-ret));
+	/* The listening socket, the cleanup timer, the eventfd to terminate */
+	ret = esdm_rpcs_loop_open(&loop, thread->proto->server_listening_fd,
+				  tfd, thread->eventfd);
+	if (ret)
 		goto out;
-	}
-
-	/* eventfd for fast termination */
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, thread->eventfd,
-		      &(struct epoll_event){
-			      .events = EPOLLIN,
-			      .data.u64 = 2 /* no ptr will have this value */
-		      }) < 0) {
-		ret = -errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add event FD %d to epoll: %s\n",
-			    thread->eventfd, strerror(-ret));
-		goto out;
-	}
 
 	while (atomic_load(&server_exit) == 0) {
 		int nfds;
 
 		/*
-		 * Reconcile the listening FD's armed state with the current
-		 * connection count before blocking. Disarm at the cap so a
-		 * pending connection cannot busy-spin epoll_wait; re-arm once a
-		 * slot frees up so new connections are served again.
+		 * The listening socket is level-triggered: while it is polled
+		 * and a connection is pending, it keeps being reported
+		 * readable. Once the per-worker connection cap is reached the
+		 * accept branch below stops accepting, so leaving it polled
+		 * would spin the worker at 100% CPU. Reconcile whether it is
+		 * polled with the current connection count before blocking:
+		 * stop at the cap, and poll it again once a slot frees up so new
+		 * connections are served again. This also gives real
+		 * backpressure (pending clients stay queued in the listen
+		 * backlog instead of being dropped) and leaves the connection
+		 * to a worker with a free slot. Once all are full, a worker
+		 * that makes room by closing a connection keeps accepting
+		 * instead.
 		 */
-		bool want_armed =
-			(num_connections < max_connections ||
-			 (evict && esdm_rpcs_full(thread->proto))) &&
-			!accept_paused;
-		if (want_armed != listen_armed) {
-			struct epoll_event lev = {
-				.events = want_armed ? EPOLLIN : 0,
-				.data.ptr = NULL,
-			};
-			if (epoll_ctl(epfd, EPOLL_CTL_MOD,
-				      thread->proto->server_listening_fd,
-				      &lev) == 0)
-				listen_armed = want_armed;
-		}
+		esdm_rpcs_loop_listen(
+			&loop, (num_connections < max_connections ||
+				(evict && esdm_rpcs_full(thread->proto))) &&
+				       !accept_paused);
 
-		nfds = epoll_wait(epfd, events, ESDM_RPCS_MAX_EVENTS, -1);
+		nfds = esdm_rpcs_loop_wait(&loop, events,
+					   ESDM_RPCS_MAX_EVENTS);
 		/* signal? */
-		if (nfds < 0 && errno == EINTR) {
+		if (nfds == -EINTR) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-				    "epoll_wait interrupted\n");
+				    "Waiting for events interrupted\n");
 			continue;
 		}
 
 		if (nfds < 0) {
-			ret = -errno;
+			ret = nfds;
 			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-				    "epoll_wait failed: %s\n", strerror(-ret));
+				    "Waiting for events failed: %s\n",
+				    strerror(-ret));
 			goto out;
 		}
 
@@ -1965,7 +2525,7 @@ static int esdm_rpcs_handler(void *args)
 				continue;
 
 			/* timer fired */
-			if (events[i].data.u64 == 1) {
+			if (events[i].data.u64 == ESDM_RPCS_EVENT_TIMER) {
 				uint64_t expirations;
 				ssize_t v = read(tfd, &expirations,
 						 sizeof(expirations));
@@ -1976,7 +2536,7 @@ static int esdm_rpcs_handler(void *args)
 			}
 
 			/* event fired */
-			if (events[i].data.u64 == 2) {
+			if (events[i].data.u64 == ESDM_RPCS_EVENT_EXIT) {
 				uint64_t event_val;
 				ssize_t v = read(thread->eventfd, &event_val,
 						 sizeof(event_val));
@@ -1986,10 +2546,8 @@ static int esdm_rpcs_handler(void *args)
 				break;
 			}
 
-			rpc_conn = events[i].data.ptr;
-
 			/* new connections? */
-			if (rpc_conn == NULL) {
+			if (events[i].data.u64 == ESDM_RPCS_EVENT_LISTEN) {
 				unsigned int accepted;
 
 				for (accepted = 0;
@@ -1999,7 +2557,7 @@ static int esdm_rpcs_handler(void *args)
 				      (evict && esdm_rpcs_full(thread->proto)));
 				     accepted++) {
 					ret = esdm_rpcs_accept(
-						thread, epfd, &rpc_conn_list,
+						thread, &loop, &rpc_conn_list,
 						events + i + 1, nfds - i - 1,
 						&num_connections,
 						&accept_paused, &rpc_conn);
@@ -2013,7 +2571,7 @@ static int esdm_rpcs_handler(void *args)
 					/* Its first request, if it sent one */
 					if (rpc_conn)
 						esdm_rpcs_serve(
-							thread, epfd,
+							thread, &loop,
 							&rpc_conn_list,
 							rpc_conn, 0,
 							&num_connections,
@@ -2022,7 +2580,8 @@ static int esdm_rpcs_handler(void *args)
 				continue;
 			}
 
-			esdm_rpcs_serve(thread, epfd, &rpc_conn_list, rpc_conn,
+			rpc_conn = events[i].data.ptr;
+			esdm_rpcs_serve(thread, &loop, &rpc_conn_list, rpc_conn,
 					events[i].events, &num_connections,
 					&accept_paused);
 		}
@@ -2056,7 +2615,7 @@ static int esdm_rpcs_handler(void *args)
 					LOGGER_DEBUG, LOGGER_C_RPC,
 					"Closing incoming connection for FD %d after timeout\n",
 					tmp1->child_fd);
-				esdm_rpcs_reclaim(thread, epfd, &rpc_conn_list,
+				esdm_rpcs_reclaim(thread, &loop, &rpc_conn_list,
 						  tmp1, &num_connections);
 				accept_paused = false;
 			}
@@ -2071,15 +2630,13 @@ out:
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 			    "Closing incoming connection for FD %d at exit\n",
 			    tmp1->child_fd);
-		esdm_rpcs_conn_drop(thread, epfd, &rpc_conn_list, tmp1,
+		esdm_rpcs_conn_drop(thread, &loop, &rpc_conn_list, tmp1,
 				    &num_connections);
 	}
 
+	esdm_rpcs_loop_close(&loop);
 	if (tfd >= 0) {
 		close(tfd);
-	}
-	if (epfd >= 0) {
-		close(epfd);
 	}
 
 	/*

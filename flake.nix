@@ -3937,6 +3937,8 @@
               json_c
               libbpf
               libselinux
+              # -Drpc-io-uring=enabled
+              liburing
               openssl
               protobufc
               self.packages.${system}.jitterentropy

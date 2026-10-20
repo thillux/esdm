@@ -162,6 +162,10 @@ static void usage(void)
 		"\t   --no_dtls\tServe the RPC interfaces unencrypted only, refusing\n");
 	fprintf(stderr,
 		"\t\t\tthe DTLS clients ask for (offered by default where built)\n");
+	fprintf(stderr,
+		"\t   --no_io_uring\tWait for the RPC connections with epoll, not\n");
+	fprintf(stderr,
+		"\t\t\twith io_uring (used by default where built and available)\n");
 	exit(1);
 }
 
@@ -363,6 +367,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "es_ext_socket_uid", 1, 0, 0 },
 			{ "es_jent_kernel_name", 1, 0, 0 },
 			{ "no_dtls", 0, 0, 0 },
+			{ "no_io_uring", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
@@ -473,6 +478,10 @@ static void parse_opts(int argc, char *argv[])
 			case 21:
 				/* no_dtls */
 				esdm_rpc_server_set_dtls(false);
+				break;
+			case 24:
+				/* no_io_uring */
+				esdm_rpc_server_set_io_uring(false);
 				break;
 
 			default:

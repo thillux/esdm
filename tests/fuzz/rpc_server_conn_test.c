@@ -74,6 +74,10 @@
 #include "threading_support.h"
 #include "unpriv_access.pb-c.h"
 
+#ifdef ESDM_RPC_IO_URING
+#include <liburing.h>
+#endif
+
 /*
  * The real ones, which the build renamed in the headers above - for the
  * server, see the server hooks below
@@ -83,6 +87,10 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
 	       int timeout);
 #undef shutdown
 int shutdown(int fd, int how);
+#ifdef ESDM_RPC_IO_URING
+#undef io_uring_submit_and_wait
+int io_uring_submit_and_wait(struct io_uring *ring, unsigned wait_nr);
+#endif
 
 #define TEST_IDLE_MS (ESDM_RPC_IDLE_TIMEOUT_USEC / 1000)
 
@@ -241,12 +249,12 @@ static bool test_in_worker(const char *prefix)
 	       !strncmp(name, prefix, strlen(prefix));
 }
 
-int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
-		    int timeout);
-int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
-		    int timeout)
+/*
+ * A worker collected the events of a round, @nfds of them, @timer telling
+ * whether its idle timer is among them - see esdm_rpcs_handler().
+ */
+static void test_round(int nfds, bool timer)
 {
-	int nfds = epoll_wait(epfd, events, maxevents, timeout), i;
 	int favor = atomic_load(test_favor);
 
 	/*
@@ -262,18 +270,57 @@ int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
 	if (atomic_load(&test_late_at) != TEST_LATE_REAP_ROUND ||
 	    test_now_ms() < atomic_load(&test_late_from_ms) ||
 	    !test_in_worker("ESDM rpc_p"))
-		return nfds;
+		return;
 
-	/* The worker's idle timer, see esdm_rpcs_handler() */
+	if (timer)
+		test_late_send(TEST_LATE_REAP_ROUND);
+}
+
+/* The data of the event of the worker's idle timer, see esdm_rpcs_loop */
+#define TEST_EVENT_TIMER 1
+
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout);
+int test_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+		    int timeout)
+{
+	int nfds = epoll_wait(epfd, events, maxevents, timeout), i;
+	bool timer = false;
+
 	for (i = 0; i < nfds; i++) {
-		if (events[i].data.u64 == 1) {
-			test_late_send(TEST_LATE_REAP_ROUND);
-			break;
-		}
+		if (events[i].data.u64 == TEST_EVENT_TIMER)
+			timer = true;
 	}
+	test_round(nfds, timer);
 
 	return nfds;
 }
+
+#ifdef ESDM_RPC_IO_URING
+/*
+ * The same for a worker waiting with io_uring: its events are the completions
+ * the wait leaves in the queue, which the worker takes after it returned.
+ */
+int test_io_uring_submit_and_wait(struct io_uring *ring, unsigned int wait_nr);
+int test_io_uring_submit_and_wait(struct io_uring *ring, unsigned int wait_nr)
+{
+	int ret = io_uring_submit_and_wait(ring, wait_nr);
+	struct io_uring_cqe *cqe;
+	unsigned int head;
+	bool timer = false;
+	int n = 0;
+
+	io_uring_for_each_cqe(ring, head, cqe)
+	{
+		if (io_uring_cqe_get_data64(cqe) == TEST_EVENT_TIMER)
+			timer = true;
+		n++;
+	}
+	test_round(n, timer);
+
+	return ret;
+}
+#endif
 
 /* Is the peer of the server's connection @fd the one of the request? */
 static bool test_late_peer(int fd)

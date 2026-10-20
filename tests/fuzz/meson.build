@@ -40,9 +40,18 @@ test('RPC server failure answers', rpc_server_test)
 
 # How the server's accept loop and workers handle their connections, serving a
 # stand-in service on sockets of the test's own. The server's calls waiting for
-# the events of a round and shutting a connection down are renamed to wrappers
-# in the test, which send a request on a connection in the middle of a round or
-# of its closing.
+# the events of a round - with epoll, or with io_uring where it is built - and
+# shutting a connection down are renamed to wrappers in the test, which send a
+# request on a connection in the middle of a round or of its closing.
+rpc_server_conn_hook_args = [
+	'-Depoll_wait=test_epoll_wait',
+	'-Dshutdown=test_shutdown',
+]
+if rpc_io_uring
+	rpc_server_conn_hook_args += [
+		'-Dio_uring_submit_and_wait=test_io_uring_submit_and_wait',
+	]
+endif
 rpc_server_conn_test = executable(
 		'rpc_server_conn_test',
 		[ common_src, crypto_src, esdm_src, service_rpc_src,
@@ -50,10 +59,7 @@ rpc_server_conn_test = executable(
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
 		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_hook_args + [
-			'-Depoll_wait=test_epoll_wait',
-			'-Dshutdown=test_shutdown',
-		],
+		c_args: fuzz_hook_args + rpc_server_conn_hook_args,
 	)
 
 test('RPC server connection handling', rpc_server_conn_test, timeout: 60)

@@ -341,6 +341,28 @@ else
 	dtls_deps = []
 endif
 
+# The io_uring event loop of the RPC server's workers - see esdm_rpcs_loop in
+# service-rpc/server/esdm_rpc_server.c. Everything built from the server's
+# sources takes dependencies_server, the server and the tests of its sources.
+# The headers of liburing are taken as system headers: their inline functions
+# do not pass the warnings of this project.
+rpc_io_uring = false
+if not get_option('rpc-io-uring').disabled()
+	if host_machine.system() != 'linux'
+		if get_option('rpc-io-uring').enabled()
+			error('rpc-io-uring needs the io_uring of Linux - set -Drpc-io-uring=disabled')
+		endif
+	else
+		liburing_dep = dependency('liburing', version: '>= 2.2',
+					  required: get_option('rpc-io-uring'),
+					  include_type: 'system')
+		if liburing_dep.found()
+			dependencies_server += liburing_dep
+			rpc_io_uring = true
+		endif
+	endif
+endif
+
 # The EGD protocol over the network - see common/esdm_tls.h. Plain TCP needs
 # nothing; the TLS mode is provided by the TLS stack of the crypto backend.
 # The TLS layer is built into the static common library only, from where the
