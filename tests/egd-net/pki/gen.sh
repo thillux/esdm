@@ -26,6 +26,19 @@
 # Rogue CA (rogue-ca.crt), trusted by nobody
 #  +- rogue-client.crt
 #
+# ML-DSA Root CA "ESDM EGD Test ML-DSA Root CA" (mldsa-ca.crt), on ML-DSA-87
+#  +- mldsa-server.crt      the server on ML-DSA-65, the names of server.crt
+#  +- mldsa-ec-server.crt   the same on ECDSA P-256
+#  +- mldsa-int.crt         intermediate CA "ESDM EGD Test ML-DSA Intermediate
+#      |                    CA", on ML-DSA-65
+#      +- mldsa-client.crt  a client on ML-DSA-44, the intermediate in its file
+#      +- mldsa-client-revoked.crt  another one, revoked by mldsa-int.crl
+#      +- mldsa-ec-client.crt  a client on ECDSA P-256, the intermediate in its
+#                          file
+#
+# The ML-DSA part takes OpenSSL 3.5 or later - an older openssl leaves it out.
+# ca-mldsa.crt holds the root CA and the ML-DSA root CA, as trust anchors of
+# both.
 # client-fakeroot.crt is client1.crt followed by a self-signed certificate
 # claiming to be the root CA - its name and its key identifier, but a key of
 # its own -, the key of which no CRL of the root verifies with. ca-int.crt
@@ -43,6 +56,9 @@
 #  int-delta.crl    of the intermediate CA, a delta CRL (deltaCRLIndicator)
 #  int-idp.crl      of the intermediate CA, limited by an issuing
 #                   distribution point
+#  mldsa-ca.crl     of the ML-DSA root CA, revoking nothing
+#  mldsa-int.crl    of the ML-DSA intermediate CA, revoking
+#                   mldsa-client-revoked
 
 set -euo pipefail
 
@@ -126,6 +142,36 @@ policy = policy_any
 unique_subject = no
 copy_extensions = none
 
+[ mldsa_root ]
+dir = $WORK/mldsa-root
+database = \$dir/index.txt
+new_certs_dir = \$dir/certs
+serial = \$dir/serial
+crlnumber = \$dir/crlnumber
+certificate = $OUT/mldsa-ca.crt
+private_key = $OUT/mldsa-ca.key
+default_md = default
+default_days = $DAYS
+default_crl_days = $DAYS
+policy = policy_any
+unique_subject = no
+copy_extensions = none
+
+[ mldsa_int ]
+dir = $WORK/mldsa-int
+database = \$dir/index.txt
+new_certs_dir = \$dir/certs
+serial = \$dir/serial
+crlnumber = \$dir/crlnumber
+certificate = $OUT/mldsa-int.crt
+private_key = $OUT/mldsa-int.key
+default_md = default
+default_days = $DAYS
+default_crl_days = $DAYS
+policy = policy_any
+unique_subject = no
+copy_extensions = none
+
 [ policy_any ]
 commonName = supplied
 organizationName = optional
@@ -189,26 +235,32 @@ issuingDistributionPoint = critical, @idp
 fullname = URI:http://crl.example/int.crl
 EOF
 
+# A key: <file> [algorithm], ECDSA on P-256 without an algorithm
 key() {
-	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
-		-out "$1" 2>/dev/null
+	if [ -n "${2:-}" ]; then
+		openssl genpkey -algorithm "$2" -out "$1" 2>/dev/null
+	else
+		openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+			-out "$1" 2>/dev/null
+	fi
 }
 
-# A self-signed CA: <key> <cert> <CN>
+# A self-signed CA: <key> <cert> <CN> [algorithm]
 self_signed() {
-	key "$1"
+	key "$1" "${4:-}"
 	openssl req -config "$WORK/ca.cnf" -new -x509 -key "$1" -out "$2" \
 		-days "$DAYS" -subj "/O=ESDM/CN=$3" -extensions v3_root \
 		-set_serial 1
 }
 
-# A certificate issued by a CA of ca.cnf:
-#   <ca> <extensions> <name> <CN> [openssl ca options...]
+# A certificate issued by a CA of ca.cnf, with a key of ECDSA on P-256 - or of
+# the algorithm of KEY_ALG:
+#   [KEY_ALG=<algorithm>] issue <ca> <extensions> <name> <CN> [openssl ca options...]
 issue() {
 	local ca="$1" ext="$2" name="$3" cn="$4"
 
 	shift 4
-	key "$OUT/$name.key"
+	key "$OUT/$name.key" "${KEY_ALG:-}"
 	openssl req -config "$WORK/ca.cnf" -new -key "$OUT/$name.key" \
 		-subj "/O=ESDM/CN=$cn" -out "$WORK/$name.csr"
 	openssl ca -config "$WORK/ca.cnf" -name "$ca" -batch -notext \
@@ -294,5 +346,41 @@ crl root ca-revoked-int.crl
 openssl ca -config "$WORK/ca.cnf" -name root_server -revoke "$OUT/server.crt" \
 	2>/dev/null
 crl root_server ca-revoked-server.crl
+
+# The ML-DSA PKI, see above: with OpenSSL 3.5 or later only
+if openssl list -signature-algorithms 2>/dev/null | grep ML-DSA-87 >/dev/null; then
+	ca_dir mldsa-root
+	ca_dir mldsa-int
+
+	self_signed "$OUT/mldsa-ca.key" "$OUT/mldsa-ca.crt" \
+		"ESDM EGD Test ML-DSA Root CA" ML-DSA-87
+
+	KEY_ALG=ML-DSA-65 issue mldsa_root v3_int mldsa-int \
+		"ESDM EGD Test ML-DSA Intermediate CA"
+	KEY_ALG=ML-DSA-65 issue mldsa_root v3_server mldsa-server \
+		"ESDM EGD Test ML-DSA Server"
+	issue mldsa_root v3_server mldsa-ec-server \
+		"ESDM EGD Test ECDSA Server (ML-DSA CA)"
+
+	KEY_ALG=ML-DSA-44 issue mldsa_int v3_client mldsa-client \
+		"ESDM EGD Test ML-DSA Client"
+	KEY_ALG=ML-DSA-44 issue mldsa_int v3_client mldsa-client-revoked \
+		"ESDM EGD Test ML-DSA Client (revoked)"
+	issue mldsa_int v3_client mldsa-ec-client \
+		"ESDM EGD Test ECDSA Client (ML-DSA CA)"
+
+	for c in mldsa-client mldsa-client-revoked mldsa-ec-client; do
+		cat "$OUT/mldsa-int.crt" >>"$OUT/$c.crt"
+	done
+	cat "$OUT/ca.crt" "$OUT/mldsa-ca.crt" >"$OUT/ca-mldsa.crt"
+
+	crl mldsa_root mldsa-ca.crl
+	openssl ca -config "$WORK/ca.cnf" -name mldsa_int -revoke \
+		"$WORK/mldsa-int/certs/$(awk -F'\t' '/ML-DSA Client \(revoked\)/ { print $4 }' \
+			"$WORK/mldsa-int/index.txt").pem" 2>/dev/null
+	crl mldsa_int mldsa-int.crl
+else
+	echo "No ML-DSA in this openssl: the ML-DSA PKI is left out"
+fi
 
 echo "Test PKI written to $OUT"
