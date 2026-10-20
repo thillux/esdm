@@ -263,13 +263,17 @@
  * code use SHA-256 both ways, a peer listing SHA-1 first is sent SHA-1. Linux
  * does not tell which HMAC an association uses, so it is not checked.
  *
- * What RFC 6083 asks and the TLS stacks do not all offer: DTLS shall not
- * detect replays (section 3.3), as SCTP may deliver the records of several
- * streams, and unordered ones, out of their order. GnuTLS has it turned off;
- * OpenSSL does so only for its own SCTP BIO, which needs the TLS stack built
- * with SCTP support, and Botan not at all. On the one ordered stream used here
- * every record arrives in the order of its sequence number, and the window of
- * the replay detection never discards one.
+ * Where RFC 6083 is not followed: DTLS shall not detect replays (section
+ * 3.3), as SCTP may deliver the records of several streams, and unordered
+ * ones, out of their order - and the window of the replay detection would
+ * discard those it slid past. Here the replay detection of DTLS is on, with
+ * every TLS stack, deliberately: on the one ordered and reliable stream used
+ * every record arrives once and in the order of its sequence number, so the
+ * window never discards a record of the peer - only one sent again, which
+ * DTLS drops rather than deliver it twice. SCTP drops a chunk it took already,
+ * and SCTP-AUTH those a party on the path forged; a record sent anew as a new
+ * user message by the one holding the key of the association - the peer
+ * itself, or a bug of a stack - is left to DTLS to drop.
  *
  * Randomness: the TLS stacks take their random numbers from the operating
  * system. The OpenSSL backend uses a library context of its own with the

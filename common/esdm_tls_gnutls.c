@@ -28,8 +28,9 @@
  * makes every call return GNUTLS_E_AGAIN rather than wait for the peer. On
  * SCTP, they hand the records - several of a flight in one push - to the
  * association of esdm_tls_sctp.h and take each from it; the session is a
- * datagram one without the replay detection of DTLS, which RFC 6083 rules out
- * (GNUTLS_NO_REPLAY_PROTECTION), and with timeouts too long to ever retransmit.
+ * datagram one with the replay detection of DTLS - which RFC 6083 rules out,
+ * see "DTLS over SCTP" in esdm_tls.h for why it is on here - and with
+ * timeouts too long to ever retransmit.
  *
  * GnuTLS decrypts a record into a buffer of its own, which gnutls_record_recv()
  * frees without wiping it: the packet is taken from GnuTLS instead, handed out
@@ -1340,9 +1341,9 @@ int esdm_tls_backend_conn_new(void *ctx, bool server, int fd,
 	d->check = check;
 	d->check_arg = arg;
 
-	/* No replay detection of DTLS on SCTP, see the file header */
+	/* With the replay detection of DTLS, see the file header */
 	if (sctp)
-		flags |= GNUTLS_DATAGRAM | GNUTLS_NO_REPLAY_PROTECTION;
+		flags |= GNUTLS_DATAGRAM;
 
 	if (gnutls_init(&d->session, flags) < 0) {
 		free(d);

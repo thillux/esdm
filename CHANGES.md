@@ -616,6 +616,8 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: es-ext-net with OpenSSL: a flight of the DTLS handshake beyond 4 KiB - long chains, large keys or signatures, a CA on ML-DSA - failed the handshake, as OpenSSL writes a flight in parts of 4 KiB that cut its records, which the SCTP layer took for no records; the parts are collected into records again
 
+* es-ext-net with GnuTLS: the replay detection of DTLS is on, as with OpenSSL and Botan - against RFC 6083 section 3.3, which rules it out for records SCTP delivers out of order, which the one ordered stream used never does - so a record sent twice is dropped rather than delivered twice
+
 * fix: External ES socket: every new connection to a provider runs its self test before the provider is credited, so a restarted provider is tested at once; the ESDM status waits at most 500 ms for the STATUS of a provider, which keeps its connection and has its late answer shown when it arrives, and no longer reconnects to a provider; retry, probe and backoff deadlines are kept in nanoseconds rather than whole seconds; a status or name with C1 controls or Unicode bidirectional controls is refused
 
 * fix: esdm-es-pkcs11: only a login the token refuses because of the PIN drops the PIN, other login failures keep it and retry; a token reporting its user PIN on the final try is not logged in to (status pin "final_try"); a PIN given on the command line is not repeated in error messages

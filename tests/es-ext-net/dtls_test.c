@@ -33,6 +33,8 @@
  *    the rotation of the server certificate, a rotation that does not load,
  *    and the revocation of an established connection.
  *  - Messages of one record and of several, both ways, IPv4 and IPv6.
+ *  - A record sent once more on the association is dropped by the replay
+ *    detection of DTLS, which is on with every TLS stack.
  *
  * Skips (77) in a build without es-ext-net, and on a kernel without SCTP.
  */
@@ -491,6 +493,98 @@ static void test_mldsa(void)
 	esdm_tls_ctx_put(cctx);
 }
 
+/* Receive the next record - or what is no -EAGAIN -, for a while */
+static ssize_t recv_record(struct pair *p, struct esdm_tls *t, uint8_t *buf,
+			   size_t len)
+{
+	unsigned int i;
+	ssize_t n = -EAGAIN;
+
+	for (i = 0; i < 100 && n == -EAGAIN; i++) {
+		n = esdm_tls_recv(t, buf, len);
+		if (n == -EAGAIN)
+			pair_wait(p);
+	}
+	return n;
+}
+
+/*
+ * A record of the client sent once more on the association, as a user message
+ * of its own - authenticated with the key of SCTP-AUTH, as the peer itself
+ * could send it: the replay detection of DTLS drops it, with every TLS stack,
+ * and the connection goes on - see "DTLS over SCTP" in esdm_tls.h
+ */
+static void test_replay(void)
+{
+	struct esdm_tls_config scfg =
+		cfg_of(PKI("server.crt"), PKI("server.key"), PKI("ca.crt"));
+	struct esdm_tls_config ccfg =
+		cfg_of(PKI("client1.crt"), PKI("client1.key"), PKI("ca.crt"));
+	struct esdm_tls_ctx *sctx = ctx_of(true, &scfg),
+			    *cctx = ctx_of(false, &ccfg);
+	static const uint8_t first[] = "the record sent twice";
+	static const uint8_t second[] = "the record after it";
+	static uint8_t rec[20000];
+	uint8_t out[64];
+	struct iovec iov = { .iov_base = rec, .iov_len = sizeof(rec) };
+	struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1 };
+	struct pollfd pfd;
+	struct pair p;
+	ssize_t len, n;
+
+	printf("DTLS over SCTP (%s): a record replayed\n", esdm_tls_stack());
+
+	CHECK(!pair_open(&p, sctx, cctx, "localhost"), "pair");
+	CHECK(!pair_handshake(&p), "handshake: server %d (%s), client %d (%s)",
+	      p.sret, esdm_tls_error(p.s), p.cret, esdm_tls_error(p.c));
+
+	/* A record each way: what SCTP notifies of the handshake is taken */
+	CHECK(!pair_record(&p, p.c, p.s, first, out, sizeof(first)),
+	      "a record of the client");
+	CHECK(!pair_record(&p, p.s, p.c, first, out, sizeof(first)),
+	      "a record of the server");
+
+	/* The record, looked at on the socket of the server before it is taken */
+	CHECK(esdm_tls_send(p.c, first, sizeof(first)) ==
+		      (ssize_t)sizeof(first),
+	      "send");
+	CHECK(!esdm_tls_flush(p.c), "flush");
+	pfd.fd = p.sfd;
+	pfd.events = POLLIN;
+	CHECK(poll(&pfd, 1, 2000) == 1, "the record did not arrive");
+	len = recvmsg(p.sfd, &msg, MSG_PEEK | MSG_DONTWAIT);
+	CHECK(len > 0 && !(msg.msg_flags & MSG_NOTIFICATION) &&
+		      (msg.msg_flags & MSG_EOR),
+	      "no record to replay: %zd, flags %x", len, msg.msg_flags);
+	n = recv_record(&p, p.s, out, sizeof(out));
+	CHECK(n == (ssize_t)sizeof(first) && !memcmp(out, first, sizeof(first)),
+	      "the record was not received: %zd (%s)", n, esdm_tls_error(p.s));
+
+	/* Sent again, then a new one */
+	if (len > 0)
+		CHECK(send(p.cfd, rec, (size_t)len, MSG_NOSIGNAL) == len,
+		      "replay: %s", strerror(errno));
+	CHECK(esdm_tls_send(p.c, second, sizeof(second)) ==
+		      (ssize_t)sizeof(second),
+	      "send");
+	CHECK(!esdm_tls_flush(p.c), "flush");
+
+	n = recv_record(&p, p.s, out, sizeof(out));
+	CHECK(n == (ssize_t)sizeof(second) &&
+		      !memcmp(out, second, sizeof(second)),
+	      "the replayed record was delivered, or the next one not: %zd (%s)",
+	      n, esdm_tls_error(p.s));
+	/* On the one ordered stream, nothing can follow the second record */
+	CHECK(esdm_tls_recv(p.s, out, sizeof(out)) == -EAGAIN,
+	      "more than the two records arrived");
+	if (n == (ssize_t)sizeof(second))
+		printf("  the replayed record was dropped, the next one taken\n");
+
+	pair_close(&p);
+	esdm_tls_ctx_put(sctx);
+	esdm_tls_ctx_put(cctx);
+}
+
 static void test_crl(void)
 {
 	struct esdm_tls_config scfg = cfg_of(PKI("server.crt"),
@@ -685,6 +779,7 @@ int main(void)
 	test_auth();
 	test_refusals();
 	test_mldsa();
+	test_replay();
 	test_crl();
 	test_rotation();
 	test_messages();
