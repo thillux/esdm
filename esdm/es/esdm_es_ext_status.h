@@ -29,11 +29,11 @@
 struct json_object;
 
 /*
- * Parse the status a plugin or a provider reported: @len bytes of text at
- * @text, which have to be one JSON object - see esdm_es_ext_json_object() -
- * of no more than @max bytes, nested no deeper than @depth: ESDM_ES_EXT_STATUS_MAX
- * and ESDM_ES_EXT_STATUS_MAX_DEPTH for a plugin, ESDM_ES_EXT_PROTO_STATUS_MAX
- * and one level more for a provider, which may wrap the status of its plugin.
+ * Parse the status a provider reported: @len bytes of text at @text, which
+ * have to be one JSON object - see esdm_es_ext_json_object() - of no more than
+ * @max bytes, nested no deeper than @depth: ESDM_ES_EXT_PROTO_STATUS_MAX and
+ * one level more than ESDM_ES_EXT_STATUS_MAX_DEPTH, as the provider server of
+ * libesdm_es_ext wraps the status its source reports.
  *
  * A status that is none is logged once, *@warned remembering that it was
  * until a valid status comes along; @who names the source in the log.
@@ -47,7 +47,7 @@ struct json_object *esdm_es_ext_status_parse(const char *text, size_t len,
 
 /*
  * Room for how a log message names an external source: its name in the ES
- * table and the name it declares, see esdm_es_extlib.c
+ * table and the name it declares, see esdm_es_extsock.c
  */
 #define ESDM_ES_EXT_LABEL_SIZE 64
 
@@ -60,7 +60,7 @@ void esdm_es_ext_state_name(struct json_object *obj, const char *declared,
 			    const char *instance);
 
 /*
- * The status of a plugin or a provider is asked for at most once per this many
+ * The status of a provider is asked for at most once per this many
  * seconds, and the last one obtained shown in between: it is asked for with
  * the source held, a request of a seeding waiting meanwhile - and whoever may
  * ask for the ESDM status is not to make the seedings wait at will.

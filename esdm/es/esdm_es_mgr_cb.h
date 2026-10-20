@@ -72,14 +72,9 @@ enum esdm_external_es {
 #endif
 #ifdef ESDM_ES_EXT
 	/*
-	 * External ES: ESDM_EXT_LIB_NUM plugin libraries, then
-	 * ESDM_EXT_SOCKET_NUM provider sockets. A range of entries each, from
-	 * the first to the last - empty for a kind without instances, whose last
-	 * is the one before its first then.
+	 * External ES: ESDM_EXT_SOCKET_NUM provider sockets, a range of entries
+	 * from the first to the last
 	 */
-	esdm_ext_es_extlib_first,
-	esdm_ext_es_extlib_last =
-		esdm_ext_es_extlib_first + ESDM_EXT_LIB_NUM - 1,
 	esdm_ext_es_extsock_first,
 	esdm_ext_es_extsock_last =
 		esdm_ext_es_extsock_first + ESDM_EXT_SOCKET_NUM - 1,

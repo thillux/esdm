@@ -192,7 +192,8 @@ include_dirs_es_ext = include_directories([ 'common',
 					    'es-ext',
 					    'service-egd/server' ])
 
-# Plugin libraries of the external entropy sources are loaded with dlopen(3)
+# dlopen(3), for the TLS module of libesdm_egd_client and the tests looking
+# up symbols with dlsym(3) - in the C library itself since glibc 2.34
 dl_dep = dependency('dl')
 
 # The EGD client needs nothing but the common code - keep it that way by not

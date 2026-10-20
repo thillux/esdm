@@ -27,7 +27,6 @@
 #include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
-#include "esdm_es_extlib.h"
 #include "esdm_es_extsock.h"
 #include "esdm_es_irq_ebpf.h"
 #include "esdm_es_irq.h"
@@ -57,9 +56,6 @@ struct esdm_config {
 	_Atomic uint32_t esdm_es_hwrand_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_tpm2_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_jent_kernel_entropy_rate_bits;
-#if ESDM_EXT_LIB_NUM > 0
-	_Atomic uint32_t esdm_es_ext_lib_entropy_rate_bits[ESDM_EXT_LIB_NUM];
-#endif
 #if ESDM_EXT_SOCKET_NUM > 0
 	_Atomic uint32_t esdm_es_ext_socket_entropy_rate_bits[ESDM_EXT_SOCKET_NUM];
 #endif
@@ -82,8 +78,7 @@ struct esdm_config {
  * Clamp such a limit to INT_MAX. UINT32_MAX stays: it disables the limit on
  * purpose.
  */
-/* The rates of the external sources, one per instance of its kind */
-#define ESDM_CONFIG_EXT_LIB_RATE(i) [i] = ESDM_EXT_LIB_ENTROPY_RATE_##i,
+/* The rates of the external sources, one per instance */
 #define ESDM_CONFIG_EXT_SOCKET_RATE(i) [i] = ESDM_EXT_SOCKET_ENTROPY_RATE_##i,
 
 #define ESDM_CONFIG_MAX_WO_RESEED_BITS(val)                                    \
@@ -148,17 +143,13 @@ static struct esdm_config esdm_config = {
 	 * See documentation of ESDM_JENT_KERNEL_ENTROPY_RATE
 	*/
 	.esdm_es_jent_kernel_entropy_rate_bits = ESDM_JENT_KERNEL_ENTROPY_RATE,
-#if ESDM_EXT_LIB_NUM > 0
-	/*
-	 * See the meson option es_ext_lib_entropy_rate: the cap of what an
-	 * external entropy source plugin is credited with for its claims, or
-	 * ESDM_ES_EXT_ENTROPY_RATE_AUTO for the one the plugin declares
-	 */
-	.esdm_es_ext_lib_entropy_rate_bits = { ESDM_EXT_LIB_INSTANCES(
-		ESDM_CONFIG_EXT_LIB_RATE) },
-#endif
 #if ESDM_EXT_SOCKET_NUM > 0
-	/* The same for the providers of the external entropy source sockets */
+	/*
+	 * See the meson option es_ext_socket_entropy_rate: the cap of what the
+	 * provider of an external entropy source socket is credited with for
+	 * its claims, or ESDM_ES_EXT_ENTROPY_RATE_AUTO for the one the provider
+	 * declares
+	 */
 	.esdm_es_ext_socket_entropy_rate_bits = { ESDM_EXT_SOCKET_INSTANCES(
 		ESDM_CONFIG_EXT_SOCKET_RATE) },
 #endif
@@ -428,7 +419,7 @@ void esdm_config_es_jent_kernel_entropy_rate_set(uint32_t ent)
 	esdm_es_add_entropy();
 }
 
-#if ESDM_EXT_LIB_NUM > 0 || ESDM_EXT_SOCKET_NUM > 0
+#if ESDM_EXT_SOCKET_NUM > 0
 /*
  * The rate configured for an external source: capped as any rate, but
  * ESDM_ES_EXT_ENTROPY_RATE_AUTO, no rate configured, kept as it is
@@ -440,48 +431,6 @@ static uint32_t esdm_config_es_ext_rate(uint32_t ent)
 		       esdm_config_entropy_rate_max(ent);
 }
 #endif
-
-uint32_t esdm_config_es_ext_lib_entropy_rate_configured(unsigned int idx)
-{
-#if ESDM_EXT_LIB_NUM > 0
-	if (idx < ESDM_EXT_LIB_NUM)
-		return esdm_config.esdm_es_ext_lib_entropy_rate_bits[idx];
-#else
-	(void)idx;
-#endif
-	return ESDM_ES_EXT_ENTROPY_RATE_AUTO;
-}
-
-/* The rate the source is credited at, see esdm_es_extlib.c */
-DSO_PUBLIC
-uint32_t esdm_config_es_ext_lib_entropy_rate(unsigned int idx)
-{
-#if ESDM_EXT_LIB_NUM > 0
-	if (idx < ESDM_EXT_LIB_NUM)
-		return esdm_es_extlib_entropy_rate(idx, NULL);
-#else
-	(void)idx;
-#endif
-	return 0;
-}
-
-DSO_PUBLIC
-int esdm_config_es_ext_lib_entropy_rate_set(unsigned int idx, uint32_t ent)
-{
-#if ESDM_EXT_LIB_NUM > 0
-	if (idx >= ESDM_EXT_LIB_NUM)
-		return -EINVAL;
-
-	esdm_config.esdm_es_ext_lib_entropy_rate_bits[idx] =
-		esdm_config_es_ext_rate(ent);
-	esdm_es_add_entropy();
-	return 0;
-#else
-	(void)idx;
-	(void)ent;
-	return -EINVAL;
-#endif
-}
 
 uint32_t esdm_config_es_ext_socket_entropy_rate_configured(unsigned int idx)
 {
@@ -637,7 +586,7 @@ uint32_t esdm_config_curr_node(void)
 int esdm_config_init(void)
 {
 	uint32_t complete_entropy_rate = 0;
-#if ESDM_EXT_LIB_NUM > 0 || ESDM_EXT_SOCKET_NUM > 0
+#if ESDM_EXT_SOCKET_NUM > 0
 	unsigned int i;
 #endif
 
@@ -693,12 +642,6 @@ int esdm_config_init(void)
 	 * tell whether the sources the ESDM manages can seed it, which is what
 	 * the check below is about.
 	 */
-#if ESDM_EXT_LIB_NUM > 0
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		esdm_config.esdm_es_ext_lib_entropy_rate_bits[i] =
-			esdm_config_es_ext_rate(
-				esdm_config.esdm_es_ext_lib_entropy_rate_bits[i]);
-#endif
 #if ESDM_EXT_SOCKET_NUM > 0
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
 		esdm_config.esdm_es_ext_socket_entropy_rate_bits[i] =

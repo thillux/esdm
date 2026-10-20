@@ -21,16 +21,14 @@
  * The external entropy sources of the esdm-server, as configured on its
  * command line.
  *
- * - --es_ext_lib loads the plugin library while the daemon has its
- *   privileges, and the plugin delivers once they are dropped.
  * - --es_ext_socket connects to a provider served by esdm-es-ext-serve. Once
  *   the provider was restarted, the daemon - its privileges dropped by then -
  *   connects to it again on demand.
- * - In a build with several sources of each kind, the options given several
- *   times configure one source each, the n-th occurrence the n-th source: each
- *   source has its own plugin or provider and rate, and is listed under its
- *   own instance name in the JSON and the text status.
- * - A source is shown under the name its plugin or provider declares, which
+ * - In a build with several sources, the options given several times
+ *   configure one source each, the n-th occurrence the n-th source: each
+ *   source has its own provider and rate, and is listed under its own
+ *   instance name in the JSON and the text status.
+ * - A source is shown under the name its provider declares, which
  *   esdm-es-ext-serve --name overrides; two sources may declare the same name.
  *
  * Skipped (77) unless run as root, as the esdm-server refuses to start
@@ -38,7 +36,7 @@
  * the test puts itself in namespaces of its own.
  *
  * Usage: es_ext_server_test <esdm-server> <esdm-es-ext-serve> <test plugin>
- *			     [<plugin copy> x 8 <rated plugin>]
+ *			     <rated plugin>
  */
 
 #define _GNU_SOURCE
@@ -61,12 +59,7 @@
 #include "es_ext_test_util.h"
 #include "esdm_rpc_client.h"
 
-/* The names of the first source of each kind, see esdm_es_extlib.h */
-#if ESDM_EXT_LIB_NUM > 1
-#define TEST_EXTLIB "ExternalLib0"
-#else
-#define TEST_EXTLIB "ExternalLib"
-#endif
+/* The name of the first source, see esdm_es_extsock.h */
 #if ESDM_EXT_SOCKET_NUM > 1
 #define TEST_EXTSOCK "ExternalSocket0"
 #else
@@ -140,7 +133,6 @@ static const char *test_es_section(const char *status, const char *instance)
 	return name;
 }
 
-#if ESDM_EXT_SOCKET_NUM > 0
 static bool test_wait_socket(void)
 {
 	unsigned int i;
@@ -153,57 +145,7 @@ static bool test_wait_socket(void)
 
 	return false;
 }
-#endif
 
-#if ESDM_EXT_LIB_NUM > 0
-static void test_plugin(const char *server, const char *plugin)
-{
-	char *const argv[] = { (char *)server, "-f", "--es_ext_lib",
-			       (char *)plugin, NULL };
-	static char status[65536];
-	const char *es;
-	/* Room for the seed of every source, of up to 16 of each external kind */
-	static uint8_t seed[8192];
-	pid_t pid;
-
-	pid = test_spawn(argv);
-	CHECK(pid > 0, "cannot start %s", server);
-	if (pid <= 0)
-		return;
-
-	CHECK(test_status(status, sizeof(status)),
-	      "the server does not answer");
-	es = test_es_section(status, TEST_EXTLIB);
-	CHECK(es != NULL, "the status lists no " TEST_EXTLIB " source");
-	if (es) {
-		CHECK(!strncmp(es, " Name: es-ext-test\n", 19),
-		      "the source is not shown under its name (%.400s)", es);
-		CHECK(strstr(es, "Plugin: es-ext-test") != NULL,
-		      "the plugin was not loaded (%.400s)", es);
-		CHECK(strstr(es, "Status: delivering") != NULL,
-		      "the plugin does not deliver (%.400s)", es);
-		/* The status of the plugin, a section of the source */
-		CHECK(strstr(es, "\n Provider properties:\n"
-				 "  Plugin: es-ext-test\n") != NULL,
-		      "the status of the plugin is not shown (%.400s)", es);
-	}
-
-	/* Asked for its data with the privileges of the daemon dropped */
-	CHECK(esdm_rpcc_get_seed(seed, sizeof(seed), 0) > 0,
-	      "no seed with the plugin loaded");
-	CHECK(test_status(status, sizeof(status)),
-	      "the server does not answer");
-	es = test_es_section(status, TEST_EXTLIB);
-	CHECK(es && strstr(es, "Status: delivering") != NULL,
-	      "the plugin does not deliver after the privilege drop (%.400s)",
-	      es ? es : "");
-
-	test_terminate(pid);
-}
-
-#endif
-
-#if ESDM_EXT_SOCKET_NUM > 0
 static void test_socket_provider(const char *server, const char *serve,
 				 const char *plugin)
 {
@@ -277,9 +219,8 @@ static void test_socket_provider(const char *server, const char *serve,
 out:
 	test_terminate(provider);
 }
-#endif
 
-#if ESDM_EXT_LIB_NUM >= 2 && ESDM_EXT_SOCKET_NUM >= 2
+#if ESDM_EXT_SOCKET_NUM >= 2
 
 /* The integer member @key of the JSON object @obj, -1 if there is none */
 static int64_t test_json_int(struct json_object *obj, const char *key)
@@ -310,46 +251,48 @@ static const char *test_json_text(struct json_object *obj)
 }
 
 /*
- * Two sources of each kind, configured on the command line, the n-th
- * occurrence of an option for the n-th source: each with its own plugin or
- * provider, name and rate - the rate of the plugin or the provider where the
- * occurrence is auto, the one given otherwise - and the first provider
- * failing its self test.
+ * Several sources, configured on the command line, the n-th occurrence of an
+ * option for the n-th source: each with its own provider, name and rate - the
+ * rate of the provider where the occurrence is auto, the one given otherwise -
+ * and the first provider failing its self test. The third, where the build has
+ * one, is credited at the rate its plugin declares.
  */
 static void test_several(const char *server, const char *serve,
-			 char *const copies[], const char *rated)
+			 const char *plugin, const char *rated)
 {
 	const char *const serve0[] = { "--entropy_rate", "200", NULL };
 	const char *const serve1[] = { "--name", "es-ext-test", NULL };
-	char socket[2][sizeof(test_dir) + 32];
-	char *const server_argv[] = {
-		(char *)server, "-f",
-		"--es_ext_lib", (char *)rated,
-		"--es_ext_lib", copies[1],
-		"--es_ext_lib_entropy_rate", "auto",
-		"--es_ext_lib_entropy_rate", "64",
-		"--es_ext_socket", socket[0],
-		"--es_ext_socket", socket[1],
-		"--es_ext_socket_entropy_rate", "auto",
-		"--es_ext_socket_entropy_rate", "192",
-		NULL
-	};
+	unsigned int n = ESDM_EXT_SOCKET_NUM >= 3 ? 3 : 2;
+	char socket[3][sizeof(test_dir) + 32];
+	static const char *const rates[] = { "auto", "192", "auto" };
+	char *server_argv[2 + 4 * 3 + 1];
 	static char status[65536];
 	struct json_object *root = NULL, *es;
 	const char *section;
-	pid_t provider[2], pid;
-	unsigned int i;
+	pid_t provider[3] = { -1, -1, -1 }, pid;
+	unsigned int i, args = 0;
 
-	for (i = 0; i < 2; i++)
+	server_argv[args++] = (char *)server;
+	server_argv[args++] = "-f";
+	for (i = 0; i < n; i++) {
 		snprintf(socket[i], sizeof(socket[i]), "%s/provider%u.socket",
 			 test_dir, i);
+		server_argv[args++] = "--es_ext_socket";
+		server_argv[args++] = socket[i];
+		server_argv[args++] = "--es_ext_socket_entropy_rate";
+		server_argv[args++] = (char *)rates[i];
+	}
+	server_argv[args] = NULL;
 
-	provider[0] = es_ext_test_serve(serve, copies[2], socket[0], serve0,
+	provider[0] = es_ext_test_serve(serve, plugin, socket[0], serve0,
 					"selftest_ret=-19;name=Quelle A");
-	provider[1] = es_ext_test_serve(serve, copies[3], socket[1], serve1,
+	provider[1] = es_ext_test_serve(serve, plugin, socket[1], serve1,
 					"rate=96;name=overridden");
-	CHECK(provider[0] > 0 && provider[1] > 0,
-	      "the providers did not come up");
+	if (n > 2)
+		provider[2] = es_ext_test_serve(serve, rated, socket[2], NULL,
+						NULL);
+	for (i = 0; i < n; i++)
+		CHECK(provider[i] > 0, "provider %u did not come up", i);
 
 	pid = test_spawn(server_argv);
 	CHECK(pid > 0, "cannot start %s", server);
@@ -368,30 +311,6 @@ static void test_several(const char *server, const char *serve,
 	root = json_tokener_parse(status);
 	CHECK(root != NULL, "the JSON status is no JSON");
 
-	/* The rate of the plugin, for auto */
-	es = es_ext_test_status_es(root, "ExternalLib0");
-	CHECK(test_json_str_is(es, "name", "es-ext-rated") &&
-		      test_json_str_is(es, "plugin_library", rated),
-	      "ExternalLib0 does not have the plugin of its option: %s",
-	      test_json_text(es));
-	CHECK(test_json_int(es, "entropy_rate") == 128 &&
-		      test_json_str_is(es, "entropy_rate_source", "plugin") &&
-		      test_json_int(es, "entropy_rate_per_256_data_bits") == 128,
-	      "ExternalLib0 is not credited at the rate of its plugin: %s",
-	      test_json_text(es));
-
-	/* The rate of the second occurrence */
-	es = es_ext_test_status_es(root, "ExternalLib1");
-	CHECK(test_json_str_is(es, "name", "es-ext-test") &&
-		      test_json_str_is(es, "plugin_library", copies[1]),
-	      "ExternalLib1 does not have the plugin of its option: %s",
-	      test_json_text(es));
-	CHECK(test_json_int(es, "entropy_rate") == 64 &&
-		      test_json_str_is(es, "entropy_rate_source", "config") &&
-		      test_json_int(es, "entropy_rate_per_256_data_bits") == 64,
-	      "ExternalLib1 is not credited at the rate of its option: %s",
-	      test_json_text(es));
-
 	/*
 	 * The name of the plugin, the rate of --entropy_rate of the provider -
 	 * credited with nothing, as it fails its self test
@@ -409,8 +328,8 @@ static void test_several(const char *server, const char *serve,
 	      test_json_text(es));
 
 	/*
-	 * The name of --name - the name of a plugin library source as well -
-	 * and the rate of the option, not the one of the plugin
+	 * The name of --name - the name of the third source as well - and the
+	 * rate of the option, not the one of the plugin
 	 */
 	es = es_ext_test_status_es(root, "ExternalSocket1");
 	CHECK(test_json_str_is(es, "name", "es-ext-test") &&
@@ -422,16 +341,36 @@ static void test_several(const char *server, const char *serve,
 		      test_json_int(es, "entropy_rate_per_256_data_bits") == 192,
 	      "ExternalSocket1 is not credited at the rate of its option: %s",
 	      test_json_text(es));
+
+	/* The name and the rate the plugin declares, for auto */
+	if (n > 2) {
+		es = es_ext_test_status_es(root, "ExternalSocket2");
+		CHECK(test_json_str_is(es, "name", "es-ext-rated") &&
+			      test_json_str_is(es, "provider_socket",
+					       socket[2]),
+		      "ExternalSocket2 does not have the provider of its option: %s",
+		      test_json_text(es));
+		CHECK(test_json_int(es, "entropy_rate") == 128 &&
+			      test_json_str_is(es, "entropy_rate_source",
+					       "provider") &&
+			      test_json_int(es,
+					    "entropy_rate_per_256_data_bits") ==
+				      128,
+		      "ExternalSocket2 is not credited at the rate of its plugin: %s",
+		      test_json_text(es));
+	}
 	json_object_put(root);
 
 	/* And the text status names each of them */
 	CHECK(test_status(status, sizeof(status)),
 	      "the server does not answer");
-	CHECK(test_es_section(status, "ExternalLib0") &&
-		      test_es_section(status, "ExternalLib1") &&
-		      test_es_section(status, "ExternalSocket0") &&
-		      test_es_section(status, "ExternalSocket1"),
-	      "the text status does not name each source");
+	for (i = 0; i < n; i++) {
+		char instance[32];
+
+		snprintf(instance, sizeof(instance), "ExternalSocket%u", i);
+		CHECK(test_es_section(status, instance),
+		      "the text status does not name %s", instance);
+	}
 	section = test_es_section(status, "ExternalSocket0");
 	CHECK(section && !strncmp(section, " Name: Quelle A\n", 16),
 	      "the text status does not show the declared name (%.300s)",
@@ -443,7 +382,7 @@ static void test_several(const char *server, const char *serve,
 	test_terminate(pid);
 
 out:
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < n; i++) {
 		es_ext_test_terminate(provider[i]);
 		unlink(socket[i]);
 	}
@@ -455,8 +394,8 @@ int main(int argc, char *argv[])
 {
 	int ret;
 
-	if (argc < 4) {
-		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> [<plugin copy> x 8 <rated plugin>]\n",
+	if (argc < 5) {
+		printf("usage: %s <esdm-server> <esdm-es-ext-serve> <test plugin> <rated plugin>\n",
 		       argv[0]);
 		return 1;
 	}
@@ -488,17 +427,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-#if ESDM_EXT_LIB_NUM > 0
-	test_plugin(argv[1], argv[3]);
-#endif
-#if ESDM_EXT_SOCKET_NUM > 0
 	test_socket_provider(argv[1], argv[2], argv[3]);
-#endif
-#if ESDM_EXT_LIB_NUM >= 2 && ESDM_EXT_SOCKET_NUM >= 2
-	if (argc >= 13)
-		test_several(argv[1], argv[2], argv + 4, argv[12]);
-	else
-		CHECK(0, "the plugin copies are missing");
+#if ESDM_EXT_SOCKET_NUM >= 2
+	test_several(argv[1], argv[2], argv[3], argv[4]);
 #endif
 
 	esdm_rpcc_fini_unpriv_service();

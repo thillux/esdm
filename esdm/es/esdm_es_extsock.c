@@ -161,9 +161,9 @@ struct esdm_es_extsock {
 
 	/*
 	 * The last request to the provider failed, or its last self test did.
-	 * Kept apart as for the plugin source: only data delivered clears a
-	 * failed request, only a self test that passes clears a failed self
-	 * test - not a new connection either. Set and cleared under the write
+	 * Kept apart: only data delivered clears a failed request, only a self
+	 * test that passes clears a failed self test - not a new connection
+	 * either. Set and cleared under the write
 	 * lock, read under the reader lock.
 	 */
 	bool read_failed;
@@ -930,7 +930,10 @@ static int esdm_es_extsock_status_answer_locked(struct esdm_es_extsock *sock,
 		return 0;
 	}
 
-	/* One level deeper than a plugin: the server may wrap that of its plugin */
+	/*
+	 * One level deeper than the status of a source: the provider server
+	 * of libesdm_es_ext wraps the one its source reports
+	 */
 	*obj = esdm_es_ext_status_parse(text, textlen,
 					ESDM_ES_EXT_PROTO_STATUS_MAX,
 					ESDM_ES_EXT_STATUS_MAX_DEPTH + 1,

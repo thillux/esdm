@@ -279,47 +279,32 @@ conf_data.set_quoted('ESDM_PKCS11_TOKEN_LABEL',
 
 conf_data.set('ESDM_ES_EXT', get_option('es_ext').enabled())
 
-# The external entropy sources of each kind: their number, and the X-macro
-# ESDM_EXT_*_INSTANCES(X) expanding X(i) for each of their indices i, from which
-# the code generates what each instance needs - see esdm_es_extlib.c
-es_ext_lib_num = 0
+# The external entropy sources: their number, and the X-macro
+# ESDM_EXT_SOCKET_INSTANCES(X) expanding X(i) for each of their indices i, from
+# which the code generates what each instance needs - see esdm_es_extsock.c
 es_ext_socket_num = 0
 if get_option('es_ext').enabled()
-	es_ext_lib_num = get_option('es_ext_lib_num')
 	es_ext_socket_num = get_option('es_ext_socket_num')
-	if es_ext_lib_num + es_ext_socket_num == 0
-		error('es_ext is enabled, but es_ext_lib_num and es_ext_socket_num are both 0 - give one of them a number of sources, or disable es_ext')
-	endif
 endif
-foreach es_ext_kind : [ [ 'LIB', es_ext_lib_num ],
-			[ 'SOCKET', es_ext_socket_num ] ]
-	es_ext_instances = []
-	foreach i : range(es_ext_kind[1])
-		es_ext_instances += 'X(@0@)'.format(i)
-	endforeach
-	conf_data.set('ESDM_EXT_' + es_ext_kind[0] + '_NUM', es_ext_kind[1])
-	conf_data.set('ESDM_EXT_' + es_ext_kind[0] + '_INSTANCES(X)',
-		      ' '.join(es_ext_instances))
+es_ext_instances = []
+foreach i : range(es_ext_socket_num)
+	es_ext_instances += 'X(@0@)'.format(i)
 endforeach
+conf_data.set('ESDM_EXT_SOCKET_NUM', es_ext_socket_num)
+conf_data.set('ESDM_EXT_SOCKET_INSTANCES(X)', ' '.join(es_ext_instances))
 
 
 # The configuration of the external sources: the i-th entry of a list sets
-# ESDM_EXT_*_<i> for the i-th source of its kind. A path for each source, or
-# for fewer, the others getting none; a rate or a uid for each source, or one
-# for all of them.
+# ESDM_EXT_SOCKET_*_<i> for the i-th source. A path for each source, or for
+# fewer, the others getting none; a rate or a uid for each source, or one for
+# all of them.
 foreach es_ext_opt : [
-		[ 'es_ext_lib_path', es_ext_lib_num, 'ESDM_EXT_LIB_PATH_',
-		  'es_ext_lib_num' ],
-		[ 'es_ext_lib_entropy_rate', es_ext_lib_num,
-		  'ESDM_EXT_LIB_ENTROPY_RATE_', 'es_ext_lib_num' ],
-		[ 'es_ext_socket_path', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_PATH_', 'es_ext_socket_num' ],
-		[ 'es_ext_socket_entropy_rate', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_ENTROPY_RATE_', 'es_ext_socket_num' ],
-		[ 'es_ext_socket_peer_uid', es_ext_socket_num,
-		  'ESDM_EXT_SOCKET_PEER_UID_', 'es_ext_socket_num' ] ]
+		[ 'es_ext_socket_path', 'ESDM_EXT_SOCKET_PATH_' ],
+		[ 'es_ext_socket_entropy_rate',
+		  'ESDM_EXT_SOCKET_ENTROPY_RATE_' ],
+		[ 'es_ext_socket_peer_uid', 'ESDM_EXT_SOCKET_PEER_UID_' ] ]
 	es_ext_name = es_ext_opt[0]
-	es_ext_num = es_ext_opt[1]
+	es_ext_num = es_ext_socket_num
 	es_ext_is_path = es_ext_name.endswith('_path')
 	es_ext_is_uid = es_ext_name.endswith('_uid')
 
@@ -352,24 +337,22 @@ foreach es_ext_opt : [
 	endforeach
 
 	if es_ext_num == 0
-		# No source of the kind is built: say so, unless it is the default
+		# No source is built: say so, unless it is the default
 		es_ext_default = es_ext_is_uid ? [ '-1' ] : []
 		if get_option(es_ext_name) != es_ext_default
-			warning('@0@ is ignored, as @1@'.format(es_ext_name,
-				get_option('es_ext').enabled() ?
-					es_ext_opt[3] + ' is 0' :
-					'es_ext is disabled'))
+			warning('@0@ is ignored, as es_ext is disabled'.format(
+				es_ext_name))
 		endif
 		continue
 	endif
 
 	if es_ext_is_path
 		if es_ext_vals.length() > es_ext_num
-			error('@0@ names @1@ paths, for @2@ sources of its kind'.format(
+			error('@0@ names @1@ paths, for @2@ sources'.format(
 			      es_ext_name, es_ext_vals.length(), es_ext_num))
 		endif
 	elif es_ext_vals.length() <= 1
-		# None configured for any source of the kind, or one for all
+		# None configured for any source, or one for all
 		es_ext_one = es_ext_is_uid ? '-1' : 'auto'
 		if es_ext_vals.length() == 1
 			es_ext_one = es_ext_vals[0]
@@ -380,12 +363,12 @@ foreach es_ext_opt : [
 			es_ext_vals += es_ext_one
 		endforeach
 	elif es_ext_vals.length() != es_ext_num
-		error('@0@ takes one value for all sources of its kind or one for each of the @1@ sources, not @2@ values'.format(
+		error('@0@ takes one value for all sources or one for each of the @1@ sources, not @2@ values'.format(
 		      es_ext_name, es_ext_num, es_ext_vals.length()))
 	endif
 
 	foreach i : range(es_ext_num)
-		es_ext_define = es_ext_opt[2] + i.to_string()
+		es_ext_define = es_ext_opt[1] + i.to_string()
 		es_ext_val = i < es_ext_vals.length() ? es_ext_vals[i] : ''
 		if es_ext_is_path
 			conf_data.set_quoted(es_ext_define, es_ext_val)

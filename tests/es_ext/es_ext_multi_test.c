@@ -18,56 +18,47 @@
  */
 
 /*
- * Several external entropy sources of each kind, in a build with at least two
- * plugin library and two provider socket sources (es_ext_lib_num,
- * es_ext_socket_num).
+ * Several external entropy sources, in a build with at least two provider
+ * socket sources (es_ext_socket_num).
  *
  * - Each source is an entry of the ES table of its own, named with its index.
- * - The sources of a kind are independent: each has its own plugin or
- *   provider, entropy rate, accepted uid, self test verdict, failures and
- *   state; what happens to one - a failed self test, a failing request, a
- *   provider that goes away - does not change what another is credited with.
- * - A plugin library serves one source: a second source refuses the plugin
- *   another one uses.
+ * - The sources are independent: each has its own provider, entropy rate,
+ *   accepted uid, self test verdict, failures and state; what happens to one -
+ *   a failed self test, a failing request, a provider that goes away - does
+ *   not change what another is credited with.
  * - The JSON status of the ESDM lists every source once, under its instance
- *   name - and under the name its plugin or provider declares, which two
- *   sources may share; a source declaring none, or one that is not valid, is
- *   shown under its instance name. Another plugin loaded into one source, or
- *   a provider restarted with another name, changes the name of that source
- *   only, and a status taken meanwhile shows the old name or the new one.
+ *   name - and under the name its provider declares, which two sources may
+ *   share; a source declaring none, or one that is not valid, is shown under
+ *   its instance name. A provider restarted with another name changes the
+ *   name of that source only, and a status taken meanwhile shows the old name
+ *   or the new one.
  * - Each source is credited at its own rate: the one configured for it, else
- *   the one its plugin or provider declares, else the default of its kind.
- *   Configuring one source, loading another plugin into one, or restarting
- *   one provider with another rate changes the rate of that source only.
- * - Each source has the status of its own plugin or provider - for a provider
- *   the fields of its esdm-es-ext-serve, the DTLS of its own connection
- *   included, next to the status of its plugin - none for one without, one
- *   failing, one that is no valid status; cached for each source on its own;
- *   a slow plugin or provider keeps only its own status out, a provider gone
- *   only its own source.
+ *   the one its provider declares, else 0. Configuring one source, or all of
+ *   them, or restarting one provider with another rate, changes the rate of
+ *   that source only.
+ * - Each source has the status of its own provider - the fields of its
+ *   server, the DTLS of its own connection included, next to the status of
+ *   its source - none for one without, one failing, one that is no valid
+ *   status; cached for each source on its own; a slow provider keeps only its
+ *   own status out, a provider gone only its own source.
  *
- * Both sources are compiled into the test, with a short retry interval and
- * timeout of the provider sockets. The plugin libraries are copies of the test
- * plugin, each with a control of its own; the providers are esdm-es-ext-serve
- * processes serving further copies, steered through the environment.
+ * The sources are compiled into the test, with a short retry interval and
+ * timeout. The providers are esdm-es-ext-serve processes serving the test
+ * plugin, steered through the environment.
  *
- * Usage: es_ext_multi_test <esdm-es-ext-serve> <plugin copy> x 8
- *			    <bare plugin>
+ * Usage: es_ext_multi_test <esdm-es-ext-serve> <test plugin>
  */
 
 #define _GNU_SOURCE
 #include "config.h"
 
-#define ESDM_EXT_LIB_PROBE_INTERVAL_SEC 0
 #define ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC 1
 #define ESDM_EXT_SOCKET_TIMEOUT_MS 500
 #define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 3
 
-/* The units under test */
-#include "esdm_es_extlib.c"
+/* The unit under test */
 #include "esdm_es_extsock.c"
 
-#include <dlfcn.h>
 #include <pthread.h>
 
 #include "common_test.h"
@@ -77,24 +68,28 @@
 #include "es_ext_test_plugin.h"
 #include "es_ext_test_util.h"
 
-#if ESDM_EXT_LIB_NUM < 2 || ESDM_EXT_SOCKET_NUM < 2
-#error "The test needs two sources of each kind at least"
+#if ESDM_EXT_SOCKET_NUM < 2
+#error "The test needs two sources at least"
 #endif
 
-#define TEST_PLUGINS 8
-
 static const char *test_serve_bin;
-static const char *test_plugin_bare;
-static const char *test_plugin[TEST_PLUGINS];
-static struct esdm_es_ext_test_control *test_ctl[TEST_PLUGINS];
-static void *test_ref[TEST_PLUGINS];
-static struct esdm_es_ext_plugin *test_plugin_struct[TEST_PLUGINS];
+static const char *test_plugin;
 
 static char test_dir[] = "/tmp/esdm-es-ext-multi-test-XXXXXX";
 static char test_socket[ESDM_EXT_SOCKET_NUM][sizeof(test_dir) + 32];
 
-#define LIB(i) (&esdm_es_extlib[i])
 #define SOCK(i) (&esdm_es_extsock[i])
+
+/*
+ * Start a provider on the socket of source @i, with the arguments @extra and
+ * the settings @settings of the test plugin - see es_ext_test_serve()
+ */
+static pid_t test_serve(unsigned int i, const char *const *extra,
+			const char *settings)
+{
+	return es_ext_test_serve(test_serve_bin, test_plugin, test_socket[i],
+				 extra, settings);
+}
 
 static uint32_t test_level(uint32_t rate, uint32_t bits)
 {
@@ -124,28 +119,18 @@ static bool test_state_has(const struct esdm_es_cb *es, const char *key,
 }
 
 /*
- * Every source an entry of the ES table of its own, the plugin libraries and
- * then the provider sockets, each named with its index - and no two entries
- * of the table named alike.
+ * Every source an entry of the ES table of its own, each named with its index
+ * - and no two entries of the table named alike.
  */
 static void test_table(void)
 {
 	char name[32];
 	unsigned int i, j;
 
-	CHECK_EQ(esdm_ext_es_extlib_last - esdm_ext_es_extlib_first + 1,
-		 ESDM_EXT_LIB_NUM);
 	CHECK_EQ(esdm_ext_es_extsock_last - esdm_ext_es_extsock_first + 1,
 		 ESDM_EXT_SOCKET_NUM);
-	CHECK_EQ(esdm_ext_es_extsock_first, esdm_ext_es_extlib_last + 1);
+	CHECK_EQ(esdm_ext_es_extsock_last + 1, esdm_ext_es_aux);
 
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-		snprintf(name, sizeof(name), "ExternalLib%u", i);
-		CHECK(esdm_es[esdm_ext_es_extlib_first + i] == LIB(i),
-		      "plugin library source %u is not its entry", i);
-		CHECK(!strcmp(LIB(i)->name, name), "%s is called %s", name,
-		      LIB(i)->name);
-	}
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
 		snprintf(name, sizeof(name), "ExternalSocket%u", i);
 		CHECK(esdm_es[esdm_ext_es_extsock_first + i] == SOCK(i),
@@ -163,91 +148,6 @@ static void test_table(void)
 }
 
 /*
- * Two plugin library sources, one failing its self test, the other credited,
- * each at a rate of its own: neither changes what the other is credited with.
- */
-static void test_plugins(void)
-{
-	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
-	struct esdm_es_ext_test_control *ctl0 = test_ctl[0], *ctl1 = test_ctl[1];
-	unsigned int i;
-
-	/* Configuration of a source of its own, none beyond the build's */
-	CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[0]), 0);
-	CHECK_EQ(esdm_es_ext_lib_set_path(1, test_plugin[1]), 0);
-	CHECK_EQ(esdm_es_ext_lib_set_path(ESDM_EXT_LIB_NUM, test_plugin[2]),
-		 -EINVAL);
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(0, 64), 0);
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(1, 128), 0);
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate(0), 64);
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate(1), 128);
-
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK_EQ(LIB(i)->init(), 0);
-	CHECK(LIB(0)->active() && LIB(1)->active(),
-	      "the plugins were not loaded");
-	for (i = 2; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK(!LIB(i)->active(), "%s is active without a plugin",
-		      LIB(i)->name);
-	CHECK(test_state_has(LIB(0), "plugin_library", test_plugin[0]),
-	      "the first source does not name its library");
-	CHECK(test_state_has(LIB(1), "plugin_library", test_plugin[1]),
-	      "the second source does not name its library");
-	CHECK_EQ(ctl0->init_calls, 1);
-	CHECK_EQ(ctl1->init_calls, 1);
-
-	/* One fails its self test, the other passes */
-	ctl0->selftest_ret = -ENODEV;
-	CHECK_EQ(LIB(0)->selftest(), -EFAULT);
-	CHECK_EQ(LIB(1)->selftest(), 0);
-	CHECK_EQ(LIB(0)->curr_entropy(bits), 0);
-	CHECK_EQ(LIB(1)->curr_entropy(bits), test_level(128, bits));
-	CHECK_EQ(test_get(LIB(0), bits), 0);
-	CHECK_EQ(test_get(LIB(1), bits), test_level(128, bits));
-	CHECK(test_state_has(LIB(0), "status", "failing its self test"),
-	      "the failed self test is not the first source's");
-	CHECK(test_state_has(LIB(1), "status", "delivering"),
-	      "the second source does not deliver");
-
-	/* The other one failing a request */
-	ctl1->get_ret = -EIO;
-	CHECK_EQ(test_get(LIB(1), bits), 0);
-	CHECK(test_state_has(LIB(1), "status", "failing"),
-	      "the failed request is not the second source's");
-	CHECK(test_state_has(LIB(0), "status", "failing its self test"),
-	      "the first source changed with the second");
-	ctl1->get_ret = 0;
-	CHECK_EQ(LIB(1)->monitor_es(), 0);
-	CHECK_EQ(LIB(1)->curr_entropy(bits), test_level(128, bits));
-
-	/* A rate of its own each */
-	ctl0->selftest_ret = 0;
-	CHECK_EQ(LIB(0)->selftest(), 0);
-	CHECK_EQ(test_get(LIB(0), bits), test_level(64, bits));
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(1, 256), 0);
-	CHECK_EQ(test_get(LIB(1), bits), test_level(256, bits));
-	CHECK_EQ(test_get(LIB(0), bits), test_level(64, bits));
-	CHECK_EQ(ctl0->selftest_calls, 2);
-	CHECK_EQ(ctl1->selftest_calls, 1);
-
-	/* A plugin library serves one source */
-	CHECK_EQ(esdm_es_ext_lib_set_path(1, test_plugin[0]), -EBUSY);
-	CHECK(!LIB(1)->active(), "a plugin serves two sources");
-	CHECK(LIB(0)->active(), "the plugin was taken from its source");
-	CHECK_EQ(test_get(LIB(0), bits), test_level(64, bits));
-	CHECK_EQ(esdm_es_ext_lib_set_path(1, test_plugin[1]), 0);
-	CHECK(LIB(1)->active(), "the second plugin is not back");
-	CHECK_EQ(test_get(LIB(1), bits), test_level(256, bits));
-
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		LIB(i)->fini();
-	CHECK_EQ(ctl0->fini_calls, 1);
-	CHECK_EQ(ctl1->fini_calls, 2);
-	esdm_config_es_ext_lib_entropy_rate_set(0, 256);
-	esdm_config_es_ext_lib_entropy_rate_set(1, 256);
-}
-
-/*
  * Two provider socket sources, each connected to an esdm-es-ext-serve of its
  * own: one failing its self test, the other credited at its own rate; a uid
  * accepted by one only; a provider gone for one only.
@@ -258,11 +158,8 @@ static void test_providers(void)
 	pid_t provider[2];
 	unsigned int i;
 
-	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
-					test_socket[0], NULL,
-					"selftest_ret=-19");
-	provider[1] = es_ext_test_serve(test_serve_bin, test_plugin[5],
-					test_socket[1], NULL, NULL);
+	provider[0] = test_serve(0, NULL, "selftest_ret=-19");
+	provider[1] = test_serve(1, NULL, NULL);
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 
@@ -332,13 +229,6 @@ static void test_providers(void)
 	}
 }
 
-/* A request of a seeding the plugin of @arg takes its time for */
-static void *test_slow_get(void *arg)
-{
-	test_get(arg, ESDM_DRNG_SECURITY_STRENGTH_BITS);
-	return NULL;
-}
-
 /* The string member @key of the state of @es, into @buf */
 static const char *test_state_str(const struct esdm_es_cb *es, const char *key,
 				  char *buf, size_t buflen)
@@ -400,71 +290,6 @@ static bool test_reader_start(struct test_reader *reader, pthread_t *thread)
 }
 
 /*
- * The names the plugins declare, one per source: two sources of the same
- * name, one without, one with a name that is none. Another plugin loaded into
- * one source changes only its name, and a status reader sees the old name or
- * the new one meanwhile.
- */
-static void test_plugin_names(void)
-{
-	unsigned int i, n = ESDM_EXT_LIB_NUM < 4 ? ESDM_EXT_LIB_NUM : 4;
-	struct test_reader reader = { .es = LIB(0) };
-	char name[64], instance[64];
-	pthread_t thread;
-
-	snprintf(test_ctl[0]->name, sizeof(test_ctl[0]->name), "alpha");
-	snprintf(test_ctl[1]->name, sizeof(test_ctl[1]->name), "alpha");
-	if (n > 2)
-		test_plugin_struct[2]->name = NULL;
-	if (n > 3)
-		snprintf(test_ctl[3]->name, sizeof(test_ctl[3]->name),
-			 "esc\x1b[31m");
-	for (i = 0; i < n; i++) {
-		CHECK_EQ(esdm_es_ext_lib_set_path(i, test_plugin[i]), 0);
-		CHECK_EQ(LIB(i)->init(), 0);
-	}
-
-	for (i = 0; i < n; i++) {
-		test_state_str(LIB(i), "name", name, sizeof(name));
-		test_state_str(LIB(i), "instance", instance, sizeof(instance));
-		CHECK(!strcmp(instance, LIB(i)->name),
-		      "%s is the instance %s", LIB(i)->name, instance);
-		CHECK(!strcmp(name, i < 2 ? "alpha" : LIB(i)->name),
-		      "%s is shown as %s", LIB(i)->name, name);
-	}
-
-	/* Another plugin into the first source, read meanwhile */
-	reader.names[0] = "alpha";
-	reader.names[1] = "beta";
-	reader.names[2] = LIB(0)->name;
-	CHECK(test_reader_start(&reader, &thread), "the reader does not read");
-	snprintf(test_ctl[6]->name, sizeof(test_ctl[6]->name), "beta");
-	for (i = 0; i < 20; i++) {
-		CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[i & 1 ? 0 : 6]),
-			 0);
-	}
-	atomic_store(&reader.stop, true);
-	pthread_join(thread, NULL);
-	CHECK_EQ(reader.bad, 0);
-	CHECK(!strcmp(test_state_str(LIB(0), "name", name, sizeof(name)),
-		      "alpha"),
-	      "the first source is shown as %s", name);
-	CHECK(!strcmp(test_state_str(LIB(1), "name", name, sizeof(name)),
-		      "alpha"),
-	      "the second source changed with the first: %s", name);
-
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-		LIB(i)->fini();
-		esdm_es_ext_lib_set_path(i, "");
-	}
-	for (i = 0; i < TEST_PLUGINS; i++) {
-		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
-			 ES_EXT_TEST_NAME);
-		test_plugin_struct[i]->name = test_ctl[i]->name;
-	}
-}
-
-/*
  * The names the providers declare: the one of --name, the one of the plugin -
  * the same for two of them. A provider restarted with another name shows it
  * once connected to again, the others keep theirs, and a status reader sees
@@ -481,10 +306,8 @@ static void test_provider_names(void)
 	pthread_t thread;
 	unsigned int i;
 
-	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
-					test_socket[0], name_a, NULL);
-	provider[1] = es_ext_test_serve(test_serve_bin, test_plugin[5],
-					test_socket[1], NULL, "name=Quelle A");
+	provider[0] = test_serve(0, name_a, NULL);
+	provider[1] = test_serve(1, NULL, "name=Quelle A");
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 	for (i = 0; i < 2; i++) {
@@ -521,8 +344,7 @@ static void test_provider_names(void)
 	CHECK(!strcmp(test_state_str(SOCK(0), "name", name, sizeof(name)),
 		      "Quelle A"),
 	      "the name changed before the provider came back: %s", name);
-	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
-					test_socket[0], name_c, NULL);
+	provider[0] = test_serve(0, name_c, NULL);
 	CHECK(provider[0] > 0, "the provider did not come back");
 	CHECK_EQ(test_get(SOCK(0), bits), 0);
 	es_ext_test_sleep_ms(1200);
@@ -567,85 +389,6 @@ static bool test_rate_is(const struct esdm_es_cb *es, uint32_t rate,
 }
 
 /*
- * The rates of the plugin library sources, each of its own: declared by their
- * plugins - 64, 200, 300 capped at 256, none from a plugin without the callback - or
- * configured for one source, for all, and back; another plugin loaded into
- * one source changes its rate only.
- */
-static void test_plugin_rates(void)
-{
-	const uint32_t bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
-	static const uint32_t declared[] = { 64, 200, 300 };
-	static const uint32_t expected[] = { 64, 200, 256, 256 };
-	static const char *const sources[] = { "plugin", "plugin", "plugin",
-					       "default" };
-	unsigned int i, n = ESDM_EXT_LIB_NUM < 4 ? ESDM_EXT_LIB_NUM : 4;
-
-	for (i = 0; i < n; i++) {
-		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
-				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
-			 0);
-		if (i < 3)
-			test_ctl[i]->entropy_rate = declared[i];
-		CHECK_EQ(esdm_es_ext_lib_set_path(i, i < 3 ? test_plugin[i] :
-							      test_plugin_bare),
-			 0);
-	}
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK_EQ(LIB(i)->init(), 0);
-	for (i = 0; i < n; i++) {
-		CHECK_EQ(LIB(i)->selftest(), 0);
-		CHECK(test_rate_is(LIB(i), expected[i], sources[i]),
-		      "%s is not credited at its rate", LIB(i)->name);
-		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate(i), expected[i]);
-		/* The claim of each block, at the rate of its source */
-		CHECK_EQ(test_get(LIB(i), bits), test_level(expected[i], bits));
-	}
-
-	/* Configured for one source only */
-	CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(1, 32), 0);
-	for (i = 0; i < n; i++) {
-		CHECK(test_rate_is(LIB(i), i == 1 ? 32 : expected[i],
-				   i == 1 ? "config" : sources[i]),
-		      "%s changed with another source", LIB(i)->name);
-		CHECK_EQ(test_get(LIB(i), bits),
-			 test_level(i == 1 ? 32 : expected[i], bits));
-	}
-
-	/* Configured for all, overriding every plugin, and taken back */
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(i, 16), 0);
-	for (i = 0; i < n; i++) {
-		CHECK(test_rate_is(LIB(i), 16, "config"),
-		      "%s is not credited at the rate configured",
-		      LIB(i)->name);
-		CHECK_EQ(test_get(LIB(i), bits), test_level(16, bits));
-	}
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK_EQ(esdm_config_es_ext_lib_entropy_rate_set(
-				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
-			 0);
-
-	/* Another plugin into the first source: its rate only */
-	test_ctl[6]->entropy_rate = 8;
-	CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[6]), 0);
-	CHECK(test_rate_is(LIB(0), 8, "plugin"),
-	      "the rate of the other plugin is not taken");
-	CHECK_EQ(test_get(LIB(0), bits), test_level(8, bits));
-	for (i = 1; i < n; i++)
-		CHECK(test_rate_is(LIB(i), expected[i], sources[i]),
-		      "%s changed with the first source", LIB(i)->name);
-
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-		LIB(i)->fini();
-		esdm_es_ext_lib_set_path(i, "");
-		esdm_config_es_ext_lib_entropy_rate_set(i, 256);
-	}
-	for (i = 0; i < TEST_PLUGINS; i++)
-		test_ctl[i]->entropy_rate = ES_EXT_TEST_RATE_NONE;
-}
-
-/*
  * The rates of the provider socket sources, each of its own: declared by
  * esdm-es-ext-serve --entropy_rate, by the plugin it serves, by a plugin
  * declaring more than 256, or none - 0 then; configured for one source; a
@@ -667,13 +410,11 @@ static void test_provider_rates(void)
 
 	for (i = 0; i < n; i++) {
 		/* The last one in the clear, the others over DTLS */
-		provider[i] = es_ext_test_serve(test_serve_bin,
-						test_plugin[4 + i],
-						test_socket[i],
-						!i	   ? rate_48 :
-						i == 3 ? no_dtls :
-							 NULL,
-						settings[i]);
+		provider[i] = test_serve(i,
+					 !i	 ? rate_48 :
+					 i == 3 ? no_dtls :
+						  NULL,
+					 settings[i]);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
 		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
@@ -709,10 +450,26 @@ static void test_provider_rates(void)
 			 1, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
 		 0);
 
+	/* Configured for all, overriding every provider, and taken back */
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(i, 16), 0);
+	for (i = 0; i < n; i++) {
+		CHECK(test_rate_is(SOCK(i), 16, "config"),
+		      "%s is not credited at the rate configured",
+		      SOCK(i)->name);
+		CHECK_EQ(test_get(SOCK(i), bits), test_level(16, bits));
+	}
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
+			 0);
+	for (i = 0; i < n; i++)
+		CHECK(test_rate_is(SOCK(i), expected[i], sources[i]),
+		      "%s is not back at its rate", SOCK(i)->name);
+
 	/* The first restarted with another rate: read anew, for it only */
 	es_ext_test_terminate(provider[0]);
-	provider[0] = es_ext_test_serve(test_serve_bin, test_plugin[4],
-					test_socket[0], rate_24, NULL);
+	provider[0] = test_serve(0, rate_24, NULL);
 	CHECK(provider[0] > 0, "the provider did not come back");
 	test_get(SOCK(0), bits);
 	for (i = 0; i < 10 && !test_rate_is(SOCK(0), 24, "provider"); i++) {
@@ -747,13 +504,6 @@ static struct json_object *test_provider_of(const struct esdm_es_cb *es,
 	unsigned int i;
 
 	if (fresh) {
-		for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-			if (es == LIB(i)) {
-				mutex_lock(&extlib[i].state_mutex);
-				extlib[i].status.at = 0;
-				mutex_unlock(&extlib[i].state_mutex);
-			}
-		}
 		for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
 			if (es == SOCK(i)) {
 				mutex_lock(&extsock[i].state_mutex);
@@ -799,109 +549,6 @@ static bool test_plugin_null(struct json_object *provider)
 }
 
 /*
- * The status of each plugin library source its own: the status of its plugin,
- * none for a plugin without one, one failing and one reporting NaN; cached for
- * each source on its own; a slow plugin keeps only its own status out; another
- * plugin loaded into one source forgets the status of that source only.
- */
-static void test_plugin_status(void)
-{
-	static const char *const settings[] = { NULL, NULL, NULL,
-						"{\"plugin\":NaN}" };
-	static const int rets[] = { 0, -EOPNOTSUPP, -EIO, 0 };
-	unsigned int i, calls0, calls1, n = ESDM_EXT_LIB_NUM < 4 ?
-						    ESDM_EXT_LIB_NUM :
-						    4;
-	struct json_object *state, *provider;
-	pthread_t getter;
-
-	for (i = 0; i < n; i++) {
-		test_ctl[i]->status_ret = rets[i];
-		test_ctl[i]->status_text = settings[i];
-		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
-			 "plugin-%u", i);
-		CHECK_EQ(esdm_es_ext_lib_set_path(i, test_plugin[i]), 0);
-	}
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++)
-		CHECK_EQ(LIB(i)->init(), 0);
-
-	/* Its own status each, none where there is none */
-	for (i = 0; i < n; i++) {
-		provider = test_provider_of(LIB(i), true, &state);
-		if (!i)
-			CHECK(provider && es_state_str_is(provider, "plugin",
-							  ES_EXT_TEST_NAME),
-			      "%s does not have the status of its plugin: %s",
-			      LIB(i)->name, es_state_print(state));
-		else
-			CHECK(!provider, "%s has a status: %s", LIB(i)->name,
-			      es_state_print(state));
-		CHECK(es_state_str_has(state, "status", "awaiting") ||
-			      es_state_str_has(state, "status", "delivering"),
-		      "%s lost its state with its status", LIB(i)->name);
-		json_object_put(state);
-	}
-
-	/* Cached for each source on its own */
-	test_ctl[1]->status_ret = 0;
-	provider = test_provider_of(LIB(1), true, &state);
-	json_object_put(state);
-	calls0 = test_ctl[0]->status_calls;
-	calls1 = test_ctl[1]->status_calls;
-	provider = test_provider_of(LIB(0), true, &state);
-	CHECK(provider != NULL, "the first source lost its status");
-	json_object_put(state);
-	provider = test_provider_of(LIB(1), false, &state);
-	CHECK(provider != NULL, "the second source lost its status");
-	json_object_put(state);
-	CHECK_EQ(test_ctl[0]->status_calls, calls0 + 1);
-	CHECK_EQ(test_ctl[1]->status_calls, calls1);
-
-	/* A slow plugin keeps its own status out, not the others' */
-	test_ctl[1]->get_delay_ms = 600;
-	CHECK_EQ(pthread_create(&getter, NULL, test_slow_get, LIB(1)), 0);
-	es_ext_test_sleep_ms(100);
-	provider = test_provider_of(LIB(1), true, &state);
-	CHECK(!provider, "a busy plugin was asked for its status");
-	json_object_put(state);
-	provider = test_provider_of(LIB(0), true, &state);
-	CHECK(provider != NULL, "the status of the first source waited");
-	json_object_put(state);
-	pthread_join(getter, NULL);
-	test_ctl[1]->get_delay_ms = 0;
-	CHECK_EQ(test_ctl[1]->status_calls, calls1);
-
-	/* Another plugin into the first: its status only is forgotten */
-	provider = test_provider_of(LIB(1), true, &state);
-	json_object_put(state);
-	calls1 = test_ctl[1]->status_calls;
-	calls0 = test_ctl[6]->status_calls;
-	CHECK_EQ(esdm_es_ext_lib_set_path(0, test_plugin[6]), 0);
-	provider = test_provider_of(LIB(0), false, &state);
-	CHECK(provider && es_state_str_is(provider, "plugin",
-					  ES_EXT_TEST_NAME) &&
-		      test_ctl[6]->status_calls == calls0 + 1,
-	      "the status of the other plugin is not asked for: %s",
-	      es_state_print(state));
-	json_object_put(state);
-	provider = test_provider_of(LIB(1), false, &state);
-	CHECK(provider != NULL, "the second source forgot its status");
-	json_object_put(state);
-	CHECK_EQ(test_ctl[1]->status_calls, calls1);
-
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-		LIB(i)->fini();
-		esdm_es_ext_lib_set_path(i, "");
-	}
-	for (i = 0; i < TEST_PLUGINS; i++) {
-		test_ctl[i]->status_ret = 0;
-		test_ctl[i]->status_text = NULL;
-		snprintf(test_ctl[i]->name, sizeof(test_ctl[i]->name),
-			 ES_EXT_TEST_NAME);
-	}
-}
-
-/*
  * The status of each provider socket source its own: the fields of its
  * esdm-es-ext-serve - the name, the rate, the DTLS of its connection - and the
  * status of its plugin, null for none; cached for each source on its own; a
@@ -926,9 +573,8 @@ static void test_provider_status(void)
 	long ms;
 
 	for (i = 0; i < n; i++) {
-		provider_pid[i] = es_ext_test_serve(
-			test_serve_bin, test_plugin[4 + i], test_socket[i],
-			i == 0 ? opts0 : i == 1 ? opts1 : NULL, settings[i]);
+		provider_pid[i] = test_serve(
+			i, i == 0 ? opts0 : i == 1 ? opts1 : NULL, settings[i]);
 		CHECK(provider_pid[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
 		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
@@ -1009,9 +655,7 @@ static void test_provider_status(void)
 	 * does not wait for it, and it is not asked for a while
 	 */
 	es_ext_test_terminate(provider_pid[1]);
-	provider_pid[1] = es_ext_test_serve(test_serve_bin, test_plugin[5],
-					    test_socket[1], opts1,
-					    "status_delay_ms=900;name=S1");
+	provider_pid[1] = test_serve(1, opts1, "status_delay_ms=900;name=S1");
 	CHECK(provider_pid[1] > 0, "the slow provider did not come up");
 	test_get(SOCK(1), ESDM_DRNG_SECURITY_STRENGTH_BITS);
 	clock_gettime(CLOCK_MONOTONIC, &start);
@@ -1082,13 +726,10 @@ static void test_status(void)
 	int ret;
 
 	for (i = 0; i < 2; i++) {
-		provider[i] = es_ext_test_serve(test_serve_bin,
-						test_plugin[4 + i],
-						test_socket[i], opts[i], NULL);
+		provider[i] = test_serve(i, opts[i], NULL);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
 		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
 		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
-		CHECK_EQ(esdm_es_ext_lib_set_path(i, test_plugin[i]), 0);
 	}
 
 	ret = esdm_init();
@@ -1102,16 +743,6 @@ static void test_status(void)
 	if (!root)
 		goto fini;
 
-	for (i = 0; i < ESDM_EXT_LIB_NUM; i++) {
-		snprintf(name, sizeof(name), "ExternalLib%u", i);
-		es = es_ext_test_status_es(root, name);
-		CHECK(es != NULL, "the status lists no %s", name);
-		if (es && i < 2)
-			CHECK(es_state_str_is(es, "plugin_library",
-					      test_plugin[i]),
-			      "%s does not name its library: %s", name,
-			      es_state_print(es));
-	}
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
 		snprintf(name, sizeof(name), "ExternalSocket%u", i);
 		es = es_ext_test_status_es(root, name);
@@ -1164,7 +795,6 @@ out:
 	for (i = 0; i < 2; i++) {
 		es_ext_test_terminate(provider[i]);
 		esdm_es_ext_socket_set_path(i, "");
-		esdm_es_ext_lib_set_path(i, "");
 	}
 }
 
@@ -1172,36 +802,15 @@ int main(int argc, char *argv[])
 {
 	unsigned int i;
 
-	if (argc < 3 + TEST_PLUGINS) {
-		printf("usage: %s <esdm-es-ext-serve> <plugin copy> x %u <bare plugin>\n",
-		       argv[0], TEST_PLUGINS);
+	if (argc < 3) {
+		printf("usage: %s <esdm-es-ext-serve> <test plugin>\n",
+		       argv[0]);
 		return 1;
 	}
-	test_plugin_bare = argv[2 + TEST_PLUGINS];
+	test_serve_bin = argv[1];
+	test_plugin = argv[2];
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
-
-	test_serve_bin = argv[1];
-	for (i = 0; i < TEST_PLUGINS; i++) {
-		test_plugin[i] = argv[2 + i];
-
-		/*
-		 * A reference of the test's own keeps a library loaded when
-		 * its source closes it, so that its control stays where it is
-		 */
-		test_ref[i] = dlopen(test_plugin[i], RTLD_NOW | RTLD_LOCAL);
-		CHECK(test_ref[i] != NULL, "cannot load %s: %s",
-		      test_plugin[i], dlerror());
-		if (!test_ref[i])
-			return common_test_result("es_ext_multi");
-		test_ctl[i] = dlsym(test_ref[i], ES_EXT_TEST_CONTROL_SYMBOL);
-		test_plugin_struct[i] =
-			dlsym(test_ref[i], ESDM_ES_EXT_PLUGIN_SYMBOL);
-		CHECK(test_ctl[i] != NULL && test_plugin_struct[i] != NULL,
-		      "%s has no control", test_plugin[i]);
-		if (!test_ctl[i] || !test_plugin_struct[i])
-			return common_test_result("es_ext_multi");
-	}
 
 	/* Traversable for a provider of another user */
 	if (!mkdtemp(test_dir) || chmod(test_dir, 0755)) {
@@ -1213,21 +822,15 @@ int main(int argc, char *argv[])
 			 "%s/provider%u.socket", test_dir, i);
 
 	test_table();
-	test_plugins();
 	test_providers();
-	test_plugin_names();
 	test_provider_names();
-	test_plugin_rates();
 	test_provider_rates();
-	test_plugin_status();
 	test_provider_status();
 	test_status();
 
 	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
 		unlink(test_socket[i]);
 	rmdir(test_dir);
-	for (i = 0; i < TEST_PLUGINS; i++)
-		dlclose(test_ref[i]);
 
 	return common_test_result("es_ext_multi");
 }

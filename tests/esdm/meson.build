@@ -40,7 +40,7 @@ if get_option('fips140')
 		[ files('../../esdm/fips.c'), 'esdm_fips_test.c' ],
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		link_with: esdm_common_static_lib,
 	)
 

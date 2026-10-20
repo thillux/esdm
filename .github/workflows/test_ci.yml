@@ -74,18 +74,18 @@ jobs:
             opts: -Dcrypto_backend=leancrypto
           - name: gnutls
             opts: -Dcrypto_backend=gnutls
-        # Several external entropy sources of each kind: the tests of the
-        # instances against each other are only built where there are some.
-        # On x86_64 only, the code is the same on arm64 - but on both
-        # releases, as are the configurations below. The second one of each
-        # takes the backend of the first by its YAML anchor.
+        # Several external entropy sources: the tests of the instances
+        # against each other are only built where there are some. On x86_64
+        # only, the code is the same on arm64 - but on both releases, as are
+        # the configurations below. The second one of each takes the backend
+        # of the first by its YAML anchor.
         include:
           - runner: ubuntu-24.04
             backend: &several-ext-sources
               name: openssl-several-ext-sources
               opts: >-
                 -Dcrypto_backend=openssl
-                -Des_ext_lib_num=4 -Des_ext_socket_num=4
+                -Des_ext_socket_num=4
           - runner: ubuntu-26.04
             backend: *several-ext-sources
           # What speaks to the network or to a token, by the TLS stacks of

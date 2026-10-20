@@ -278,47 +278,10 @@ uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
 
 /*
  * The entropy rate of an external entropy source that is not configured: the
- * source is credited at the rate it declares - see libesdm_es_ext(3) - or at
- * the default of its kind if it declares none
+ * source is credited at the rate its provider declares - see libesdm_es_ext(3)
+ * - or at 0 if it declares none
  */
 #define ESDM_ES_EXT_ENTROPY_RATE_AUTO UINT32_MAX
-
-/**
- * @brief External ES plugin configuration: set the entropy rate
- *
- * The rate caps the entropy the plugin library loaded as external entropy
- * source @idx (esdm-server --es_ext_lib, meson option es_ext_lib_path) is
- * credited with: a block is credited with what the plugin claims for it, but
- * with no more than this rate allows. See libesdm_es_ext(3).
- *
- * A rate set here takes precedence over the one the plugin declares with its
- * entropy_rate callback; ESDM_ES_EXT_ENTROPY_RATE_AUTO sets none, so that
- * the plugin is credited at the rate it declares, at 256 if it declares none.
- * Before a rate is set, the one of the meson option es_ext_lib_entropy_rate
- * applies, none by default.
- *
- * The ESDM has as many plugin library sources as the build configured (meson
- * option es_ext_lib_num), numbered from 0, each with a rate of its own.
- *
- * NOTE: The ESDM ensures that the entropy rate cannot be set to a value larger
- *	 than the security strength of the the applied DRNG.
- *
- * @param [in] idx Index of the plugin library source
- * @param [in] ent Entropy rate in bits, or ESDM_ES_EXT_ENTROPY_RATE_AUTO
- *
- * @return 0 on success, -EINVAL if there is no source @idx
- */
-int esdm_config_es_ext_lib_entropy_rate_set(unsigned int idx, uint32_t ent);
-
-/**
- * @brief External ES plugin configuration: get the entropy rate
- *
- * @param [in] idx Index of the plugin library source
- *
- * @return The rate the source is credited at, in bits: the one set, else the
- *	   one its plugin declares, else 256; 0 if there is no source @idx
- */
-uint32_t esdm_config_es_ext_lib_entropy_rate(unsigned int idx);
 
 /**
  * @brief External ES provider configuration: set the entropy rate

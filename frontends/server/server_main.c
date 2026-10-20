@@ -37,7 +37,6 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
-#include "esdm_es_extlib.h"
 #include "esdm_es_extsock.h"
 #include "esdm_es_jent_kernel.h"
 #include "esdm_rpc_server.h"
@@ -136,17 +135,6 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
 	fprintf(stderr,
-		"\t   --es_ext_lib <PATH>\tLoad the plugin library PATH as external\n");
-	fprintf(stderr,
-		"\t\t\tentropy source instead of the one the build configured\n");
-	fprintf(stderr, "\t\t\t(es_ext_lib_path)\n");
-	fprintf(stderr,
-		"\t   --es_ext_lib_entropy_rate <BITS>\tCredit the plugin with at\n");
-	fprintf(stderr,
-		"\t\t\tmost BITS of entropy per 256 bits of data (0 to 256), or\n");
-	fprintf(stderr,
-		"\t\t\twith what it declares (auto, by default)\n");
-	fprintf(stderr,
 		"\t   --es_ext_socket <PATH>\tRead the external entropy source\n");
 	fprintf(stderr,
 		"\t\t\tserved by a provider on the Unix domain socket PATH\n");
@@ -162,10 +150,8 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tThe --es_ext options may be repeated: the n-th occurrence\n");
 	fprintf(stderr,
-		"\t\t\tof one configures the n-th source of its kind, of which\n");
-	fprintf(stderr,
-		"\t\t\tthis build has %u plugin libraries and %u provider sockets\n",
-		ESDM_EXT_LIB_NUM, ESDM_EXT_SOCKET_NUM);
+		"\t\t\tof one configures the n-th source, of which this build has\n");
+	fprintf(stderr, "\t\t\t%u\n", ESDM_EXT_SOCKET_NUM);
 	fprintf(stderr,
 		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
 	fprintf(stderr,
@@ -202,58 +188,36 @@ static uint32_t parse_entropy_rate(const char *opt, const char *arg)
 
 /*
  * The options of the external entropy sources may be given once for each
- * source of their kind: the n-th occurrence of an option configures the n-th
- * source, counted per option.
+ * source: the n-th occurrence of an option configures the n-th source, counted
+ * per option.
  */
 struct es_ext_option {
-	/* The option, its kind of source, and the meson option of its number */
+	/* The option */
 	const char *name;
-	const char *kind;
-	const char *num_option;
-	unsigned int num;
 	/* How often it was given so far */
 	unsigned int given;
 };
 
-static struct es_ext_option es_ext_lib_opt = {
-	"--es_ext_lib", "plugin library", "es_ext_lib_num", ESDM_EXT_LIB_NUM, 0
-};
-static struct es_ext_option es_ext_lib_rate_opt = {
-	"--es_ext_lib_entropy_rate", "plugin library", "es_ext_lib_num",
-	ESDM_EXT_LIB_NUM, 0
-};
-static struct es_ext_option es_ext_socket_opt = {
-	"--es_ext_socket", "provider socket", "es_ext_socket_num",
-	ESDM_EXT_SOCKET_NUM, 0
-};
+static struct es_ext_option es_ext_socket_opt = { "--es_ext_socket", 0 };
 static struct es_ext_option es_ext_socket_rate_opt = {
-	"--es_ext_socket_entropy_rate", "provider socket", "es_ext_socket_num",
-	ESDM_EXT_SOCKET_NUM, 0
+	"--es_ext_socket_entropy_rate", 0
 };
-static struct es_ext_option es_ext_socket_uid_opt = {
-	"--es_ext_socket_uid", "provider socket", "es_ext_socket_num",
-	ESDM_EXT_SOCKET_NUM, 0
-};
+static struct es_ext_option es_ext_socket_uid_opt = { "--es_ext_socket_uid",
+						      0 };
 
 /*
  * The source the occurrence of @opt configures. One occurrence more than the
- * build has sources of its kind is an error, as is any without external
- * sources at all.
+ * build has sources is an error, as is any without external sources at all.
  */
 static unsigned int es_ext_instance(struct es_ext_option *opt)
 {
 #ifdef ESDM_ES_EXT
-	if (opt->given < opt->num)
+	if (opt->given < ESDM_EXT_SOCKET_NUM)
 		return opt->given++;
 
-	if (!opt->num)
-		fprintf(stderr,
-			"%s: this build has no %s sources (meson option %s)\n",
-			opt->name, opt->kind, opt->num_option);
-	else
-		fprintf(stderr,
-			"%s is given more often than this build has %s sources, which is %u (meson option %s)\n",
-			opt->name, opt->kind, opt->num, opt->num_option);
+	fprintf(stderr,
+		"%s is given more often than this build has provider socket sources, which is %u (meson option es_ext_socket_num)\n",
+		opt->name, ESDM_EXT_SOCKET_NUM);
 #else
 	fprintf(stderr,
 		"External entropy sources are not part of this build (meson option es_ext), %s is not taken\n",
@@ -276,32 +240,6 @@ static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
 	if (set(es_ext_instance(opt), rate)) {
 		fprintf(stderr, "Cannot set the entropy rate of %s %s\n",
 			opt->name, arg);
-		exit(1);
-	}
-}
-
-/*
- * A plugin library of the external entropy sources, in place of the one the
- * build names (es_ext_lib_path). It is loaded and initialized by esdm_init(),
- * while the daemon still has its privileges.
- */
-static void set_es_ext_lib(const char *path)
-{
-	unsigned int idx;
-	int ret;
-
-	if (path[0] == '\0') {
-		fprintf(stderr,
-			"The external ES plugin library path must not be empty\n");
-		exit(1);
-	}
-
-	idx = es_ext_instance(&es_ext_lib_opt);
-	ret = esdm_es_ext_lib_set_path(idx, path);
-	if (ret) {
-		fprintf(stderr,
-			"Cannot set the external ES plugin library %s: %s\n",
-			path, strerror(-ret));
 		exit(1);
 	}
 }
@@ -420,8 +358,6 @@ static void parse_opts(int argc, char *argv[])
 			{ "keep_ipc", 0, 0, 0 },
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
-			{ "es_ext_lib", 1, 0, 0 },
-			{ "es_ext_lib_entropy_rate", 1, 0, 0 },
 			{ "es_ext_socket", 1, 0, 0 },
 			{ "es_ext_socket_entropy_rate", 1, 0, 0 },
 			{ "es_ext_socket_uid", 1, 0, 0 },
@@ -517,33 +453,24 @@ static void parse_opts(int argc, char *argv[])
 					exit(1);
 				break;
 			case 17:
-				/* es_ext_lib */
-				set_es_ext_lib(optarg);
-				break;
-			case 18:
-				/* es_ext_lib_entropy_rate */
-				set_es_ext_rate(&es_ext_lib_rate_opt, optarg,
-						esdm_config_es_ext_lib_entropy_rate_set);
-				break;
-			case 19:
 				/* es_ext_socket */
 				set_es_ext_socket(optarg);
 				break;
-			case 20:
+			case 18:
 				/* es_ext_socket_entropy_rate */
 				set_es_ext_rate(
 					&es_ext_socket_rate_opt, optarg,
 					esdm_config_es_ext_socket_entropy_rate_set);
 				break;
-			case 21:
+			case 19:
 				/* es_ext_socket_uid */
 				set_es_ext_socket_uid(optarg);
 				break;
-			case 22:
+			case 20:
 				/* es_jent_kernel_name */
 				set_es_jent_kernel_name(optarg);
 				break;
-			case 23:
+			case 21:
 				/* no_dtls */
 				esdm_rpc_server_set_dtls(false);
 				break;

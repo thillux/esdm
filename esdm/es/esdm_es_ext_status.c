@@ -1,5 +1,5 @@
 /*
- * ESDM External Entropy Source: the status a plugin or a provider reports
+ * ESDM External Entropy Source: the status a provider reports
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -20,9 +20,9 @@
  */
 
 /*
- * The status comes from code that is not part of the ESDM, and from another
- * process for a provider: it is taken as the JSON object it has to be, or not
- * at all, before it becomes a part of the ESDM status - see
+ * The status comes from another process, which runs code that is not part of
+ * the ESDM: it is taken as the JSON object it has to be, or not at all, before
+ * it becomes a part of the ESDM status - see
  * esdm_es_ext_json.h, whose checks the provider server of libesdm_es_ext
  * shares.
  */

@@ -55,7 +55,7 @@ if get_option('es_jent').enabled()
 	es_jent_selftest_fail_tester = executable(
 		'es_jent_selftest_fail_tester',
 		[ esdm_ipc_ns, 'es_jent_selftest_fail_test.c' ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 	)
@@ -66,7 +66,7 @@ if get_option('es_jent').enabled()
 	es_jent_collector_lost_tester = executable(
 		'es_jent_collector_lost_tester',
 		[ esdm_ipc_ns, 'es_jent_collector_lost_test.c' ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 	)

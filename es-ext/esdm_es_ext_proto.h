@@ -18,8 +18,9 @@
  */
 
 /*
- * The external entropy source protocol and plugin checks, shared by the two
- * sides: the ESDM (esdm_es_extlib.c, esdm_es_extsock.c) and libesdm_es_ext.
+ * The external entropy source protocol, shared by the two sides: the ESDM
+ * (esdm_es_extsock.c) and libesdm_es_ext - and the checks of the callbacks of
+ * a source, which the provider server of libesdm_es_ext calls.
  *
  * Everything here is static inline. The ESDM does not link against
  * libesdm_es_ext, and a program linking both - a test - must not see two

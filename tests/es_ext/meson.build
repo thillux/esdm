@@ -61,21 +61,6 @@ if get_option('esdm-es-ext').enabled() or get_option('es_ext').enabled()
 		include_directories: include_directories('include'),
 		implicit_include_directories: false,
 	)
-	# Copies of the test plugin, each a library with a control of its own:
-	# a plugin library serves one source, and a build with several sources
-	# of a kind tests them with plugins of their own.
-	es_ext_test_plugin_copies = []
-	es_ext_test_plugin_copy_args = []
-	foreach copy : [ '1', '2', '3', '4', '5', '6', '7', '8' ]
-		es_ext_test_plugin_copy = shared_module(
-			'esdm_es_ext_test_plugin_' + copy,
-			'es_ext_test_plugin.c',
-			include_directories: include_dirs_es_ext_test,
-		)
-		es_ext_test_plugin_copies += es_ext_test_plugin_copy
-		es_ext_test_plugin_copy_args += es_ext_test_plugin_copy.full_path()
-	endforeach
-
 	es_ext_plugins = [ es_ext_test_plugin, es_ext_bad_version_plugin,
 			   es_ext_bad_no_get_plugin, es_ext_bad_no_plugin,
 			   es_ext_example_plugin, es_ext_test_plugin_bare,
@@ -145,13 +130,11 @@ if get_option('esdm-es-ext').enabled()
 			es_ext_server_test,
 			args: [ esdm_server.full_path(),
 				esdm_es_ext_serve.full_path(),
-				es_ext_test_plugin.full_path() ] +
-			      es_ext_test_plugin_copy_args +
-			      [ es_ext_test_plugin_rated.full_path() ],
+				es_ext_test_plugin.full_path(),
+				es_ext_test_plugin_rated.full_path() ],
 			depends: [ esdm_server, esdm_es_ext_serve,
 				   es_ext_test_plugin,
-				   es_ext_test_plugin_rated ] +
-				 es_ext_test_plugin_copies,
+				   es_ext_test_plugin_rated ],
 			suite: 'es_ext', timeout: 120)
 	endif
 
@@ -188,36 +171,8 @@ if get_option('esdm-es-ext').enabled()
 		suite: 'es_ext', timeout: 60)
 endif
 
-# The sources of a kind are compiled into its tests, which test the first one
-if get_option('es_ext').enabled() and es_ext_lib_num > 0
-	# The source is compiled into the test - see the file header.
-	es_extlib_test = executable('es_extlib_test',
-		[ esdm_ipc_ns, 'es_extlib_test.c' ],
-		dependencies: dependencies_server + [ dl_dep ],
-		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
-		link_with: esdm_static_lib,
-	)
-	test('External ES plugin library', es_extlib_test,
-		args: es_ext_plugin_args, depends: es_ext_plugins,
-		suite: 'es_ext')
-
-	# The self test of a plugin before the initial seeding of esdm_init()
-	es_ext_init_test = executable('es_ext_init_test',
-		[ esdm_ipc_ns, 'es_ext_init_test.c' ],
-		dependencies: dependencies_server + [ dl_dep ],
-		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
-		link_with: esdm_static_lib,
-	)
-	test('External ES self test before the initial seeding',
-		es_ext_init_test,
-		args: [ es_ext_test_plugin.full_path() ],
-		depends: [ es_ext_test_plugin ],
-		suite: 'es_ext', timeout: 60)
-endif
-
-if get_option('es_ext').enabled() and es_ext_socket_num > 0
+# The source is compiled into its tests, which test the first one
+if get_option('es_ext').enabled()
 	# The socket source is compiled into the test - see the file header -
 	# against the provider server of the library serving the test plugin.
 	if get_option('esdm-es-ext').enabled()
@@ -225,7 +180,7 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 			[ esdm_ipc_ns, 'es_extsock_test.c',
 			  'es_ext_test_plugin.c' ],
 			c_args: [ '-DES_EXT_TEST_PLUGIN_STATIC' ],
-			dependencies: dependencies_server + [ dl_dep ],
+			dependencies: dependencies_server,
 			include_directories: [ include_dirs_server,
 					       include_directories('../common') ],
 			link_with: [ esdm_static_lib,
@@ -233,6 +188,21 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 		)
 		test('External ES provider socket', es_extsock_test,
 			suite: 'es_ext', timeout: 60)
+
+		# The self test of a provider before the initial seeding of
+		# esdm_init(), the test plugin served in process
+		es_ext_init_test = executable('es_ext_init_test',
+			[ esdm_ipc_ns, 'es_ext_init_test.c',
+			  'es_ext_test_plugin.c' ],
+			c_args: [ '-DES_EXT_TEST_PLUGIN_STATIC' ],
+			dependencies: dependencies_server,
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			link_with: [ esdm_static_lib,
+				     esdm_es_ext_lib.get_static_lib() ],
+		)
+		test('External ES self test before the initial seeding',
+			es_ext_init_test, suite: 'es_ext', timeout: 60)
 	endif
 
 	# esdm-es-pkcs11 read by the provider socket source, which is compiled
@@ -240,7 +210,7 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 	if get_option('es_pkcs11').enabled()
 		es_pkcs11_esdm_test = executable('es_pkcs11_esdm_test',
 			[ esdm_ipc_ns, 'es_pkcs11_esdm_test.c' ],
-			dependencies: dependencies_server + [ dl_dep ],
+			dependencies: dependencies_server,
 			include_directories: [ include_dirs_server,
 					       include_directories('../common') ],
 			link_with: esdm_static_lib,
@@ -253,22 +223,20 @@ if get_option('es_ext').enabled() and es_ext_socket_num > 0
 	endif
 endif
 
-# Several sources of each kind, both compiled into the test - see the file
-# header. Only a build with two of each at least has them.
-if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es_ext_lib_num >= 2 and es_ext_socket_num >= 2
+# Several sources, compiled into the test - see the file header. Only a build
+# with two at least has them.
+if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es_ext_socket_num >= 2
 	es_ext_multi_test = executable('es_ext_multi_test',
 		[ esdm_ipc_ns, 'es_ext_multi_test.c' ],
-		dependencies: dependencies_server + [ dl_dep ],
+		dependencies: dependencies_server,
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
 		link_with: esdm_static_lib,
 	)
-	test('External ES with several sources of each kind',
+	test('External ES with several sources',
 		es_ext_multi_test,
-		args: [ esdm_es_ext_serve.full_path() ] +
-		      es_ext_test_plugin_copy_args +
-		      [ es_ext_test_plugin_bare.full_path() ],
-		depends: [ esdm_es_ext_serve, es_ext_test_plugin_bare ] +
-			 es_ext_test_plugin_copies,
+		args: [ esdm_es_ext_serve.full_path(),
+			es_ext_test_plugin.full_path() ],
+		depends: [ esdm_es_ext_serve, es_ext_test_plugin ],
 		suite: 'es_ext', timeout: 120)
 endif
