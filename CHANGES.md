@@ -82,7 +82,8 @@ C program in place of the Python script of the 1.2.4 development versions:
 meson test runs those that hold next to the ESDM of the machine (suite
 esdm_cdev) where the module is loaded and skips them elsewhere, the build option
 esdm-cdev-check installs the program with its man page, and the VM test of the flake runs every
-check with it, without Python
+check with it, without Python; the checks include that the reads waiting for
+the ESDM wait for an ESDM not operational, and the credit of writes
 
 * Add esdm-vhost-user-rng (meson option vhost-user-rng, Linux only): the
 vhost-user back-end of a virtio entropy device, giving QEMU (vhost-user-rng-pci,
@@ -90,7 +91,9 @@ and vhost-user-rng on virtio-mmio, e.g. on microvm) and Cloud Hypervisor
 (--generic-vhost-user ...,device_type=rng) guests a virtio-rng device served
 from the fully seeded DRNG of the ESDM - nothing before the ESDM is fully
 seeded -, or with --pr from the prediction resistant one, optionally rate
-limited (--max_bytes/--period_ms). One process per VM without privileges, as it
+limited (--max_bytes/--period_ms) - with --pr to 1024 bytes per second unless
+--max_bytes says otherwise, as every 32 bytes reseed the prediction resistant
+DRNG. One process per VM without privileges, as it
 parses memory the guest writes, reaching the ESDM over the unprivileged RPC
 interface; every field of the queue is read once, chains, indirect tables and
 buffers are checked against the queue size and the memory of the guest, and a
@@ -196,7 +199,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
-* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
+* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in - under sustained load not enough: the node is then spent until the worker reseeds it in its next pass
 
 * fix: esdm_get_seed() hands back the output of all entropy sources again, the zero-entropy ones collected as additional data included, without clearing the entropy estimates of the creditable sources; the returned entropy count covers the creditable sources only
 
@@ -530,7 +533,7 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 
 * fix: esdm-server ignores SIGUSR1 until its suspend handler is installed; esdm-server, the CUSE daemons, esdm-proc and esdm-kernel-seeder log errors and warnings without -v; esdm-tool fails when a status option cannot fetch the status, and prints the status unabridged; a stress worker that cannot allocate its buffer ends instead of hanging its tool
 
-* The documentation describes the jitter RNG NTG.1 shortcut, the errors, signals and wiping of esdm_cdev, the sandboxed EGD client, the DTLS wait of the RPC client, the status of a short buffer, where the init of a plugin runs, the getrandom shim's __real_*() under --wrap, the IPC resources at shutdown, the eBPF event data and the options of the frontends as they are
+* The documentation describes the jitter RNG NTG.1 shortcut, the errors, signals and wiping of esdm_cdev, the sandboxed EGD client, the DTLS wait of the RPC client, the status of a short buffer, where the init of a plugin runs, the getrandom shim's __real_*() under --wrap, the IPC resources at shutdown, the eBPF event data, the options of the frontends as they are, the stricter argument checks of RNDADDENTROPY in esdm_cdev, the configuration IOCTL of /dev/esdm_es, and the task wakeup hook and event rings of esdm_es
 
 * Add rpc_bench (meson test --benchmark): the throughput and the CPU time per request of the RPC interface by the calls of its consumers - full, prediction resistant and unseeded reads, getrandom(2) through libesdm_getrandom and, for comparison, the kernel's -, in requests of 32 bytes to 1 MiB, from several threads of several processes
 
@@ -549,6 +552,56 @@ brought in line with the code; the presentations before v1.0.0 are dropped
 * fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK or GRND_INSECURE waited for as long as requests of other threads held the connections - minutes, with several threads reading prediction resistant data -; it waits 20 ms at most now, and is then answered by the kernel as without an ESDM - a prediction resistant or seed read with GRND_NONBLOCK fails with EAGAIN
 
 * libesdm_getrandom: up to four connections per process (meson option linux-getrandom-num-nodes, which was 1), opened as concurrent requests need them, so the threads of a process are served in parallel
+
+* fix: esdm_cdev: only O_SYNC selects the prediction resistant read, no longer O_DSYNC alone; /proc/esdm/uuid is served by the kernel's RNG while the ESDM cannot serve it, as /dev/esdm_urandom is, instead of being empty; the /proc/esdm snapshots are charged to the memory cgroup of the opener, and their copy in the seq_file buffer is wiped
+
+* fix: esdm_es: ESDM_IRQ_CONF / ESDM_SCHED_CONF refuse an invalid requested entropy before they reset the entropy source; a failing module init tears down only what it set up; the module builds with W=1, against every kernel of the flake with the warnings as errors
+
+* fix: with sp80090c, fips140 or ais2031_drg4, node DRNGs that reach the 2^17 bit cap under sustained load are reseeded by the worker in its next pass, every one of them, with a reseed rather than a new instantiation, and the worker is told each time; reaching the cap no longer clears the state that all DRNGs are seeded, so esdm_get_seed() keeps serving
+
+* fix: esdm_get_random_bytes_full() blocks until the whole request is served instead of returning -EAGAIN or a short count, also while the ESDM is out of operation for a moment; the initial DRNG is reseeded before it is declared spent and no longer takes the ESDM out of operation under load; esdm_get_random_bytes_full_noblock() falls back to the initial DRNG after its reseed instead of answering -EAGAIN
+
+* fix: the prediction resistance DRNG serves its callers in turns, in the order they came, instead of a trylock answering -EAGAIN: one client pipelining prediction resistant reads on one EGD worker no longer starves those of the other workers and of the RPC interface; the EGD server generates one block of 32 bytes per call, so a round of a worker overruns its 25 ms by one seeding at most, and a non-blocking prediction resistant read (0xe0) answers at most 32 bytes
+
+* security: a child of fork() reseeds every DRNG with data unique to it before its first output instead of repeating the random numbers of its parent, see the FORK section of libesdm(3)
+
+* security: esdm-server-signal-helper --resume requests the privileged reseed of all DRNGs (RNDRESEEDCRNG) - the write into the auxiliary pool it made reseeded nothing; the reseed interval counts the time suspended (CLOCK_BOOTTIME)
+
+* fix: esdm_reinit() keeps the data and the entropy of the auxiliary pool, as documented
+
+* fix: RPC server: a request sent as its connection was being closed as idle or to make room is no longer lost - a connection with a request waiting is not idle, and one the server closes itself is shut down for reading first and still answers what its client sent before
+
+* fix: RPC server: a worker accepts up to 512 new connections per round instead of one, so a burst of clients connecting to a busy worker is served in turn with the others instead of being let in one per round while those accepted first went idle and were reaped
+
+* fix: CUSE: O_DSYNC alone selected the prediction resistant read; --username=USER set the user "=USER"
+
+* fix: OpenSSL RNG and SEED-SRC providers, libesdm_getrandom and libesdm_egd_client in TLS mode: with Botan, a process crashed in exit() when its connection was released after the static destructors of the TLS stack, e.g. by OPENSSL_cleanup(); the DTLS and TLS layers no longer call into the TLS stack once the process exits
+
+* fix: RPC client: a prediction resistant answer without data failed the call with -EFAULT; it counts as -EAGAIN now (the blocking call retries, the non-blocking one ends); RPC client and server call the protobuf-c closures through their own type (undefined behaviour, reported by clang's -fsanitize=function)
+
+* fix: esdm-server --pid_namespace: the supervisor could not fork once the daemon ended; esdm_aux_client.h includes <time.h> for struct timespec
+
+* fix: EGD server: what a client sent before the server closed its connection - idle, or to make room for a new one - is taken rather than discarded: a connection with input waiting is not idle, and the server shuts reading down before it closes, so a write that succeeded is never lost and a later one fails
+
+* libesdm_egd_client splits a prediction resistant read into transfers of 224 bytes (ESDM_EGD_MAX_PR_TRANSFER), a multiple of the 32 bytes the prediction resistance DRNG generates per seed, so n bytes cost ceil(n/32) seeds rather than one more per transfer; it needs only libc in builds with es-ext-net but without egd-net TLS, where the EGD tests failed to link
+
+* fix: egd-net: a command has to arrive in full within --io_timeout of its first byte, and in plain mode the first command within --handshake_timeout of the connection - a peer sending a byte at a time no longer holds a probation slot for hours
+
+* fix: egd-net: esdm-egd-net-crl-update checks every CRL of a PEM file and writes nothing if one does not parse; its unit runs as the system user esdm-egd-net-crl (sysusers.d), whose /var/lib/esdm-egd-net-crl the daemons can read - the DynamicUser= state directory below /var/lib/private kept them out
+
+* fix: egd-net: the esdm-egd-net-relay closes upstream connections to a server revoked by reloaded CRLs or whose certificate expired, and with all slots taken serves a new connection at the expense of the least recently used connection of the user holding the most; the esdm-es-ext-relay checks an upstream connection whose handshake spanned a reload of its CRLs
+
+* fix: TLS: a chain has to end in a self-signed trust anchor with GnuTLS as well, so an intermediate CA alone in --ca is refused by every TLS stack; the Botan backend reads the private key into memory that is wiped, and the egd-net units set LimitCORE=0; ExecReload of the units signals with the kill of /bin/sh, so systemctl reload works on NixOS
+
+* fix: External ES socket: every new connection to a provider runs its self test before the provider is credited, so a restarted provider is tested at once; the ESDM status waits at most 500 ms for the STATUS of a provider, which keeps its connection and has its late answer shown when it arrives, and no longer reconnects to a provider; retry, probe and backoff deadlines are kept in nanoseconds rather than whole seconds; a status or name with C1 controls or Unicode bidirectional controls is refused
+
+* fix: esdm-es-pkcs11: only a login the token refuses because of the PIN drops the PIN, other login failures keep it and retry; a token reporting its user PIN on the final try is not logged in to (status pin "final_try"); a PIN given on the command line is not repeated in error messages
+
+* fix: the kernel IRQ add-on loaded after the ESDM started caps the credit of the kernel RNG as well; the interrupt and scheduler sources stay credited while their cache has drained the kernel, so cached blocks are no longer spent uncounted; the per-CPU flush timer of the eBPF sources is pinned to its CPU on Linux 6.7+ and armed anew when lost; the example ES plugin reads its device without blocking, with 1 s per request at most
+
+* esdm-server --groupname, the --groupname of esdm-egd-net-relay, esdm-egd-net-server, esdm-es-ext-relay, esdm-es-ext-serve and esdm-es-pkcs11, and esdm-vhost-user-rng --group: the group becomes the group of the process after the privilege drop; it and the group of the user are the supplementary groups, so what the daemon may access is unchanged
+
+* tests: sanitizer findings and crashes in daemons the tests start fail the test; the RPC regression tests of tests/fuzz run in every build; each public header is compiled on its own; the test environments wait for daemons to accept connections
 
 Changes 1.2.3
 * Fix handling of non-blocking server response
