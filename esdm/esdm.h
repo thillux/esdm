@@ -27,7 +27,12 @@
 /**
  * @brief esdm_init() - initialize the ESDM library
  *
- * @return: 0 on success, < 0 on error
+ * The ESDM is initialized once per process. After esdm_fini() - or after an
+ * esdm_init() that failed past the DRNG manager, which tears down the same
+ * way - the DRNGs are freed and the managers are terminated for good, and a
+ * further esdm_init() fails with -ESHUTDOWN instead of bringing them back.
+ *
+ * @return: 0 on success, -ESHUTDOWN after esdm_fini(), < 0 on other errors
  */
 int esdm_init(void);
 
@@ -153,19 +158,21 @@ enum esdm_get_seed_flags {
  * requirements during instantiating a DRNG and at runtime of the DRNG. When
  * specifying ESDM_GET_SEED_FULLY_SEEDED the caller indicates the DRNG was
  * already fully seeded and the regular amount of entropy is requested.
- * Otherwise, the ESDM will obtain the entropy rate required for initial
- * seeding. The following minimum entropy rates will be obtained:
+ * Otherwise, the ESDM requests the entropy required for initial seeding. The
+ * following amounts are requested from each entropy source individually:
  *
- * * FIPS mode:
+ * * SP800-90C oversampling in effect (see esdm_es_oversampling()):
  *	* Initial seeding: 384 bits of entropy
  *	* Runtime seeding: 256 bits of entropy
- * * Non-FIPS mode:
- *	* 128 bits of entropy in any case
+ * * Otherwise: 256 bits of entropy in any case
  *
- * Albeit these are minimum entropy rates, the ESDM tries to request the
- * given amount of entropy from each entropy source individually. If the
- * minimum amount of entropy cannot be obtained collectively by all entropy
- * sources, the ESDM will not fill the buffer.
+ * These are requested, not guaranteed amounts: the sources are only asked
+ * once at least 256 bits are available from all of them together, and what
+ * they deliver may fall short. The buffer is filled with what they deliver,
+ * and entropy_rate below reports the entropy it holds - the caller must check
+ * it against what its DRNG needs. A blocking call usually returns once one
+ * collection gathered any entropy, but either call may report an entropy_rate
+ * of 0.
  *
  * Hint: if you do not want to use the ESDM's DRNGs in general, you may want
  * to consider to reduce the number of DRNGs to only one to reduce the pressure
@@ -202,8 +209,10 @@ enum esdm_get_seed_flags {
  * @param [in] flags Flags field to adjust the behavior
  *
  * @return -EINVAL or -EMSGSIZE indicating the buffer is too small, -EAGAIN when
- *	   the call would block, but NONBLOCK is specified, > 0 the size of
- *	   the filled buffer.
+ *	   the call would block, but NONBLOCK is specified, or when another
+ *	   esdm_get_seed() call is in progress - one caller is served at a
+ *	   time, blocking or not -, -EOPNOTSUPP if the self tests failed, > 0
+ *	   the size of the filled buffer.
  */
 ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 		      enum esdm_get_seed_flags flags);
@@ -342,17 +351,20 @@ void esdm_pool_set_entropy(uint32_t entropy_bits);
 /**
  * @brief Force a reseed of all DRNGs in the ESDM
  *
- * The call only sets a flag for the reseed, the actual reseed is performed
- * the next time the DRNG is requested to deliver random data.
+ * The call marks the fully seeded DRNGs for a reseed and wakes the reseed
+ * worker, which reseeds them ahead of the next request. Without the worker,
+ * the reseed is performed the next time the DRNG is requested to deliver
+ * random data.
  */
 void esdm_drng_force_reseed(void);
 
 /**
  * @brief Indicator whether the ESDM is operational
  *
- * The ESDM is operational if at least one DRNG is fully seeded with the amount
- * of entropy equal to the DRNG security strength (regular mode) or with the
- * amount of entropy stipulated by SP800-90C (FIPS mode).
+ * The ESDM is operational if the initial DRNG, the fallback for every request,
+ * is fully seeded with the amount of entropy equal to the DRNG security
+ * strength (regular mode) or with the amount of entropy stipulated by
+ * SP800-90C (FIPS mode). The seeding of any other DRNG does not count.
  *
  * @return 1 if operational, 0 if not operational
  */
@@ -404,11 +416,13 @@ int esdm_ntg1_2024_compliant(void);
  * class answers here.
  *
  * A build to DRG.3 applies the entropy source oversampling without the request
- * size based reseeding limits, and so answers esdm_sp80090c_compliant() too.
- * The status reports the class rather than SP800-90C for it. A DRG.4 build
- * applies no oversampling of its own, so there esdm_sp80090c_compliant()
- * answers only where SP800-90C was configured separately, and both are
- * reported.
+ * size based reseeding limits. It answers esdm_es_oversampling() but not
+ * esdm_sp80090c_compliant(), which returns 0 for it even where 'sp80090c' was
+ * configured alongside: without those limits the build does not meet
+ * SP800-90C, and the status reports the class rather than SP800-90C for it. A
+ * DRG.4 build applies no oversampling of its own, so there
+ * esdm_sp80090c_compliant() answers only where SP800-90C was configured
+ * separately, and both are reported.
  *
  * @return 1 if DRG.3 is satisfied, 0 if not
  */
@@ -427,7 +441,9 @@ int esdm_drg3_compliant(void);
 int esdm_drg4_compliant(void);
 
 /**
- * @brief Indicator whether at least one DRNG is fully seeded
+ * @brief Indicator whether the initial DRNG is fully seeded
+ *
+ * The seeding of any other DRNG does not count, see esdm_state_operational.
  *
  * @return 1 if fully seeded, 0 if not fully seeded
  */

@@ -18,17 +18,73 @@
  */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_logger.h"
 #include "test_pertubation.h"
 
 #include "../status_json_check.h"
+
+/*
+ * The ESDM claims NTG.1(2024) exactly when it seeds under the NTG.1 seeding
+ * strategy - a Jitter RNG in its own NTG.1 mode does not make it so, as
+ * without the strategy the ESDM seeds from 256/384 bits of any sources. That
+ * mode is reported in the section of the Jitter RNG instead.
+ *
+ * Checked on the text report's first "Standards compliance" line (the one of
+ * the ESDM, before those of the entropy sources), or on the top level array of
+ * the JSON document.
+ */
+static int esdm_status_ntg1_2024_check(const char *buf, bool json)
+{
+	bool claimed = false, expected = !!esdm_ntg1_2024_compliant();
+
+	if (json) {
+		struct json_object *root = json_tokener_parse(buf), *compliance;
+		size_t i;
+
+		if (!root)
+			return 1;
+		if (!json_object_object_get_ex(root, "standards_compliance",
+					       &compliance)) {
+			json_object_put(root);
+			return 1;
+		}
+		for (i = 0; i < json_object_array_length(compliance); i++) {
+			const char *str = json_object_get_string(
+				json_object_array_get_idx(compliance, i));
+
+			if (str && !strcmp(str, "NTG.1(2024)"))
+				claimed = true;
+		}
+		json_object_put(root);
+	} else {
+		const char *line = strstr(buf, "Standards compliance:");
+		const char *end = line ? strchr(line, '\n') : NULL;
+		const char *ntg1 = line ? strstr(line, "NTG.1(2024)") : NULL;
+
+		if (!line || !end)
+			return 1;
+		claimed = ntg1 && ntg1 < end;
+	}
+
+	if (claimed != expected) {
+		printf("%s status %s NTG.1(2024) with the NTG.1 seeding strategy %s\n",
+		       json ? "JSON" : "Text",
+		       claimed ? "claims" : "does not claim",
+		       expected ? "enabled" : "disabled");
+		return 1;
+	}
+
+	return 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -106,6 +162,11 @@ int main(int argc, char *argv[])
 
 	printf("Status information:\n%s\n", buf);
 
+	if (esdm_status_ntg1_2024_check(buf, false)) {
+		ret = 1;
+		goto out;
+	}
+
 	ret = esdm_status_json(buf, sizeof(buf));
 	if (ret) {
 		printf("JSON status could not be created: %d\n", ret);
@@ -113,15 +174,24 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	if (esdm_status_json_check(buf)) {
+	if (esdm_status_json_check(buf) ||
+	    esdm_status_ntg1_2024_check(buf, true)) {
 		ret = 1;
 		goto out;
 	}
 
 	printf("JSON status information:\n%s\n", buf);
 
-	/* The node instances are reported one at a time instead */
+	/*
+	 * The node instances are reported one at a time instead - one per
+	 * node, which without node support is the initial DRNG alone, whatever
+	 * number of nodes is configured.
+	 */
+#ifdef ESDM_NODE
 	nodes = esdm_config_online_nodes();
+#else
+	nodes = 1;
+#endif
 	for (node = 0; node < nodes; node++) {
 		ret = esdm_status_drng_json(node, buf, sizeof(buf));
 		if (ret) {

@@ -18,6 +18,8 @@
  * DAMAGE.
  */
 
+#include <limits.h>
+
 #include "build_bug_on.h"
 #include "config.h"
 #include "esdm_config.h"
@@ -30,6 +32,7 @@
 #include "fips.h"
 #include "helper.h"
 #include "esdm_logger.h"
+#include "mutex_w.h"
 #include "visibility.h"
 
 /*
@@ -54,6 +57,7 @@ struct esdm_config {
 	_Atomic uint32_t esdm_es_jent_kernel_entropy_rate_bits;
 	_Atomic uint32_t esdm_drng_max_wo_reseed;
 	_Atomic uint32_t esdm_drng_max_wo_reseed_bits;
+	_Atomic uint32_t esdm_drng_reseed_thresh;
 	_Atomic uint32_t esdm_max_nodes;
 	_Atomic enum esdm_config_force_fips force_fips;
 
@@ -62,6 +66,17 @@ struct esdm_config {
 	_Atomic bool esdm_jent_entropy_async_enable;
 	_Atomic bool esdm_ipc_cleanup;
 };
+
+/*
+ * The bits a DRNG generated since it was last fully seeded saturate at INT_MAX
+ * (see esdm_drng_get()), so a limit above that would never be reached - the
+ * maximum output without full reseed would be disabled without saying so.
+ * Clamp such a limit to INT_MAX. UINT32_MAX stays: it disables the limit on
+ * purpose.
+ */
+#define ESDM_CONFIG_MAX_WO_RESEED_BITS(val)                                    \
+	(((val) == UINT32_MAX || (val) <= INT_MAX) ? (uint32_t)(val) :         \
+						     (uint32_t)INT_MAX)
 
 static struct esdm_config esdm_config = {
 	/*
@@ -135,7 +150,13 @@ static struct esdm_config esdm_config = {
 	/*
 	 * See documentation of ESDM_DRNG_MAX_RESEED_BITS.
 	 */
-	.esdm_drng_max_wo_reseed_bits = ESDM_DRNG_MAX_RESEED_BITS,
+	.esdm_drng_max_wo_reseed_bits =
+		ESDM_CONFIG_MAX_WO_RESEED_BITS(ESDM_DRNG_MAX_RESEED_BITS),
+
+	/*
+	 * See documentation of ESDM_DRNG_RESEED_THRESH.
+	 */
+	.esdm_drng_reseed_thresh = ESDM_DRNG_RESEED_THRESH,
 
 	/*
 	 * Upper limit of DRNG nodes
@@ -170,12 +191,18 @@ static uint32_t esdm_config_entropy_rate_max(uint32_t val)
  * these timing entropy sources may be credited with a non-zero entropy
  * rate. Setting a non-zero rate for one of them therefore zeroes the rates
  * of all others.
+ *
+ * The setters are serialized: two of them racing could otherwise both clear
+ * the others before either stores its own rate, leaving both non-zero.
  */
+static DEFINE_MUTEX_W_UNLOCKED(esdm_config_timing_es_lock);
+
 static void esdm_config_timing_es_rate_set(_Atomic uint32_t *rate_bits,
 					   uint32_t ent)
 {
 	uint32_t val = esdm_config_entropy_rate_max(ent);
 
+	mutex_w_lock(&esdm_config_timing_es_lock);
 	if (val > 0) {
 		esdm_config.esdm_es_irq_entropy_rate_bits = 0;
 		esdm_config.esdm_es_sched_entropy_rate_bits = 0;
@@ -184,6 +211,8 @@ static void esdm_config_timing_es_rate_set(_Atomic uint32_t *rate_bits,
 	}
 
 	*rate_bits = val;
+	mutex_w_unlock(&esdm_config_timing_es_lock);
+
 	esdm_es_add_entropy();
 }
 
@@ -408,6 +437,11 @@ uint32_t esdm_config_drng_max_wo_reseed_bits(void)
 	return esdm_config.esdm_drng_max_wo_reseed_bits;
 }
 
+uint32_t esdm_config_drng_reseed_thresh(void)
+{
+	return esdm_config.esdm_drng_reseed_thresh;
+}
+
 DSO_PUBLIC
 uint32_t esdm_config_max_nodes(void)
 {
@@ -425,6 +459,17 @@ void esdm_config_max_nodes_set(uint32_t val)
 }
 
 #ifdef ESDM_TESTMODE
+void esdm_config_drng_reseed_thresh_set(uint32_t val)
+{
+	/*
+	 * The generate requests are counted down from ESDM_DRNG_RESEED_THRESH,
+	 * so the threshold can only be lowered - and a threshold of zero would
+	 * never be reached by a counter that triggers on the transition to it.
+	 */
+	esdm_config.esdm_drng_reseed_thresh =
+		min_uint32(max_uint32(val, 1), ESDM_DRNG_RESEED_THRESH);
+}
+
 void esdm_config_drng_max_wo_reseed_set(uint32_t val)
 {
 	esdm_config.esdm_drng_max_wo_reseed = val;
@@ -432,7 +477,8 @@ void esdm_config_drng_max_wo_reseed_set(uint32_t val)
 
 void esdm_config_drng_max_wo_reseed_bits_set(uint32_t val)
 {
-	esdm_config.esdm_drng_max_wo_reseed_bits = val;
+	esdm_config.esdm_drng_max_wo_reseed_bits =
+		ESDM_CONFIG_MAX_WO_RESEED_BITS(val);
 }
 #endif
 
@@ -525,6 +571,19 @@ int esdm_config_init(void)
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_hwrand_entropy_rate_bits);
 	complete_entropy_rate += esdm_config.esdm_es_hwrand_entropy_rate_bits;
+	esdm_config.esdm_es_tpm2_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_tpm2_entropy_rate_bits);
+	complete_entropy_rate += esdm_config.esdm_es_tpm2_entropy_rate_bits;
+	esdm_config.esdm_es_pkcs11_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_pkcs11_entropy_rate_bits);
+	complete_entropy_rate += esdm_config.esdm_es_pkcs11_entropy_rate_bits;
+	esdm_config.esdm_es_jent_kernel_entropy_rate_bits =
+		esdm_config_entropy_rate_max(
+			esdm_config.esdm_es_jent_kernel_entropy_rate_bits);
+	complete_entropy_rate +=
+		esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
 
 	if (!complete_entropy_rate) {
 		esdm_logger_status(

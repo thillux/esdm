@@ -44,8 +44,11 @@ LIBESDM_1.0 {
 		esdm_state_operational;
 		esdm_state_fully_seeded;
 		esdm_sp80090c_compliant;
+		esdm_es_oversampling;
 		esdm_ntg1_compliant;
 		esdm_ntg1_2024_compliant;
+		esdm_drg3_compliant;
+		esdm_drg4_compliant;
 
 		/* esdm.h - entropy pool handling */
 		esdm_pool_insert_aux;

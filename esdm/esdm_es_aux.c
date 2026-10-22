@@ -170,6 +170,7 @@ out:
 
 static int esdm_aux_init(void)
 {
+	struct esdm_drng *drng = esdm_drng_init_instance();
 	uint16_t i;
 	int ret = 0;
 
@@ -209,10 +210,18 @@ static int esdm_aux_init(void)
 		pool->aux_pool_state = NULL;
 		pool->aux_pool_out = NULL;
 		atomic_store(&pool->aux_entropy_bits, 0);
-		atomic_store(&pool->digestsize, ESDM_MAX_DIGESTSIZE);
 		pool->initialized = false;
 		pool->idx = i;
 		CKINT(esdm_aux_init_pool(pool));
+
+		/*
+		 * The size of the hash the pool is conditioned with, which is
+		 * the most entropy the pool holds - read from the hash rather
+		 * than assumed to be the largest one supported.
+		 */
+		atomic_store(&pool->digestsize,
+			     (int)drng->hash_cb->hash_digestsize(
+				     pool->aux_pool_state));
 	}
 
 	esdm_set_wakeup_bits();
@@ -244,10 +253,10 @@ static void esdm_aux_fini(void)
 DSO_PUBLIC
 uint32_t esdm_get_digestsize(void)
 {
-	if (esdm_pools[0].initialized)
-		return atomic_read_u32(&esdm_pools[0].digestsize) << 3;
-	else
-		return ESDM_MAX_DIGESTSIZE << 3;
+	uint32_t digestsize = atomic_read_u32(&esdm_pools[0].digestsize);
+
+	/* Before the pools are set up, the largest supported hash is assumed */
+	return (digestsize ? digestsize : ESDM_MAX_DIGESTSIZE) << 3;
 }
 
 static void esdm_pool_set_entropy_pool(struct esdm_pool *pool,

@@ -49,7 +49,7 @@ void esdm_rpc_get_seed(UnprivAccess_Service *service,
 			esdm_get_seed(rndval, request->len,
 				      request->flags | ESDM_GET_SEED_NONBLOCK);
 
-		if (response.ret >= 0) {
+		if (response.ret > 0) {
 			size_t resp_len;
 
 			/*

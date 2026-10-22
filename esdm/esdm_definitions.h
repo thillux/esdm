@@ -119,12 +119,6 @@
 /* Alignmask that is intended to be identical to CRYPTO_MINALIGN */
 #define ESDM_KCAPI_ALIGN 8
 
-/*
- * This definition must provide a buffer that is equal to SHASH_DESC_ON_STACK
- * as it will be casted into a struct hash_ctx.
- */
-#define ESDM_POOL_SIZE HASH_MAX_DESCSIZE
-
 /* Sleep time for poll operations */
 static const struct timespec poll_ts = { .tv_sec = 0, .tv_nsec = 1U << 29 };
 

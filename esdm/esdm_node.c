@@ -63,7 +63,13 @@ void esdm_drng_put_instances(void)
 	mutex_reader_unlock(&esdm_node_cleanup_lock);
 }
 
-static void esdm_drngs_node_dealloc(struct esdm_drng **drngs)
+bool esdm_drng_instances_current(struct esdm_drng **drngs)
+{
+	return atomic_load(&esdm_drng) == drngs;
+}
+
+/* @nodes is the number of entries @drngs was allocated with */
+static void esdm_drngs_node_dealloc(struct esdm_drng **drngs, uint32_t nodes)
 {
 	struct esdm_drng *esdm_drng_init = esdm_drng_init_instance();
 	uint32_t node;
@@ -71,7 +77,7 @@ static void esdm_drngs_node_dealloc(struct esdm_drng **drngs)
 	if (!drngs)
 		return;
 
-	for_each_online_node (node) {
+	for (node = 0; node < nodes; node++) {
 		struct esdm_drng *drng = drngs[node];
 
 		if (drng == esdm_drng_init)
@@ -184,14 +190,28 @@ void esdm_drngs_node_alloc(void)
 	 */
 	atomic_store(&esdm_drng_node_count, nodes);
 
+	/*
+	 * The new DRNGs are not seeded, so the state that all DRNGs are has to
+	 * go - and stay gone. A seeding declares it under the pool lock, on
+	 * the strength of the node array it took before that lock: one that
+	 * took it while there was none yet and finishes after the clear would
+	 * declare the new DRNGs seeded. The array is therefore published and
+	 * the state cleared under the pool lock, and the seeding declares
+	 * nothing if the array it went by is not the published one any more -
+	 * see esdm_drng_instances_current(). Either the clear comes after the
+	 * seeding, or the seeding sees the array it missed.
+	 */
+	esdm_pool_lock();
 	if (atomic_compare_exchange_strong(&esdm_drng, &expected, drngs)) {
 		esdm_pool_all_nodes_seeded(false);
+		esdm_pool_unlock();
 		esdm_es_add_entropy();
 		goto unlock;
 	}
+	esdm_pool_unlock();
 
 err:
-	esdm_drngs_node_dealloc(drngs);
+	esdm_drngs_node_dealloc(drngs, nodes);
 
 unlock:
 	mutex_w_unlock(&esdm_crypto_cb_update);
@@ -203,6 +223,6 @@ void esdm_node_fini(void)
 
 	mutex_lock(&esdm_node_cleanup_lock);
 	drngs = atomic_exchange_explicit(&esdm_drng, NULL, memory_order_acquire);
-	esdm_drngs_node_dealloc(drngs);
+	esdm_drngs_node_dealloc(drngs, esdm_drng_node_count_get());
 	mutex_unlock(&esdm_node_cleanup_lock);
 }

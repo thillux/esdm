@@ -57,7 +57,8 @@ int main(int argc, char *argv[])
 
 		rc = esdm_get_random_bytes_full(buf, len);
 		if (rc < 0) {
-			ret = (int)ret;
+			printf("esdm_get_random_bytes_full failed: %zd\n", rc);
+			ret = 1;
 			goto out;
 		}
 

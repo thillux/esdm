@@ -456,7 +456,8 @@ err:
  * Common service function to set the requested amount of bits with the kernel
  * entropy sources.
  *
- * @param [in/out] configured_bits Currently and newly configured bit size
+ * @param [in/out] configured_bits Last requested bit size, also if the kernel
+ *				  rejected it
  * @param [in] requested_bits Bit size to be configured
  * @param [in] fd file descriptor to the entropy source
  * @param [in] ioctl_cmd IOCTL command to be used with the FD
@@ -473,16 +474,24 @@ void esdm_kernel_set_requested_bits(uint32_t *configured_bits,
 		data[1] = 0;
 		ret = ioctl(fd, ioctl_cmd, data);
 		if (ret >= 0) {
-			*configured_bits = requested_bits;
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 				    "Set requested %u bits with kernel\n",
 				    requested_bits);
 		} else {
+			/*
+			 * E.g. a kernel without FIPS mode accepts only 256
+			 * bits, not the oversampled sizes. It keeps delivering
+			 * what it has configured, which the size handling of
+			 * esdm_kernel_read() copes with. Record the value all
+			 * the same, so the IOCTL is not sent again, and the
+			 * warning not logged again, for every read.
+			 */
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_ES,
-				"Failed to set requested %u bits with kernel\n",
+				"Failed to set requested %u bits with kernel, keeping its setting\n",
 				requested_bits);
 		}
+		*configured_bits = requested_bits;
 	}
 }
 
@@ -518,6 +527,10 @@ void esdm_set_entropy_thresh(uint32_t new_entropy_bits)
 /*
  * Reset ESDM state - the entropy counters are reset, but the data that may
  * or may not have entropy remains in the pools as this data will not hurt.
+ *
+ * The caller holds the pool lock, so that no seeding declares the DRNGs all
+ * seeded again on the strength of what it saw before the reset - see
+ * esdm_reset().
  */
 void esdm_reset_state(void)
 {
@@ -625,6 +638,15 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		       struct entropy_buf *eb)
 {
 	/*
+	 * The security strength, plus the SP800-90C oversampling, is needed
+	 * in any case: NTG.1 below comes on top of it. The jitter RNG alone
+	 * at 240 bits would otherwise suffice for an SP800-90C instantiation
+	 * asking for 384 bits.
+	 */
+	if (collected_entropy < esdm_get_seed_entropy_osr(do_full_init, false))
+		return false;
+
+	/*
 	 * AIS20/31 NTG.1:
 	 * - Two entropy sources with each delivering 240 bits initially,
 	 *   unless a single NTG.1 conformant jitter RNG covers the requirement
@@ -645,8 +667,34 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		return (result >= 2);
 	}
 
-	return (collected_entropy >=
-		esdm_get_seed_entropy_osr(do_full_init, false));
+	return true;
+}
+
+/*
+ * May the emergency reseeding go on after a pass that gathered @eb? Only while
+ * the sources that delivered can still add up to what esdm_fully_seeded()
+ * asks for: any one of them in general, but for the NTG.1 initial seeding two,
+ * or the NTG.1 conformant jitter RNG itself. Any other single source keeps
+ * delivering entropy that never meets the two-source rule, and the loop,
+ * holding the pool and DRNG locks, would never end.
+ */
+bool esdm_fully_seeded_reachable(bool do_full_init, struct entropy_buf *eb)
+{
+	uint32_t i, delivered = 0;
+
+	for_each_esdm_es (i)
+		delivered += !!eb->entropy_es[i].e_bits;
+
+	if (do_full_init && esdm_ntg1_2024_compliant()) {
+#ifdef ESDM_ES_JENT
+		if (esdm_jent_ntg1() &&
+		    eb->entropy_es[esdm_ext_es_jitter].e_bits)
+			return true;
+#endif
+		return delivered >= 2;
+	}
+
+	return delivered >= 1;
 }
 
 uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb)
@@ -1043,8 +1091,10 @@ static bool esdm_es_approved(uint32_t es)
  * outright. The caller of esdm_get_seed() hands in a buffer of its own, and
  * leaving a skipped slot untouched would hand its own bytes back to it.
  *
- * @addtl must be distinct from @seedbuf: passing one buffer twice would have
- * every source clear the estimator it just filled.
+ * @addtl may be @seedbuf itself, which collects every source into the one
+ * buffer, as esdm_get_seed() does: the estimator cleared above is the one of
+ * the slot @es is about to fill, so each source still sets its own, and a
+ * source not credited with entropy is counted with none.
  */
 static struct entropy_es *esdm_es_seed_slot(struct entropy_buf *seedbuf,
 					    struct entropy_buf *addtl,
@@ -1100,8 +1150,19 @@ void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
 	 * 9.2 mandating that DRNG is reseeded with the security strength.
 	 */
 	if (!force && fully_seeded && (esdm_avail_entropy() < req_ent)) {
+		/*
+		 * Nothing is fetched, so nothing is handed out either: the
+		 * data of @seedbuf is cleared along with its estimators. The
+		 * buffer of esdm_get_seed() is the caller's own, @addtl being
+		 * @seedbuf there, and a slot left as it was would return the
+		 * caller's bytes to it as seed - with a success that tells it
+		 * nothing about them but an entropy count of zero. A reseed
+		 * that comes here on a later pass of its emergency loop loses
+		 * nothing: the previous pass is injected already.
+		 */
 		for_each_esdm_es (i) {
-			seedbuf->entropy_es[i].e_bits = 0;
+			memset_secure(&seedbuf->entropy_es[i], 0,
+				      sizeof(seedbuf->entropy_es[i]));
 			if (addtl)
 				addtl->entropy_es[i].e_bits = 0;
 		}

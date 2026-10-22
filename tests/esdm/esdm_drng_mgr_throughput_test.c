@@ -46,6 +46,7 @@
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "helper.h"
+#include "wait_seeded.h"
 
 /* Long enough to cross the reseed thresholds repeatedly, short enough for CI */
 #define TEST_SECONDS_PER_SIZE 1.0
@@ -53,28 +54,12 @@
 /* Both ends of what consumers ask for: a key's worth, and a bulk read */
 static const size_t test_sizes[] = { 32, 64, 256, 1024, 4096 };
 
-/* Seconds the ESDM is given to reach the fully seeded state */
-#define TEST_SEED_WAIT_SECONDS 30
-
 static double test_now(void)
 {
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
-static int test_wait_fully_seeded(void)
-{
-	unsigned int i;
-
-	for (i = 0; i < TEST_SEED_WAIT_SECONDS * 10; i++) {
-		if (esdm_state_fully_seeded())
-			return 0;
-		usleep(100 * 1000);
-	}
-
-	return 1;
 }
 
 static int test_one_size(size_t len)

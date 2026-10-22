@@ -42,13 +42,15 @@ bool esdm_pool_all_nodes_seeded_get(void);
 
 bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		       struct entropy_buf *eb);
+bool esdm_fully_seeded_reachable(bool do_full_init, struct entropy_buf *eb);
 uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb);
 void esdm_unset_fully_seeded(struct esdm_drng *drng);
 void esdm_init_ops(struct entropy_buf *eb);
 /*
  * Collect from the entropy sources in one pass, splitting the result over the
  * two buffers a reseed needs: @seedbuf takes the sources that may be credited
- * with entropy, @addtl the rest. The two must be distinct buffers.
+ * with entropy, @addtl the rest. @addtl may also be @seedbuf itself, which
+ * collects every source into that one buffer.
  *
  * Pass NULL for @addtl to collect the creditable sources alone. The others are
  * then not fetched at all and their slots in @seedbuf are cleared.

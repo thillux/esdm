@@ -20,6 +20,7 @@
 #ifndef _ESDM_NODE_H
 #define _ESDM_NODE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "config.h"
@@ -32,8 +33,22 @@ void esdm_drngs_node_alloc(void);
 void esdm_node_fini(void);
 uint32_t esdm_drng_node_count_get(void);
 
+/*
+ * Is @drngs, taken with esdm_drng_get_instances(), still the published node
+ * array? It changes while held only from none to the array, which is published
+ * under the pool lock: a caller holding that lock can tell whether the view it
+ * took before the lock missed the array.
+ */
+bool esdm_drng_instances_current(struct esdm_drng **drngs);
+
+/*
+ * Iterate over the entries of the published per-node DRNG array. Bound by the
+ * size the array was allocated with, not by esdm_config_online_nodes(): the
+ * latter is recomputed live and grows if esdm_config_max_nodes_set() is raised
+ * after the allocation.
+ */
 #define for_each_online_node(cpu)                                              \
-	for (cpu = 0; cpu < esdm_config_online_nodes(); cpu++)
+	for (cpu = 0; cpu < esdm_drng_node_count_get(); cpu++)
 
 #else /* ESDM_NODE */
 static inline struct esdm_drng **esdm_drng_get_instances(void)
@@ -52,6 +67,11 @@ static inline void esdm_node_fini(void)
 static inline uint32_t esdm_drng_node_count_get(void)
 {
 	return 0;
+}
+static inline bool esdm_drng_instances_current(struct esdm_drng **drngs)
+{
+	(void)drngs;
+	return true;
 }
 
 #define for_each_online_node(cpu) for (cpu = 0; cpu < 1; cpu++)

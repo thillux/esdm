@@ -53,7 +53,9 @@ int esdm_init(void)
 	CKINT(esdm_drng_mgr_initialize());
 
 	/* Initialize the entropy source manager */
-	CKINT(esdm_es_mgr_initialize());
+	ret = esdm_es_mgr_initialize();
+	if (ret)
+		goto fini;
 
 	/* Initialize all nodes */
 	esdm_drngs_node_alloc();
@@ -65,10 +67,25 @@ int esdm_init(void)
 	esdm_selftest_run();
 
 	/* Initialize the status ESDM shared memory segment */
-	CKINT(esdm_shm_status_init());
+	ret = esdm_shm_status_init();
+	if (ret)
+		goto fini;
 
 out:
 	return ret;
+
+fini:
+	/*
+	 * Tear down what was set up, the way esdm_fini() does - except for the
+	 * status segment, which was not created: esdm_fini() would remove the
+	 * IPC objects by name, and those may belong to another ESDM.
+	 */
+	esdm_drng_mgr_reseed_worker_stop();
+	esdm_selftest_periodic_stop();
+	esdm_es_mgr_finalize();
+	esdm_drng_mgr_finalize();
+	esdm_node_fini();
+	goto out;
 }
 
 DSO_PUBLIC

@@ -93,6 +93,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_drng_mgr_no_worker_reseed_test = executable(
+		'esdm_drng_mgr_no_worker_reseed_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_no_worker_reseed_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_drng_mgr_throughput_test = executable(
 		'esdm_drng_mgr_throughput_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_throughput_test.c' ],
@@ -104,6 +112,22 @@ if get_option('esdm-server').enabled()
 	esdm_drng_mgr_max_wo_reseed_bits_test = executable(
 		'esdm_drng_mgr_max_wo_reseed_bits_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_max_wo_reseed_bits_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_drng_mgr_max_wo_reseed_bits_large_test = executable(
+		'esdm_drng_mgr_max_wo_reseed_bits_large_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_max_wo_reseed_bits_large_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_drng_mgr_spent_node_fallback_test = executable(
+		'esdm_drng_mgr_spent_node_fallback_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_spent_node_fallback_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -125,9 +149,9 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
-	esdm_selftest_test = executable(
-		'esdm_selftest_test',
-		[ esdm_ipc_ns, 'esdm_selftest_test.c' ],
+	esdm_selftest_security_test = executable(
+		'esdm_selftest_security_test',
+		[ esdm_ipc_ns, 'esdm_selftest_security_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -141,11 +165,27 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_reseed_security_test = executable(
+		'esdm_reseed_security_test',
+		[ esdm_ipc_ns, 'esdm_reseed_security_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_jent_only_security_test = executable(
 		'esdm_jent_only_security_test',
 		[ esdm_ipc_ns, 'esdm_jent_only_security_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_output_min_entropy_security_test = executable(
+		'esdm_output_min_entropy_security_test',
+		[ esdm_ipc_ns, 'esdm_output_min_entropy_security_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_lib,
 		dependencies: dependencies_server,
 	)
 
@@ -157,19 +197,172 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_ntg1_single_source_test = executable(
+		'esdm_ntg1_single_source_test',
+		[ esdm_ipc_ns, 'esdm_ntg1_single_source_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	# The per-node DRNG array only exists with the node support
+	if get_option('node').enabled()
+		esdm_node_bound_test = executable(
+			'esdm_node_bound_test',
+			[ esdm_ipc_ns, 'esdm_node_bound_test.c' ],
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+			dependencies: dependencies_server,
+		)
+
+		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
+
+		esdm_node_alloc_seeding_test = executable(
+			'esdm_node_alloc_seeding_test',
+			[ esdm_ipc_ns, 'esdm_node_alloc_seeding_test.c' ],
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+			dependencies: dependencies_server,
+		)
+
+		test('ESDM node DRNG allocation is not undone by a seeding',
+			esdm_node_alloc_seeding_test)
+	endif
+
+	esdm_reset_seeding_test = executable(
+		'esdm_reset_seeding_test',
+		[ esdm_ipc_ns, 'esdm_reset_seeding_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM reset is not undone by a seeding in progress',
+		esdm_reset_seeding_test)
+
+	esdm_pr_seeded_state_test = executable(
+		'esdm_pr_seeded_state_test',
+		[ esdm_ipc_ns, 'esdm_pr_seeded_state_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM PR DRNG keeps the seeding state',
+		esdm_pr_seeded_state_test)
+
+	esdm_aux_digestsize_test = executable(
+		'esdm_aux_digestsize_test',
+		[ esdm_ipc_ns, 'esdm_aux_digestsize_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM aux pool digest size', esdm_aux_digestsize_test)
+
+	esdm_reseed_per_request_test = executable(
+		'esdm_reseed_per_request_test',
+		[ esdm_ipc_ns, 'esdm_reseed_per_request_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM reseed per request', esdm_reseed_per_request_test)
+
+	esdm_pr_full_entropy_test = executable(
+		'esdm_pr_full_entropy_test',
+		[ esdm_ipc_ns, 'esdm_pr_full_entropy_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM PR DRNG RBG3(RS) oversampling', esdm_pr_full_entropy_test)
+
+	esdm_operational_init_drng_test = executable(
+		'esdm_operational_init_drng_test',
+		[ esdm_ipc_ns, 'esdm_operational_init_drng_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM operational state follows the initial DRNG',
+		esdm_operational_init_drng_test,
+		timeout: 60)
+
+	esdm_config_timing_rate_test = executable(
+		'esdm_config_timing_rate_test',
+		[ 'esdm_config_timing_rate_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM config timing ES rates exclusive',
+		esdm_config_timing_rate_test)
+
+	esdm_config_max_wo_reseed_bits_test = executable(
+		'esdm_config_max_wo_reseed_bits_test',
+		[ 'esdm_config_max_wo_reseed_bits_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM config maximum bits without full reseed clamped',
+		esdm_config_max_wo_reseed_bits_test)
+
+	esdm_init_unwind_test = executable(
+		'esdm_init_unwind_test',
+		[ esdm_ipc_ns, 'esdm_init_unwind_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM failed init unwinds', esdm_init_unwind_test)
+
 	test('ESDM API call esdm_status', esdm_status_test)
 	test('ESDM API call esdm_version', esdm_version_test)
-	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test)
-	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test)
+	# Both draw some 16 MiB in requests of up to 1 MiB. With the reseeding
+	# caps of an sp80090c, fips140 or ais2031_drg4 build, the DRNG reseeds
+	# every 12 KiB, and each reseed waits for a synchronous Jitter RNG
+	# collection - well over a thousand of them, which on a loaded machine
+	# takes minutes rather than the default 30 seconds.
+	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test,
+		timeout: 300)
+	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test,
+		timeout: 300)
 	test('ESDM DRNG manager max w/o reseed - 1 DRNG', esdm_drng_mgr_max_wo_reseed_test,
 		args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed - 2 DRNG', esdm_drng_mgr_max_wo_reseed_test,
-		args : [ '2' ])
+	# The DRNG of a node keeps the ESDM operational once the initial one is
+	# spent - with node support, that is: without it, there is only the
+	# initial DRNG however many nodes are configured.
+	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed - 2 DRNG', esdm_drng_mgr_max_wo_reseed_test,
+			args : [ '2' ])
+	endif
+
+	test('ESDM DRNG manager node reseed without worker',
+		esdm_drng_mgr_no_worker_reseed_test)
 
 	test('ESDM DRNG manager max w/o reseed bits - 1 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
 		args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed bits - 2 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
-		args : [ '2' ])
+	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed bits - 2 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
+			args : [ '2' ])
+	endif
+	test('ESDM DRNG manager max w/o reseed bits large request - 1 DRNG',
+		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '1' ])
+	test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
+		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
+	if get_option('node').enabled()
+		test('ESDM DRNG manager spent node DRNG falls back to the initial DRNG',
+			esdm_drng_mgr_spent_node_fallback_test)
+	endif
 
 	# Serial: it reports a rate, and a rate measured while the rest of the
 	# suite has the machine says more about the suite than about the ESDM.
@@ -218,15 +411,29 @@ if get_option('esdm-server').enabled()
 		timeout: 300)
 
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
+	# Reports a hang itself after 60 seconds.
+	test('ESDM NTG.1 initial seeding gives up on a single source',
+		esdm_ntg1_single_source_test,
+		timeout: 120)
 
-	test('ESDM self tests', esdm_selftest_test)
+	# Skips without ea_non_iid in PATH; its estimators take a while on 1 MiB.
+	test('ESDM security - output min-entropy',
+		esdm_output_min_entropy_security_test,
+		timeout: 300)
+
+	test('ESDM security - self tests', esdm_selftest_security_test)
 
 	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
 		timeout: 120)
 
-	# Sits out a reseed interval, so it needs more than the default timeout
-	# of 30 seconds only if the machine is loaded - keep some headroom.
+	# Waits up to 90 seconds for the Jitter RNG to seed the ESDM before it
+	# counts that as a failure, which a slow sanitizer build may need.
 	test('ESDM security - Jitter RNG as the only credited source',
 		esdm_jent_only_security_test,
+		timeout: 180)
+
+	# Sits out two reseed intervals of five seconds and 2^11 requests.
+	test('ESDM security - reseed on interval and request threshold',
+		esdm_reseed_security_test,
 		timeout: 120)
 endif
