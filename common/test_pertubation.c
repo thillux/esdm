@@ -212,28 +212,39 @@ void esdm_test_shm_status_fini(void)
 	mutex_w_unlock(&esdm_test_shm_status_lock);
 }
 
+/*
+ * The counters are bumped by every thread making or serving a call, and by
+ * every process attached to the segment - hence atomic operations instead of
+ * a plain += that loses counts when two of them write at once.
+ */
 void esdm_test_shm_status_add_rpc_client_written(size_t written)
 {
 	if (esdm_test_shm_status)
-		esdm_test_shm_status->rpc_data_client_written += written;
+		__atomic_fetch_add(&esdm_test_shm_status->rpc_data_client_written,
+				   written, __ATOMIC_RELAXED);
 }
 
 size_t esdm_test_shm_status_get_rpc_client_written(void)
 {
 	if (esdm_test_shm_status)
-		return esdm_test_shm_status->rpc_data_client_written;
+		return __atomic_load_n(
+			&esdm_test_shm_status->rpc_data_client_written,
+			__ATOMIC_RELAXED);
 	return 0;
 }
 
 void esdm_test_shm_status_add_rpc_server_written(size_t written)
 {
 	if (esdm_test_shm_status)
-		esdm_test_shm_status->rpc_data_server_written += written;
+		__atomic_fetch_add(&esdm_test_shm_status->rpc_data_server_written,
+				   written, __ATOMIC_RELAXED);
 }
 
 size_t esdm_test_shm_status_get_rpc_server_written(void)
 {
 	if (esdm_test_shm_status)
-		return esdm_test_shm_status->rpc_data_server_written;
+		return __atomic_load_n(
+			&esdm_test_shm_status->rpc_data_server_written,
+			__ATOMIC_RELAXED);
 	return 0;
 }

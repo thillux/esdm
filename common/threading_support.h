@@ -69,6 +69,13 @@ extern "C" {
 #define ESDM_THREAD_RPC_UNPRIV_GROUP ((uint32_t)-3)
 #define ESDM_THREAD_EGD_GROUP ((uint32_t)-4)
 /*
+ * The EGD server workers. Unlike the other special groups, this one has a slot
+ * per worker: its workers stay for the lifetime of the server, so taking them
+ * from the regular pool would leave less of it to the jobs that come and go
+ * there - and none at all on a machine whose RPC workers fill it already.
+ */
+#define ESDM_THREAD_EGD_SLOTS 4
+/*
  * The asynchronous reseed of the per-node DRNGs. One slot is all this needs:
  * every reseed serializes on the entropy pool lock anyway, so a second worker
  * would only wait for the first.
@@ -77,6 +84,9 @@ extern "C" {
 /* The periodic self tests of the hash and the DRNG implementation. */
 #define ESDM_THREAD_PERIODIC_SELFTEST ((uint32_t)-6)
 #define ESDM_THREAD_MAX_SPECIAL_GROUPS 6
+/* Slots of all special groups together */
+#define ESDM_THREAD_SPECIAL_SLOTS                                              \
+	(ESDM_THREAD_MAX_SPECIAL_GROUPS - 1 + ESDM_THREAD_EGD_SLOTS)
 
 enum esdm_request_type {
 	es_monitor,

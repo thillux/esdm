@@ -164,7 +164,11 @@ test('common endianness conversion - software byte swap', conv_be_le_sw_test)
 test('common buffer handling', buffer_test)
 test('common logger', esdm_logger_test)
 test('common helper', helper_test)
-test('common Linux support', linux_support_test)
+# The supervisor's children belong to the PID namespace whose init it has
+# reaped by its exit, so LeakSanitizer cannot fork its tracer there and aborts.
+test('common Linux support', linux_support_test,
+	env: [ 'ASAN_OPTIONS=halt_on_error=1:abort_on_error=1' +
+		':print_summary=1:detect_leaks=0' ])
 test('common known answer test comparison', selftest_kat_test)
 test('common operating system random numbers', os_random_test)
 test('common xoshiro256++ PRNG', xoshiro_test)
