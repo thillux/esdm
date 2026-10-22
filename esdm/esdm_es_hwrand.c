@@ -67,6 +67,13 @@ static DEFINE_MUTEX_UNLOCKED(hwrand_mutex);
 #if (ESDM_HWRAND_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf hwrand_buf;
 static bool hwrand_buf_alloced = false;
+
+/* What a block of @requested_bits is credited with at present */
+static uint32_t esdm_hwrand_buf_credit(uint32_t requested_bits)
+{
+	return esdm_fast_noise_entropylevel(
+		esdm_config_es_hwrand_entropy_rate(), requested_bits);
+}
 #endif
 
 static bool esdm_hwrand_active(void);
@@ -109,6 +116,11 @@ static int esdm_hwrand_init(void)
 			"Disabling /dev/hwrng-based entropy source as device not present, error opening %s: %s\n",
 			ESDM_ES_HWRAND_IF, strerror(errno));
 		mutex_unlock(&hwrand_mutex);
+#if (ESDM_HWRAND_ENTROPY_BLOCKS != 0)
+		/* What the device delivered before is credited no more */
+		if (hwrand_buf_alloced)
+			esdm_es_buf_reset(&hwrand_buf);
+#endif
 		return 0;
 	}
 
@@ -118,7 +130,9 @@ static int esdm_hwrand_init(void)
 	if (hwrand_buf_alloced) {
 		esdm_es_buf_reset(&hwrand_buf);
 	} else if (esdm_es_buf_alloc(&hwrand_buf, ESDM_HWRAND_ENTROPY_BLOCKS,
-				     "LinuxHWRand") == 0) {
+				     "LinuxHWRand",
+				     esdm_config_es_hwrand_entropy_rate,
+				     esdm_hwrand_buf_credit) == 0) {
 		hwrand_buf_alloced = true;
 	}
 #endif
@@ -291,6 +305,24 @@ static void esdm_hwrand_buf_fill(struct entropy_es *eb_es,
 	esdm_hwrand_get_sync(eb_es, requested_bits);
 }
 
+/*
+ * Every failed fill costs the full read timeout under hwrand_mutex, so a
+ * stalled device would hold the monitor for all empty slots. The round stops
+ * instead; the synchronous read of the next seeding finds out whether the
+ * device recovered.
+ */
+static bool esdm_hwrand_buf_ready(void *ctx)
+{
+	bool ret;
+
+	(void)ctx;
+	mutex_reader_lock(&hwrand_mutex);
+	ret = esdm_hwrand_fd >= 0 && !esdm_hwrand_read_failed;
+	mutex_reader_unlock(&hwrand_mutex);
+
+	return ret;
+}
+
 static int esdm_hwrand_monitor(void)
 {
 	uint32_t requested_bits = esdm_get_seed_entropy_osr(false, true);
@@ -298,14 +330,17 @@ static int esdm_hwrand_monitor(void)
 	if (!esdm_hwrand_active())
 		return 0;
 
-	return esdm_es_buf_monitor(&hwrand_buf, requested_bits,
-				   esdm_hwrand_buf_fill, NULL);
+	return esdm_es_buf_monitor_ready(&hwrand_buf, requested_bits,
+					 esdm_hwrand_buf_fill,
+					 esdm_hwrand_buf_ready, NULL);
 }
 
 static void esdm_hwrand_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			    bool __unused unsused)
+			    bool allow_cached)
 {
-	if (esdm_es_buf_try_get(&hwrand_buf, eb_es, requested_bits))
+	if (allow_cached &&
+	    esdm_es_buf_try_get(&hwrand_buf, eb_es, requested_bits,
+				!!esdm_config_es_hwrand_entropy_rate()))
 		return;
 
 	esdm_hwrand_get_sync(eb_es, requested_bits);
@@ -314,7 +349,7 @@ static void esdm_hwrand_get(struct entropy_es *eb_es, uint32_t requested_bits,
 #else /* ESDM_HWRAND_ENTROPY_BLOCKS == 0 */
 
 static void esdm_hwrand_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			    bool __unused unsused)
+			    bool __unused allow_cached)
 {
 	esdm_hwrand_get_sync(eb_es, requested_bits);
 }
@@ -350,13 +385,20 @@ static bool esdm_hwrand_active(void)
 /* The device is still open and its last read worked. */
 static int esdm_hwrand_selftest(void)
 {
-	if (esdm_hwrand_fd < 0) {
+	bool open, failed;
+
+	mutex_reader_lock(&hwrand_mutex);
+	open = esdm_hwrand_fd >= 0;
+	failed = esdm_hwrand_read_failed;
+	mutex_reader_unlock(&hwrand_mutex);
+
+	if (!open) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "HWRand ES: no device - nothing to test\n");
 		return 0;
 	}
 
-	if (esdm_hwrand_read_failed) {
+	if (failed) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"HWRand ES: the last read from the device failed\n");

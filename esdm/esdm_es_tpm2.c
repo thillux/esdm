@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bitshift.h"
@@ -41,7 +42,32 @@
 static int tpm2_fd = -1;
 static DEFINE_MUTEX_UNLOCKED(tpm2_mutex);
 
+/*
+ * A connection lost to an I/O error is reopened on demand, at most once per
+ * interval: a resource manager restart must not take the source out for good,
+ * nor a TPM that is gone cost an open() per request. A device absent at init
+ * stays disabled, as before. Monotonic seconds, written under tpm2_mutex.
+ */
+#define ESDM_TPM2_REOPEN_INTERVAL_SEC 5
+static bool tpm2_lost = false;
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static bool tpm2_selftest_failed = false;
+/*
+ * Set when a read from the TPM failed while its device is open, cleared by the
+ * next read that delivers in full. A TPM answering with an error that is no
+ * reason to retry - TPM_RC_FAILURE of a TPM in failure mode, say - keeps its
+ * connection: the resource manager is there and the TPM keeps answering, it
+ * just does not deliver. While set no entropy is claimed, so the source neither
+ * inflates the entropy the ESDM reports as available nor counts as one credited
+ * with entropy, as esdm_hwrand_read_failed does for /dev/hwrng. The source is
+ * still asked - its data then goes in as additional data - which is how a TPM
+ * that delivers again is noticed.
+ */
+static bool tpm2_read_failed = false;
+static time_t tpm2_reopen_at = 0;
+
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
+static uint32_t esdm_es_tpm2_buf_credit(uint32_t requested_bits);
 static struct esdm_es_buf tpm2_buf;
 static bool tpm2_buf_alloced = false;
 #endif
@@ -80,6 +106,59 @@ struct TPM2ResponseHeader {
 	uint32_t responseSize;
 	TPM2_RC responseCode;
 } __attribute((__packed__));
+
+static time_t esdm_es_tpm2_now(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return 0;
+	return ts.tv_sec;
+}
+
+static void esdm_es_tpm2_finalize_locked(void)
+{
+	if (tpm2_fd < 0)
+		return;
+
+	close(tpm2_fd);
+	tpm2_fd = -1;
+}
+
+/* Caller must hold tpm2_mutex (write lock). */
+static void esdm_es_tpm2_lost_locked(void)
+{
+	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = true;
+	tpm2_reopen_at = esdm_es_tpm2_now() + ESDM_TPM2_REOPEN_INTERVAL_SEC;
+}
+
+/* Caller must hold tpm2_mutex (write lock). */
+static void esdm_es_tpm2_reopen_locked(void)
+{
+	time_t now;
+	int fd;
+
+	if (tpm2_fd >= 0 || !tpm2_lost)
+		return;
+
+	now = esdm_es_tpm2_now();
+	if (now < tpm2_reopen_at)
+		return;
+	tpm2_reopen_at = now + ESDM_TPM2_REOPEN_INTERVAL_SEC;
+
+	fd = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+			    "TPM 2.0 reopen failed: %s\n", strerror(errno));
+		return;
+	}
+
+	tpm2_fd = fd;
+	tpm2_lost = false;
+	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
+		    "TPM 2.0 entropy source reopened its device\n");
+}
 
 /*
  * Send a TPM 2.0 command and receive the response.
@@ -132,8 +211,7 @@ static int esdm_es_tpm2_transceive(struct TPM2CommandHeader *cmd,
 					  cmd_buffer_len)) {
 			esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 				    "TPM 2.0 command write failed\n");
-			close(tpm2_fd);
-			tpm2_fd = -1;
+			esdm_es_tpm2_lost_locked();
 			goto out;
 		}
 
@@ -152,8 +230,7 @@ static int esdm_es_tpm2_transceive(struct TPM2CommandHeader *cmd,
 			esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 				    "TPM 2.0 response read failed: %zd\n",
 				    safe_ret);
-			close(tpm2_fd);
-			tpm2_fd = -1;
+			esdm_es_tpm2_lost_locked();
 			goto out;
 		}
 		/*
@@ -218,19 +295,12 @@ out:
 	return ret;
 }
 
-static void esdm_es_tpm2_finalize_locked(void)
-{
-	if (tpm2_fd < 0)
-		return;
-
-	close(tpm2_fd);
-	tpm2_fd = -1;
-}
-
 static void esdm_es_tpm2_finalize(void)
 {
 	mutex_lock(&tpm2_mutex);
 	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = false;
+	tpm2_read_failed = false;
 	mutex_unlock(&tpm2_mutex);
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
@@ -249,6 +319,8 @@ static int esdm_es_tpm2_init(void)
 
 	/* Allow the init function to be called multiple times */
 	esdm_es_tpm2_finalize_locked();
+	tpm2_lost = false;
+	tpm2_read_failed = false;
 
 	ret = open(ESDM_TPM2_RM_PATH, O_RDWR | O_CLOEXEC);
 	if (ret < 0) {
@@ -266,7 +338,8 @@ static int esdm_es_tpm2_init(void)
 	if (tpm2_buf_alloced) {
 		esdm_es_buf_reset(&tpm2_buf);
 	} else if (esdm_es_buf_alloc(&tpm2_buf, ESDM_TPM2_ENTROPY_BLOCKS,
-				     "TPM2.0") == 0) {
+				     "TPM2.0", esdm_config_es_tpm2_entropy_rate,
+				     esdm_es_tpm2_buf_credit) == 0) {
 		tpm2_buf_alloced = true;
 	}
 #endif
@@ -277,7 +350,7 @@ static int esdm_es_tpm2_init(void)
 /* Caller must hold tpm2_mutex. */
 static uint32_t esdm_es_tpm2_entropylevel_locked(uint32_t requested_bits)
 {
-	if (tpm2_fd < 0)
+	if (tpm2_fd < 0 || tpm2_selftest_failed || tpm2_read_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
@@ -371,9 +444,10 @@ static int esdm_es_tpm2_get_internal(uint8_t *buf, uint32_t len)
 	memset_secure(stir_buf, 0, sizeof(stir_buf));
 #endif
 
+	/* The answer is the size field and exactly the bytes requested */
 	if (esdm_es_tpm2_transceive(&getrandom_cmd, (uint8_t *)&bytes_requested,
 				    sizeof(bytes_requested), &getrandom_rsp,
-				    resp_buf, sizeof(resp_buf))) {
+				    resp_buf, sizeof(uint16_t) + len)) {
 		esdm_logger(LOGGER_WARN, LOGGER_C_ES,
 			    "TPM 2.0 get random failed. RC: 0x%04x\n",
 			    getrandom_rsp.responseCode);
@@ -418,6 +492,7 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 	 */
 	mutex_lock(&tpm2_mutex);
 
+	esdm_es_tpm2_reopen_locked();
 	if (tpm2_fd < 0)
 		goto err;
 
@@ -426,12 +501,15 @@ static void esdm_es_tpm2_get_sync(struct entropy_es *eb_es,
 						 requested_bits - done_bits);
 		uint32_t chunk_bytes = chunk_bits >> 3;
 
-		if (esdm_es_tpm2_get_internal(buffer, tpm2_max_chunk_bytes))
+		if (esdm_es_tpm2_get_internal(buffer, tpm2_max_chunk_bytes)) {
+			tpm2_read_failed = true;
 			goto err;
+		}
 		memcpy(eb_es->e + (done_bits >> 3), buffer, chunk_bytes);
 		done_bits += chunk_bits;
 	}
 
+	tpm2_read_failed = false;
 	eb_es->e_bits = esdm_es_tpm2_entropylevel_locked(requested_bits);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "obtained %u bits of entropy from TPM 2.0 entropy source\n",
@@ -449,6 +527,28 @@ err:
 
 #if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
 
+/*
+ * What a block of @requested_bits is credited with at present: the configured
+ * rate, and nothing once a self test saw the TPM repeat its output. Unlike
+ * esdm_es_tpm2_entropylevel() it does not ask whether the device is open now -
+ * a block cached before the connection was lost was read from a TPM that
+ * delivered.
+ */
+static uint32_t esdm_es_tpm2_buf_credit(uint32_t requested_bits)
+{
+	bool failed;
+
+	mutex_reader_lock(&tpm2_mutex);
+	failed = tpm2_selftest_failed;
+	mutex_reader_unlock(&tpm2_mutex);
+
+	if (failed)
+		return 0;
+
+	return esdm_fast_noise_entropylevel(esdm_config_es_tpm2_entropy_rate(),
+					    requested_bits);
+}
+
 static void esdm_es_tpm2_buf_fill(struct entropy_es *eb_es,
 				  uint32_t requested_bits, void *ctx)
 {
@@ -460,6 +560,11 @@ static int esdm_es_tpm2_monitor(void)
 {
 	uint32_t requested_bits = esdm_get_seed_entropy_osr(false, true);
 
+	/* A cache hit never reaches the reopen in esdm_es_tpm2_get_sync() */
+	mutex_lock(&tpm2_mutex);
+	esdm_es_tpm2_reopen_locked();
+	mutex_unlock(&tpm2_mutex);
+
 	if (!esdm_es_tpm2_active())
 		return 0;
 
@@ -468,9 +573,15 @@ static int esdm_es_tpm2_monitor(void)
 }
 
 static void esdm_es_tpm2_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			     bool __unused unsused)
+			     bool allow_cached)
 {
-	if (esdm_es_buf_try_get(&tpm2_buf, eb_es, requested_bits))
+	/*
+	 * A block the TPM delivered before a self test saw it repeat itself is
+	 * credited no more than what it reads now.
+	 */
+	if (allow_cached &&
+	    esdm_es_buf_try_get(&tpm2_buf, eb_es, requested_bits,
+				!!esdm_es_tpm2_buf_credit(requested_bits)))
 		return;
 
 	esdm_es_tpm2_get_sync(eb_es, requested_bits);
@@ -479,7 +590,7 @@ static void esdm_es_tpm2_get(struct entropy_es *eb_es, uint32_t requested_bits,
 #else /* ESDM_TPM2_ENTROPY_BLOCKS == 0 */
 
 static void esdm_es_tpm2_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			     bool __unused unsused)
+			     bool __unused allow_cached)
 {
 	esdm_es_tpm2_get_sync(eb_es, requested_bits);
 }
@@ -519,16 +630,65 @@ static bool esdm_es_tpm2_active(void)
 	return ret;
 }
 
-/* The connection to the TPM is still there. */
+/* Two reads of the TPM that have to succeed and have to differ. */
 static int esdm_es_tpm2_selftest(void)
 {
+	uint8_t first[16], second[16];
+	int ret = 0;
+
+	mutex_lock(&tpm2_mutex);
+
+	esdm_es_tpm2_reopen_locked();
 	if (tpm2_fd < 0) {
-		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-			    "TPM2 ES: no device - nothing to test\n");
-		return 0;
+		/* A device that went away is a failure, one never there not */
+		if (tpm2_lost) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+				    "TPM2 ES: connection to the TPM lost\n");
+			ret = -EFAULT;
+		} else {
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+				    "TPM2 ES: no device - nothing to test\n");
+		}
+		goto out;
 	}
 
-	return 0;
+	if (esdm_es_tpm2_get_internal(first, sizeof(first)) ||
+	    esdm_es_tpm2_get_internal(second, sizeof(second))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "TPM2 ES: the TPM did not deliver\n");
+		/* No entropy is claimed until a read delivers again */
+		tpm2_read_failed = true;
+		ret = -EFAULT;
+		goto out;
+	}
+
+	/* Both reads delivered in full */
+	tpm2_read_failed = false;
+
+	if (!memcmp(first, second, sizeof(first))) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "TPM2 ES: the TPM repeated its output\n");
+		tpm2_selftest_failed = true;
+#if (ESDM_TPM2_ENTROPY_BLOCKS != 0)
+		/*
+		 * What the cache holds was read before this test, from a TPM
+		 * that has shown it repeats itself - not to be handed out as
+		 * entropy, as esdm_jent_selftest() does with its cache.
+		 */
+		esdm_es_buf_reset(&tpm2_buf);
+#endif
+		ret = -EFAULT;
+		goto out;
+	}
+
+	tpm2_selftest_failed = false;
+
+out:
+	mutex_unlock(&tpm2_mutex);
+	memset_secure(first, 0, sizeof(first));
+	memset_secure(second, 0, sizeof(second));
+
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_tpm2 = {

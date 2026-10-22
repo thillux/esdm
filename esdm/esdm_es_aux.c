@@ -198,30 +198,37 @@ static int esdm_aux_init(void)
 		 * undefined. The lock outlives esdm_aux_fini(), so an init after
 		 * a fini takes the same path with the states already NULL.
 		 */
-		if (pool->lock_initialized) {
-			mutex_w_lock(&pool->lock);
-			esdm_aux_fini_pool(pool);
-			mutex_w_unlock(&pool->lock);
-		} else {
+		if (!pool->lock_initialized) {
 			CKINT(mutex_w_init(&pool->lock, 0, 0));
 			pool->lock_initialized = true;
 		}
 
-		pool->aux_pool_state = NULL;
-		pool->aux_pool_out = NULL;
+		/*
+		 * Replace the hash states and reset the entropy count under
+		 * the pool lock as a whole: a concurrent
+		 * esdm_pool_insert_aux() must neither see the states released
+		 * or not yet allocated nor have the entropy it credits in
+		 * between wiped out.
+		 */
+		mutex_w_lock(&pool->lock);
+		if (pool->aux_pool_state || pool->aux_pool_out)
+			esdm_aux_fini_pool(pool);
 		atomic_store(&pool->aux_entropy_bits, 0);
 		pool->initialized = false;
 		pool->idx = i;
-		CKINT(esdm_aux_init_pool(pool));
+		ret = esdm_aux_init_pool(pool);
 
 		/*
 		 * The size of the hash the pool is conditioned with, which is
 		 * the most entropy the pool holds - read from the hash rather
 		 * than assumed to be the largest one supported.
 		 */
-		atomic_store(&pool->digestsize,
-			     (int)drng->hash_cb->hash_digestsize(
-				     pool->aux_pool_state));
+		if (!ret)
+			atomic_store(&pool->digestsize,
+				     (int)drng->hash_cb->hash_digestsize(
+					     pool->aux_pool_state));
+		mutex_w_unlock(&pool->lock);
+		CKINT(ret);
 	}
 
 	esdm_set_wakeup_bits();
@@ -243,7 +250,14 @@ static void esdm_aux_fini(void)
 	size_t i;
 
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
-		esdm_aux_fini_pool(&esdm_pools[i]);
+		struct esdm_pool *pool = &esdm_pools[i];
+
+		/* Release the states under the lock - see esdm_aux_init() */
+		if (pool->lock_initialized)
+			mutex_w_lock(&pool->lock);
+		esdm_aux_fini_pool(pool);
+		if (pool->lock_initialized)
+			mutex_w_unlock(&pool->lock);
 	}
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Aux ES hash deallocated\n");
@@ -585,16 +599,20 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	    hash_cb->hash_update(shash, aux_state, digestsize) ||
 	    hash_cb->hash_update(ohash, aux_state, digestsize)) {
 		/*
-		 * The hash chain failed after collected_ent_bits was already
-		 * drained from the pool by the atomic_exchange() above. As no output
-		 * is produced, return the consumed entropy to the pool instead
-		 * of losing it (the caller holds pool->lock, so this is the only
-		 * writer). Additionally drop the initialized flag: hash_final()
-		 * may already have finalized one or both hash states, so force a
-		 * clean re-initialization on the next insert rather than
-		 * continuing to hash into a torn state.
+		 * The hash chain failed part way: hash_final() may already have
+		 * finalized one or both hash states, so drop the initialized
+		 * flag to force a clean re-initialization on the next insert
+		 * rather than continuing to hash into a torn state.
+		 *
+		 * That re-initialization discards everything the pool has
+		 * absorbed, so the entropy it was credited with is gone with it
+		 * - the bits drained above as well as the overflow put back.
+		 * Clear the counter (the caller holds pool->lock, so this is the
+		 * only writer): giving the drained bits back would credit the
+		 * next extraction with entropy of data that never reaches it,
+		 * and the source would report it as available meanwhile.
 		 */
-		atomic_fetch_add(&pool->aux_entropy_bits, (int)collected_ent_bits);
+		esdm_pool_set_entropy_pool(pool, 0);
 		pool->initialized = false;
 		returned_ent_bits = 0;
 	} else {
@@ -618,18 +636,15 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 	uint32_t max_entropy = 0;
 	bool locked_pool = false;
 	/*
-	 * Evaluate the entropy threshold once up front. esdm_compress_osr()
-	 * depends on the runtime-writable force_fips flag; recomputing it per
-	 * iteration would let a concurrent flip change which pool satisfies the
-	 * break condition mid-loop, so we could break holding one pool's lock
-	 * while unlocking a different one afterwards (unlock of an unowned
-	 * mutex plus a permanently leaked lock).
+	 * The entropy a pool has to provide. esdm_aux_avail_entropy_pool()
+	 * already discounts the OSR the extraction applies, so the requested
+	 * bits are compared against without adding it once more. The threshold
+	 * stays the same for the whole loop: one changing mid-loop could let
+	 * us break holding one pool's lock while unlocking a different one
+	 * afterwards (unlock of an unowned mutex plus a permanently leaked
+	 * lock).
 	 */
-#ifdef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
 	const uint32_t entropy_threshold = requested_bits;
-#else
-	const uint32_t entropy_threshold = requested_bits + esdm_compress_osr();
-#endif
 
 	/*
 	 * Now we want to find the pool to extract the entropy from. The applied
@@ -660,7 +675,7 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 
 		/*
 		 * We found the pool that can already provide all our entropy
-		 * needs (including the discount for the OSR), take it.
+		 * needs (after the discount for the OSR), take it.
 		 */
 		if (entropy_threshold <= max_entropy) {
 			locked_pool = true;

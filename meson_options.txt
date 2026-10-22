@@ -163,9 +163,10 @@ limit that this value must be in the range between 0 and 256.
 When configuring this value to 0, the kernel RNG entropy source will provide
 256 bits of data without being credited to contain entropy.
 
-Note: This value is set to 0 automatically when booting the kernel in FIPS
-mode (with fips=1 kernel command line option). This is due to the fact that
-random.c is not SP800-90B compliant.
+Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, this value
+is set to 0 automatically when booting the kernel in FIPS mode (with fips=1
+kernel command line option). This is due to the fact that random.c is not
+SP800-90B compliant.
 ''')
 
 ################################################################################
@@ -308,9 +309,10 @@ attaching an eBPF program to the stable sched_switch tracepoint
 of a stock Linux kernel (BTF/CO-RE required, i.e. the kernel
 must be built with CONFIG_DEBUG_INFO_BTF).
 
-The event timestamps are health-tested (SP800-90B RCT and APT)
-inside the eBPF program, which collects the time between
-successive events of a CPU in per-CPU buffers - the spacing of
+In FIPS 140, SP800-90C and NTG.1 mode the event timestamps are
+health-tested (SP800-90B RCT and APT) inside the eBPF program,
+which collects the time between successive events of a CPU in
+per-CPU buffers - the spacing of
 the events is where the entropy is, and it is the signal the
 SP800-90B assessment measures. A buffer is handed to a BPF ring
 buffer once it is full, or after an idle deadline when its CPU
@@ -382,10 +384,10 @@ option('es_irq_ebpf', type: 'feature', value: 'disabled',
 The ESDM models an entropy source based on the timing of the
 occurrence of interrupts. In contrast to the es_irq entropy
 source which requires a patched kernel, this entropy source
-obtains the interrupt timing by attaching eBPF programs to the
-stable irq_handler_entry and softirq_entry tracepoints of a
-stock Linux kernel (BTF/CO-RE required, i.e. the kernel must be
-built with CONFIG_DEBUG_INFO_BTF).
+obtains the interrupt timing by attaching an eBPF program to the
+stable irq_handler_entry tracepoint of a stock Linux kernel
+(BTF/CO-RE required, i.e. the kernel must be built with
+CONFIG_DEBUG_INFO_BTF).
 
 Note: unlike the es_irq entropy source, this entropy source
 does not divert the interrupt timings from the kernel RNG - it
@@ -608,8 +610,10 @@ option('es_pkcs11_module_path', type: 'string', value: '',
 Path of the PKCS#11 module shared library to load (e.g.
 /usr/lib/softhsm/libsofthsm2.so or /usr/lib/pkcs11/opensc-pkcs11.so).
 
-When left empty, the PKCS#11 entropy source is disabled at runtime even if it
-was compiled in.
+esdm-server --pkcs11_module PATH loads another module in its place.
+
+When left empty and not given on the command line either, the PKCS#11 entropy
+source is disabled at runtime even if it was compiled in.
 ''')
 
 option('es_pkcs11_token_label', type: 'string', value: '',

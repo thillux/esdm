@@ -34,10 +34,45 @@
 
 static struct kcapi_handle *jent_rng = NULL;
 static DEFINE_MUTEX_UNLOCKED(jent_rng_mutex);
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static bool jent_kernel_selftest_failed = false;
+/*
+ * Set when a read from the kernel's jitterentropy RNG failed or came back
+ * short, cleared by the next read that delivers in full. The handle stays open
+ * meanwhile: a kernel RNG returning an error, or an AF_ALG socket returning
+ * EOF, does so behind a handle that is still there. While set no entropy is
+ * claimed, so the source neither inflates the entropy the ESDM reports as
+ * available nor counts as one credited with entropy, as esdm_hwrand_read_failed
+ * does for /dev/hwrng. The source is still asked - its data then goes in as
+ * additional data - which is how an RNG that delivers again is noticed.
+ */
+static bool jent_kernel_read_failed = false;
 
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
 static struct esdm_es_buf jent_kernel_buf;
 static bool jent_kernel_buf_alloced = false;
+
+/*
+ * What a block of @requested_bits is credited with at present: the configured
+ * rate, and nothing once a self test saw the kernel's jitterentropy RNG repeat
+ * its output. Unlike esdm_jent_kernel_entropylevel() it does not ask whether
+ * the handle is open now - a block cached before was read from an RNG that
+ * delivered.
+ */
+static uint32_t esdm_jent_kernel_buf_credit(uint32_t requested_bits)
+{
+	bool failed;
+
+	mutex_reader_lock(&jent_rng_mutex);
+	failed = jent_kernel_selftest_failed;
+	mutex_reader_unlock(&jent_rng_mutex);
+
+	if (failed)
+		return 0;
+
+	return esdm_fast_noise_entropylevel(
+		esdm_config_es_jent_kernel_entropy_rate(), requested_bits);
+}
 #endif
 
 static bool esdm_jent_kernel_active(void);
@@ -55,6 +90,7 @@ static void esdm_jent_kernel_finalize(void)
 {
 	mutex_lock(&jent_rng_mutex);
 	esdm_jent_kernel_finalize_locked();
+	jent_kernel_read_failed = false;
 	mutex_unlock(&jent_rng_mutex);
 
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
@@ -73,6 +109,7 @@ static int esdm_jent_kernel_init(void)
 
 	/* Allow the init function to be called multiple times */
 	esdm_jent_kernel_finalize_locked();
+	jent_kernel_read_failed = false;
 
 	ret = kcapi_rng_init(&jent_rng, "jitterentropy_rng", 0);
 	if (ret != 0) {
@@ -87,9 +124,11 @@ static int esdm_jent_kernel_init(void)
 #if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
 	if (jent_kernel_buf_alloced) {
 		esdm_es_buf_reset(&jent_kernel_buf);
-	} else if (esdm_es_buf_alloc(&jent_kernel_buf,
-				     ESDM_JENT_KERNEL_ENTROPY_BLOCKS,
-				     "KernelJitterRNG") == 0) {
+	} else if (!esdm_es_buf_alloc(&jent_kernel_buf,
+				      ESDM_JENT_KERNEL_ENTROPY_BLOCKS,
+				      "KernelJitterRNG",
+				      esdm_config_es_jent_kernel_entropy_rate,
+				      esdm_jent_kernel_buf_credit)) {
 		jent_kernel_buf_alloced = true;
 	}
 #endif
@@ -100,7 +139,8 @@ static int esdm_jent_kernel_init(void)
 /* Caller must hold jent_rng_mutex. */
 static uint32_t esdm_jent_kernel_entropylevel_locked(uint32_t requested_bits)
 {
-	if (jent_rng == NULL)
+	if (jent_rng == NULL || jent_kernel_selftest_failed ||
+	    jent_kernel_read_failed)
 		return 0;
 
 	return esdm_fast_noise_entropylevel(
@@ -152,9 +192,12 @@ static void esdm_jent_kernel_get_sync(struct entropy_es *eb_es,
 	 * requested entropy below.
 	 */
 	if (kcapi_rng_generate(jent_rng, eb_es->e, requested_bits >> 3) !=
-	    (ssize_t)(requested_bits >> 3))
+	    (ssize_t)(requested_bits >> 3)) {
+		jent_kernel_read_failed = true;
 		goto err;
+	}
 
+	jent_kernel_read_failed = false;
 	eb_es->e_bits = esdm_jent_kernel_entropylevel_locked(requested_bits);
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_ES,
@@ -191,9 +234,15 @@ static int esdm_jent_kernel_monitor(void)
 }
 
 static void esdm_jent_kernel_get(struct entropy_es *eb_es,
-				 uint32_t requested_bits, bool __unused unused)
+				 uint32_t requested_bits, bool allow_cached)
 {
-	if (esdm_es_buf_try_get(&jent_kernel_buf, eb_es, requested_bits))
+	/*
+	 * A block the RNG delivered before a self test saw it repeat itself is
+	 * credited no more than what it reads now.
+	 */
+	if (allow_cached &&
+	    esdm_es_buf_try_get(&jent_kernel_buf, eb_es, requested_bits,
+				!!esdm_jent_kernel_buf_credit(requested_bits)))
 		return;
 
 	esdm_jent_kernel_get_sync(eb_es, requested_bits);
@@ -202,7 +251,8 @@ static void esdm_jent_kernel_get(struct entropy_es *eb_es,
 #else /* ESDM_JENT_KERNEL_ENTROPY_BLOCKS == 0 */
 
 static void esdm_jent_kernel_get(struct entropy_es *eb_es,
-				 uint32_t requested_bits, bool __unused unused)
+				 uint32_t requested_bits,
+				 bool __unused allow_cached)
 {
 	esdm_jent_kernel_get_sync(eb_es, requested_bits);
 }
@@ -260,16 +310,33 @@ static int esdm_jent_kernel_selftest(void)
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"KernelJitterRNG ES: the kernel jitterentropy RNG did not deliver\n");
+		/* No entropy is claimed until a read delivers again */
+		jent_kernel_read_failed = true;
 		ret = -EFAULT;
 		goto out;
 	}
+
+	/* Both reads delivered in full */
+	jent_kernel_read_failed = false;
 
 	if (!memcmp(first, second, sizeof(first))) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"KernelJitterRNG ES: the kernel jitterentropy RNG repeated its output\n");
+		jent_kernel_selftest_failed = true;
+#if (ESDM_JENT_KERNEL_ENTROPY_BLOCKS != 0)
+		/*
+		 * What the cache holds was read before this test, from an RNG
+		 * that has shown it repeats itself - not to be handed out as
+		 * entropy, as esdm_jent_selftest() does with its cache.
+		 */
+		esdm_es_buf_reset(&jent_kernel_buf);
+#endif
 		ret = -EFAULT;
+		goto out;
 	}
+
+	jent_kernel_selftest_failed = false;
 
 out:
 	mutex_unlock(&jent_rng_mutex);

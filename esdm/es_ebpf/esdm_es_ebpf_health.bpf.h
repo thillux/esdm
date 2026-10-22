@@ -67,7 +67,11 @@ esdm_ebpf_health_ok(const struct esdm_ebpf_percpu_state *state)
 	return !esdm_ebpf_cfg.health_enabled || state->startup_done;
 }
 
-/* SP800-90B startup test progress: one APT window completed */
+/*
+ * SP800-90B startup test progress: one APT window completed. The test
+ * completes on the window that takes the count from one to zero and on no
+ * other - a count already at zero stays there, it does not wrap around.
+ */
 static __always_inline void
 esdm_ebpf_sp80090b_startup(struct esdm_ebpf_percpu_state *state)
 {
@@ -76,18 +80,68 @@ esdm_ebpf_sp80090b_startup(struct esdm_ebpf_percpu_state *state)
 		state->startup_done = 1;
 }
 
+/* Current health epoch of the entropy source (struct esdm_ebpf_health) */
+static __always_inline __u32 esdm_ebpf_health_epoch(void)
+{
+	struct esdm_ebpf_health *health;
+	__u32 zero = 0;
+
+	health = bpf_map_lookup_elem(&esdm_ebpf_health_map, &zero);
+	if (!health)
+		return 0;
+
+	return *(volatile __u32 *)&health->epoch;
+}
+
+/*
+ * A health test failure invalidates all entropy collected before it, on every
+ * CPU: start a new health epoch, which tells user space to credit none of the
+ * records of the previous ones still in the ring buffer, and makes the other
+ * CPUs drop the batches they began before it instead of handing them over.
+ * The batch of this CPU is discarded right away - it would only be dropped on
+ * its hand-over anyway, and this way its deltas do not linger until then.
+ *
+ * The result of the atomic add is not used, which keeps it the plain BPF_XADD
+ * that -mcpu=v2 offers.
+ */
+static __always_inline void
+esdm_ebpf_health_invalidate(struct esdm_ebpf_percpu_state *state)
+{
+	struct esdm_ebpf_health *health;
+	__u32 zero = 0;
+
+	health = bpf_map_lookup_elem(&esdm_ebpf_health_map, &zero);
+	if (health)
+		__sync_fetch_and_add(&health->epoch, 1);
+
+	__builtin_memset(&state->rec, 0, sizeof(state->rec));
+	state->pos = 0;
+}
+
 /*
  * Handle failure of the SP800-90B startup or runtime testing: restart the
  * startup test, which stops this CPU from collecting until it passes again.
  * The failure is recorded in the per-CPU state, from which user space picks it
- * up and invalidates the collected entropy.
+ * up and invalidates the collected entropy, and in the health epoch, which
+ * invalidates the collected events still on their way to user space.
+ *
+ * The RCT and APT counters are left running: the permanent cutoffs count on
+ * the very same counters, and resetting them at the intermittent cutoff would
+ * leave the permanent one unreachable. So the APT window the failure fell into
+ * goes on to its end, and its close must not count as a passed startup block -
+ * it holds the failure. One block more than a startup takes is due therefore,
+ * the first of which that window consumes: the new startup test is the
+ * ESDM_EBPF_STARTUP_BLOCKS full windows after it. A failure the RCT reports on
+ * the very event that closed a window is one window early in that regard and
+ * costs a window more, which errs on the safe side.
  */
 static __always_inline void
 esdm_ebpf_sp80090b_failure(struct esdm_ebpf_percpu_state *state, __u32 test)
 {
+	esdm_ebpf_health_invalidate(state);
 	state->health_failures++;
 	state->health_test = test;
-	state->startup_blocks = ESDM_EBPF_STARTUP_BLOCKS;
+	state->startup_blocks = ESDM_EBPF_STARTUP_BLOCKS + 1;
 	state->startup_done = 0;
 }
 
@@ -95,6 +149,7 @@ static __always_inline void
 esdm_ebpf_sp80090b_permanent_failure(struct esdm_ebpf_percpu_state *state,
 				     __u32 test)
 {
+	esdm_ebpf_health_invalidate(state);
 	state->health_failures++;
 	state->health_test = test;
 	state->permanent_failure = 1;

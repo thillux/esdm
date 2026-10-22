@@ -21,6 +21,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdatomic.h>
 #include <sys/random.h>
 #include <sys/stat.h>
 
@@ -31,11 +32,18 @@
 #include "esdm_es_krng.h"
 #include "memset_secure.h"
 #include "os_random.h"
+#include "esdm_es_irq.h"
 #include "esdm_es_sched.h"
+#include "es_ebpf/esdm_es_irq_ebpf.h"
+#include "es_ebpf/esdm_es_sched_ebpf.h"
 #include "helper.h"
 #include "esdm_logger.h"
+#include "math_helper.h"
 
 static uint32_t krng_entropy = ESDM_KERNEL_RNG_ENTROPY_RATE;
+
+/* Set by a self test that saw a repeated output, cleared by one that passes */
+static atomic_bool esdm_krng_selftest_failed = false;
 
 static void esdm_krng_fini(void)
 {
@@ -54,7 +62,11 @@ static int esdm_krng_init(void)
 }
 
 /*
- * This function adjusts the entropy level depending on system properties
+ * This function adjusts the entropy level depending on system properties.
+ *
+ * Evaluated on every call rather than set once by the timing entropy sources:
+ * they come and go with (re)initialization, and the eBPF variants have no
+ * hook that would adjust the kernel RNG rate when they load.
  */
 static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 {
@@ -62,21 +74,40 @@ static uint32_t esdm_krng_properties_entropylevel(uint32_t entropylevel)
 	 * If SP800-90C compliant mode is enabled, we cannot claim that the
 	 * kernel provides entropy as the kernel is not SP800-90B compliant.
 	 */
-	return esdm_es_oversampling() ||
-			       /*
-	 * If the scheduler-based entropy source is enabled, the kernel is
+	if (esdm_es_oversampling())
+		return 0;
+
+	/*
+	 * If a scheduler-based entropy source is credited, the kernel is
 	 * claimed to not return any entropy. This is due to the fact that
 	 * interrupts may trigger scheduling events. This implies that
 	 * interrupts are not independent of interrupts.
 	 */
-			       esdm_sched_enabled() ?
-		       0 :
-		       entropylevel;
+	if (esdm_sched_enabled() || esdm_sched_ebpf_enabled())
+		return 0;
+
+	/*
+	 * The interrupt entropy source either takes the interrupts away from
+	 * the kernel RNG (kernel add-on) or credits the same events the kernel
+	 * RNG processes (eBPF) - either way only a remainder is left. The
+	 * add-on diverts the interrupts once it is there, whether or not user
+	 * space credits it with anything; the eBPF variant only observes them
+	 * and takes nothing from the kernel RNG, so it matters only while it
+	 * is credited.
+	 */
+	if (esdm_irq_present() || esdm_irq_ebpf_enabled())
+		return min_uint32(entropylevel,
+				  ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
+
+	return entropylevel;
 }
 
 static uint32_t esdm_krng_entropylevel(uint32_t requested_bits)
 {
 	uint32_t entropylevel = krng_entropy;
+
+	if (atomic_load(&esdm_krng_selftest_failed))
+		return 0;
 
 	/*
 	 * If a specific entropy value is configured, use it instead of the
@@ -163,8 +194,12 @@ static int esdm_krng_selftest(void)
 	if (!memcmp(first, second, sizeof(first))) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "KernelRNG ES: getrandom(2) repeated its output\n");
+		atomic_store(&esdm_krng_selftest_failed, true);
 		ret = -EFAULT;
+		goto out;
 	}
+
+	atomic_store(&esdm_krng_selftest_failed, false);
 
 out:
 	memset_secure(first, 0, sizeof(first));

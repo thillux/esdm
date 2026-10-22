@@ -80,10 +80,18 @@
 #define ESDM_STATUS_JSON_BUFLEN 500
 #endif
 
+/* The kernel add-on is present, whether its interrupt ES is credited or not */
+bool esdm_irq_present(void);
+/* The interrupt ES is present and credited */
 bool esdm_irq_enabled(void);
 extern struct esdm_es_cb esdm_es_irq;
 
 #else /* ESDM_ES_IRQ */
+
+static inline bool esdm_irq_present(void)
+{
+	return false;
+}
 
 static inline bool esdm_irq_enabled(void)
 {

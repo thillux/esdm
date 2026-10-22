@@ -51,6 +51,13 @@ struct {
 	__type(value, struct esdm_ebpf_status);
 } esdm_ebpf_status_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct esdm_ebpf_health);
+} esdm_ebpf_health_map SEC(".maps");
+
 /*
  * Zero source of the ring buffer zeroization. An array map value is
  * zero-initialized by the kernel and nothing ever writes to this one, so it
@@ -172,6 +179,14 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	if (events > ESDM_EBPF_BATCH_EVENTS)
 		events = ESDM_EBPF_BATCH_EVENTS;
 
+	/*
+	 * A health test failure on another CPU while this batch was filling
+	 * invalidated the deltas collected before it - user space would credit
+	 * none of them, so they are not handed over at all.
+	 */
+	if (state->rec.health_epoch != esdm_ebpf_health_epoch())
+		events = 0;
+
 	state->rec.type = esdm_ebpf_rec_event;
 	state->rec.cpu = bpf_get_smp_processor_id();
 	state->rec.reset_gen = state->reset_gen;
@@ -180,11 +195,26 @@ esdm_ebpf_submit_batch(struct esdm_ebpf_percpu_state *state)
 	/*
 	 * Count only what made it in: the difference to what user space has
 	 * fetched is what is still waiting in the ring buffer, and dropped
-	 * deltas are not.
+	 * deltas are not. The count is per reset generation and health epoch
+	 * of the record, and moved ahead of the hand-over, taking it back if
+	 * that fails: user space may fetch the record the moment it is in, and
+	 * must not find more fetched than deposited under its pair. A new pair
+	 * gets its count before its name, so a read of the state catching this
+	 * in between is off by this batch, not by all of the previous pair.
 	 */
-	if (!bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
-				ESDM_EBPF_EVENT_REC_LEN(events), 0))
-		state->events += events;
+	if (events) {
+		if (state->events_reset_gen != state->rec.reset_gen ||
+		    state->events_health_epoch != state->rec.health_epoch) {
+			state->events = events;
+			state->events_reset_gen = state->rec.reset_gen;
+			state->events_health_epoch = state->rec.health_epoch;
+		} else {
+			state->events += events;
+		}
+		if (bpf_ringbuf_output(&esdm_ebpf_rb, &state->rec,
+				       ESDM_EBPF_EVENT_REC_LEN(events), 0))
+			state->events -= events;
+	}
 
 	/*
 	 * The deltas have left the collection buffer, so the record sitting in
@@ -302,8 +332,8 @@ esdm_ebpf_timer_arm(struct esdm_ebpf_percpu_state *state)
  * replace it.
  *
  * The in_progress flag guards against same-CPU nesting: e.g. for the
- * interrupt entropy source a hardirq may preempt the program running in
- * softirq context on the same CPU. Nested contexts on one CPU are strictly
+ * interrupt entropy source a nested hardirq may preempt the program on the
+ * same CPU. Nested contexts on one CPU are strictly
  * stacked, so a plain flag without atomics is sufficient - the nested event
  * is simply skipped.
  */
@@ -369,7 +399,8 @@ static __always_inline void esdm_ebpf_collect(void)
 	 * add-on does the same (esdm_time_process_common()).
 	 *
 	 * Only deltas the health tests vouch for are collected, so the record
-	 * carries no health state and user space may credit all of it.
+	 * carries no health state of this CPU - only the health epoch, which
+	 * tells user space whether a failure since invalidated it.
 	 */
 	if (gcd_known && state->last_ts) {
 		__u64 delta = ts - state->last_ts;
@@ -386,6 +417,10 @@ static __always_inline void esdm_ebpf_collect(void)
 
 		if (esdm_ebpf_health_ok(state) &&
 		    state->pos < ESDM_EBPF_BATCH_EVENTS) {
+			/* The batch belongs to the epoch it started in */
+			if (!state->pos)
+				state->rec.health_epoch =
+					esdm_ebpf_health_epoch();
 			state->rec.delta[state->pos &
 					 (ESDM_EBPF_BATCH_EVENTS - 1)] = delta;
 			state->pos++;

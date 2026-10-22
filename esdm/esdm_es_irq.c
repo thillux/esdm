@@ -77,6 +77,34 @@ static void esdm_irq_finalize(void)
 #endif
 }
 
+/*
+ * Discard the cached blocks along with a descriptor an init failure dropped:
+ * a successful reinit discards them as well.
+ */
+static void esdm_irq_buf_discard(void)
+{
+#if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
+	if (irq_buf_alloced)
+		esdm_es_buf_reset(&irq_buf);
+#endif
+}
+
+/*
+ * The kernel add-on is there, credited or not: its hook in random.c takes the
+ * interrupts away from the kernel RNG as soon as the add-on registers, whatever
+ * rate user space credits the source with.
+ */
+bool esdm_irq_present(void)
+{
+	bool ret;
+
+	mutex_reader_lock(&irq_mutex);
+	ret = esdm_irq_entropy_fd >= 0;
+	mutex_reader_unlock(&irq_mutex);
+
+	return ret;
+}
+
 bool esdm_irq_enabled(void)
 {
 	bool ret;
@@ -197,6 +225,7 @@ static int esdm_irq_initialize(void)
 		esdm_irq_entropy_fd = fd;
 		esdm_irq_finalize_locked();
 		mutex_unlock(&irq_mutex);
+		esdm_irq_buf_discard();
 		esdm_logger(
 			esdm_config_es_irq_retry() ? LOGGER_VERBOSE :
 						     LOGGER_WARN,
@@ -205,12 +234,20 @@ static int esdm_irq_initialize(void)
 		return 0;
 	}
 	if (ret < 0) {
-		close(fd);
+		int err = errno;
+
+		/*
+		 * On a reinit fd is the live descriptor: the global must not
+		 * keep pointing at the closed number.
+		 */
+		esdm_irq_entropy_fd = fd;
+		esdm_irq_finalize_locked();
 		mutex_unlock(&irq_mutex);
+		esdm_irq_buf_discard();
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"Failure to obtain interrupt entropy source status from kernel, errno: %i, error: %s\n",
-			errno, strerror(errno));
+			err, strerror(err));
 		return -EAGAIN;
 	}
 
@@ -228,8 +265,11 @@ static int esdm_irq_initialize(void)
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES,
 			    "Kernel entropy buffer has larger size as ESDM\n");
 	} else {
-		close(fd);
+		/* As above, fd may be the live descriptor */
+		esdm_irq_entropy_fd = fd;
+		esdm_irq_finalize_locked();
 		mutex_unlock(&irq_mutex);
+		esdm_irq_buf_discard();
 		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 			    "Kernel entropy buffer has different size\n");
 		return -EFAULT;
@@ -240,17 +280,21 @@ static int esdm_irq_initialize(void)
 	mutex_unlock(&irq_mutex);
 
 	/*
-	 * The presence of the interrupt entropy source implies that the main
-         * entropy source of the kernel random.c is being taken away.
+	 * The kernel RNG ES caps its rate itself while this ES is present
+	 * (esdm_krng_properties_entropylevel()), leaving the configured rate
+	 * alone.
 	 */
-	esdm_config_es_krng_entropy_rate_set(
-		ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
 
 #if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
+	/*
+	 * No cap (see esdm_es_buf_alloc()): the kernel credits a block with the
+	 * events it collected, which the rate alone does not tell.
+	 */
 	if (irq_buf_alloced) {
 		esdm_es_buf_reset(&irq_buf);
-	} else if (esdm_es_buf_alloc(&irq_buf, ESDM_IRQ_ENTROPY_BLOCKS,
-				     "Interrupt") == 0) {
+	} else if (esdm_es_buf_alloc(
+			   &irq_buf, ESDM_IRQ_ENTROPY_BLOCKS, "Interrupt",
+			   esdm_config_es_irq_entropy_rate, NULL) == 0) {
 		irq_buf_alloced = true;
 	}
 #endif
@@ -259,6 +303,26 @@ static int esdm_irq_initialize(void)
 
 	return 0;
 }
+
+/* The kernel holds what the monitor waits for before it fills the cache */
+static bool esdm_irq_full(uint32_t ent)
+{
+	return ent >= esdm_config_es_irq_entropy_rate();
+}
+
+#if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
+/*
+ * Each fill drains the kernel. Without asking again before each slot, the
+ * first fill took what the kernel held and the others the few bits collected
+ * since - hits credited with next to nothing, where a miss would have read the
+ * kernel at the seeding.
+ */
+static bool esdm_irq_buf_ready(void *ctx)
+{
+	(void)ctx;
+	return esdm_irq_full(esdm_irq_entropylevel(esdm_security_strength()));
+}
+#endif
 
 static int esdm_irq_seed_monitor(void)
 {
@@ -305,7 +369,7 @@ static int esdm_irq_seed_monitor(void)
 	if (!esdm_config_es_irq_entropy_rate())
 		return 0;
 
-	if (ent >= esdm_config_es_irq_entropy_rate()) {
+	if (esdm_irq_full(ent)) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 			    "Full entropy of interrupt ES detected\n");
 #if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
@@ -313,8 +377,9 @@ static int esdm_irq_seed_monitor(void)
 			uint32_t requested_bits =
 				esdm_get_seed_entropy_osr(false, true);
 
-			esdm_es_buf_monitor(&irq_buf, requested_bits,
-					    esdm_irq_buf_fill, NULL);
+			esdm_es_buf_monitor_ready(&irq_buf, requested_bits,
+						  esdm_irq_buf_fill,
+						  esdm_irq_buf_ready, NULL);
 		} else {
 			esdm_es_add_entropy();
 		}
@@ -390,9 +455,11 @@ static void esdm_irq_buf_fill(struct entropy_es *eb_es,
 }
 
 static void esdm_irq_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			 bool __unused unused)
+			 bool allow_cached)
 {
-	if (esdm_es_buf_try_get(&irq_buf, eb_es, requested_bits))
+	if (allow_cached &&
+	    esdm_es_buf_try_get(&irq_buf, eb_es, requested_bits,
+				!!esdm_config_es_irq_entropy_rate()))
 		return;
 
 	esdm_irq_get_sync(eb_es, requested_bits);
@@ -401,7 +468,7 @@ static void esdm_irq_get(struct entropy_es *eb_es, uint32_t requested_bits,
 #else /* ESDM_IRQ_ENTROPY_BLOCKS == 0 */
 
 static void esdm_irq_get(struct entropy_es *eb_es, uint32_t requested_bits,
-			 bool __unused unused)
+			 bool __unused allow_cached)
 {
 	esdm_irq_get_sync(eb_es, requested_bits);
 }
@@ -480,6 +547,17 @@ static void esdm_irq_reset(void)
 		}
 	}
 	mutex_unlock(&irq_mutex);
+
+#if (ESDM_IRQ_ENTROPY_BLOCKS != 0)
+	/*
+	 * The cached blocks were taken from the kernel before the reset and
+	 * carry the entropy it credited them with: the reset discards them
+	 * along with what the kernel still held, or they would be credited at
+	 * the next seeding as if collected since. After the kernel reset, so a
+	 * fill the cache reset lets through reads from the reset kernel.
+	 */
+	esdm_es_buf_reset(&irq_buf);
+#endif
 }
 
 static bool esdm_irq_active(void)
@@ -493,17 +571,26 @@ static bool esdm_irq_active(void)
 	return esdm_config_es_irq_retry() || fd_present;
 }
 
-/* The kernel interface of the entropy source is still open. */
+/* The kernel interface of the entropy source still answers. */
 static int esdm_irq_selftest(void)
 {
+	uint32_t entropy;
+	int ret = 0;
+
+	mutex_lock(&irq_mutex);
 	if (esdm_irq_entropy_fd < 0) {
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_ES,
 			"IRQ ES: kernel interface not available - nothing to test\n");
-		return 0;
+	} else if (ioctl(esdm_irq_entropy_fd, ESDM_IRQ_AVAIL_ENTROPY,
+			 &entropy) < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_ES,
+			    "IRQ ES: kernel interface failed: %d\n", ret);
 	}
+	mutex_unlock(&irq_mutex);
 
-	return 0;
+	return ret;
 }
 
 struct esdm_es_cb esdm_es_irq = {

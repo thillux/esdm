@@ -34,6 +34,13 @@ struct bpf_program;
 struct ring_buffer;
 struct entropy_es;
 
+/* Events of one CPU counted under one reset generation and health epoch */
+struct esdm_ebpf_cpu_tally {
+	uint64_t events;
+	uint32_t reset_gen;
+	uint32_t health_epoch;
+};
+
 /* State of one eBPF-based entropy source */
 struct esdm_ebpf_es {
 	const char *name;
@@ -62,6 +69,7 @@ struct esdm_ebpf_es {
 	struct bpf_program *wipe_prog;
 	bool wiping;
 	struct bpf_map *status_map;
+	struct bpf_map *health_map;
 	/* Per-CPU state of the programs, read whole into ->cpu_state */
 	struct bpf_map *state_map;
 	struct esdm_ebpf_percpu_state *cpu_state;
@@ -70,19 +78,28 @@ struct esdm_ebpf_es {
 
 	bool loaded;
 
-	/* Events the running fetch inserted into the pool, and its bound */
+	/*
+	 * Events the running fetch inserted into the pool, and its bound: on
+	 * the credited events, or on the ingested ones for an uncredited
+	 * source, whose events credit nothing that could bound it.
+	 */
 	uint32_t ingested;
 	uint64_t fetch_target;
+	bool fetch_uncredited;
 
 	/*
-	 * Events fetched from the ring buffer over the lifetime of the source,
-	 * and the ones the programs deposited but nobody has fetched yet - the
-	 * entropy the source can still extract without waiting for new events.
+	 * Events fetched from the ring buffer, one tally per CPU kept the way
+	 * the programs count what they deposited (struct
+	 * esdm_ebpf_percpu_state): per reset generation and health epoch of the
+	 * records, starting over with the first record of a new pair.
 	 */
-	uint64_t consumed_events;
+	struct esdm_ebpf_cpu_tally *fetched;
+	/*
+	 * Creditable events the programs deposited but nobody has fetched yet -
+	 * the entropy the source can still extract without waiting for new
+	 * events.
+	 */
 	uint64_t pending_events;
-	/* Events the programs deposited over that lifetime, as last read */
-	uint64_t submitted_events;
 
 	/* CPUs whose SP800-90B startup test has completed */
 	unsigned int startup_done_cpus;
@@ -91,6 +108,7 @@ struct esdm_ebpf_es {
 	bool health_enabled;
 	bool perm_failure;
 	uint32_t reset_gen;
+	uint32_t health_epoch;
 	uint64_t health_failures;
 
 	/* Conditioning pool: digest states (internal and output) */
@@ -156,8 +174,12 @@ int esdm_ebpf_prepare(struct esdm_ebpf_es *es, struct bpf_object *obj,
 
 /*
  * Complete the initialization of an eBPF entropy source whose skeleton has
- * been loaded and attached by the caller: allocate the conditioning pool,
- * locate the ring buffer map and set up the ring buffer consumer.
+ * been loaded by the caller: allocate the conditioning pool, locate the ring
+ * buffer map and set up the ring buffer consumer.
+ *
+ * The caller attaches the programs only once this succeeded: from then on the
+ * events they collect can be erased again (esdm_ebpf_zeroize()), which a
+ * source not initialized cannot do. A failure here thus leaves nothing behind.
  */
 int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj);
 

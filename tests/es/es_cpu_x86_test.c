@@ -294,7 +294,8 @@ int main(int argc, char *argv[])
 
 	if (!rdseed_available() && !rdrand_available()) {
 		printf("ES CPU x86: neither RDSEED nor RDRAND on this CPU, skipping test\n");
-		return 77;
+		/* What was checked up to here still counts */
+		return common_test_failures ? 1 : 77;
 	}
 
 	if (rdseed_available())

@@ -55,6 +55,7 @@
 #define ESDM_EBPF_BTF_PATH "/sys/kernel/btf/vmlinux"
 #define ESDM_EBPF_RB_MAP_NAME "esdm_ebpf_rb"
 #define ESDM_EBPF_STATUS_MAP_NAME "esdm_ebpf_status_map"
+#define ESDM_EBPF_HEALTH_MAP_NAME "esdm_ebpf_health_map"
 #define ESDM_EBPF_STATE_MAP_NAME "esdm_ebpf_state"
 #define ESDM_EBPF_TIMERS_MAP_NAME "esdm_ebpf_timers"
 
@@ -72,10 +73,11 @@
 /*
  * Returned by the record handler once the conditioning pool cannot credit
  * another event. libbpf aborts the ring buffer consumption on a negative
- * callback return without advancing past the record, so that event and
- * everything behind it stay buffered for the next fetch.
- * ring_buffer__consume_n() would say this directly, but it is a libbpf 1.5 API
- * and the distributions this builds on are still on 1.3.
+ * callback return, but only after it advanced past the record handed to the
+ * callback, so the handler takes that record in first: everything behind it
+ * stays buffered for the next fetch. ring_buffer__consume_n() would say this
+ * directly, but it is a libbpf 1.5 API and the distributions this builds on
+ * are still on 1.3.
  */
 #define ESDM_EBPF_FETCH_DONE (-ECANCELED)
 
@@ -221,8 +223,13 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 	#endif
 	uint32_t rate = es->entropy_rate(), osr = esdm_ebpf_osr(es);
 
-	/* Health tests are only requested in FIPS or NTG.1 mode */
-	es->health_enabled = !!esdm_config_fips_enabled() || ntg1_seeding;
+	/*
+	 * Health tests are requested in FIPS, SP800-90C or NTG.1 mode, as for
+	 * the Jitter RNG ES: the seeding takes a credited source there as
+	 * validated.
+	 */
+	es->health_enabled = !!esdm_config_fips_enabled() ||
+			     !!esdm_config_sp80090c_compliant() || ntg1_seeding;
 
 	cfg->health_enabled = es->health_enabled;
 	esdm_ebpf_health_cutoffs(osr, cfg);
@@ -239,11 +246,8 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 	    ESDM_DRNG_SECURITY_STRENGTH_BITS)
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
-			"%s ES: entropy rate of %u bits per %u data bits exceeds the %u bits per event the configured oversampling rate of %u supports - crediting is capped\n",
-			es->name, rate, ESDM_DRNG_SECURITY_STRENGTH_BITS,
-			ESDM_DRNG_SECURITY_STRENGTH_BITS /
-				(ESDM_EBPF_EVENT_DATA_BITS * osr),
-			osr);
+			"%s ES: entropy rate of %u bits per %u data bits exceeds the 1/%u bit per event the configured oversampling rate supports - crediting is capped\n",
+			es->name, rate, ESDM_DRNG_SECURITY_STRENGTH_BITS, osr);
 
 	cfg->raw_sampling = 0;
 	cfg->flush_deadline_ns = ESDM_EBPF_FLUSH_DEADLINE_NS;
@@ -405,6 +409,41 @@ out:
 
 /******************************** Status map **********************************/
 
+/* Read the health epoch of the programs (struct esdm_ebpf_health) */
+static int esdm_ebpf_read_health_epoch(struct esdm_ebpf_es *es,
+				       uint32_t *epoch)
+{
+	struct esdm_ebpf_health health;
+	uint32_t zero = 0;
+
+	if (!es->health_map)
+		return -EINVAL;
+
+	if (bpf_map__lookup_elem(es->health_map, &zero, sizeof(zero), &health,
+				 sizeof(health), 0))
+		return -errno;
+
+	*epoch = health.epoch;
+	return 0;
+}
+
+/*
+ * Count events fetched from one CPU under the reset generation and health epoch
+ * of their record, the way the programs count them on deposit.
+ */
+static void esdm_ebpf_tally(struct esdm_ebpf_cpu_tally *tally,
+			    uint32_t reset_gen, uint32_t health_epoch,
+			    uint64_t events)
+{
+	if (tally->reset_gen != reset_gen ||
+	    tally->health_epoch != health_epoch) {
+		tally->events = 0;
+		tally->reset_gen = reset_gen;
+		tally->health_epoch = health_epoch;
+	}
+	tally->events += events;
+}
+
 /*
  * Read the per-CPU state the eBPF programs maintain. This is what tells user
  * space how much entropy is still to be had - the events deposited but not yet
@@ -413,27 +452,51 @@ out:
  */
 static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 {
-	uint64_t events = 0, failures = 0;
+	uint64_t pending = 0, failures = 0;
 	unsigned int i, startup_done = 0, test = 0;
+	uint32_t zero = 0, epoch = es->health_epoch;
 	bool permanent = false;
-	uint32_t zero = 0;
 
-	if (!es->state_map || !es->cpu_state)
+	if (!es->state_map || !es->cpu_state || !es->fetched)
 		return;
 
 	if (bpf_map__lookup_elem(es->state_map, &zero, sizeof(zero),
 				 es->cpu_state, es->cpu_state_sz, 0))
 		return;
 
+	/*
+	 * Read after the per-CPU state: the programs move the epoch before they
+	 * count the failure, so a failure seen in the per-CPU state is seen
+	 * here as well. A failing read keeps the epoch last seen.
+	 */
+	if (esdm_ebpf_read_health_epoch(es, &epoch))
+		epoch = es->health_epoch;
+
 	for (i = 0; i < es->nr_cpus; i++) {
 		const struct esdm_ebpf_percpu_state *cpu = &es->cpu_state[i];
+		const struct esdm_ebpf_cpu_tally *fetched = &es->fetched[i];
 
 		/*
-		 * The deposited events are counted whatever generation they
-		 * belong to: they physically sit in the ring buffer and the
-		 * ingest has to account for every one of them.
+		 * Pending are the events of the current reset generation and
+		 * health epoch only - those of earlier ones are fetched, but
+		 * credited they will not be. Both sides count them per CPU and
+		 * start over at the same record, so what was deposited and not
+		 * fetched under that pair is the difference, with nothing to
+		 * predict. A fetched count of another pair is one of an earlier
+		 * pair: none of the current one was fetched yet. Only a read
+		 * catching a CPU in the middle of a hand-over is off, by that
+		 * one batch and until the next read.
 		 */
-		events += cpu->events;
+		if (cpu->events_reset_gen == es->reset_gen &&
+		    cpu->events_health_epoch == epoch) {
+			uint64_t done = 0;
+
+			if (fetched->reset_gen == es->reset_gen &&
+			    fetched->health_epoch == epoch)
+				done = fetched->events;
+			if (cpu->events > done)
+				pending += cpu->events - done;
+		}
 
 		/*
 		 * The health state of a CPU that has not observed the current
@@ -462,10 +525,7 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 	 */
 	memset_secure(es->cpu_state, 0, es->cpu_state_sz);
 
-	es->submitted_events = events;
-	es->pending_events = (events > es->consumed_events) ?
-				     events - es->consumed_events :
-				     0;
+	es->pending_events = pending;
 
 	if (startup_done != es->startup_done_cpus) {
 		if (startup_done > es->startup_done_cpus)
@@ -478,11 +538,14 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 
 	/*
 	 * SP800-90B fail-closed handling: a health test failure invalidates all
-	 * collected entropy. The data itself stays in the pool as uncredited
-	 * stirring input. A count that dropped is a reset having cleared the
-	 * per-CPU counters, which is no new failure.
+	 * collected entropy - what the pool absorbed, and what the programs
+	 * deposited but nobody fetched yet. The ingest credits nothing of an
+	 * earlier health epoch, the pending events above count none of it, and
+	 * the programs drop the batches they had begun. The data itself stays
+	 * in the pool as uncredited stirring input. A count that dropped is a
+	 * reset having cleared the per-CPU counters, which is no new failure.
 	 */
-	if (failures > es->health_failures) {
+	if (epoch != es->health_epoch || failures > es->health_failures) {
 		es->credited_events = 0;
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
@@ -490,11 +553,13 @@ static void esdm_ebpf_update_status(struct esdm_ebpf_es *es)
 			es->name,
 			(test == esdm_ebpf_health_test_rct) ? "RCT" : "APT");
 	}
+	es->health_epoch = epoch;
 	es->health_failures = failures;
 
 	if (permanent && !es->perm_failure) {
 		es->perm_failure = true;
 		es->credited_events = 0;
+		es->pending_events = 0;
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"%s ES: SP800-90B permanent health test failure - invalidating all existing entropy\n",
@@ -618,6 +683,27 @@ static void esdm_ebpf_pool_dealloc(struct esdm_ebpf_es *es)
 	es->pool_initialized = false;
 }
 
+/*
+ * Make sure the conditioning pool is initialized, starting it over if a hash
+ * failure left it torn. What the torn states absorbed is gone, and the
+ * entropy credited for it with them - the extraction that failed cleared the
+ * credited events already. A pool that cannot be started now is tried again
+ * by the next caller, so a passing hash failure does not take the source out
+ * until a reset or a reinitialization.
+ */
+static int esdm_ebpf_pool_restart(struct esdm_ebpf_es *es,
+				  const struct esdm_hash_cb *hash_cb)
+{
+	if (es->pool_initialized)
+		return 0;
+
+	/* Never allocated or released already: nothing to start over */
+	if (!es->pool_state || !es->pool_out)
+		return -EOPNOTSUPP;
+
+	return esdm_ebpf_pool_init_states(es, hash_cb);
+}
+
 /* Insert collected event data into the conditioning pool. */
 static int esdm_ebpf_pool_insert(struct esdm_ebpf_es *es, const uint8_t *data,
 				 size_t len)
@@ -628,8 +714,7 @@ static int esdm_ebpf_pool_insert(struct esdm_ebpf_es *es, const uint8_t *data,
 	const struct esdm_hash_cb *hash_cb = drng->hash_cb;
 	int ret;
 
-	if (!es->pool_initialized)
-		return -EOPNOTSUPP;
+	CKINT(esdm_ebpf_pool_restart(es, hash_cb));
 
 	CKINT(hash_cb->hash_update(shash, data, len));
 	CKINT(hash_cb->hash_update(ohash, data, len));
@@ -741,7 +826,13 @@ uint32_t esdm_ebpf_avail_entropy(struct esdm_ebpf_es *es)
 
 uint32_t esdm_ebpf_max_entropy(struct esdm_ebpf_es *es)
 {
-	if (!es->loaded || !es->pool_initialized)
+	/*
+	 * An uncredited source reports none, like every other source at an
+	 * entropy rate of 0: the seeding takes a source reporting any for a
+	 * validated one and puts its data into the seed buffer instead of the
+	 * additional input.
+	 */
+	if (!es->loaded || !es->pool_initialized || !es->entropy_rate())
 		return 0;
 
 	/*
@@ -765,7 +856,7 @@ void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
 
 	eb_es->e_bits = 0;
 
-	if (!es->pool_initialized)
+	if (esdm_ebpf_pool_restart(es, hash_cb))
 		return;
 
 	digestsize = hash_cb->hash_digestsize(shash);
@@ -817,7 +908,18 @@ void esdm_ebpf_get_ent(struct esdm_ebpf_es *es, struct entropy_es *eb_es,
 	    hash_cb->hash_final(ohash, pool_out_digest) ||
 	    esdm_ebpf_pool_init_states(es, hash_cb) ||
 	    esdm_ebpf_pool_insert(es, pool_state_digest, digestsize)) {
+		/*
+		 * The hash states are torn and what they absorbed is lost, the
+		 * credited events cleared above with it: fail closed for those,
+		 * but start the pool over right away, so the source goes on
+		 * collecting and crediting the events still to come.
+		 */
 		es->pool_initialized = false;
+		if (esdm_ebpf_pool_restart(es, hash_cb))
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ES,
+				"%s ES: conditioning pool cannot be restarted after a hash failure\n",
+				es->name);
 	} else {
 		/*
 		 * Deliver the output digest even if no entropy is credited:
@@ -842,17 +944,10 @@ void esdm_ebpf_pool_reset(struct esdm_ebpf_es *es)
 	 * Everything the programs have deposited so far belongs to the
 	 * generation being left behind: the ingest inserts it as uncredited
 	 * stirring input and drops its entropy on the generation mismatch. So
-	 * it is not entropy this source can still deliver either - counting it
-	 * as pending would have the reset report the very entropy it just
-	 * invalidated.
-	 *
-	 * Written off by moving the consumed count up to what was deposited,
-	 * rather than by zeroing the difference: the records are still in the
-	 * ring buffer and will still be consumed, and a fetch that ran after a
-	 * plain zeroing would count them a second time.
+	 * it is not entropy this source can still deliver either - the status
+	 * read after the new generation below counts none of it.
 	 */
 	esdm_ebpf_update_status(es);
-	es->consumed_events = es->submitted_events;
 	es->pending_events = 0;
 
 	/*
@@ -892,9 +987,12 @@ static void esdm_ebpf_handle_events(struct esdm_ebpf_es *es,
 	/*
 	 * Counted before anything can reject them: the eBPF programs count what
 	 * they handed over, and the difference of the two is what is left in
-	 * the ring buffer.
+	 * the ring buffer. A CPU the source does not know of deposited
+	 * nothing it reads, so neither is anything fetched counted for it.
 	 */
-	es->consumed_events += events;
+	if (rec->cpu < es->nr_cpus)
+		esdm_ebpf_tally(&es->fetched[rec->cpu], rec->reset_gen,
+				rec->health_epoch, events);
 	es->ingested += (uint32_t)events;
 
 	/* The deltas are inserted in full, not folded into bytes */
@@ -909,6 +1007,14 @@ static void esdm_ebpf_handle_events(struct esdm_ebpf_es *es,
 	 * invalidated their entropy.
 	 */
 	if (rec->reset_gen != es->reset_gen)
+		return;
+
+	/*
+	 * Likewise for the events collected before the latest health test
+	 * failure on any CPU: the failure invalidated their entropy, and the
+	 * health epoch is what tells them apart from the ones collected since.
+	 */
+	if (rec->health_epoch != es->health_epoch)
 		return;
 
 	if (es->perm_failure)
@@ -949,14 +1055,17 @@ static int esdm_ebpf_handle_record(void *ctx, void *data, size_t size)
 	switch (type) {
 	case esdm_ebpf_rec_event:
 		/*
-		 * Stop here once the pool is full rather than hash events it
-		 * cannot credit. The record keeps its place in the ring buffer
-		 * and the next fetch takes it.
+		 * The record is consumed whatever is returned, so it is taken
+		 * in before stopping. Stop once the pool is full rather than
+		 * hash events it cannot credit: the records behind this one
+		 * keep their place in the ring buffer for the next fetch.
 		 */
-		if (es->credited_events >= es->fetch_target)
-			return ESDM_EBPF_FETCH_DONE;
 		if (size >= ESDM_EBPF_EVENT_REC_LEN(0))
 			esdm_ebpf_handle_events(es, data, size);
+		if (es->fetch_uncredited ?
+			    es->ingested >= es->fetch_target :
+			    es->credited_events >= es->fetch_target)
+			return ESDM_EBPF_FETCH_DONE;
 		break;
 	case esdm_ebpf_rec_wipe:
 		/* Filler left behind by a wipe that could not finish */
@@ -1101,6 +1210,14 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 	CKNULL_LOG(es->status_map, -EINVAL, "%s ES: status map not found\n",
 		   es->name);
 
+	es->health_map =
+		bpf_object__find_map_by_name(obj, ESDM_EBPF_HEALTH_MAP_NAME);
+	CKNULL_LOG(es->health_map, -EINVAL, "%s ES: health map not found\n",
+		   es->name);
+	es->health_epoch = 0;
+	CKINT_LOG(esdm_ebpf_read_health_epoch(es, &es->health_epoch),
+		  "%s ES: cannot read the health map\n", es->name);
+
 	es->state_map =
 		bpf_object__find_map_by_name(obj, ESDM_EBPF_STATE_MAP_NAME);
 	CKNULL_LOG(es->state_map, -EINVAL, "%s ES: per-CPU state map not found\n",
@@ -1113,6 +1230,8 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 	es->cpu_state_sz = sizeof(*es->cpu_state) * es->nr_cpus;
 	es->cpu_state = calloc(es->nr_cpus, sizeof(*es->cpu_state));
 	CKNULL(es->cpu_state, -ENOMEM);
+	es->fetched = calloc(es->nr_cpus, sizeof(*es->fetched));
+	CKNULL(es->fetched, -ENOMEM);
 
 	es->rb = ring_buffer__new(bpf_map__fd(rb_map), esdm_ebpf_handle_record,
 				  es, NULL);
@@ -1139,9 +1258,12 @@ int esdm_ebpf_init_es(struct esdm_ebpf_es *es, struct bpf_object *obj)
 
 out:
 	es->status_map = NULL;
+	es->health_map = NULL;
 	es->state_map = NULL;
 	free(es->cpu_state);
 	es->cpu_state = NULL;
+	free(es->fetched);
+	es->fetched = NULL;
 	esdm_ebpf_pool_dealloc(es);
 	return ret;
 }
@@ -1154,7 +1276,10 @@ out:
  */
 int esdm_ebpf_refill(struct esdm_ebpf_es *es)
 {
-	if (!es->loaded || !es->pool_initialized)
+	struct esdm_drng *drng = esdm_drng_init_instance();
+
+	/* The monitor also retries a pool a hash failure left torn */
+	if (!es->loaded || esdm_ebpf_pool_restart(es, drng->hash_cb))
 		return 0;
 
 	/*
@@ -1191,6 +1316,36 @@ int esdm_ebpf_refill(struct esdm_ebpf_es *es)
 	return esdm_ebpf_consume(es);
 }
 
+/*
+ * Set the bound of the fetch about to run, false if there is nothing to fetch.
+ *
+ * Take only the events the pool still has room to credit. Draining the whole
+ * ring buffer would hash every record into a pool that stops crediting at one
+ * output block, costing a hash update each and buying nothing - the surplus is
+ * better off waiting where the next fetch finds it.
+ */
+static bool esdm_ebpf_fetch_bound(struct esdm_ebpf_es *es)
+{
+	es->ingested = 0;
+	es->fetch_uncredited = !es->entropy_rate();
+	if (es->fetch_uncredited) {
+		/*
+		 * Uncredited, the events are bonus data the extraction stirs
+		 * in: no crediting bounds the fetch, so take what one block
+		 * would cost at the assessed min-entropy of 1 / OSR, which
+		 * keeps a single extraction from hashing a full ring buffer.
+		 */
+		es->fetch_target =
+			(uint64_t)esdm_ebpf_osr(es) *
+			(esdm_get_digestsize() + esdm_compress_osr());
+		return true;
+	}
+
+	es->fetch_target = esdm_ebpf_events_per_block(es);
+
+	return es->credited_events < es->fetch_target;
+}
+
 int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 {
 	int ret;
@@ -1198,18 +1353,16 @@ int esdm_ebpf_consume(struct esdm_ebpf_es *es)
 	if (!es->loaded)
 		return 0;
 
-	/*
-	 * Take only the events the pool still has room to credit. Draining the
-	 * whole ring buffer would hash every record into a pool that stops
-	 * crediting at one output block, costing a hash update each and buying
-	 * nothing - the surplus is better off waiting where the next fetch
-	 * finds it.
-	 */
-	es->fetch_target = esdm_ebpf_events_per_block(es);
-	if (es->credited_events >= es->fetch_target)
+	if (!esdm_ebpf_fetch_bound(es)) {
+		/*
+		 * Nothing to fetch, but the caller is about to rely on the
+		 * credited events: a health test failure since the last status
+		 * read has to have invalidated them by then.
+		 */
+		esdm_ebpf_update_status(es);
 		return 0;
+	}
 
-	es->ingested = 0;
 	ret = ring_buffer__consume(es->rb);
 	if (ret == ESDM_EBPF_FETCH_DONE)
 		ret = 0;
@@ -1252,9 +1405,12 @@ void esdm_ebpf_fini_es(struct esdm_ebpf_es *es)
 	free(es->cpu_state);
 	es->cpu_state = NULL;
 	es->cpu_state_sz = 0;
+	free(es->fetched);
+	es->fetched = NULL;
 
 	es->obj = NULL;
 	es->status_map = NULL;
+	es->health_map = NULL;
 	es->state_map = NULL;
 	es->wipe_prog = NULL;
 	es->rb_size = 0;
@@ -1262,9 +1418,8 @@ void esdm_ebpf_fini_es(struct esdm_ebpf_es *es)
 	es->loaded = false;
 	es->perm_failure = false;
 	es->credited_events = 0;
-	es->consumed_events = 0;
 	es->pending_events = 0;
-	es->submitted_events = 0;
+	es->health_epoch = 0;
 	es->health_failures = 0;
 	es->startup_done_cpus = 0;
 }

@@ -214,7 +214,8 @@ int main(int argc, char *argv[])
 	esdm_es_cpu.get_ent(&probe, ESDM_DRNG_INIT_SEED_SIZE_BITS, true);
 	if (!probe.e_bits) {
 		printf("ES CPU compress: CPU delivers no random numbers on this platform, skipping test\n");
-		return 77;
+		/* What was checked up to here still counts */
+		return common_test_failures ? 1 : 77;
 	}
 
 	check_get_ent(ESDM_DRNG_SECURITY_STRENGTH_BITS);

@@ -1,9 +1,8 @@
 /*
  * ESDM Slow Entropy Source: eBPF-based interrupt entropy source
  *
- * Collects entropy from the timing of hardware and soft interrupts observed
- * via eBPF programs attached to the irq_handler_entry and softirq_entry
- * tracepoints. In contrast to the interrupt entropy source implemented by
+ * Collects entropy from the timing of hardware interrupts observed via an eBPF
+ * program attached to the irq_handler_entry tracepoint. In contrast to the interrupt entropy source implemented by
  * esdm_es_irq.c, no kernel patch is required. Also, the interrupt timings
  * are only observed and not diverted from the kernel RNG - as the kernel RNG
  * processes the same events, the data of this entropy source is credited
@@ -63,10 +62,16 @@ static struct esdm_ebpf_es esdm_irq_ebpf_es = {
  */
 static DEFINE_MUTEX_UNLOCKED(irq_ebpf_mutex);
 
+/* Loaded and credited - the kernel RNG entropy rate depends on it */
 bool esdm_irq_ebpf_enabled(void)
 {
-	return esdm_irq_ebpf_es.loaded &&
-	       esdm_config_es_irq_ebpf_entropy_rate() > 0;
+	bool loaded;
+
+	mutex_reader_lock(&irq_ebpf_mutex);
+	loaded = esdm_irq_ebpf_es.loaded;
+	mutex_reader_unlock(&irq_ebpf_mutex);
+
+	return loaded && esdm_config_es_irq_ebpf_entropy_rate() > 0;
 }
 
 /* Caller must hold irq_ebpf_mutex (write lock). */
@@ -188,22 +193,37 @@ static int esdm_irq_ebpf_initialize(void)
 		goto out;
 	}
 
+	/*
+	 * Set up the consumer side before anything is collected: an attached
+	 * program deposits raw deltas in the per-CPU state and the ring buffer
+	 * right away, and only an initialized entropy source can erase them
+	 * again (esdm_ebpf_zeroize() does nothing for one that is not loaded).
+	 * Initialized after the attach, a failure of the initialization left
+	 * them behind unwiped.
+	 */
+	ret = esdm_ebpf_init_es(&esdm_irq_ebpf_es, skel->obj);
+	if (ret) {
+		/* Not attached yet, so nothing was collected to erase */
+		esdm_es_irq_ebpf_bpf__destroy(skel);
+		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
+		goto out;
+	}
+
 	ret = esdm_es_irq_ebpf_bpf__attach(skel);
 	if (ret) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_ES,
 			"Attaching of eBPF interrupt entropy source programs failed: %d\n",
 			ret);
-		esdm_es_irq_ebpf_bpf__destroy(skel);
+		/*
+		 * The programs that did get attached may have collected
+		 * already. As esdm_irq_ebpf_finalize_locked() does: detach,
+		 * erase while the maps are still there, then destroy them.
+		 */
+		esdm_es_irq_ebpf_bpf__detach(skel);
 		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
+		esdm_es_irq_ebpf_bpf__destroy(skel);
 		ret = 0;
-		goto out;
-	}
-
-	ret = esdm_ebpf_init_es(&esdm_irq_ebpf_es, skel->obj);
-	if (ret) {
-		esdm_es_irq_ebpf_bpf__destroy(skel);
-		esdm_ebpf_fini_es(&esdm_irq_ebpf_es);
 		goto out;
 	}
 

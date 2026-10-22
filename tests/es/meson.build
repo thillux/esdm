@@ -51,6 +51,28 @@ if get_option('es_jent').enabled()
 
 	test('ES Jitter RNG failing self test', es_jent_init_fail_tester,
 	     timeout: 120)
+
+	es_jent_selftest_fail_tester = executable(
+		'es_jent_selftest_fail_tester',
+		[ esdm_ipc_ns, 'es_jent_selftest_fail_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
+	test('ES Jitter RNG failing periodic health test',
+	     es_jent_selftest_fail_tester, timeout: 120)
+
+	es_jent_collector_lost_tester = executable(
+		'es_jent_collector_lost_tester',
+		[ esdm_ipc_ns, 'es_jent_collector_lost_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
+	test('ES Jitter RNG collector lost to a failed recovery',
+	     es_jent_collector_lost_tester, timeout: 120)
 endif
 
 if get_option('es_cpu').enabled()
@@ -106,6 +128,22 @@ if get_option('es_kernel').enabled()
 	)
 
 	test('ES Kernel', es_krng_tester)
+
+	# The interrupt ES is compiled into the test to fake the descriptor of
+	# its kernel add-on - see the file header.
+	if get_option('es_irq').enabled()
+		es_krng_irq_cap_tester = executable(
+			'es_krng_irq_cap_tester',
+			[ esdm_ipc_ns, 'es_krng_irq_cap_test.c' ],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			dependencies: dependencies_server,
+			link_with: esdm_static_lib,
+		)
+
+		test('ES Kernel capped while the interrupt add-on is present',
+		     es_krng_irq_cap_tester)
+	endif
 endif
 
 if get_option('es_sched').enabled()
@@ -133,6 +171,25 @@ if get_option('es_irq').enabled()
 	# is dominated by the rounds rather than by the work.
 	test('ES Interrupt', es_irq_tester, timeout: 300)
 endif
+
+# The interrupt and the scheduler source compiled into the test, which fills
+# their block cache by hand - see the file header. No kernel support needed.
+foreach es_reset : [ [ 'es_irq', 'interrupt', [] ],
+		     [ 'es_sched', 'scheduler', [ '-DTEST_ES_SCHED' ] ] ]
+	if get_option(es_reset[0]).enabled()
+		es_reset_tester = executable(
+			es_reset[0] + '_cache_reset_tester',
+			[ 'es_kernel_cache_reset_test.c' ],
+			c_args: es_reset[2],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+			dependencies: dependencies_server,
+			link_with: esdm_static_lib,
+		)
+
+		test('ES ' + es_reset[1] + ' cache reset', es_reset_tester)
+	endif
+endforeach
 
 # The following hardware/service-backed sources may be absent on the test
 # machine; their tests are structural / graceful-absence checks (see the file
@@ -162,6 +219,30 @@ if get_option('es_tpm2').enabled()
 	# full fill of the block cache - one command exchange per block, and a
 	# software TPM in an emulated machine is not quick about them.
 	test('ES TPM 2.0', es_tpm2_tester, timeout: 120)
+
+	# The source is compiled into the test, with a file standing in for
+	# the device - see the file header.
+	es_tpm2_reopen_tester = executable(
+		'es_tpm2_reopen_tester',
+		[ esdm_ipc_ns, 'es_tpm2_reopen_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES TPM 2.0 reopen', es_tpm2_reopen_tester)
+
+	# The source is compiled into the test as well, talking to a TPM
+	# simulated on a socket pair - see the file header.
+	es_tpm2_cache_tester = executable(
+		'es_tpm2_cache_tester',
+		[ esdm_ipc_ns, 'es_tpm2_cache_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES TPM 2.0 cache against self test and PR', es_tpm2_cache_tester)
 endif
 
 
@@ -216,6 +297,18 @@ if get_option('es_pkcs11').enabled()
 	endif
 endif
 
+# The health tests the eBPF programs run are plain C, which the test compiles
+# in - see the file header. It needs neither libbpf nor eBPF support, so it is
+# built whether or not an eBPF entropy source is.
+es_ebpf_health_startup_tester = executable(
+	'es_ebpf_health_startup_tester',
+	'es_ebpf_health_startup_test.c',
+	include_directories: [ include_dirs_server,
+			       include_directories('../common') ],
+)
+
+test('ES eBPF health startup after a failure', es_ebpf_health_startup_tester)
+
 if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 	es_ebpf_health_tester = executable(
 		'es_ebpf_health_tester',
@@ -226,6 +319,19 @@ if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 	)
 
 	test('ES eBPF health cutoffs', es_ebpf_health_tester)
+
+	# The conditioning pool is internal to the glue, which the test
+	# compiles in - see the file header.
+	es_ebpf_pool_tester = executable(
+		'es_ebpf_pool_tester',
+		[ esdm_ipc_ns, 'es_ebpf_pool_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+
+	test('ES eBPF conditioning pool hash failure', es_ebpf_pool_tester)
 endif
 
 if get_option('es_jent_kernel').enabled()
@@ -238,4 +344,17 @@ if get_option('es_jent_kernel').enabled()
 	)
 
 	test('ES Kernel Jitter RNG', es_jent_kernel_tester)
+
+	# The source is compiled into the test, with a stand-in for the libkcapi
+	# RNG calls - see the file header.
+	es_jent_kernel_read_fail_tester = executable(
+		'es_jent_kernel_read_fail_tester',
+		[ esdm_ipc_ns, 'es_jent_kernel_read_fail_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES Kernel Jitter RNG that stops delivering',
+	     es_jent_kernel_read_fail_tester)
 endif

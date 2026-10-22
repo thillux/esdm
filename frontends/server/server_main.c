@@ -36,6 +36,7 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_es_pkcs11.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
 #include "helper.h"
@@ -136,7 +137,39 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tresistance generator - the EGD protocol cannot select it\n");
 	fprintf(stderr, "\t\t\tper request, so it gets a socket of its own\n");
+	fprintf(stderr,
+		"\t   --pkcs11_module <PATH>\tLoad the PKCS#11 provider module PATH for\n");
+	fprintf(stderr,
+		"\t\t\tthe PKCS#11 entropy source instead of the one the build\n");
+	fprintf(stderr, "\t\t\tconfigured (es_pkcs11_module_path)\n");
 	exit(1);
+}
+
+/*
+ * The PKCS#11 provider module of the PKCS#11 entropy source, in place of the
+ * one the build names (es_pkcs11_module_path). It is loaded by esdm_init(),
+ * while the daemon still has its privileges.
+ */
+static void set_pkcs11_module(const char *path)
+{
+	int ret;
+
+	if (path[0] == '\0') {
+		fprintf(stderr, "The PKCS#11 module path must not be empty\n");
+		exit(1);
+	}
+
+	ret = esdm_es_pkcs11_set_module_path(path);
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"The PKCS#11 entropy source is not part of this build (meson option es_pkcs11)\n");
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr, "Cannot set the PKCS#11 module %s: %s\n", path,
+			strerror(-ret));
+		exit(1);
+	}
 }
 
 static void parse_opts(int argc, char *argv[])
@@ -165,6 +198,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
 			{ "egd_socket_pr", 1, 0, 0 },
+			{ "pkcs11_module", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -258,6 +292,10 @@ static void parse_opts(int argc, char *argv[])
 				/* egd_socket_pr */
 				if (esdm_egd_server_enable_pr(optarg))
 					exit(1);
+				break;
+			case 18:
+				/* pkcs11_module */
+				set_pkcs11_module(optarg);
 				break;
 
 			default:

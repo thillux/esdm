@@ -357,5 +357,6 @@ int main(int argc, char *argv[])
 	ret += es_cpu_getstate();
 	ret += es_cpu_getstate_truncated();
 
-	return ret;
+	/* A count of failures, which the exit status would take modulo 256 */
+	return ret ? 1 : 0;
 }
