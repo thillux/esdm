@@ -3,7 +3,8 @@
  *
  * The auxiliary pool cannot allocate its hash states, so the entropy source
  * manager fails after the DRNG manager came up. esdm_init() reports the error
- * and must not leave the DRNG manager behind.
+ * and must not leave the DRNG manager behind - nor report success when it is
+ * called again on what it tore down.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -73,5 +74,33 @@ int main(int argc, char *argv[])
 
 	printf("esdm_init() failed with %d and tore down the DRNG manager\n",
 	       ret);
+
+	/*
+	 * Which is final: an ESDM torn down does not come back, and a second
+	 * esdm_init() has to say so rather than report success for an ESDM
+	 * without a DRNG to serve a request from.
+	 */
+	ret = esdm_init();
+	if (!ret) {
+		printf("esdm_init() after the torn down one succeeded, DRNG %sallocated\n",
+		       drng->drng ? "" : "not ");
+		esdm_fini();
+		return 1;
+	}
+
+	printf("esdm_init() after the torn down one failed with %d\n", ret);
+
+	/*
+	 * Neither may esdm_reinit() set the entropy sources up again against
+	 * the DRNGs that are gone.
+	 */
+	ret = esdm_reinit();
+	if (ret != -ESHUTDOWN) {
+		printf("esdm_reinit() after the torn down one returned %d\n",
+		       ret);
+		return 1;
+	}
+
+	printf("esdm_reinit() after the torn down one failed with %d\n", ret);
 	return 0;
 }

@@ -4,10 +4,12 @@
  * Its jobs are observed here, all without a single request being made: a DRNG
  * that never reached the fully seeded level is brought up - nothing else does
  * that for an instance no request lands on - the prediction resistance
- * instance, which sits on the seed of the request it last served, is reseeded
- * before that seed ages, once nothing is due the worker waits for the reseed
- * it knows is coming instead of looking again every second, and a reseed
- * interval set while it waits reaches it there. A reseed interval of zero
+ * instance is left alone, since each of its outputs collects the seed it is
+ * generated from in the request, once nothing is due the worker waits for the
+ * reseed it knows is coming instead of looking again every second, and a
+ * reseed interval set while it waits reaches it there. The seed times of the
+ * node DRNGs are spread so they do not all fall due at once, and that spread
+ * stays within the reseed interval. A reseed interval of zero
  * seconds sends the worker home, since the requests reseed themselves then,
  * and an interval that grows again brings one back.
  *
@@ -56,6 +58,18 @@
 /* Wait for the worker at most this many 100ms slices */
 #define ESDM_RSD_SLICES 200
 
+/*
+ * Slices the prediction resistance DRNG is watched over: several reseed
+ * intervals, any of which the worker would have reseeded it in.
+ */
+#define ESDM_RSD_PR_SLICES (5 * 10 * ESDM_RSD_INTERVAL)
+
+/*
+ * Reseed interval the spread of the seed times is observed with: a tenth of it
+ * is what the spread draws from.
+ */
+#define ESDM_RSD_STAGGER_INTERVAL 600
+
 /* Reseed interval the worker's wait is observed with. */
 #define ESDM_RSD_LONG_INTERVAL 120
 
@@ -72,9 +86,15 @@ struct rsd_state {
 	unsigned int nodes_unseeded;
 	/* The prediction resistance instance */
 	bool pr_found;
+	bool pr_initiated;
 	long long pr_seed_generation;
 	/* The earliest reseed any of them reports */
 	long long soonest_reseed;
+	/* The node DRNGs besides the initial one */
+	unsigned int node_drngs;
+	long long node_seed_generations;
+	/* The latest reseed any of those reports */
+	long long latest_node_reseed;
 };
 
 static void rsd_state_cb(const struct esdm_drng_stats *stats, void *priv)
@@ -86,6 +106,7 @@ static void rsd_state_cb(const struct esdm_drng_stats *stats, void *priv)
 
 	if (!strcmp(stats->type, "prediction resistance")) {
 		state->pr_found = true;
+		state->pr_initiated = stats->initiated;
 		state->pr_seed_generation = stats->seed_generation;
 		return;
 	}
@@ -93,6 +114,13 @@ static void rsd_state_cb(const struct esdm_drng_stats *stats, void *priv)
 	state->nodes++;
 	if (!stats->fully_seeded)
 		state->nodes_unseeded++;
+
+	if (!strcmp(stats->type, "node")) {
+		state->node_drngs++;
+		state->node_seed_generations += stats->seed_generation;
+		if (stats->seconds_until_reseed > state->latest_node_reseed)
+			state->latest_node_reseed = stats->seconds_until_reseed;
+	}
 }
 
 static struct rsd_state rsd_state_get(void)
@@ -114,6 +142,57 @@ static void rsd_sleep_slice(void)
 }
 
 /*
+ * The seed times of the node DRNGs are spread over a tenth of the reseed
+ * interval so they do not all fall due in the same pass. The interval is the
+ * longest a seed may serve, so the spread has to come out of it: no node DRNG
+ * may report its next reseed further out than the interval right after it
+ * was seeded.
+ */
+static int rsd_stagger_check(void)
+{
+	struct rsd_state before, after;
+	unsigned int i;
+
+	esdm_set_reseed_max_time(ESDM_RSD_STAGGER_INTERVAL);
+
+	before = rsd_state_get();
+	if (!before.node_drngs) {
+		printf("no node DRNG next to the initial one - no seed time to spread\n");
+		return 0;
+	}
+
+	/* Every DRNG is reseeded by the worker, under the interval above */
+	esdm_drng_force_reseed();
+
+	for (i = 0; i < ESDM_RSD_SLICES; i++) {
+		after = rsd_state_get();
+		if (after.node_seed_generations >=
+		    before.node_seed_generations + before.node_drngs)
+			break;
+		rsd_sleep_slice();
+	}
+
+	after = rsd_state_get();
+	if (after.node_seed_generations <
+	    before.node_seed_generations + before.node_drngs) {
+		printf("the node DRNGs were not reseeded within %u slices\n",
+		       ESDM_RSD_SLICES);
+		return 1;
+	}
+
+	if (after.latest_node_reseed > ESDM_RSD_STAGGER_INTERVAL) {
+		printf("a node DRNG falls due for its reseed in %lld seconds, past the reseed interval of %u seconds\n",
+		       after.latest_node_reseed, ESDM_RSD_STAGGER_INTERVAL);
+		return 1;
+	}
+
+	printf("the latest node DRNG reseed falls due in %lld seconds, within the reseed interval of %u seconds\n",
+	       after.latest_node_reseed, ESDM_RSD_STAGGER_INTERVAL);
+
+	return 0;
+}
+
+/*
  * What the worker does once every DRNG is seeded and nothing is due: it waits
  * for the reseed it knows is coming rather than looking again every second.
  */
@@ -123,11 +202,17 @@ static int rsd_idle_check(void)
 	uint64_t next = 0, passes, later;
 	unsigned int i;
 
+	passes = esdm_drng_mgr_reseed_worker_passes();
 	esdm_set_reseed_max_time(ESDM_RSD_LONG_INTERVAL);
 
-	/* Setting the interval wakes the worker - let it complete a pass */
+	/*
+	 * Setting the interval wakes the worker - let it complete a pass. A
+	 * wait scheduled before is no sign of that: it may be a long one, and
+	 * the pass the wakeup asks for still to come.
+	 */
 	for (i = 0; i < ESDM_RSD_SLICES; i++) {
-		if (esdm_drng_mgr_reseed_worker_next_pass(&next) && next > 1)
+		if (esdm_drng_mgr_reseed_worker_passes() > passes &&
+		    esdm_drng_mgr_reseed_worker_next_pass(&next) && next > 1)
 			break;
 		rsd_sleep_slice();
 	}
@@ -319,8 +404,7 @@ static int esdm_reseed_worker_test(void)
 	 */
 	for (i = 0; i < ESDM_RSD_SLICES; i++) {
 		after = rsd_state_get();
-		if (!after.nodes_unseeded &&
-		    after.pr_seed_generation > before.pr_seed_generation)
+		if (!after.nodes_unseeded && after.pr_initiated)
 			break;
 		rsd_sleep_slice();
 	}
@@ -334,6 +418,11 @@ static int esdm_reseed_worker_test(void)
 		goto err;
 	}
 
+	if (!after.pr_initiated) {
+		printf("the prediction resistance DRNG was never instantiated\n");
+		goto err;
+	}
+
 	if (before.nodes_unseeded) {
 		printf("the worker brought %u DRNG instance(s) up to the fully seeded level\n",
 		       before.nodes_unseeded);
@@ -341,15 +430,31 @@ static int esdm_reseed_worker_test(void)
 		printf("every DRNG instance was already seeded at start up\n");
 	}
 
-	/* And the prediction resistance instance is kept fresh */
-	if (after.pr_seed_generation <= before.pr_seed_generation) {
-		printf("the prediction resistance DRNG was not reseeded: seed generation %lld\n",
-		       after.pr_seed_generation);
+	/*
+	 * And the prediction resistance instance is left alone. Each of its
+	 * outputs is generated from a seed collected for it in the request, so
+	 * a seed the worker put in would either be replaced unused or - had
+	 * the request gone with it - be output from entropy collected for no
+	 * request at all. Over several intervals, its seed generation must not
+	 * move.
+	 */
+	before = after;
+	for (i = 0; i < ESDM_RSD_PR_SLICES; i++)
+		rsd_sleep_slice();
+	after = rsd_state_get();
+
+	if (after.pr_seed_generation != before.pr_seed_generation) {
+		printf("the prediction resistance DRNG was reseeded without a request: seed generation %lld -> %lld\n",
+		       before.pr_seed_generation, after.pr_seed_generation);
 		goto err;
 	}
 
-	printf("the prediction resistance DRNG was reseeded without a request: seed generation %lld -> %lld\n",
-	       before.pr_seed_generation, after.pr_seed_generation);
+	printf("the prediction resistance DRNG was not reseeded without a request over %u slices: seed generation %lld\n",
+	       ESDM_RSD_PR_SLICES, after.pr_seed_generation);
+
+	/* Reseeded under a long interval, where do their deadlines fall? */
+	if (rsd_stagger_check())
+		goto err;
 
 	/* With every instance seeded, what does the worker do next? */
 	if (rsd_idle_check())

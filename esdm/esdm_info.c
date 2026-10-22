@@ -33,13 +33,11 @@
 #include "esdm_es_irq.h"
 #include "esdm_es_mgr.h"
 #include "esdm_es_sched.h"
-#include "esdm_info.h"
 #include "esdm_logger.h"
+#include "esdm_node.h"
 #include "esdm_selftest.h"
 #include "test_pertubation.h"
 #include "visibility.h"
-
-static unsigned int esdm_nodes = 1;
 
 static inline size_t esdm_used_buf_len(char *buf, size_t buflen)
 {
@@ -48,9 +46,13 @@ static inline size_t esdm_used_buf_len(char *buf, size_t buflen)
 	return min_size(len, buflen);
 }
 
-void esdm_pool_inc_node_node(void)
+/*
+ * The DRNGs serving: the published node array, the initial DRNG being its
+ * first entry, or the initial DRNG alone.
+ */
+static uint32_t esdm_drng_instances(void)
 {
-	esdm_nodes++;
+	return max_uint32(esdm_drng_node_count_get(), 1);
 }
 
 DSO_PUBLIC
@@ -167,8 +169,10 @@ int esdm_status(char *buf, size_t buflen)
 		 "Standards compliance: %s%s%s%s%s%s\n"
 		 "ESDM fully seeded: %s\n"
 		 "ESDM entropy level: %u\n",
-		 drng->drng_cb->drng_name(), esdm_security_strength(),
-		 esdm_nodes, esdm_config_fips_enabled() ? "FIPS 140 " : "",
+		 /* The callbacks are only installed by esdm_init() */
+		 drng->drng_cb ? drng->drng_cb->drng_name() : "N/A",
+		 esdm_security_strength(), esdm_drng_instances(),
+		 esdm_config_fips_enabled() ? "FIPS 140 " : "",
 		 /* A DRG.4 build satisfies DRG.3 and reports both */
 		 esdm_drg3_compliant() ? "DRG.3 " : "",
 		 esdm_drg4_compliant() ? "DRG.4 " : "",
@@ -582,13 +586,16 @@ int esdm_status_json(char *buf, size_t buflen)
 	json_object_object_add(root, "test_mode",
 			       json_object_new_boolean(sizeof(TESTMODE_STR) >
 						       1));
+	/* The callbacks are only installed by esdm_init() */
 	json_object_object_add(
 		root, "drng_name",
-		json_object_new_string(drng->drng_cb->drng_name()));
+		drng->drng_cb ?
+			json_object_new_string(drng->drng_cb->drng_name()) :
+			NULL);
 	json_object_object_add(root, "security_strength_bits",
 			       json_object_new_int64(esdm_security_strength()));
 	json_object_object_add(root, "drng_instances",
-			       json_object_new_int64(esdm_nodes));
+			       json_object_new_int64(esdm_drng_instances()));
 
 	if (esdm_config_fips_enabled())
 		json_object_array_add(compliance,

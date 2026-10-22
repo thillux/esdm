@@ -4,6 +4,11 @@
  * Every request is reseeded then, and once is enough: a request the initial
  * DRNG serves must not be preceded by two seedings in a row.
  *
+ * Nor may the reseed be skipped because somebody else holds the pool lock: the
+ * request waits for it. With a node DRNG next to the initial one - the
+ * argument is the number of DRNG instances asked for - that covers the
+ * generate loop, which the initial DRNG skips for its first block.
+ *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
  * License: see LICENSE file in root directory
@@ -22,14 +27,19 @@
  * DAMAGE.
  */
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_drng_mgr.h"
+#include "esdm_es_mgr.h"
 #include "esdm_logger.h"
 
 /* Number of requests made */
@@ -39,16 +49,69 @@ static void esdm_rpr_cb(const struct esdm_drng_stats *stats, void *priv)
 {
 	long long *seed_generation = priv;
 
-	if (!strcmp(stats->type, "initial"))
-		*seed_generation = stats->seed_generation;
+	/* Whichever instance served the request */
+	if (strcmp(stats->type, "prediction resistance"))
+		*seed_generation += stats->seed_generation;
 }
 
 static long long esdm_rpr_seed_generation(void)
 {
-	long long seed_generation = -1;
+	long long seed_generation = 0;
 
-	esdm_drng_stats_summary(esdm_rpr_cb, &seed_generation);
+	esdm_drng_stats_foreach(esdm_rpr_cb, &seed_generation);
 	return seed_generation;
+}
+
+/* The pool lock is held by this thread for a while once it is up */
+static atomic_bool esdm_rpr_pool_held = false;
+
+static void *esdm_rpr_hold_pool(void *arg)
+{
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 300 * 1000 * 1000 };
+
+	(void)arg;
+
+	esdm_pool_lock();
+	atomic_store(&esdm_rpr_pool_held, true);
+	nanosleep(&ts, NULL);
+	esdm_pool_unlock();
+
+	return NULL;
+}
+
+/* One request while another thread holds the pool lock */
+static int esdm_rpr_busy_pool(void)
+{
+	struct timespec slice = { .tv_sec = 0, .tv_nsec = 1000 * 1000 };
+	uint8_t buf[32];
+	long long before, after;
+	pthread_t thread;
+
+	before = esdm_rpr_seed_generation();
+
+	if (pthread_create(&thread, NULL, esdm_rpr_hold_pool, NULL))
+		return 1;
+	while (!atomic_load(&esdm_rpr_pool_held))
+		nanosleep(&slice, NULL);
+
+	if (esdm_get_random_bytes(buf, sizeof(buf)) != sizeof(buf)) {
+		printf("Request with a busy pool failed\n");
+		pthread_join(thread, NULL);
+		return 1;
+	}
+	after = esdm_rpr_seed_generation();
+
+	pthread_join(thread, NULL);
+
+	if (after != before + 1) {
+		printf("Request with a busy pool seeded its DRNG %lld times\n",
+		       after - before);
+		return 1;
+	}
+
+	printf("Request with a busy pool waited for it and was reseeded\n");
+
+	return 0;
 }
 
 int main(int argc, char *argv[])
@@ -57,9 +120,6 @@ int main(int argc, char *argv[])
 	long long before, after;
 	unsigned int i;
 	int ret;
-
-	(void)argc;
-	(void)argv;
 
 #ifndef ESDM_TESTMODE
 	if (getuid()) {
@@ -70,8 +130,8 @@ int main(int argc, char *argv[])
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
-	/* Only the initial DRNG serves requests */
-	esdm_config_max_nodes_set(1);
+	/* By default, only the initial DRNG serves requests */
+	esdm_config_max_nodes_set(argc > 1 ? (uint32_t)atoi(argv[1]) : 1);
 
 	ret = esdm_init();
 	if (ret)
@@ -89,15 +149,15 @@ int main(int argc, char *argv[])
 		}
 		after = esdm_rpr_seed_generation();
 
-		if (before < 0 || after != before + 1) {
-			printf("Request %u seeded the initial DRNG %lld times\n",
-			       i, after - before);
+		if (after != before + 1) {
+			printf("Request %u seeded its DRNG %lld times\n", i,
+			       after - before);
 			ret = 1;
 			goto out;
 		}
 	}
 
-	ret = 0;
+	ret = esdm_rpr_busy_pool();
 
 out:
 	esdm_fini();

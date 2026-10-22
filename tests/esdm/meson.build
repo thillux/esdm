@@ -149,6 +149,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_get_seed_nonblock_test = executable(
+		'esdm_get_seed_nonblock_test',
+		[ esdm_ipc_ns, 'esdm_get_seed_nonblock_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_selftest_security_test = executable(
 		'esdm_selftest_security_test',
 		[ esdm_ipc_ns, 'esdm_selftest_security_test.c' ],
@@ -251,6 +259,27 @@ if get_option('esdm-server').enabled()
 	test('ESDM PR DRNG keeps the seeding state',
 		esdm_pr_seeded_state_test)
 
+	esdm_pr_uninstantiated_test = executable(
+		'esdm_pr_uninstantiated_test',
+		[ esdm_ipc_ns, 'esdm_pr_uninstantiated_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM PR DRNG gives out nothing before its instantiation',
+		esdm_pr_uninstantiated_test)
+
+	esdm_pr_large_request_test = executable(
+		'esdm_pr_large_request_test',
+		[ esdm_ipc_ns, 'esdm_pr_large_request_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM PR DRNG request of 4 GiB', esdm_pr_large_request_test)
+
 	esdm_aux_digestsize_test = executable(
 		'esdm_aux_digestsize_test',
 		[ esdm_ipc_ns, 'esdm_aux_digestsize_test.c' ],
@@ -280,6 +309,8 @@ if get_option('esdm-server').enabled()
 	)
 
 	test('ESDM reseed per request', esdm_reseed_per_request_test)
+	test('ESDM reseed per request - 2 DRNG', esdm_reseed_per_request_test,
+		args : [ '2' ])
 
 	esdm_pr_full_entropy_test = executable(
 		'esdm_pr_full_entropy_test',
@@ -367,9 +398,9 @@ if get_option('esdm-server').enabled()
 	endif
 	test('ESDM DRNG manager max w/o reseed bits large request - 1 DRNG',
 		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '1' ])
-	test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
-		esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
 	if get_option('node').enabled()
+		test('ESDM DRNG manager max w/o reseed bits large request - 2 DRNG',
+			esdm_drng_mgr_max_wo_reseed_bits_large_test, args : [ '2' ])
 		test('ESDM DRNG manager spent node DRNG falls back to the initial DRNG',
 			esdm_drng_mgr_spent_node_fallback_test)
 	endif
@@ -419,6 +450,8 @@ if get_option('esdm-server').enabled()
 	test('ESDM get seed - all ES, FIPS', esdm_get_seed_test,
 		args : [ '1' ],
 		timeout: 300)
+	test('ESDM get seed - non-blocking leaves the bring-up to the worker',
+		esdm_get_seed_nonblock_test)
 
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
 	# Reports a hang itself after 60 seconds.

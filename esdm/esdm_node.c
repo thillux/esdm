@@ -26,7 +26,6 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_es_irq.h"
 #include "esdm_es_mgr.h"
-#include "esdm_info.h"
 #include "esdm_node.h"
 #include "esdm_logger.h"
 #include "mutex.h"
@@ -174,7 +173,6 @@ void esdm_drngs_node_alloc(void)
 		 */
 		drngs[node] = drng;
 
-		esdm_pool_inc_node_node();
 		esdm_logger(
 			LOGGER_VERBOSE, LOGGER_C_ANY,
 			"DRNG and entropy pool read hash for node %d allocated\n",

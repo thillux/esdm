@@ -107,6 +107,14 @@ threading_support_test = executable(
 		link_with: esdm_common_static_lib,
 	)
 
+queue_test = executable(
+		'queue_test',
+		[ 'queue_test.c' ],
+		include_directories: include_dirs_server,
+		dependencies: common_test_deps,
+		link_with: esdm_common_static_lib,
+	)
+
 if get_option('testmode').enabled()
 	# The shared memory segment is a system wide singleton keyed by a fixed
 	# ftok() value, so this would otherwise run next to everything else that
@@ -160,6 +168,7 @@ test('common Linux support', linux_support_test)
 test('common known answer test comparison', selftest_kat_test)
 test('common operating system random numbers', os_random_test)
 test('common xoshiro256++ PRNG', xoshiro_test)
+test('common wait queue wakeup', queue_test)
 
 # The threading test occupies an entire thread group at once and waits for
 # signals to be delivered, so it neither shares the machine well nor finishes

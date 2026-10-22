@@ -87,7 +87,14 @@ static int esdm_pfe_test(void)
 		return 77;
 	}
 
-	esdm_test_es_rates_zero();
+	/*
+	 * The NTG.1 seeding strategy instantiates a DRNG only from two entropy
+	 * sources of 240 bits each, and the aux pool is one: the other sources
+	 * keep their rates until both DRNGs are seeded. Everything below is past
+	 * the instantiation, where one source is enough.
+	 */
+	if (!esdm_ntg1_2024_compliant())
+		esdm_test_es_rates_zero();
 
 	ret = esdm_init();
 	if (ret)
@@ -106,7 +113,14 @@ static int esdm_pfe_test(void)
 		goto out;
 	}
 
-	/* Spend the initial seed, after which every output reseeds */
+	/* From here on, the aux pool is the only source */
+	esdm_test_es_rates_zero();
+
+	/*
+	 * Every output collects its own seed, the first one after the
+	 * instantiation too: a full aux pool covers a full block.
+	 */
+	esdm_pool_insert_aux(data, sizeof(data), sizeof(data) << 3);
 	rc = esdm_get_random_bytes_pr(buf, sizeof(buf));
 	if (rc != (ssize_t)sizeof(buf)) {
 		printf("First PR request failed: %zd\n", rc);

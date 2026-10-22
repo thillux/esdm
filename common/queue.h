@@ -24,6 +24,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +75,62 @@ static inline int thread_wait_queue_wait(struct thread_wait_queue *queue,
 	pthread_cleanup_pop(1);
 
 	return ret;
+}
+
+/*
+ * Wait on the queue unless @pred(@arg) holds - until @abstime (CLOCK_MONOTONIC)
+ * if it is not NULL. Returns 0 if the predicate held or a wakeup arrived, the
+ * (positive) pthread error code otherwise, ETIMEDOUT once @abstime passed. A
+ * caller loops on 0 until its predicate holds, as a wakeup may be spurious.
+ *
+ * Unlike the macros below, the predicate is evaluated under thread_wait_lock,
+ * right before the wait it decides on. A waker that makes it true before
+ * calling thread_wake_all_locked() is therefore either seen by that check or
+ * finds the waiter blocked already - its wakeup cannot fall in between the two
+ * and be lost.
+ */
+static inline int thread_wait_queue_wait_pred(struct thread_wait_queue *queue,
+					      const struct timespec *abstime,
+					      bool (*pred)(void *arg),
+					      void *arg)
+{
+	int ret;
+
+	ret = pthread_mutex_lock(&queue->thread_wait_lock);
+	assert(ret == 0);
+	pthread_cleanup_push(thread_wait_queue_unlock,
+			     &queue->thread_wait_lock);
+	if (pred(arg)) {
+		ret = 0;
+	} else if (abstime) {
+		ret = pthread_cond_clockwait(&queue->thread_wait_cv,
+					     &queue->thread_wait_lock,
+					     CLOCK_MONOTONIC, abstime);
+	} else {
+		ret = pthread_cond_wait(&queue->thread_wait_cv,
+					&queue->thread_wait_lock);
+	}
+	pthread_cleanup_pop(1);
+
+	return ret;
+}
+
+/*
+ * Wake every waiter with thread_wait_lock held - the counterpart of
+ * thread_wait_queue_wait_pred(): whatever the caller set before is seen by a
+ * waiter that checks its predicate after this, and one that checked before is
+ * blocked already and woken.
+ */
+static inline void thread_wake_all_locked(struct thread_wait_queue *queue)
+{
+	int ret __attribute__((unused));
+
+	ret = pthread_mutex_lock(&queue->thread_wait_lock);
+	assert(ret == 0);
+	ret = pthread_cond_broadcast(&queue->thread_wait_cv);
+	assert(ret == 0);
+	ret = pthread_mutex_unlock(&queue->thread_wait_lock);
+	assert(ret == 0);
 }
 
 #define DECLARE_WAIT_QUEUE(name)                                               \
