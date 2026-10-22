@@ -471,6 +471,7 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 	size_t bytes_to_fetch = num_rand_bytes;
 	const size_t BUFFER_SIZE = 8192;
 	uint8_t bytes[BUFFER_SIZE];
+	int result = EXIT_FAILURE;
 	ssize_t ret = 0;
 
 	while (bytes_to_fetch > 0) {
@@ -502,7 +503,7 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 					esdm_logger(
 						LOGGER_ERR, LOGGER_C_TOOL,
 						"error writing bytes to stdout\n");
-					return EXIT_FAILURE;
+					goto out;
 				}
 			} else {
 				for (size_t i = 0; i < chunk_size; ++i) {
@@ -513,7 +514,7 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 		} else {
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 				    "fetching random data failed, exiting\n");
-			return EXIT_FAILURE;
+			goto out;
 		}
 		bytes_to_fetch -= chunk_size;
 	}
@@ -521,7 +522,16 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 	if (!raw)
 		printf("\n");
 
-	return EXIT_SUCCESS;
+	result = EXIT_SUCCESS;
+
+out:
+	/*
+	 * The random data may be used as key material by whoever reads it, so
+	 * it does not stay behind on the stack - on every way out, as the
+	 * last chunk is still there after a failure as well.
+	 */
+	memset_secure(bytes, 0, sizeof(bytes));
+	return result;
 }
 
 static int handle_entropy_count(void)
@@ -1064,6 +1074,8 @@ out_1:
 	esdm_rpcc_fini_priv_service();
 
 out_ret:
+	/* The seed is wiped on every way out, not only on success */
+	memset_secure(seed_buffer, 0, sizeof(seed_buffer));
 	return ret_val;
 }
 
@@ -1163,6 +1175,8 @@ out_2:
 	esdm_rpcc_fini_priv_service();
 
 out_ret:
+	/* The seed is wiped on every way out, not only on success */
+	memset_secure(reseed_buffer, 0, sizeof(reseed_buffer));
 	return ret_val;
 }
 #endif /* ESDM_HAS_AUX_CLIENT */

@@ -333,6 +333,72 @@ static void test_ignores_leftover(void)
 	sem_unlink(ESDM_SEM_NEED_ENTROPY_LEVEL);
 }
 
+/*
+ * A segment another user created while no server runs, and keeps attached to,
+ * telling that the ESDM wants entropy. The server removes it once it starts,
+ * until then the client must not take it for the server's. Creating it as
+ * another user needs root: in the user namespace of an unprivileged run, no
+ * other uid is mapped.
+ */
+static void test_ignores_planted(void)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	struct esdm_shm_status *status;
+	int shmid, errsv, wstatus;
+	pid_t pid;
+
+	if (geteuid()) {
+		printf("aux_client: planted segment not covered, needs root\n");
+		return;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		CHECK(0, "fork() failed: %s", strerror(errno));
+		return;
+	}
+
+	/* The other user, who creates the segment writable for everybody */
+	if (!pid) {
+		if (setgid(65534) || setuid(65534))
+			_exit(1);
+		_exit(shmget(key, sizeof(struct esdm_shm_status),
+			     IPC_CREAT | IPC_EXCL | 0666) < 0 ?
+			      2 :
+			      0);
+	}
+
+	if (waitpid(pid, &wstatus, 0) != pid || !WIFEXITED(wstatus) ||
+	    WEXITSTATUS(wstatus)) {
+		CHECK(0, "cannot create the segment as another user");
+		return;
+	}
+
+	shmid = shmget(key, sizeof(struct esdm_shm_status), 0);
+	if (shmid < 0) {
+		CHECK(0, "the planted segment is gone: %s", strerror(errno));
+		return;
+	}
+
+	/* Attached to, so it looks like a running server's */
+	status = shmat(shmid, NULL, 0);
+	if (status == (void *)-1) {
+		CHECK(0, "cannot attach the segment: %s", strerror(errno));
+		shmctl(shmid, IPC_RMID, NULL);
+		return;
+	}
+	atomic_store(&status->need_entropy, true);
+	status->version = ESDM_SHM_STATUS_VERSION;
+
+	CHECK_EQ(esdm_aux_init_wait_for_need_entropy(), 0);
+	CHECK_EQ(timedwait_ms(200, &errsv), -1);
+	CHECK_EQ(errsv, ETIMEDOUT);
+	esdm_aux_fini_wait_for_need_entropy();
+
+	shmdt(status);
+	shmctl(shmid, IPC_RMID, NULL);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -344,6 +410,7 @@ int main(int argc, char *argv[])
 	test_creates_nothing();
 	test_finds_server();
 	test_ignores_leftover();
+	test_ignores_planted();
 
 	return common_test_result("aux_client");
 }

@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
@@ -30,6 +31,8 @@
 #include "config.h"
 #include "constructor.h"
 #include "esdm_rpc_client.h"
+#include "esdm_rpc_service.h"
+#include "math_helper.h"
 #include "mutex.h"
 #include "visibility.h"
 
@@ -82,6 +85,23 @@ out:
 	mutex_unlock(&getrandom_mutex);
 }
 
+/*
+ * A thread of the parent may hold the lock in the middle of the initialization
+ * when another one forks. It does not exist in the child, which would wait for
+ * the lock forever on its first call. So the child creates the lock anew, and
+ * is_initialized tells whether the initialization still has to be done.
+ */
+static void esdm_getrandom_fork_child(void)
+{
+	mutex_init(&getrandom_mutex, 0);
+}
+
+ESDM_DEFINE_CONSTRUCTOR(esdm_getrandom_lib_constructor);
+static void esdm_getrandom_lib_constructor(void)
+{
+	pthread_atfork(NULL, NULL, esdm_getrandom_fork_child);
+}
+
 ESDM_DEFINE_DESTRUCTOR(esdm_getrandom_lib_exit);
 static void esdm_getrandom_lib_exit(void)
 {
@@ -113,6 +133,64 @@ static int esdm_getrandom_would_block(void)
 		return ret;
 
 	return !fully_seeded;
+}
+
+/*
+ * How long one chunk of a GRND_NONBLOCK request for seeded randomness may take.
+ *
+ * esdm_getrandom_would_block() only tells how the ESDM was when it answered.
+ * Should it stop being fully seeded before the data is requested - e.g. as an
+ * entropy source failed its health test - the blocking RPC call would ask again
+ * and again until it is seeded once more, which may be never. The timed call
+ * ends there instead.
+ *
+ * A zero timeout does not do: the deadline has passed already when the RPC
+ * client is about to send the request, so it gives up without asking the ESDM
+ * at all. The timeout thus bounds how long a non-blocking caller may be held in
+ * this case. It is generous next to the round trip of a request that is served
+ * at once, so that a busy system does not report a seeded ESDM as EAGAIN.
+ */
+#define ESDM_GETRANDOM_NONBLOCK_TIMEOUT_NS 500000000L
+
+/*
+ * Obtain seeded randomness without waiting for the ESDM to become seeded.
+ *
+ * The request is split into chunks of what one RPC carries, each with its own
+ * timeout: a large request would otherwise run out of time on the way, and the
+ * timed RPC call reports an error only, discarding what it obtained before.
+ *
+ * Returns the number of bytes obtained, which is less than @length only when
+ * the ESDM stopped serving midway, -EAGAIN when it served nothing without
+ * blocking, < 0 on other errors.
+ */
+static ssize_t esdm_getrandom_full_nonblock(uint8_t *buffer, size_t length)
+{
+	size_t done = 0;
+	ssize_t ret = 0;
+
+	while (done < length) {
+		struct timespec ts = {
+			.tv_sec = 0,
+			.tv_nsec = ESDM_GETRANDOM_NONBLOCK_TIMEOUT_NS
+		};
+		size_t todo = min_size(ESDM_RPC_MAX_DATA, length - done);
+
+		esdm_invoke(esdm_rpcc_get_random_bytes_full_timeout(
+			buffer + done, todo, &ts));
+		if (ret < 0)
+			break;
+		done += (size_t)ret;
+	}
+
+	/* What was obtained is returned, as a short read if need be */
+	if (done)
+		return (ssize_t)done;
+
+	/* Not seeded any more is the ESDM's answer, nothing to cover for */
+	if (ret == -ETIMEDOUT)
+		return -EAGAIN;
+
+	return ret;
 }
 
 DSO_PUBLIC
@@ -210,6 +288,18 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 			ret = -1;
 		}
 		return ret;
+	} else if (flags & GRND_NONBLOCK) {
+		/*
+		 * Seeded a moment ago is no promise for the request: the ESDM
+		 * may have stopped being fully seeded meanwhile, for which the
+		 * blocking call would wait. That is the ESDM's answer, not a
+		 * failure, so it is not handed to the kernel either.
+		 */
+		ret = esdm_getrandom_full_nonblock(buffer, length);
+		if (ret == -EAGAIN) {
+			errno = EAGAIN;
+			return -1;
+		}
 	} else {
 		esdm_invoke(esdm_rpcc_get_random_bytes_full(buffer, length));
 	}

@@ -35,6 +35,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/shm.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "common_test.h"
@@ -398,6 +402,256 @@ out:
 	close(fds[1]);
 }
 
+/*
+ * Whether a descriptor still is the file at its path: the esdm-server takes the
+ * lock of its PID file only for good when the path still names the file it
+ * opened. One its previous holder removed meanwhile, or replaced, is not.
+ */
+static void test_fd_at_path(void)
+{
+	char dir[] = "/tmp/esdm-helper-test-XXXXXX";
+	char path[64], other_path[64];
+	int fd, other_fd;
+
+	CHECK_EQ(esdm_fd_at_path(-1, "/"), -EBADF);
+
+	if (!mkdtemp(dir)) {
+		CHECK(0, "mkdtemp failed: %s", strerror(errno));
+		return;
+	}
+	snprintf(path, sizeof(path), "%s/file", dir);
+	snprintf(other_path, sizeof(other_path), "%s/other", dir);
+
+	fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		CHECK(0, "cannot create %s: %s", path, strerror(errno));
+		rmdir(dir);
+		return;
+	}
+	CHECK_EQ(esdm_fd_at_path(fd, NULL), -EINVAL);
+
+	/* The file it was opened at */
+	CHECK_EQ(esdm_fd_at_path(fd, path), 1);
+
+	/* Another file is not */
+	other_fd = open(other_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	CHECK(other_fd >= 0, "cannot create %s: %s", other_path,
+	      strerror(errno));
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+
+	/* A symbolic link at the path is not the file it points to */
+	unlink(other_path);
+	CHECK_EQ(symlink(path, other_path), 0);
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+	unlink(other_path);
+
+	/* Removed after it was opened, the file is at no path */
+	CHECK_EQ(unlink(path), 0);
+	CHECK_EQ(esdm_fd_at_path(fd, path), 0);
+
+	/* Nor once another file was created in its place */
+	if (other_fd >= 0)
+		close(other_fd);
+	other_fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(other_fd >= 0, "cannot create %s again: %s", path,
+	      strerror(errno));
+	CHECK_EQ(esdm_fd_at_path(fd, path), 0);
+	if (other_fd >= 0) {
+		CHECK_EQ(esdm_fd_at_path(other_fd, path), 1);
+		close(other_fd);
+	}
+
+	/* A path below a file names nothing */
+	snprintf(other_path, sizeof(other_path), "%s/file/below", dir);
+	CHECK_EQ(esdm_fd_at_path(fd, other_path), 0);
+
+	close(fd);
+	unlink(path);
+	rmdir(dir);
+}
+
+/* A segment status as IPC_STAT reports it, with only the uids of interest */
+static struct shmid_ds shm_with(uid_t cuid, uid_t uid)
+{
+	struct shmid_ds buf;
+
+	memset(&buf, 0, sizeof(buf));
+	buf.shm_perm.cuid = cuid;
+	buf.shm_perm.uid = uid;
+
+	return buf;
+}
+
+/* Bind a Unix socket at @path, returning its descriptor or -1 */
+static int bind_socket(const char *path)
+{
+	struct sockaddr_un addr;
+	int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+
+	if (fd < 0)
+		return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+/*
+ * A caller whose real uid is not its effective one runs with privileges its
+ * user does not have, like a set-uid program: the user could have created the
+ * segment, which is not taken for the server's. Only root can switch the real
+ * uid alone, and does so in a child, as there is no way back.
+ */
+static void test_shm_created_by_server_privileged(uid_t other)
+{
+	struct shmid_ds buf;
+	pid_t pid;
+	int status;
+
+	if (geteuid()) {
+		printf("esdm_shm_created_by_server: privileged caller not covered, needs root\n");
+		return;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		CHECK(0, "fork failed: %s", strerror(errno));
+		return;
+	}
+
+	if (pid == 0) {
+		int failed = 0;
+
+		if (setresuid(other, 0, 0) || getuid() != other)
+			_exit(2);
+
+		/* The invoking user's segment is not the server's */
+		buf = shm_with(other, other);
+		if (esdm_shm_created_by_server(&buf, NULL))
+			failed |= 4;
+
+		/* Root's still is */
+		buf = shm_with(0, 0);
+		if (!esdm_shm_created_by_server(&buf, NULL))
+			failed |= 8;
+
+		_exit(failed);
+	}
+
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+		CHECK(0, "the privileged caller did not terminate normally");
+		return;
+	}
+
+	switch (WEXITSTATUS(status)) {
+	case 0:
+		break;
+	case 2:
+		printf("esdm_shm_created_by_server: privileged caller not covered, cannot switch the real uid to %u\n",
+		       (unsigned int)other);
+		break;
+	default:
+		CHECK(!(WEXITSTATUS(status) & 4),
+		      "a caller of real uid %u and effective uid 0 accepts the segment of uid %u",
+		      (unsigned int)other, (unsigned int)other);
+		CHECK(!(WEXITSTATUS(status) & 8),
+		      "a caller of real uid %u and effective uid 0 rejects the segment of root",
+		      (unsigned int)other);
+	}
+}
+
+/*
+ * Which status segments a client takes for the server's: those of root, of the
+ * owner of the server's socket and of its own uid - not one another user
+ * created while no server ran, whatever it was handed over to afterwards.
+ */
+static void test_shm_created_by_server(void)
+{
+	uid_t self = getuid();
+	/* A uid that is neither root nor the caller */
+	uid_t other = (self == 4242) ? 4243 : 4242;
+	char dir[] = "/tmp/esdm-helper-test-XXXXXX";
+	char sock_path[64], file_path[64];
+	struct shmid_ds buf;
+	int fd;
+
+	CHECK(!esdm_shm_created_by_server(NULL, NULL),
+	      "no segment status is accepted");
+
+	buf = shm_with(0, 0);
+	CHECK(esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of root is not accepted");
+
+	buf = shm_with(self, self);
+	CHECK(esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of the caller's own uid is not accepted");
+
+	buf = shm_with(other, other);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of uid %u is accepted", (unsigned int)other);
+
+	/* Handing it to root afterwards does not make it the server's */
+	buf = shm_with(other, 0);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment uid %u created and handed to root is accepted",
+	      (unsigned int)other);
+
+	/* Nor does a segment of root handed to somebody else stay trusted */
+	buf = shm_with(0, other);
+	CHECK(!esdm_shm_created_by_server(&buf, NULL),
+	      "the segment of root handed to uid %u is accepted",
+	      (unsigned int)other);
+
+	if (!mkdtemp(dir)) {
+		CHECK(0, "mkdtemp failed: %s", strerror(errno));
+		return;
+	}
+	snprintf(sock_path, sizeof(sock_path), "%s/socket", dir);
+	snprintf(file_path, sizeof(file_path), "%s/file", dir);
+
+	/* A socket that is not there names nobody */
+	buf = shm_with(other, other);
+	CHECK(!esdm_shm_created_by_server(&buf, sock_path),
+	      "a missing socket names uid %u", (unsigned int)other);
+
+	fd = bind_socket(sock_path);
+	CHECK(fd >= 0, "cannot bind %s: %s", sock_path, strerror(errno));
+
+	/* The socket's owner is the server, which is the caller here */
+	CHECK(!esdm_shm_created_by_server(&buf, sock_path),
+	      "the socket of uid %u names uid %u", (unsigned int)self,
+	      (unsigned int)other);
+
+	/* Only root can hand the socket to another uid, which then counts */
+	if (fd >= 0 && !geteuid() && !chown(sock_path, other, other)) {
+		CHECK(esdm_shm_created_by_server(&buf, sock_path),
+		      "the segment of the socket's owner %u is not accepted",
+		      (unsigned int)other);
+
+		/* A file in its place is no server's socket */
+		close(open(file_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0600));
+		CHECK_EQ(chown(file_path, other, other), 0);
+		CHECK(!esdm_shm_created_by_server(&buf, file_path),
+		      "a plain file names uid %u", (unsigned int)other);
+		unlink(file_path);
+	} else {
+		printf("esdm_shm_created_by_server: socket owner of another uid not covered, needs root\n");
+	}
+
+	if (fd >= 0)
+		close(fd);
+	unlink(sock_path);
+	rmdir(dir);
+
+	test_shm_created_by_server_privileged(other);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -415,6 +669,8 @@ int main(int argc, char *argv[])
 	test_safe_read_eintr();
 	test_safe_read_write_errors();
 	test_safe_read_write_partial_error();
+	test_fd_at_path();
+	test_shm_created_by_server();
 
 	return common_test_result("helper");
 }

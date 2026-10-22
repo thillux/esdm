@@ -31,8 +31,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include "helper.h"
 #include "math_helper.h"
 
 uint32_t esdm_online_nodes(void)
@@ -137,6 +141,79 @@ ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen)
 
 out:
 	return bytes_written;
+}
+
+int esdm_fd_at_path(int fd, const char *path)
+{
+	struct stat fd_sb, path_sb;
+
+	if (!path)
+		return -EINVAL;
+
+	if (fstat(fd, &fd_sb) == -1)
+		return -errno;
+
+	/* lstat(): a symbolic link is not the file it points to */
+	if (lstat(path, &path_sb) == -1) {
+		if (errno == ENOENT || errno == ENOTDIR)
+			return 0;
+		return -errno;
+	}
+
+	return fd_sb.st_dev == path_sb.st_dev && fd_sb.st_ino == path_sb.st_ino;
+}
+
+/*
+ * Whether the caller's own uid is one to trust: only when the caller runs with
+ * no more privileges than its user has anyway. A set-uid or set-gid program
+ * linking the aux client runs on behalf of whoever invoked it, who would
+ * otherwise create the segment while no server runs and tell the program what
+ * it likes - AT_SECURE covers those, file capabilities and security module
+ * transitions alike. A real uid other than the effective one is a program that
+ * changed its identity: the CUSE daemon, which dropped only its effective uid,
+ * keeps root as real uid, which is trusted anyway.
+ */
+static bool esdm_shm_caller_uid_trusted(void)
+{
+	return getauxval(AT_SECURE) == 0 && getuid() == geteuid();
+}
+
+/*
+ * Root, the server's uid, or the uid of an unprivileged caller: a segment the
+ * latter created can only be planted by somebody who controls the caller
+ * anyway.
+ */
+static bool esdm_shm_uid_trusted(uid_t uid, uid_t server_uid)
+{
+	return uid == 0 || uid == server_uid ||
+	       (uid == getuid() && esdm_shm_caller_uid_trusted());
+}
+
+bool esdm_shm_created_by_server(const struct shmid_ds *buf,
+				const char *server_socket)
+{
+	struct stat sb;
+	/* root, unless the socket names somebody else */
+	uid_t server_uid = 0;
+
+	if (!buf)
+		return false;
+
+	/*
+	 * Only a socket counts: a plain file at the path tells nothing about
+	 * who runs the server. Without one, no server runs that is not root.
+	 */
+	if (server_socket && !stat(server_socket, &sb) && S_ISSOCK(sb.st_mode))
+		server_uid = sb.st_uid;
+
+	/*
+	 * The creator is what matters: the owner of a segment can hand it to
+	 * any uid with IPC_SET, the creator stays. The owner is checked as
+	 * well, as the server never hands its segment to somebody else, which
+	 * could then change its permissions.
+	 */
+	return esdm_shm_uid_trusted(buf->shm_perm.cuid, server_uid) &&
+	       esdm_shm_uid_trusted(buf->shm_perm.uid, server_uid);
 }
 
 void may_enable_memory_debugging()

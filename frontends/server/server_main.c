@@ -493,39 +493,84 @@ static void install_term(void)
 	sigaction(SIGTERM, &sa, NULL);
 }
 
+/*
+ * How often a PID file removed between its open and its lock is opened again.
+ * Each attempt lost the race against an instance that removed the file while
+ * it shut down, which happens once per instance.
+ */
+#define ESDM_SERVER_PIDFILE_ATTEMPTS 8
+
 static void create_pid_file(const char *pid_file)
 {
 	char pid_str[12] = { 0 }; /* max. integer length + '\n' + null */
+	unsigned int attempt;
+	int ret;
 
 	/*
 	 * Open or create pid file, then lock it. If the lock fails,
 	 * another instance is running. If the file is stale (left
 	 * from a crash), the lock will succeed and we can reuse it.
+	 *
+	 * The lock is only worth something on the file at the path. The
+	 * instance that held it may have removed the file after we opened
+	 * it - see pidfile_release() - and released the lock, which we then
+	 * take on a file nobody sees: the next instance would create a new
+	 * one, lock it as well and run alongside us. So a file that is no
+	 * longer the one at the path is let go and the path opened again.
 	 */
-	/*
-	 * O_NOFOLLOW: do not follow a symlink planted at pid_file (the daemon
-	 * runs as root and would otherwise ftruncate()/overwrite the target).
-	 * O_CLOEXEC: do not leak the descriptor across the exec of helpers.
-	 */
-	pidfile_fd = open(pid_file, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
-			  S_IRUSR | S_IWUSR);
-	if (pidfile_fd == -1) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
-			    "Cannot open pid file\n");
-		exit(1);
-	}
-
-	if (lockf(pidfile_fd, F_TLOCK, 0) == -1) {
-		if (errno == EAGAIN || errno == EACCES) {
-			esdm_logger(
-				LOGGER_ERR, LOGGER_C_SERVER,
-				"PID file already locked, another instance running\n");
-			exit(1);
-		} else {
+	for (attempt = 1;; attempt++) {
+		/*
+		 * O_NOFOLLOW: do not follow a symlink planted at pid_file (the
+		 * daemon runs as root and would otherwise ftruncate()/overwrite
+		 * the target).
+		 * O_CLOEXEC: do not leak the descriptor across the exec of
+		 * helpers.
+		 */
+		pidfile_fd = open(pid_file,
+				  O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
+				  S_IRUSR | S_IWUSR);
+		if (pidfile_fd == -1) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
-				    "Cannot lock pid file\n");
+				    "Cannot open pid file\n");
 			exit(1);
 		}
+
+		if (lockf(pidfile_fd, F_TLOCK, 0) == -1) {
+			if (errno == EAGAIN || errno == EACCES) {
+				esdm_logger(
+					LOGGER_ERR, LOGGER_C_SERVER,
+					"PID file already locked, another instance running\n");
+				exit(1);
+			} else {
+				esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+					    "Cannot lock pid file\n");
+				exit(1);
+			}
+		}
+
+		ret = esdm_fd_at_path(pidfile_fd, pid_file);
+		if (ret == 1)
+			break;
+		if (ret < 0) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+				    "Cannot check pid file: %s\n",
+				    strerror(-ret));
+			exit(1);
+		}
+
+		close(pidfile_fd);
+		pidfile_fd = -1;
+
+		if (attempt >= ESDM_SERVER_PIDFILE_ATTEMPTS) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_SERVER,
+				"PID file keeps being removed, other instances starting and stopping\n");
+			exit(1);
+		}
+
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_SERVER,
+			"PID file removed after it was opened, opening it again\n");
 	}
 
 	if (ftruncate(pidfile_fd, 0) == -1) {

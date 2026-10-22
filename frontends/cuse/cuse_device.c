@@ -133,6 +133,19 @@ static int esdm_cuse_shm_status_new_shmid(void)
 	if (shmctl(shmid, IPC_STAT, &buf) < 0 || buf.shm_nattch == 0)
 		return -1;
 
+	/*
+	 * Somebody else may have created the segment while the server does
+	 * not run, and stay attached to it - the server only removes it once
+	 * it starts. Its contents would tell the poll path and the
+	 * O_NONBLOCK readers whatever its creator likes.
+	 */
+	if (!esdm_shm_created_by_server(&buf, ESDM_RPC_UNPRIV_SOCKET)) {
+		esdm_logger(
+			LOGGER_DEBUG, LOGGER_C_CUSE,
+			"Shared memory segment not created by the ESDM server ignored\n");
+		return -1;
+	}
+
 	return shmid;
 }
 
@@ -426,13 +439,6 @@ static int esdm_cuse_drop_privileges(void)
 
 	if (esdm_cuse_dropped)
 		return 0;
-
-	/*
-	 * The namespaces are hardening on top of the privilege drop, a failure
-	 * to enter them is logged. It must not keep the daemon from dropping
-	 * its privileges.
-	 */
-	esdm_cuse_isolate_namespace();
 
 	/* Without root, there is nothing to drop */
 	if (geteuid() != 0)
@@ -764,6 +770,47 @@ static bool esdm_cuse_read_would_block(fuse_req_t req)
 	return !ret && !fully_seeded;
 }
 
+/*
+ * How long one chunk of an O_NONBLOCK read of seeded randomness may take.
+ *
+ * esdm_cuse_read_would_block() only tells how the ESDM was a moment ago.
+ * Should it stop being fully seeded before the data is requested - e.g. as an
+ * entropy source failed its health test - the blocking RPC call would ask again
+ * and again until it is seeded once more, which may be never, and keep the
+ * worker thread all along. The timed call ends there instead.
+ *
+ * A zero timeout does not do: the deadline has passed already when the RPC
+ * client is about to send the request, so it gives up without asking the ESDM
+ * at all. The timeout thus bounds how long a non-blocking reader may be held in
+ * this case. It is generous next to the round trip of a request that is served
+ * at once, so that a busy system does not report a seeded ESDM as EAGAIN.
+ */
+#define ESDM_CUSE_NONBLOCK_TIMEOUT_NS 500000000L
+
+/*
+ * esdm_rpcc_get_random_bytes_full_int for an O_NONBLOCK reader: -EAGAIN once
+ * the ESDM did not serve within ESDM_CUSE_NONBLOCK_TIMEOUT_NS. The timed call
+ * ends with -ETIMEDOUT also when the interrupt function abandons the request
+ * before the deadline - a reader that was interrupted keeps that, so that it is
+ * told EINTR, see esdm_cuse_read_internal().
+ */
+static ssize_t esdm_cuse_get_random_bytes_full_nonblock_int(uint8_t *buf,
+							    size_t buflen,
+							    void *int_data)
+{
+	struct timespec ts = { .tv_sec = 0,
+			       .tv_nsec = ESDM_CUSE_NONBLOCK_TIMEOUT_NS };
+	fuse_req_t req = (fuse_req_t)int_data;
+	ssize_t ret;
+
+	ret = esdm_rpcc_get_random_bytes_full_timeout_int(buf, buflen, &ts,
+							  int_data);
+	if (ret == -ETIMEDOUT && !(req && fuse_req_interrupted(req)))
+		return -EAGAIN;
+
+	return ret;
+}
+
 void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			     struct fuse_file_info *fi, get_func_t get,
 			     int fallback_fd)
@@ -794,6 +841,14 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		get = (fi->flags & O_NONBLOCK) ?
 			      esdm_rpcc_get_random_bytes_pr_nonblock_int :
 			      esdm_rpcc_get_random_bytes_pr_int;
+
+	/*
+	 * The seeded state checked below may be gone by the time the data is
+	 * requested, which the blocking call would wait out.
+	 */
+	if ((fi->flags & O_NONBLOCK) &&
+	    get == esdm_rpcc_get_random_bytes_full_int)
+		get = esdm_cuse_get_random_bytes_full_nonblock_int;
 
 	/*
 	 * Everything but the plain urandom read blocks until the ESDM is
@@ -848,9 +903,23 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		 * short read, nothing read is EAGAIN.
 		 */
 		if (ret == -EAGAIN &&
-		    get == esdm_rpcc_get_random_bytes_pr_nonblock_int) {
+		    (get == esdm_rpcc_get_random_bytes_pr_nonblock_int ||
+		     get == esdm_cuse_get_random_bytes_full_nonblock_int)) {
 			if (read_bytes)
 				break;
+			goto out;
+		}
+
+		/*
+		 * An interrupted reader is no failure of the ESDM to cover for:
+		 * the kernel still waits for the reply on a signal that does not
+		 * kill the caller, which would get the fallback's bytes before
+		 * the ESDM is seeded. It gets what was read, or EINTR.
+		 */
+		if (ret < 0 && fuse_req_interrupted(req)) {
+			if (read_bytes)
+				break;
+			ret = -EINTR;
 			goto out;
 		}
 
@@ -940,6 +1009,12 @@ void esdm_cuse_write_internal(fuse_req_t req, const char *buf, size_t size,
 	goto out;
 
 err:
+	/* As for a read, an interrupted writer is not served by the fallback */
+	if (ret < 0 && fuse_req_interrupted(req)) {
+		ret = written ? 0 : -EINTR;
+		goto out;
+	}
+
 	/*
 	 * If call to the ESDM server failed, let us fall back to the
 	 * fallback file descriptor. It writes the entire buffer into the
@@ -1088,55 +1163,62 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 					     sizeof(struct rand_pool_info) };
 
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
-		} else if (rpi->buf_size < 0) {
-			fuse_reply_err(req, EINVAL);
-		} else if ((size_t)rpi->buf_size !=
-			   in_bufsz - sizeof(struct rand_pool_info)) {
+			break;
+		}
+		if (rpi->buf_size >= 0 &&
+		    (size_t)rpi->buf_size !=
+			    in_bufsz - sizeof(struct rand_pool_info)) {
 			struct iovec iov = { arg,
 					     sizeof(struct rand_pool_info) +
 						     (size_t)rpi->buf_size };
 
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
-		} else if (rpi->entropy_count < 0 ||
-			   (uint64_t)rpi->entropy_count >
-				   (uint64_t)rpi->buf_size * 8) {
-			/*
-			 * Reject a negative entropy_count (which would otherwise
-			 * become a huge value once cast to uint32_t) and any
-			 * claim of more entropy bits than the supplied buffer
-			 * can hold, mirroring the kernel's RNDADDENTROPY check.
-			 */
-			fuse_reply_err(req, EINVAL);
-		} else {
-			/*
-			 * This operation requires privileges. Thus, raise the
-			 * privilege level to the same level as the caller has.
-			 */
-			ret = esdm_cuse_priv_call_start(req);
-			if (ret) {
-				fuse_reply_err(req, ret);
-				return;
-			}
-
-			esdm_invoke(esdm_rpcc_rnd_add_entropy_int(
-				(const uint8_t *)rpi->buf,
-				(size_t)rpi->buf_size,
-				(uint32_t)rpi->entropy_count, req));
-
-			/* In case of an error, update the kernel */
-			if (ret && !esdm_cuse_priv_in_progress(&ret)) {
-				if (backend_fd >= 0 &&
-				    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
-					ret = -errno;
-				else
-					ret = 0;
-			}
-			esdm_cuse_drop_privilege_transient();
-			if (ret)
-				fuse_reply_err(req, -ret);
-			else
-				fuse_reply_ioctl(req, 0, NULL, 0);
+			break;
 		}
+
+		/*
+		 * This operation requires privileges. Thus, raise the
+		 * privilege level to the same level as the caller has. As the
+		 * kernel, check the caller before the request's fields.
+		 */
+		ret = esdm_cuse_priv_call_start(req);
+		if (ret) {
+			fuse_reply_err(req, ret);
+			return;
+		}
+
+		/*
+		 * The kernel refuses a negative entropy_count, which would
+		 * become a huge value once cast to uint32_t. A count beyond
+		 * the bits of the buffer it takes, as the kernel does, but
+		 * credits no more than the buffer can hold.
+		 */
+		if (rpi->buf_size < 0 || rpi->entropy_count < 0) {
+			esdm_cuse_drop_privilege_transient();
+			fuse_reply_err(req, EINVAL);
+			return;
+		}
+		ent_count_bits = (uint32_t)min_uint64(
+			(uint64_t)rpi->entropy_count,
+			(uint64_t)rpi->buf_size * 8);
+
+		esdm_invoke(esdm_rpcc_rnd_add_entropy_int(
+			(const uint8_t *)rpi->buf, (size_t)rpi->buf_size,
+			ent_count_bits, req));
+
+		/* In case of an error, update the kernel */
+		if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+			if (backend_fd >= 0 &&
+			    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
+				ret = -errno;
+			else
+				ret = 0;
+		}
+		esdm_cuse_drop_privilege_transient();
+		if (ret)
+			fuse_reply_err(req, -ret);
+		else
+			fuse_reply_ioctl(req, 0, NULL, 0);
 		break;
 	case RNDZAPENTCNT:
 	case RNDCLEARPOOL:
@@ -1429,8 +1511,13 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 		esdm_cuse_set_pollmask(fi->poll_events, &mask);
 		fuse_reply_poll(req, mask);
 
-		if (mask) {
-			/* Event already available (replied above). */
+		if (mask || !ph) {
+			/*
+			 * Event already available (replied above), or a poll
+			 * that does not wait (e.g. timeout 0) and passes no
+			 * handle: registering it would leave a node without
+			 * handle, which marks a suspend wake-up.
+			 */
 			fuse_notify_poll(ph);
 			fuse_pollhandle_destroy(ph);
 		} else {
@@ -1912,6 +1999,15 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			esdm_cuse_term_signals,
 			ARRAY_SIZE(esdm_cuse_term_signals), NULL));
 	}
+
+	/*
+	 * Namespaces are per thread: enter them before libfuse and the thread
+	 * pool start any, so that every thread serving the device is isolated.
+	 * They are hardening on top of the privilege drop, a failure to enter
+	 * them is only logged.
+	 */
+	if (!param.is_help)
+		esdm_cuse_isolate_namespace();
 
 	/* One thread group */
 	CKINT(thread_init(1));

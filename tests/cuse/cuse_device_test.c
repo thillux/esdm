@@ -38,11 +38,15 @@
  *
  * The one exception is the non-blocking prediction resistant read, whose
  * EAGAIN is an answer of the ESDM rather than a failure. It is replaced by
- * test_pr_nonblock() below, which answers as scripted. So are the privileged
- * calls, whose -EINPROGRESS is no failure to cover for either.
+ * test_pr_nonblock() below, which answers as scripted. The same holds for the
+ * timed call a non-blocking read of seeded randomness takes, whose -ETIMEDOUT
+ * means the ESDM stopped being seeded - test_full_timeout() answers it from the
+ * same script. So are the privileged calls, whose -EINPROGRESS is no failure to
+ * cover for either.
  */
 
 #define esdm_rpcc_get_random_bytes_pr_nonblock_int test_pr_nonblock
+#define esdm_rpcc_get_random_bytes_full_timeout_int test_full_timeout
 #define esdm_rpcc_rnd_add_to_ent_cnt_int test_add_to_ent_cnt
 #define esdm_rpcc_rnd_add_entropy_int test_add_entropy
 #define esdm_rpcc_rnd_clear_pool_int test_clear_pool
@@ -90,6 +94,9 @@ static struct {
 
 /* The caller every handler below sees */
 static struct fuse_ctx test_ctx;
+
+/* The entropy count the last RNDADDENTROPY handed to the ESDM */
+static uint32_t added_entropy_cnt;
 
 static unsigned int notify_calls;
 static unsigned int destroy_calls;
@@ -412,13 +419,13 @@ static void test_ioctl_compat(void)
 	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
 
 	/* And the data transferred is checked as for one */
+	caller_is_root(true);
 	rpi->buf_size = 4;
-	rpi->entropy_count = 33;
+	rpi->entropy_count = -1;
 	compat_ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
 
-	caller_is_root(true);
 	compat_ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
@@ -459,9 +466,10 @@ static void test_ioctl_retries(void)
 
 /*
  * What the kernel's own RNDADDENTROPY rejects, this one has to reject as well:
- * a negative buffer size, and a claim of more entropy than the buffer can hold.
- * A caller getting either past this check would move the ESDM's entropy
- * estimate with data that does not carry the entropy.
+ * a negative buffer size and a negative entropy count, after the check of the
+ * caller as in the kernel. A claim of more entropy than the buffer can hold the
+ * kernel takes, and so does this one, but the ESDM is credited no more than the
+ * buffer holds.
  */
 static void test_ioctl_addentropy_rejected(void)
 {
@@ -474,24 +482,36 @@ static void test_ioctl_addentropy_rejected(void)
 	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
 	const size_t datalen = 32;
 
+	caller_is_root(true);
+
 	rpi->buf_size = -1;
 	rpi->entropy_count = 8;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, drop_calls);
 
 	rpi->buf_size = (int)datalen;
 	rpi->entropy_count = -1;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, drop_calls);
 
 	/* More bits than the buffer holds */
 	rpi->buf_size = (int)datalen;
 	rpi->entropy_count = (int)datalen * 8 + 1;
+	added_entropy_cnt = 0;
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_IOCTL);
+	CHECK_EQ(added_entropy_cnt, datalen * 8);
+
+	/* The privilege check comes first, as in the kernel */
+	caller_is_root(false);
+	rpi->entropy_count = -1;
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(reply.err, EPERM);
 }
 
 /*
@@ -1042,8 +1062,8 @@ int test_add_entropy(const uint8_t *entropy_buf, size_t entropy_buf_len,
 {
 	(void)entropy_buf;
 	(void)entropy_buf_len;
-	(void)entropy_cnt;
 	(void)int_data;
+	added_entropy_cnt = entropy_cnt;
 	return priv_rpc_ret;
 }
 
@@ -1239,6 +1259,17 @@ ssize_t test_pr_nonblock(uint8_t *buf, size_t buflen, void *int_data)
 	return ret;
 }
 
+/* The timeout test_full_timeout() was called with last */
+static struct timespec full_timeout_ts;
+
+ssize_t test_full_timeout(uint8_t *buf, size_t buflen, struct timespec *ts,
+			  void *int_data)
+{
+	full_timeout_ts = *ts;
+
+	return test_pr_nonblock(buf, buflen, int_data);
+}
+
 static void pr_script_set(ssize_t first, ssize_t second, ssize_t third)
 {
 	pr_script[0] = first;
@@ -1315,6 +1346,55 @@ static void test_read_pr_nonblock(int fd)
 	pr_script_len = 0;
 }
 
+/*
+ * A non-blocking read of a seeded ESDM. It may stop being seeded before the
+ * data is requested, for which the blocking call would wait - so the timed one
+ * is taken, which gives up with -ETIMEDOUT. That is the ESDM's answer as well,
+ * no failure the kernel device is to cover for.
+ */
+static void test_read_full_nonblock(int fd)
+{
+	/* Nothing read: the reader is told to try again */
+	pr_script_set(-ETIMEDOUT, 32, 32);
+	read_call_size(O_NONBLOCK, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(pr_calls, 1);
+
+	/*
+	 * A zero timeout would end the call before it asks the ESDM at all,
+	 * and the bound is what a non-blocking reader may be held at most.
+	 */
+	CHECK(full_timeout_ts.tv_sec || full_timeout_ts.tv_nsec,
+	      "the non-blocking read never asks the ESDM");
+	CHECK(full_timeout_ts.tv_sec < 2,
+	      "the non-blocking read may be held for %ld s",
+	      (long)full_timeout_ts.tv_sec);
+
+	/* A full chunk, then the timeout: a short read of that chunk */
+	pr_script_set(ESDM_RPC_MAX_DATA, -ETIMEDOUT, 32);
+	read_call_size(O_NONBLOCK, ESDM_RPC_MAX_DATA + 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, ESDM_RPC_MAX_DATA);
+	CHECK_EQ(pr_calls, 2);
+
+	/* Served in time, it is a full read of what the ESDM gave */
+	pr_script_set(32, -ETIMEDOUT, -ETIMEDOUT);
+	read_call_size(O_NONBLOCK, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
+	CHECK(reply_is_pr_bytes(), "the read is not what the ESDM gave");
+	CHECK_EQ(pr_calls, 1);
+
+	/* An ESDM that cannot be reached is covered by the fallback */
+	pr_script_len = 0;
+	pr_calls = 0;
+	read_call_size(O_NONBLOCK, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
+	CHECK_EQ(pr_calls, 1);
+}
+
 static void test_read_nonblock(void)
 {
 	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -1357,6 +1437,7 @@ static void test_read_nonblock(void)
 	CHECK_EQ(reply.size, 32);
 
 	test_read_pr_nonblock(fd);
+	test_read_full_nonblock(fd);
 	atomic_store(&esdm_cuse_shm_status->operational, false);
 
 	close(fd);
