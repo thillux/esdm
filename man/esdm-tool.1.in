@@ -237,6 +237,19 @@ Automatic reseeding of the auxiliary pool from the same source.
 .BR \-\-reseed\-delay\-ms " \fIMSEC\fR"
 Delay inserted before each reseed, to emulate the latency of a smartcard or a
 TPM.
+.SS FIPS integrity check
+Only available when the ESDM was built with FIPS 140 support. Both options
+have to be given together.
+.TP
+.BR \-F ", " \-\-fips\-targetfile " \fIPATH\fR"
+The file whose HMAC is to be recorded, e.g. the ESDM library.
+.TP
+.BR \-C ", " \-\-fips\-checkfile " \fIPATH\fR"
+Create the check file holding that HMAC at
+.IR PATH ,
+or write the HMAC to standard output for
+.BR \- .
+An existing file is not overwritten.
 .SH EXIT STATUS
 .B esdm\-tool
 exits with status 0 on success. The query options

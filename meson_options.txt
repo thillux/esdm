@@ -814,13 +814,14 @@ option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
        Therefore 'drng_max_reseed_bits' always has to be larger than
        'drng_reseed_threshold_bits'.
 
-       Set this setting to anything lower than 131072 (2**17) to enforce
-       DRG.4.10 of AIS 20/31 Version 3.0. E.g. 65536 (2**16) and
-       'drng_max_reseed_bits' to 131072 (2**17).
+       Set 'drng_max_reseed_bits' to 131072 (2**17) or lower to enforce
+       DRG.4.10 of AIS 20/31 Version 3.0.
 
-       Both specified limits of 2**17 and 2**16 are applied unless smaller
-       values are configured when the options sp80090c, fips140 and/or
-       ais2031_drg4 are defined.
+       When the options sp80090c, fips140 and/or ais2031_drg4 are defined,
+       'drng_max_reseed_bits' is capped at 131072 (2**17) and this option
+       at three quarters of the resulting maximum, i.e. 98304 bits, unless
+       smaller values are configured. The option ais2031_drg3 skips both
+       caps.
        ''')
 
 option('drng_max_reseed_bits', type: 'integer', value: 0xffffffff,
@@ -1012,15 +1013,17 @@ wrapper around interfaces offered by ESDM that can be directly used.''')
 option('client-connect-timeout-exponent', type: 'integer', min: 20, max: 29, value: 28,
        description: '''Timeout for ESDM client/server connection
 
-Set the rpc client connect timeout to
+Set the pause of the rpc client between two connection attempts to
 1 << VAL nanoseconds. Change the default with care/know the consequences!
 (perform tests under load, ...)''')
 
 option('client-rx-tx-timeout-exponent', type: 'integer', min: 20, max: 29, value: 28,
        description: '''Timeout for ESDM client/server rx/tx operations
 
-Set the rpc client send/receive timeout to
-1 << VAL nanoseconds. Change the default with care/know the consequences!
+Set the rpc client send timeout, and the interval at which it checks for an
+interruption while waiting for an answer, to 1 << VAL nanoseconds. The wait for
+the answer is fixed (about 1.6 seconds per submission, 6.4 seconds in total).
+Change the default with care/know the consequences!
 (perform tests under load, ...)''')
 
 option('client-reconnect-attempts', type: 'integer', min: 5, max: 30, value: 10,

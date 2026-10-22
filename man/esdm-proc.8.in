@@ -41,6 +41,15 @@ every request. Writable.
 Identifies the provider as the ESDM. This file has no counterpart in the
 kernel and lets a consumer tell the two apart.
 .PP
+A writable file takes a single non\-negative number, in decimal, octal or
+hexadecimal notation, optionally surrounded by white space such as the newline
+.BR echo (1)
+appends, in a write of less than 32 bytes. Anything else, a longer write
+included, is refused with
+.BR EINVAL ,
+a number of 4294967295 (2^32\-1) or more with
+.BR ERANGE .
+.PP
 The daemon needs to be started as root to mount over
 .IR /proc/sys/kernel/random .
 On systemd installations it is normally started through the shipped

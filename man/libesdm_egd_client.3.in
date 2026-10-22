@@ -58,6 +58,15 @@ connection in the child; the next operation there opens one of its own. Should
 the fork have bypassed the handler \- a direct
 .BR clone (2),
 say \- the client notices at its next use and reconnects then.
+.IP \(bu 2
+An application may close the client's descriptor behind its back \- OpenSSH
+runs
+.BR closefrom (3)
+on its way into the pre\-authentication child \- and the number may be taken by
+whatever it opens next. Before every operation the client confirms that the
+descriptor still is the connection it made, by the socket cookie or, where the
+kernel has none, by the peer's address. One that is not is left to the
+application, never closed by the client, and a fresh connection is made.
 .RE
 .SH FUNCTIONS
 .TP
@@ -132,12 +141,16 @@ Once connected, the operations stay within
 .BR read (2),
 .BR write (2),
 .BR poll (2),
+.BR rt_sigprocmask (2),
 .BR close (2),
 .BR getpid (2),
 .BR clock_gettime (2),
-.BR nanosleep (2)
-and
-.BR getsockopt (2).
+.BR nanosleep (2),
+.BR getsockopt (2)
+and \- on a kernel without socket cookies \-
+.BR getpeername (2),
+the latter two to confirm before every operation that the descriptor still is
+the connection made earlier.
 That is deliberate: it is the set a seccomp confined process is typically still
 allowed, OpenSSH's pre\-auth sandbox being the reference case. In particular
 .BR send (2)/ recv (2)
@@ -147,9 +160,16 @@ which that filter answers with
 .B SECCOMP_RET_KILL
 \- and
 .B MSG_NOSIGNAL
-is therefore not available, so a write is preceded by a poll that catches a
-vanished peer before it could raise
-.BR SIGPIPE .
+is therefore not available:
+.B SIGPIPE
+is blocked around a write instead. Should the peer vanish right before a write,
+the
+.B SIGPIPE
+it raises is taken off with
+.BR sigtimedwait (2)
+\- unless
+.B SIGPIPE
+was ignored when the connection was made, as it is in OpenSSH.
 .PP
 Establishing a connection is a different matter: it needs
 .BR socket (2)
@@ -161,6 +181,16 @@ connected before the sandbox is entered \- which is why
 .BR esdm_egd_client_alloc ()
 connects rather than deferring it. A process that forks into a sandbox cannot
 be served at all, since the fork forces a reconnect.
+.PP
+.BR esdm\-server (8)
+keeps such a connection open for as long as it sits idle, unless it runs short
+of them: an idle connection is only closed once nearly all connection slots or
+descriptors of the server are taken, or the UID of the consumer is being refused
+further connections. Even then, the connections closed are those of the UIDs
+holding the most of them, so a user who fills the slots cannot have the
+connections of everybody else closed. A sandboxed consumer whose connection is closed
+nevertheless \- that way, or by a restart of the daemon \- is killed by its
+sandbox on the reconnect.
 .SH ENVIRONMENT
 .TP
 .B ESDM_EGD_SOCKET

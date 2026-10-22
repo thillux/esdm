@@ -1,4 +1,4 @@
-.TH ESDM\-SERVER 8 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH ESDM\-SERVER 8 "2026-10-09" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 esdm\-server \- Entropy Source and DRNG Manager daemon
 .SH SYNOPSIS
@@ -63,6 +63,18 @@ option implies
 .BR \-p ", " \-\-pid " \fIFILE\fR"
 Write the PID of the daemon to
 .IR FILE .
+The daemon keeps the file locked for as long as it runs, its shutdown included,
+so another instance cannot start before it is gone. It writes the file
+before it drops its privileges, and can then no longer remove it from a
+directory only root may write to, such as
+.IR /run .
+So at shutdown it empties the file instead, which then names no process; the
+next start reuses it, and systemd removes the file of a service configured with
+.B PIDFile=
+itself. With
+.BR \-\-pid_namespace ,
+the file names the supervisor, which keeps its privileges and removes the file
+when it exits.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 Unprivileged user to switch to after the privileged initialization. Defaults
@@ -120,6 +132,16 @@ Serve the EGD protocol backed by the prediction\-resistance generator on
 .IR PATH .
 The EGD protocol cannot select the generator per request, hence the separate
 socket.
+.TP
+.BR \-\-pkcs11_module " \fIPATH\fR"
+Load the PKCS#11 provider module
+.I PATH
+for the PKCS#11 entropy source instead of the module the build was configured
+with (meson option
+.BR es_pkcs11_module_path ).
+The module is loaded while the daemon still has its privileges. Refused by a
+build without the PKCS#11 entropy source (meson option
+.BR es_pkcs11 ).
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP
@@ -131,6 +153,75 @@ consumers waiting on it notice that the daemon is about to be suspended. This
 is what
 .BR esdm\-server\-signal\-helper (8)
 sends before the system goes to sleep.
+.SH CONNECTION LIMITS
+All interfaces share the file descriptor limit of the daemon (the shipped
+.B esdm\-server.service
+sets
+.BR LimitNOFILE=8192 ).
+So that no single local user can exhaust it and lock every other consumer out,
+the daemon bounds the connections of each unprivileged user. Processes running
+as root are exempt. A user is not simply the UID of the connecting process: an
+unprivileged user may map the UIDs of its subordinate range in a user
+namespace and connect as each of them, and these count as the user's own. A
+process in a user namespace other than the daemon's is counted as the owner of
+the outermost user namespace between the two that is not owned by root, as far
+as the kernel shows the daemon that namespace \- which, once the daemon
+dropped its privileges, it does only for processes it may trace. Otherwise, a
+UID within a range of
+.I /etc/subuid
+counts as the user owning the range, unless that is root or does not resolve
+to a UID; changes of the file take effect within a second. Any other UID is a
+user of its own, and so is each UID of a user namespace that root created and
+filled itself, such as that of a container.
+.TP
+.B RPC interface
+At most 16 concurrent connections per online CPU and user, counted over all
+RPC connections of all server threads - a client process holds up to one
+connection per online CPU. The bound is at least 512 and at most half of the
+file descriptor limit of the daemon; it is logged at startup. A connection that has been idle for the period set by the
+.B esdm\-server\-rpc\-idle\-timeout\-usec
+build option (2 seconds by default) is closed;
+.BR libesdm_rpc_client (3)
+reconnects transparently.
+The unprivileged connections of all UIDs together leave 2560 descriptors, but
+at most half of the limit, to the EGD and privileged interfaces. This bound is
+split evenly over the server threads, at most 1024 connections each, and logged
+at startup. A thread whose share is taken leaves new connections to the others.
+Once all shares are taken, a thread does not refuse a new connection but
+closes one of its idle ones \- the least recently used one of the user holding
+the most connections in that thread. A connection with a request not read yet
+is never closed for that, nor is one of the privileged interface. One with an
+answer its client has not read yet is closed only when no idle one is left; the
+client still reads that answer.
+.TP
+.B EGD interface
+Served by one worker thread per online CPU, at most four, each serving the
+clients it accepted. At most 2048 concurrent connections in total and 256 per
+user. A connection
+that has received no command and owes no response for 60 seconds is closed
+only when its slot is wanted: at most 256 slots are left, an accept ran out of
+descriptors within that time, or its user was refused a connection and is still
+at its limit. While slots are short, only the idle connections of the users
+holding the most connections are closed, never those of root. Once all slots
+are taken, a new
+connection is not left waiting but a connection is closed to make room for it
+\- one of a user holding the most connections of all, preferably of the user
+of the new connection, the least recently active one with nothing owed to its
+client if there is one, and never one of root or of a user holding fewer. A
+server thread that serves no connection of such a user leaves the new
+connection to the others, or turns it away.
+.BR libesdm_egd_client (3)
+reconnects transparently, which a client confined by seccomp after it connected
+may not survive.
+A worker thread spends at most 25 ms per round of its event loop on generating
+prediction resistant data, one generation per connection, so that the clients
+of the prediction resistant socket cannot hold up the others of that thread;
+a request beyond that waits for the next round, which follows at once.
+.PP
+A connection beyond the limit of its user is accepted and closed at once. The
+daemon logs a warning when a user reaches its limit, and again only after the
+user has dropped below its limit in between. Apart from the scaling of the RPC bound, these limits are compile\-time
+constants.
 .SH FILES
 .TP
 .I /run/esdm\-rpc\-unpriv.socket

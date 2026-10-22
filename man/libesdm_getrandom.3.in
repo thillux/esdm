@@ -46,7 +46,15 @@ argument of
 .BR getrandom (2)
 keeps its usual meaning:
 .B GRND_NONBLOCK
-does not wait for the ESDM to be seeded,
+does not wait for the ESDM to be seeded \- nor, together with
+.BR GRND_RANDOM ,
+for a prediction\-resistance generator that is busy with another request \-
+and fails with
+.B EAGAIN
+instead. Should the ESDM stop being fully seeded while a request is served,
+the call waits about half a second for it, and then returns the data obtained
+until then or, without any, fails with
+.BR EAGAIN .
 .B GRND_RANDOM
 selects the prediction\-resistance generator, and
 .B GRND_INSECURE

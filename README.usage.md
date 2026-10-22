@@ -49,10 +49,14 @@ all can be applied.
 
 ### Lower Connection Timeout
 
-The timeout for the conenction to the ESDM server can be lowered by setting
-the configuration option `client-timeout-exponent` is set to a value of,
-for example, 22 which implies that after 4ms wait time the connection is
-closed and reopened.
+The waits of the connection to the ESDM server can be lowered with the
+configuration options `client-connect-timeout-exponent` (the pause between two
+connection attempts) and `client-rx-tx-timeout-exponent` (the wait for the
+socket to take a request, and the interval at which a client waiting for an
+answer checks whether to give up). Setting them to, for example, 22 implies
+waits of 4ms. The wait for an answer itself is fixed: an unprivileged request
+is sent again on a new connection after about 1.6 seconds, and given up after
+about 6.4.
 
 ### Increase Scheduling Priority of ESDM Daemons
 
@@ -139,8 +143,9 @@ same amount of entropy does not replace it.
 
 The compile time option of `ais2031_drg4` is independent of it and caps the
 request size based reseeding limits to the values required by DRG.4.10 of the
-same standard, i.e. a reseed is attempted after 2**16 output bits and the fully
-seeded state is lost after 2**17 output bits without a successful reseed.
+same standard, i.e. the fully seeded state is lost after 2**17 output bits
+without a successful reseed, and a reseed is attempted after three quarters of
+that, 98304 output bits. The option `ais2031_drg3` skips these caps.
 
 ## AIS 20/31 (2011) Compliance
 
@@ -288,7 +293,8 @@ one socket, for instance:
 
   Without the `egd_socket` key the socket is taken from the `ESDM_EGD_SOCKET`
   environment variable and, failing that, from the path the respective provider
-  was built with.
+  was built with. The variable names the ordinary socket, so the `-pr` provider
+  skips it.
 
 ### Prediction resistance
 

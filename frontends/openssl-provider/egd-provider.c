@@ -681,12 +681,14 @@ DSO_PUBLIC int OSSL_provider_init(const OSSL_CORE_HANDLE *handle,
 
 	/*
 	 * The socket named in this provider's openssl.cnf section wins; with
-	 * none configured the client library falls back to the environment and
-	 * then to the esdm-server-egd.socket path. This also establishes the one
-	 * connection used for the provider's lifetime. An ESDM that is not up
-	 * yet is not fatal - the client retries, and refusing to load would take
-	 * the whole OpenSSL configuration down. Use the provider self test where
-	 * that should be a hard failure.
+	 * none configured the PR variant takes the path of its socket, and the
+	 * other one leaves it to the client library, which falls back to the
+	 * environment - naming the ordinary socket, hence not for the PR
+	 * variant - and then to the esdm-server-egd.socket path. This also
+	 * establishes the one connection used for the provider's lifetime.
+	 * An ESDM that is not up yet is not fatal - the client retries, and
+	 * refusing to load would take the whole OpenSSL configuration down. Use
+	 * the provider self test where that should be a hard failure.
 	 */
 	socket_path = esdm_prov_get_conf_param(handle,
 					       ESDM_EGD_SOCKET_CONF_KEY);

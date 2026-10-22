@@ -51,6 +51,22 @@ For process shutdown paths where the other users cannot be reached.
 .BI "void esdm_rpcc_force_fini_priv_service(void);"
 The same for the privileged endpoint.
 .TP
+.BI "int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **" rpc_conn ", void *" int_data ");"
+.TP
+.BI "void esdm_rpcc_put_unpriv_service(esdm_rpc_client_connection_t *" rpc_conn ");"
+.TP
+.BI "int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **" rpc_conn ", void *" int_data ");"
+.TP
+.BI "void esdm_rpcc_put_priv_service(esdm_rpc_client_connection_t *" rpc_conn ");"
+Check a connection handle of the respective endpoint out of the pool and
+return it, for applications issuing requests on a handle themselves. The
+service must be initialized; the get calls do not establish it and fail with
+.B \-EFAULT
+otherwise, or with
+.B \-ESHUTDOWN
+while it is being torn down. The handle belongs to the pool and must not be
+freed. Passing NULL to a put call is a no\-op.
+.TP
 .BI "int esdm_rpcc_set_max_online_nodes(uint32_t " nodes ");"
 Limit the number of connection pool nodes the client keeps. Call before
 initializing a service.
@@ -67,16 +83,41 @@ form with a NULL
 .SS Obtaining random data
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes(uint8_t *" buf ", size_t " buflen ");"
-Random data without a guarantee that the ESDM is fully seeded.
+Random data without a guarantee that the ESDM is fully seeded. A request the
+ESDM answers with
+.B \-EAGAIN
+\- the DRNG serving it reached its maximum output without full reseed \- is
+sent again, at once and, should that be answered the same way, after a second.
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_full(uint8_t *" buf ", size_t " buflen ");"
 Random data, blocking until the ESDM is fully seeded.
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *" buf ", size_t " buflen ", struct timespec *" ts ");"
-The same, bounded by a timeout.
+The same, bounded by the relative timeout
+.IR ts ,
+after which it returns
+.BR \-ETIMEDOUT ,
+or the error of the last connection attempt when the server could not be
+reached until then.
+A
+.I ts
+with a negative field or a
+.I tv_nsec
+of a second or more is refused with
+.BR \-EINVAL .
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes_pr(uint8_t *" buf ", size_t " buflen ");"
 Random data with prediction resistance.
+.TP
+.BI "ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *" buf ", size_t " buflen ");"
+The same, but where the ESDM cannot serve prediction resistant data right away
+\- it is not operational yet, another prediction resistant request is in
+flight, or the server thread already spent its share of the current round on
+collections from the entropy sources, see
+.BR esdm_rpcc_get_seed ()
+\- it returns the data obtained so far, or
+.B \-EAGAIN
+if that is none, rather than waiting.
 .TP
 .BI "ssize_t esdm_rpcc_get_seed(uint8_t *" buf ", size_t " buflen ", unsigned int " flags ");"
 Seed material taken directly from the entropy sources, for callers seeding a
@@ -88,17 +129,53 @@ and
 .BR ESDM_GET_SEED_FULLY_SEEDED ;
 see
 .BR libesdm (3)
-for the layout of the returned buffer.
+for the layout of the returned buffer. The server collects the seed without
+waiting, and answers
+.B \-EAGAIN
+when it cannot right away: the ESDM is not fully seeded yet, another seed is
+being collected, or the server thread already spent its share of the current
+round on collections from the entropy sources \- requests for seeds and for
+prediction resistant data share it. With
+.BR ESDM_GET_SEED_NONBLOCK ,
+that is returned; without it, the request is sent again after a pause until
+it is served.
 .SS Status
 .TP
 .BI "int esdm_rpcc_status(char *" buf ", size_t " buflen ");"
-Status of the ESDM and its entropy sources as human readable text.
+Status of the ESDM and its entropy sources as human readable text. A report
+that does not fit into
+.I buflen
+is cut short there, still NUL\-terminated, and
+.B \-EMSGSIZE
+is returned. The server caps the report at just under 64 KiB
+.RB ( ESDM_RPC_MAX_STATUS_DATA );
+a longer one arrives cut short in the same way, with the same return value.
 .TP
 .BI "int esdm_rpcc_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document.
+The same information as a JSON document. A document is never cut short: when it
+does not fit into
+.I buflen
+or exceeds the cap of the server,
+.B \-EMSGSIZE
+is returned. On any error,
+.I buf
+holds the empty string rather than a partial or stale document.
+.TP
+.BI "int esdm_rpcc_drng_status_json(uint32_t " node ", char *" buf ", size_t " buflen ");"
+Status of the DRNG instance of
+.I node
+as a JSON document, with the error handling of
+.BR esdm_rpcc_status_json ().
+.B \-ENODEV
+means the node has no DRNG instance.
+.TP
+.BI "int esdm_rpcc_drng_status_pr_json(char *" buf ", size_t " buflen ");"
+The same for the DRNG instance serving prediction resistant requests.
 .TP
 .BI "int esdm_rpcc_jent_status(char *" buf ", size_t " buflen ");"
-Internal status of the Jitter RNG entropy source.
+Internal status of the Jitter RNG entropy source as a JSON document, with the
+error handling of
+.BR esdm_rpcc_status_json ().
 .TP
 .BI "int esdm_rpcc_is_fully_seeded(bool *" fully_seeded ");"
 Whether the ESDM is fully seeded.
@@ -113,21 +190,33 @@ Size of the entropy pool, in bits.
 Entropy level below which polling writers are woken.
 .TP
 .BI "int esdm_rpcc_get_min_reseed_secs(unsigned int *" seconds ");"
-Minimum number of seconds between two reseed operations.
-.SS Administration
-These require the privileged endpoint.
+Maximum time in seconds between two reseeds of a DRNG.
+.SS Contributing data
 .TP
 .BI "int esdm_rpcc_write_data(const uint8_t *" data_buf ", size_t " data_buf_len ");"
-Write data into the auxiliary pool without crediting entropy.
+Write data into the auxiliary pool without crediting entropy. This uses the
+unprivileged endpoint and is open to every user.
+.SS Administration
+These require the privileged endpoint.
 .TP
 .BI "int esdm_rpcc_set_write_wakeup_thresh(unsigned int " thresh ");"
 Set the write wakeup threshold.
 .TP
 .BI "int esdm_rpcc_set_min_reseed_secs(unsigned int " seconds ");"
-Set the minimum reseed interval.
+Set that time. Zero seconds reseeds before every request, values above one hour
+are capped to it.
 .TP
 .BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
 Set the token label and user PIN of the PKCS#11 entropy source.
+.TP
+.BI "int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *" result ");"
+Run the self tests of the server now. Returns 0 if every self test passed and
+the ESDM hands out random bits, otherwise the error of the failing test, or
+.B \-EOPNOTSUPP
+where an earlier failure still holds the output back. If
+.I result
+is not NULL, it receives the state of the crypto and the entropy source self
+tests and the number of entropy sources tested and failed, on error too.
 .SS Linux random device IOCTLs
 These mirror the
 .BR ioctl (2)
@@ -156,20 +245,44 @@ return 0 on success, functions returning
 return the number of bytes produced. Both return a negative errno value on
 error.
 .B \-EINTR
-means the connection was interrupted and the call may simply be repeated; the
+means the call was interrupted through the interrupt function and may simply be
+repeated; the
 .B esdm_invoke()
-macro declared in the header does that up to five times.
+macro declared in the header does that up to five times. A call of the
+privileged endpoint interrupted after its request was sent returns
+.B \-EINPROGRESS
+instead, as the server may still apply the request; neither
+.B esdm_invoke()
+nor the caller should repeat it.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
+.B \-EMSGSIZE
+means the request does not fit into one message of just under 64 KiB, which
+limits the entropy buffer of
+.BR esdm_rpcc_rnd_add_entropy ().
+.BR esdm_rpcc_write_data ()
+splits its data into messages itself.
+.PP
+.B \-ETIMEDOUT
+means the server did not answer in time. A request of the unprivileged endpoint
+whose answer is late is sent again on a fresh connection, which may be served by
+a less busy server thread, until about 6.4 seconds have passed in all; one the
+server closed the connection on without answering is sent again once.
+A request of the privileged endpoint is waited for up to 60 seconds and never
+sent a second time \- neither after a timeout nor after a connection reset
+.RB ( \-ECONNRESET ),
+since the server may already have applied it, and applying it twice \- such as
+crediting entropy twice \- is worse than reporting the failure.
 .SH THREAD SAFETY
 The library maintains a pool of connections. A call takes one out of the pool
 for its duration, so calls from several threads proceed concurrently as long as
 the pool has free entries and block on each other otherwise. Applications that
 manage connection handles themselves with
 .BR esdm_rpcc_get_unpriv_service ()
-must return them with
-.BR esdm_rpcc_put_unpriv_service ()
+or
+.BR esdm_rpcc_get_priv_service ()
+must return them with the matching put call
 as soon as the request completed, since a checked\-out handle is held
 exclusively.
 .SH EXAMPLE

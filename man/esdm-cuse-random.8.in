@@ -45,9 +45,15 @@ and including
 on the write side.
 .PP
 .B esdm\-cuse\-random
-serves the blocking semantics: reads wait until the ESDM is fully seeded.
+serves the blocking semantics: reads wait until the ESDM is fully seeded, and
+.BR poll (2)
+reports the device readable once it is and writable while the ESDM wants
+entropy.
 .B esdm\-cuse\-urandom
-serves the non\-blocking semantics.
+serves the non\-blocking semantics, and like the kernel's
+.I /dev/urandom
+it is always readable and writable to
+.BR poll (2).
 .PP
 Both daemons must be started as root and drop to an unprivileged user after
 the device has been created. On systemd installations they are normally
@@ -82,7 +88,14 @@ Unprivileged user to switch to once the device exists. Defaults to
 .BR nobody .
 .TP
 .B \-\-pid_namespace
-Fork the daemon into an isolating PID namespace.
+Fork the daemon into an isolating PID namespace. The callers are outside of it,
+so the daemon cannot identify them to check for
+.BR CAP_SYS_ADMIN ,
+and the privileged
+.BR ioctl (2)
+commands are refused to every caller with
+.BR EPERM .
+Reading and writing the device is not affected.
 .TP
 .BR \-d ", " "\-o debug"
 Enable debug output. Implies
@@ -106,6 +119,27 @@ CUSE device registered by
 CUSE device registered by
 .BR esdm\-cuse\-urandom .
 .SH NOTES
+The privileged
+.BR ioctl (2)
+commands require the caller to hold
+.B CAP_SYS_ADMIN
+in the daemon's user namespace, as with the kernel device. The daemon learns
+this from the caller's
+.IR /proc/ pid
+entries, which it reads with root privileges, so that a
+.I /proc
+mounted with
+.B hidepid=
+does not hide them. A caller whose entries root cannot read without
+.B CAP_SYS_PTRACE
+\- with
+.BR hidepid= ,
+one running under another user or group ID than root \- is refused, as the shipped
+units do not grant that capability. Until the daemon has finished setting up the
+device and dropped its privileges, the privileged commands fail with
+.B EAGAIN
+for every caller.
+.PP
 Before each daemon overlays the kernel device with its own, it keeps a file
 descriptor on the original kernel
 .IR /dev/random " respectively " /dev/urandom
