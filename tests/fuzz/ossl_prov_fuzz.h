@@ -56,18 +56,6 @@ void fuzz_backend_begin(const uint8_t *data, size_t len);
 void fuzz_backend_end(void);
 
 /*
- * Whether this provider variant has to refuse a request asking for prediction
- * resistance. The EGD protocol cannot express it, so the provider bound to the
- * ordinary EGD socket refuses rather than quietly serving data without the
- * property that was asked for - which is a promise worth holding it to.
- */
-#if defined(ESDM_FUZZ_PROV_EGD) && !defined(ESDM_EGD_PROV_FORCE_PR)
-#define FUZZ_PROV_REFUSES_PR true
-#else
-#define FUZZ_PROV_REFUSES_PR false
-#endif
-
-/*
  * Property query selecting this variant's algorithms, and the name the harness
  * registers the provider under.
  */

@@ -29,11 +29,8 @@
  *  - get_seed() either hands back nothing at all, or a buffer of at least
  *    min_len and at most max_len bytes that is really that large - a seed
  *    consumer sizes its pool by the returned length,
- *  - a failed get_seed() leaves the caller's pointer NULL rather than a buffer
- *    it would then free twice,
- *  - and the EGD variant bound to the ordinary socket refuses every request
- *    asking for prediction resistance, rather than serving data that does not
- *    have the property that was asked for.
+ *  - and a failed get_seed() leaves the caller's pointer NULL rather than a
+ *    buffer it would then free twice.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -574,23 +571,12 @@ enum fuzz_call {
 };
 
 /*
- * The prediction resistance flag of a request, and what the provider variant
- * under test owes the caller for it.
+ * The prediction resistance flag of a request. Every variant serves it - the
+ * EGD ones with the ESDM's prediction resistant read command.
  */
 static bool fuzz_pr(struct fuzz_input *in)
 {
 	return (fuzz_u8(in) & 1) != 0;
-}
-
-static void fuzz_check_pr_refused(const char *call, bool pr, bool succeeded)
-{
-	if (!FUZZ_PROV_REFUSES_PR || !pr || !succeeded)
-		return;
-
-	fprintf(stderr,
-		"%s served a request asking for prediction resistance, which this provider cannot deliver\n",
-		call);
-	abort();
 }
 
 static void fuzz_call_generate_one(struct fuzz_prov *p, struct fuzz_input *in)
@@ -613,7 +599,6 @@ static void fuzz_call_generate_one(struct fuzz_prov *p, struct fuzz_input *in)
 	buf = fuzz_buf(len);
 	ret = p->generate(p->randctx, buf, len, strength, pr, NULL, 0);
 	fuzz_check_guard("rand_generate", buf, len);
-	fuzz_check_pr_refused("rand_generate", pr, ret == 1);
 
 	if (ret != 1)
 		fuzz_check_cleansed("rand_generate", buf, len);
@@ -681,8 +666,6 @@ static void fuzz_call_get_seed_one(struct fuzz_prov *p, struct fuzz_input *in)
 	ret = p->get_seed(p->randctx, &buffer, entropy_bits, min_len, max_len,
 			  pr, NULL, 0);
 
-	fuzz_check_pr_refused("rand_get_seed", pr, ret != 0);
-
 	if (!ret) {
 		/*
 		 * Nothing was delivered, so nothing may be handed back either
@@ -730,7 +713,7 @@ static void fuzz_call_get_seed_one(struct fuzz_prov *p, struct fuzz_input *in)
  * the paths where a context could not be created. Nothing is asserted about
  * the answers: the RPC based providers keep no state in the context that a
  * request needs, so a call without one is served rather than refused, while
- * the EGD ones reach their connection through it and have to refuse. What both
+ * the EGD ones reach their connection through it and have to refuse. What all
  * owe the caller is not to walk into the NULL pointer.
  */
 static void fuzz_call_null_ctx_one(struct fuzz_prov *p)
@@ -876,7 +859,6 @@ static void fuzz_one_call(struct fuzz_prov *p, struct fuzz_input *in)
 		uint8_t pstr[16];
 		size_t pstr_len = fuzz_len(in, sizeof(pstr));
 		size_t i;
-		int ret;
 
 		if (!p->instantiate)
 			break;
@@ -885,10 +867,9 @@ static void fuzz_one_call(struct fuzz_prov *p, struct fuzz_input *in)
 			pstr[i] = fuzz_u8(in);
 
 		fuzz_build_params(in, params, &num);
-		ret = p->instantiate(p->randctx, fuzz_u8(in), pr, pstr,
-				     pstr_len, params);
+		p->instantiate(p->randctx, fuzz_u8(in), pr, pstr, pstr_len,
+			       params);
 		fuzz_check_params("rand_instantiate", num);
-		fuzz_check_pr_refused("rand_instantiate", pr, ret == 1);
 		break;
 	}
 
@@ -1232,8 +1213,8 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 	fuzz_seed_add("every-call", script, sizeof(script));
 
 	/*
-	 * A request asking for prediction resistance, which is the one thing
-	 * the EGD variants have to refuse rather than serve.
+	 * A request asking for prediction resistance, which the EGD variants
+	 * serve with the ESDM's prediction resistant read command.
 	 */
 	script[0] = 0;
 	script[1] = fuzz_call_generate;

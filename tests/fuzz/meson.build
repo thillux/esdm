@@ -1,6 +1,142 @@
-# Fuzz harnesses for the RPC interfaces. Each is built twice: as a libFuzzer
-# binary, and with the seed-replaying driver in fuzz_driver.c, which needs no
-# fuzzing engine and runs in the ordinary test suite.
+# Fuzz harnesses for the RPC interfaces, built with -Dfuzzing=enabled. Each is
+# built twice: as a libFuzzer binary, and with the seed-replaying driver in
+# fuzz_driver.c, which needs no fuzzing engine and runs in the ordinary test
+# suite.
+#
+# Ahead of them, regression tests of the RPC server and client that reach
+# them through the entry points of the harnesses, which ESDM_FUZZING compiles
+# in - see common/meson.build. They are built in every configuration: each
+# compiles the sources it tests with the entry points, which the shipped
+# binaries go without, so they do not need the option.
+fuzz_hook_args = get_option('fuzzing').enabled() ? [ ] : [ '-DESDM_FUZZING' ]
+
+# The request path the rpc_request harness below fuzzes, driven by several
+# threads at once: what a fuzzer cannot reach on its own, as it feeds one input
+# at a time.
+rpc_stress_test = executable(
+		'rpc_stress_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_stress.c') ],
+		include_directories: include_dirs_server,
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC request path under concurrent load', rpc_stress_test, timeout: 300)
+
+# The answers the server gives where it cannot give the one asked for, through
+# the request path the rpc_request harness below fuzzes.
+rpc_server_test = executable(
+		'rpc_server_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC server failure answers', rpc_server_test)
+
+# How the server's accept loop and workers handle their connections, serving a
+# stand-in service on sockets of the test's own. The server's calls waiting for
+# the events of a round and shutting a connection down are renamed to wrappers
+# in the test, which send a request on a connection in the middle of a round or
+# of its closing.
+rpc_server_conn_test = executable(
+		'rpc_server_conn_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_conn_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args + [
+			'-Depoll_wait=test_epoll_wait',
+			'-Dshutdown=test_shutdown',
+		],
+	)
+
+test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
+
+# The event loop of the server's workers, serving a stand-in service on sockets
+# of the test's own.
+rpc_server_loop_test = executable(
+		'rpc_server_loop_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('rpc_server_loop_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC server event loops', rpc_server_loop_test, timeout: 120)
+
+# The opportunistic DTLS of the RPC connections: the client library of the test
+# against the server's accept loop and workers serving stand-in services,
+# through a relay on the sockets the client connects to - which are fixed at
+# build time, hence alone. Without DTLS built, what is left is the server
+# refusing it.
+rpc_dtls_test = executable(
+		'rpc_dtls_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, client_rpc_src,
+		  files('rpc_dtls_test.c') ],
+		include_directories: [ include_dirs_server, include_dirs_client,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC connections with DTLS', rpc_dtls_test,
+	timeout: 120,
+	is_parallel: false)
+
+# libesdm_getrandom preloaded into a client whose DTLS handshake asks it for
+# random numbers, against rpc_dtls_test serving in a process of its own.
+if get_option('linux-getrandom').enabled()
+	rpc_dtls_getrandom_test = executable(
+			'rpc_dtls_getrandom_test',
+			[ files('rpc_dtls_getrandom_test.c') ],
+			include_directories: [ include_dirs_client,
+					       include_directories('../common') ],
+			dependencies: dependencies_client,
+		)
+
+	test('RPC connections with DTLS in libesdm_getrandom',
+		rpc_dtls_getrandom_test,
+		env: [ 'ESDM_RPC_DTLS_SERVER=' + rpc_dtls_test.full_path(),
+		       'LD_PRELOAD=' + esdm_getrandom_lib.full_path(),
+		       # See tester_getrandom_env in tests/getrandom
+		       'ASAN_OPTIONS=halt_on_error=1:abort_on_error=1' +
+				':print_summary=1:verify_asan_link_order=0' ],
+		depends: [ rpc_dtls_test ],
+		timeout: 120,
+		is_parallel: false)
+endif
+
+# Prediction resistant and seed requests flooding one worker, served by the
+# real unprivileged service and an ESDM of the test's own - in an IPC namespace
+# of its own, as the ESDM claims the fixed status segment names.
+rpc_server_pr_budget_test = executable(
+		'rpc_server_pr_budget_test',
+		[ common_src, crypto_src, esdm_src, service_rpc_src,
+		  server_rpc_src, egd_server_src, files('../test_ipc_ns.c'),
+		  files('rpc_server_pr_budget_test.c') ],
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		dependencies: dependencies_server + dependencies_esdm_lib,
+		c_args: fuzz_hook_args,
+	)
+
+test('RPC server budget of prediction resistance and seeds',
+	rpc_server_pr_budget_test,
+	timeout: 120)
+
+# The rest are the harnesses
+if not get_option('fuzzing').enabled()
+	subdir_done()
+endif
 
 fuzz_cc = meson.get_compiler('c')
 
@@ -24,14 +160,6 @@ have_libfuzzer = fuzz_cc.links(fuzz_engine_probe,
 
 if not have_libfuzzer
 	message('No libFuzzer in this compiler - the fuzz harnesses are built with the replay driver only')
-endif
-
-# protobuf-c calls a closure of a generic type through the type of the message
-# it carries, which the indirect call check of clang 17+ reports on every call.
-# Turn that one check off where the compiler knows the option.
-fuzz_c_args = [ ]
-if fuzz_cc.has_argument('-fno-sanitize=function')
-	fuzz_c_args += [ '-fno-sanitize=function' ]
 endif
 
 fuzz_targets = [
@@ -194,8 +322,9 @@ if get_option('openssl-rand-provider').enabled()
 			'timeout': 300,
 		},
 		# libesdm-egd-provider: the EGD socket instead of the RPC
-		# interface, and a peer whose answers the fuzzer writes. This
-		# one has to refuse a request asking for prediction resistance.
+		# interface, and a peer whose answers the fuzzer writes. A
+		# request asking for prediction resistance is served with the
+		# ESDM's prediction resistant read command.
 		{
 			'name': 'ossl_egd_prov',
 			'sources': openssl_prov_egd_src,
@@ -204,9 +333,9 @@ if get_option('openssl-rand-provider').enabled()
 			'link': [ esdm_common_static_lib ],
 			'c_args': [ '-DESDM_FUZZ_PROV_EGD=1' ],
 		},
-		# libesdm-egd-provider-pr: bound to the socket of the
-		# prediction resistance generator, so it accepts what its
-		# sibling refuses.
+		# libesdm-egd-provider-pr: every request served with the
+		# prediction resistant read command, whatever the caller asked
+		# for.
 		{
 			'name': 'ossl_egd_prov_pr',
 			'sources': openssl_prov_egd_src,
@@ -219,67 +348,8 @@ if get_option('openssl-rand-provider').enabled()
 	]
 endif
 
-# The same request path as the first harness, driven by several threads at
-# once: what a fuzzer cannot reach on its own, as it feeds one input at a time.
-rpc_stress_test = executable(
-		'rpc_stress_test',
-		[ common_src, crypto_src, esdm_src, service_rpc_src,
-		  server_rpc_src, egd_server_src, files('rpc_stress.c') ],
-		include_directories: include_dirs_server,
-		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
-	)
-
-test('RPC request path under concurrent load', rpc_stress_test, timeout: 300)
-
-# The answers the server gives where it cannot give the one asked for, through
-# the same request path as the first harness.
-rpc_server_test = executable(
-		'rpc_server_test',
-		[ common_src, crypto_src, esdm_src, service_rpc_src,
-		  server_rpc_src, egd_server_src, files('rpc_server_test.c') ],
-		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
-		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
-	)
-
-test('RPC server failure answers', rpc_server_test)
-
-# How the server's accept loop and workers handle their connections, serving a
-# stand-in service on sockets of the test's own.
-rpc_server_conn_test = executable(
-		'rpc_server_conn_test',
-		[ common_src, crypto_src, esdm_src, service_rpc_src,
-		  server_rpc_src, egd_server_src, files('rpc_server_conn_test.c') ],
-		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
-		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
-	)
-
-test('RPC server connection handling', rpc_server_conn_test, timeout: 60)
-
-# Prediction resistant and seed requests flooding one worker, served by the
-# real unprivileged service and an ESDM of the test's own - in an IPC namespace
-# of its own, as the ESDM claims the fixed status segment names.
-rpc_server_pr_budget_test = executable(
-		'rpc_server_pr_budget_test',
-		[ common_src, crypto_src, esdm_src, service_rpc_src,
-		  server_rpc_src, egd_server_src, files('../test_ipc_ns.c'),
-		  files('rpc_server_pr_budget_test.c') ],
-		include_directories: [ include_dirs_server,
-				       include_directories('../common') ],
-		dependencies: dependencies_server + dependencies_esdm_lib,
-		c_args: fuzz_c_args,
-	)
-
-test('RPC server budget of prediction resistance and seeds',
-	rpc_server_pr_budget_test,
-	timeout: 120)
-
 foreach fuzz_target : fuzz_targets
-	target_c_args = fuzz_c_args + fuzz_target.get('c_args', [ ])
+	target_c_args = fuzz_target.get('c_args', [ ])
 
 	fuzz_replay = executable(
 			fuzz_target['name'] + '_fuzz_replay',

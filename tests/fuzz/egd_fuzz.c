@@ -56,12 +56,6 @@
  */
 int esdm_init(void);
 
-/*
- * The first byte selects the prediction resistance socket when all of these
- * bits are set - see LLVMFuzzerTestOneInput() for why it is not a single one.
- */
-#define FUZZ_PR_SOCKET_MASK 0x0f
-
 /* Where the responses go, and its other end, which the harness empties */
 static int fuzz_response_fd = -1;
 static int fuzz_response_peer_fd = -1;
@@ -117,18 +111,11 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-	/* The first byte picks the socket, so an empty input has none */
-	if (!size)
-		return 0;
-
 	/*
-	 * Which of the two sockets the client reached decides which generator
-	 * answers it - the protocol cannot ask for prediction resistance, so it
-	 * is a property of the socket.
+	 * Which generator answers is a matter of the command - the ESDM's
+	 * prediction resistant reads are commands of their own.
 	 */
-	esdm_egd_fuzz_stream((data[0] & FUZZ_PR_SOCKET_MASK) ==
-				     FUZZ_PR_SOCKET_MASK,
-			     fuzz_response_fd, data + 1, size - 1);
+	esdm_egd_fuzz_stream(fuzz_response_fd, data, size);
 
 	fuzz_drain_responses();
 
@@ -140,10 +127,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
  ******************************************************************************/
 
 /*
- * One well formed command each, plus the two shapes that only a stream protocol
- * has: several commands in one read, and one command split across two.
+ * One well formed command each - the standard ones and the ESDM's own - plus
+ * the shapes that only a stream protocol has: several commands in one read,
+ * runs of reads among them, and one command split across two.
  */
-#define FUZZ_MAX_SEEDS 9
+#define FUZZ_MAX_SEEDS 32
 static struct fuzz_seed fuzz_seeds[FUZZ_MAX_SEEDS];
 static uint8_t fuzz_seed_data[FUZZ_MAX_SEEDS][64];
 static size_t fuzz_num_seeds;
@@ -165,11 +153,9 @@ static void fuzz_seed_add(const char *name, const uint8_t *cmd, size_t len)
 	if (fuzz_num_seeds >= FUZZ_MAX_SEEDS)
 		return;
 
-	seed[0] = 0; /* the ordinary socket */
-
 	fuzz_seeds[fuzz_num_seeds].name = name;
 	fuzz_seeds[fuzz_num_seeds].data = seed;
-	fuzz_seeds[fuzz_num_seeds].len = fuzz_seed_record(seed, 1, cmd, len);
+	fuzz_seeds[fuzz_num_seeds].len = fuzz_seed_record(seed, 0, cmd, len);
 	fuzz_num_seeds++;
 }
 
@@ -192,6 +178,28 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 						 6,
 						 7,
 						 8 };
+	static const uint8_t pr_read_nonblock[] = {
+		ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, 32
+	};
+	static const uint8_t pr_read_block[] = { ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
+						 32 };
+	static const uint8_t read_unseeded[] = {
+		ESDM_EGD_CMD_ESDM_READ_UNSEEDED, ESDM_EGD_MAX_TRANSFER
+	};
+	static const uint8_t get_state[] = { ESDM_EGD_CMD_ESDM_GET_STATE };
+	static const uint8_t status[] = { ESDM_EGD_CMD_ESDM_STATUS };
+	static const uint8_t status_json[] = { ESDM_EGD_CMD_ESDM_STATUS_JSON };
+	static const uint8_t add_to_ent_cnt[] = {
+		ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, 0x00, 0x00, 0x01, 0x00
+	};
+	static const uint8_t clear_pool[] = { ESDM_EGD_CMD_ESDM_CLEAR_POOL };
+	static const uint8_t reseed[] = { ESDM_EGD_CMD_ESDM_RESEED };
+	static const uint8_t set_write_wakeup[] = {
+		ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP, 0x00, 0x00, 0x01, 0x00
+	};
+	static const uint8_t set_min_reseed_secs[] = {
+		ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS, 0x00, 0x00, 0x02, 0x58
+	};
 	uint8_t *seed;
 	size_t pos;
 
@@ -205,6 +213,20 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 	fuzz_seed_add("read-nonblock", read_nonblock, sizeof(read_nonblock));
 	fuzz_seed_add("read-block", read_block, sizeof(read_block));
 	fuzz_seed_add("write-entropy", write_entropy, sizeof(write_entropy));
+	fuzz_seed_add("pr-read-nonblock", pr_read_nonblock,
+		      sizeof(pr_read_nonblock));
+	fuzz_seed_add("pr-read-block", pr_read_block, sizeof(pr_read_block));
+	fuzz_seed_add("read-unseeded", read_unseeded, sizeof(read_unseeded));
+	fuzz_seed_add("get-state", get_state, sizeof(get_state));
+	fuzz_seed_add("status", status, sizeof(status));
+	fuzz_seed_add("status-json", status_json, sizeof(status_json));
+	fuzz_seed_add("add-to-ent-cnt", add_to_ent_cnt, sizeof(add_to_ent_cnt));
+	fuzz_seed_add("clear-pool", clear_pool, sizeof(clear_pool));
+	fuzz_seed_add("reseed", reseed, sizeof(reseed));
+	fuzz_seed_add("set-write-wakeup", set_write_wakeup,
+		      sizeof(set_write_wakeup));
+	fuzz_seed_add("set-min-reseed-secs", set_min_reseed_secs,
+		      sizeof(set_min_reseed_secs));
 
 	/* Several commands arriving in one read */
 	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
@@ -220,27 +242,71 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 		fuzz_seed_add("batched-commands", batch, sizeof(batch));
 	}
 
-	/* The same read on the prediction resistance socket. */
+	/* Two status reports in one read: the first is held while it goes out */
 	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
-		seed = fuzz_seed_data[fuzz_num_seeds];
-		seed[0] = FUZZ_PR_SOCKET_MASK;
-		pos = fuzz_seed_record(seed, 1, read_block, sizeof(read_block));
+		const uint8_t batch[] = { ESDM_EGD_CMD_ESDM_STATUS,
+					  ESDM_EGD_CMD_ESDM_STATUS_JSON,
+					  ESDM_EGD_CMD_ESDM_GET_STATE };
 
-		fuzz_seeds[fuzz_num_seeds].name = "read-block-pr";
-		fuzz_seeds[fuzz_num_seeds].data = seed;
-		fuzz_seeds[fuzz_num_seeds].len = pos;
-		fuzz_num_seeds++;
+		fuzz_seed_add("batched-status", batch, sizeof(batch));
+	}
+
+	/*
+	 * Runs of reads, which the server answers together - see
+	 * esdm_egd_read_run() -, of each read it does that for, and one that
+	 * changes the read half way and carries reads of nothing
+	 */
+	if (fuzz_num_seeds + 4 <= FUZZ_MAX_SEEDS) {
+		static const uint8_t runs[][16] = {
+			{ ESDM_EGD_CMD_READ_BLOCK, 255, ESDM_EGD_CMD_READ_BLOCK,
+			  255, ESDM_EGD_CMD_READ_BLOCK, 255,
+			  ESDM_EGD_CMD_READ_BLOCK, 17 },
+			{ ESDM_EGD_CMD_READ_NONBLOCK, 255,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 255,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 3 },
+			{ ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 255 },
+			{ ESDM_EGD_CMD_READ_NONBLOCK, 32,
+			  ESDM_EGD_CMD_READ_NONBLOCK, 0,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 64,
+			  ESDM_EGD_CMD_ESDM_READ_UNSEEDED, 0,
+			  ESDM_EGD_CMD_READ_BLOCK, 0, ESDM_EGD_CMD_READ_BLOCK,
+			  8, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, 16,
+			  ESDM_EGD_CMD_GET_PID },
+		};
+		static const size_t run_len[] = { 8, 6, 6, 15 };
+		static const char *const run_name[] = { "read-block-run",
+							"read-nonblock-run",
+							"read-unseeded-run",
+							"read-mixed-runs" };
+		unsigned int i;
+
+		for (i = 0; i < 4; i++)
+			fuzz_seed_add(run_name[i], runs[i], run_len[i]);
 	}
 
 	/* And one command split across two reads, which is the harder case */
 	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
 		seed = fuzz_seed_data[fuzz_num_seeds];
-		seed[0] = 0;
-		pos = fuzz_seed_record(seed, 1, write_entropy, 3);
+		pos = fuzz_seed_record(seed, 0, write_entropy, 3);
 		pos = fuzz_seed_record(seed, pos, write_entropy + 3,
 				       sizeof(write_entropy) - 3);
 
 		fuzz_seeds[fuzz_num_seeds].name = "split-command";
+		fuzz_seeds[fuzz_num_seeds].data = seed;
+		fuzz_seeds[fuzz_num_seeds].len = pos;
+		fuzz_num_seeds++;
+	}
+
+	/* An ESDM command with its argument split from the command byte */
+	if (fuzz_num_seeds < FUZZ_MAX_SEEDS) {
+		seed = fuzz_seed_data[fuzz_num_seeds];
+		pos = fuzz_seed_record(seed, 0, add_to_ent_cnt, 2);
+		pos = fuzz_seed_record(seed, pos, add_to_ent_cnt + 2,
+				       sizeof(add_to_ent_cnt) - 2);
+
+		fuzz_seeds[fuzz_num_seeds].name = "split-esdm-command";
 		fuzz_seeds[fuzz_num_seeds].data = seed;
 		fuzz_seeds[fuzz_num_seeds].len = pos;
 		fuzz_num_seeds++;

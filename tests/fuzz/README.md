@@ -44,7 +44,7 @@ it.
 | `ossl_rng_prov_pr_fuzz` | the same, against the prediction resistance build | slowest - each request collects fresh entropy |
 | `ossl_seed_src_prov_fuzz` | the same, against the SEED-SRC only build | slow |
 | `ossl_egd_prov_fuzz` | a script of provider calls, then the answers an impostor server gives them | slow - every call is a round trip over a socket |
-| `ossl_egd_prov_pr_fuzz` | the same, against the prediction resistance build | slow |
+| `ossl_egd_prov_pr_fuzz` | the same, against the build serving everything with prediction resistance | slow |
 
 `egd_client_fuzz` is the same socket seen from the other side. The harness is
 the server: it answers the client's calls with the bytes of the input rather
@@ -69,12 +69,13 @@ later is what the state machine has to survive.
 A provider is a library loaded into a process that is not ours, and the ESDM
 ships five of them: two speaking the RPC protocol (all four RAND algorithms,
 and the variant routing every request to the prediction resistance generator),
-one offering SEED-SRC alone, and two speaking the EGD protocol (the ordinary
-socket and the prediction resistance one). Each gets a harness, because what
-differs between them is exactly what the harness looks at: the interface they
-reach the ESDM through, whether prediction resistance is a per-request flag or
-a property of the socket, and the table of algorithms the operation query hands
-back.
+one offering SEED-SRC alone, and two speaking the EGD protocol (honoring the
+prediction resistance flag per request with the ESDM's prediction resistant
+read command, and the variant serving every request with it). Each gets a
+harness, because what differs between them is exactly what the harness looks
+at: the interface they reach the ESDM through, whether prediction resistance
+is a per-request flag or forced, and the table of algorithms the operation
+query hands back.
 
 The provider is loaded the way libcrypto loads it - `OSSL_PROVIDER_add_builtin()`
 and `OSSL_PROVIDER_load()`, so `OSSL_provider_init()` runs with the real core
@@ -164,14 +165,15 @@ away with.
 Two things about such a build are worth knowing before a finding is blamed on
 the code:
 
-* The harnesses are compiled with `-fno-sanitize=function` where the compiler
-  knows the option. protobuf-c hands a call to a closure of a generic type and
-  the generated code calls it through the type of the message it carries, which
-  is its RPC design rather than anything this tree writes; clang 17 and newer
-  check indirect calls against the callee's type and report every one of them.
-  Left on, the first one fails the seed replays under `meson test`, which halts
-  on the first finding, and a fuzzing run buries a real report under thousands
-  of these.
+* clang 17 and newer check an indirect call against the type of the function
+  called (`-fsanitize=function`, part of `undefined`). protobuf-c calls the
+  closure of an RPC as a `ProtobufCClosure`, whatever type the generated code
+  declares it with for the message it carries, so the closures of the RPC
+  client and server are functions of that type, and the server calls the one
+  it is handed as such - see the response callbacks in `service-rpc/client`
+  and the methods in `service-rpc/server`. A report of this check is a
+  closure written with another type, a defect of this tree; the harnesses are
+  built with the check on.
 * The rest of the test suite is not built that way and several of its binaries
   compile the same sources they also link, which the address sanitizer reports
   as ODR violations at startup. `ASAN_OPTIONS=detect_odr_violation=0` runs them
@@ -195,7 +197,14 @@ load; `ESDM_STRESS_THREADS` and `ESDM_STRESS_REQUESTS` turn the same binary
 into as long a run as you care to give it:
 
     ESDM_STRESS_THREADS=16 ESDM_STRESS_REQUESTS=500000 \
-        build-fuzz/tests/fuzz/rpc_stress_test
+        build/tests/fuzz/rpc_stress_test
+
+It and the other regression tests of this directory that reach the server and
+client through the entry points of the harnesses - the failure answers, the
+connection handling, DTLS, the budget of prediction resistance - are built in
+every configuration, not only with `-Dfuzzing=enabled`: each compiles the
+sources it tests with `-DESDM_FUZZING`, the shipped binaries stay without the
+entry points.
 
 ## Running
 
@@ -282,10 +291,8 @@ promised:
   returned length is what a seed consumer sizes its pool by, so the harness
   reads the whole of it and lets the sanitizer decide; a failed `get_seed()`
   leaving the caller's pointer `NULL` rather than a buffer it would go on to
-  free; and the EGD provider bound to the ordinary socket refusing every
-  request asking for prediction resistance, rather than serving data that does
-  not have the property that was asked for. Holding `enable_locking()` to being
-  callable twice is how the leaked lock was found.
+  free. Holding `enable_locking()` to being callable twice is how the leaked
+  lock was found.
 
 ## In the test suite
 

@@ -29,9 +29,10 @@
  *
  * The real unprivileged service is served on a socket of the test's own,
  * through the serve hook of the fuzz harnesses, by a single worker - with
- * several, the requests spread over them and the PR DRNG, which serves one
- * caller at a time, answers -EAGAIN to all but one anyway. No daemon and no
- * privileges are needed, but an operational ESDM is: the Jitter RNG is enough.
+ * several, the requests spread over them and wait for their turns at the PR
+ * DRNG, which serves one caller at a time, rather than for the round of their
+ * worker. No daemon and no privileges are needed, but an operational ESDM is:
+ * the Jitter RNG is enough.
  *
  *   - every request is answered, with the bytes asked for or -EAGAIN,
  *   - with more of them pending at once than fit into a round, some are

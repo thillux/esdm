@@ -291,6 +291,8 @@ enum fuzz_call {
 	fuzz_call_write_entropy,
 	fuzz_call_get_pid,
 	fuzz_call_socket_path,
+	fuzz_call_get_random_pr,
+	fuzz_call_get_random_pr_nonblock,
 	fuzz_calls
 };
 
@@ -313,6 +315,33 @@ static void fuzz_one_call(struct esdm_egd_client *client,
 		ret = esdm_egd_client_get_random(client, buf, len);
 		fuzz_check_cleansed("esdm_egd_client_get_random", len, ret);
 		break;
+
+	case fuzz_call_get_random_pr:
+		/* The same over the ESDM's prediction resistant read command */
+		len = fuzz_len(in, FUZZ_BUF_MAX);
+		buf = fuzz_buf(len);
+		ret = esdm_egd_client_get_random_pr(client, buf, len);
+		fuzz_check_cleansed("esdm_egd_client_get_random_pr", len, ret);
+		break;
+
+	case fuzz_call_get_random_pr_nonblock: {
+		size_t generated = SIZE_MAX;
+
+		len = fuzz_len(in, ESDM_EGD_MAX_TRANSFER + 1);
+		buf = fuzz_buf(len);
+		ret = esdm_egd_client_get_random_pr_nonblock(client, buf, len,
+							     &generated);
+		fuzz_check_cleansed("esdm_egd_client_get_random_pr_nonblock",
+				    len, ret);
+
+		if (!ret && generated > len) {
+			fprintf(stderr,
+				"esdm_egd_client_get_random_pr_nonblock reports %zu bytes in a buffer of %zu\n",
+				generated, len);
+			abort();
+		}
+		break;
+	}
 
 	case fuzz_call_get_random_nonblock: {
 		size_t generated = SIZE_MAX;
@@ -458,7 +487,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, fuzz_socket_path, sizeof(addr.sun_path) - 1);
+	/* Of the same size, and terminated where it was formatted */
+	memcpy(addr.sun_path, fuzz_socket_path, sizeof(addr.sun_path));
 
 	if (bind(fuzz_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
 	    listen(fuzz_listen_fd, 8) < 0) {
@@ -530,7 +560,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
  * length byte is a lie - which is the whole of what this protocol lets a peer
  * lie about.
  */
-#define FUZZ_MAX_SEEDS 13
+#define FUZZ_MAX_SEEDS 16
 static struct fuzz_seed fuzz_seeds[FUZZ_MAX_SEEDS];
 static uint8_t fuzz_seed_data[FUZZ_MAX_SEEDS][512];
 static size_t fuzz_num_seeds;
@@ -565,6 +595,11 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 						     0 };
 	static const uint8_t script_nonblock[] = { fuzz_call_get_random_nonblock,
 						   0, 16 };
+	static const uint8_t script_read_pr[] = { fuzz_call_get_random_pr, 0,
+						  16 };
+	static const uint8_t script_nonblock_pr[] = {
+		fuzz_call_get_random_pr_nonblock, 0, 16
+	};
 	static const uint8_t script_count[] = { fuzz_call_entropy_count };
 	static const uint8_t script_pid[] = { fuzz_call_get_pid };
 	static const uint8_t script_write[] = { fuzz_call_write_entropy,
@@ -642,6 +677,14 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 		      stream_pid_overlong, sizeof(stream_pid_overlong));
 	fuzz_seed_add("write-entropy", script_write, sizeof(script_write), NULL,
 		      0);
+	fuzz_seed_add("pr-read-block", script_read_pr, sizeof(script_read_pr),
+		      stream_read, sizeof(stream_read));
+	fuzz_seed_add("pr-read-nonblock", script_nonblock_pr,
+		      sizeof(script_nonblock_pr), stream_nonblock,
+		      sizeof(stream_nonblock));
+	fuzz_seed_add("pr-read-nonblock-overlong", script_nonblock_pr,
+		      sizeof(script_nonblock_pr), stream_nonblock_overlong,
+		      sizeof(stream_nonblock_overlong));
 
 	*num = fuzz_num_seeds;
 

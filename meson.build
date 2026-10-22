@@ -403,12 +403,10 @@ testdirs = [
 	'tests/server-signal-helper',
 	'tests/aux-client',
 	'tests/tool',
-	]
-if get_option('fuzzing').enabled()
-testdirs += [
+	# The fuzz harnesses with -Dfuzzing=enabled, and the regression tests
+	# built with their entry points always
 	'tests/fuzz',
-]
-endif
+	]
 if get_option('openssl-rand-provider').enabled()
 testdirs += [
 	'tests/openssl-rand-provider',
