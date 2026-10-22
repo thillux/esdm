@@ -47,7 +47,7 @@ esdm_rpcc_get_random_bytes_full_cb(const RandValResponse *response,
 	esdm_rpcc_error_check(response, buffer);
 
 	if (response->ret < 0) {
-		buffer->ret = response->ret;
+		buffer->ret = esdm_rpcc_randval_ret(response->ret);
 		return;
 	}
 
@@ -114,7 +114,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 			maxbuflen = new_max;
 			continue;
 		} else if (buffer.ret == -EAGAIN) {
-			nanosleep(&esdm_client_poll_ts, NULL);
+			/* Not seeded yet - wait without holding the connection */
+			CKINT(esdm_rpcc_unpriv_service_pause(&rpc_conn, int_data,
+							     NULL));
 			continue;
 		} else if (buffer.ret < 0) {
 			ret = buffer.ret;

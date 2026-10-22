@@ -404,10 +404,12 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
  *
  * @param [out] buf Buffer to be filled with random bits.
  * @param [in] buflen Size of the buffer to be filled.
- * @param [in] ts maximum timeout after which the waiting will be stopped
+ * @param [in] ts maximum timeout after which the waiting will be stopped, a
+ *		  relative time with tv_sec >= 0 and tv_nsec in [0, 999999999]
  *
- * @return: read data length on success, < 0 on error (-EINTR means connection
- *	    was interrupted and the caller may try again)
+ * @return: read data length on success, < 0 on error (-ETIMEDOUT once @ts
+ *	    elapsed, -EINVAL for an invalid @ts, -EINTR means connection was
+ *	    interrupted and the caller may try again)
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
 						struct timespec *ts);
@@ -418,6 +420,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout(uint8_t *buf, size_t buflen,
  * The function allows specifying an interrupt callback data structure that
  * is used when invoking the interrupt check function registered with
  * esdm_rpcc_init_priv_service / esdm_rpcc_init_unpriv_service
+ *
+ * Both apply: the call ends with -ETIMEDOUT once @ts elapsed, and with -EINTR
+ * when the interrupt function, invoked with @int_data, asks for it before.
  */
 ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 						    struct timespec *ts,
@@ -452,6 +457,35 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 					  void *int_data);
 
 /**
+ * @brief Non-blocking variant of esdm_rpcc_get_random_bytes_pr
+ *
+ * esdm_rpcc_get_random_bytes_pr waits as long as the server answers that it
+ * cannot serve prediction resistant data right now - the ESDM is not
+ * operational yet, or another prediction resistant request is in flight. This
+ * variant returns instead, with the data obtained so far, or -EAGAIN if that is
+ * none. A request the server accepted still waits for the entropy it collects.
+ *
+ * @param [out] buf Buffer to be filled with random bits.
+ * @param [in] buflen Size of the buffer to be filled.
+ *
+ * @return: read data length on success, which may be less than @buflen;
+ *	    -EAGAIN if no data was available without blocking; < 0 on other
+ *	    errors (-EINTR means connection was interrupted and the caller may
+ *	    try again)
+ */
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock(uint8_t *buf, size_t buflen);
+
+/**
+ * @brief See esdm_rpcc_get_random_bytes_pr_nonblock
+ *
+ * The function allows specifying an interrupt callback data structure that
+ * is used when invoking the interrupt check function registered with
+ * esdm_rpcc_init_priv_service / esdm_rpcc_init_unpriv_service
+ */
+ssize_t esdm_rpcc_get_random_bytes_pr_nonblock_int(uint8_t *buf, size_t buflen,
+						   void *int_data);
+
+/**
  * @brief RPC-version of esdm_get_random_bytes
  *
  * This call uses the unprivileged RPC endpoint of the ESDM server. It therefore
@@ -459,6 +493,9 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
  *
  * This function never blocks and therefore provides no guarantee whether the
  * DRNG is seeded or the initial seed level stipulated by SP800-90C is reached.
+ * A request the server answers with -EAGAIN - the DRNG it went to reached its
+ * maximum output without full reseed - is sent again: at once, and after the
+ * poll interval should the server keep answering so.
  *
  * @param [out] buf Buffer to be filled with random bits.
  * @param [in] buflen Size of the buffer to be filled.
@@ -567,8 +604,9 @@ int esdm_rpcc_rnd_get_ent_cnt_int(unsigned int *entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_add_to_ent_cnt(unsigned int entcnt);
 
@@ -589,8 +627,10 @@ int esdm_rpcc_rnd_add_to_ent_cnt_int(unsigned int entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke; -EMSGSIZE means entropy_buf does not fit into one
+ *	    message of just under 64 KiB)
  */
 int esdm_rpcc_rnd_add_entropy(const uint8_t *entropy_buf,
 			      size_t entropy_buf_len, uint32_t entropy_cnt);
@@ -614,8 +654,9 @@ int esdm_rpcc_rnd_add_entropy_int(const uint8_t *entropy_buf,
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_clear_pool(void);
 
@@ -640,8 +681,9 @@ int esdm_rpcc_rnd_clear_pool_int(void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_rnd_reseed_crng(void);
 
@@ -708,8 +750,9 @@ int esdm_rpcc_get_write_wakeup_thresh_int(unsigned int *write_wakeup_thresh,
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_set_write_wakeup_thresh(unsigned int write_wakeup_thresh);
 
@@ -752,8 +795,9 @@ int esdm_rpcc_get_min_reseed_secs_int(unsigned int *seconds, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-EINPROGRESS means the call was
+ *	    interrupted after the request was sent and must not be repeated,
+ *	    see esdm_invoke)
  */
 int esdm_rpcc_set_min_reseed_secs(unsigned int seconds);
 
@@ -795,9 +839,10 @@ int esdm_rpcc_set_min_reseed_secs_int(unsigned int seconds, void *int_data);
  *		   unchanged.
  *
  * @return: 0 on success, -EINVAL if both arguments are NULL, < 0 on error
- *	    (-EINTR means the connection was interrupted and the caller may
- *	    try again; -ENOENT if the PKCS#11 entropy source is not compiled
- *	    in or no matching token was found).
+ *	    (-EINPROGRESS means the call was interrupted after the request
+ *	    was sent and must not be repeated, see esdm_invoke; -ENOENT if
+ *	    the PKCS#11 entropy source is not compiled in or no matching
+ *	    token was found).
  */
 int esdm_rpcc_set_pkcs11_config(const char *token_label, const char *pin);
 
@@ -844,8 +889,8 @@ struct esdm_rpcc_selftest_result {
  * 	reported or with the undone states if nothing was received.
  * @return: 0 if every self test passed and the ESDM hands out random bits, < 0
  * 	otherwise - the error of the failing test, -EOPNOTSUPP where an earlier self
- * 	test failed and still holds the output back, -EINTR where the connection was
- * 	interrupted and the caller may try again
+ * 	test failed and still holds the output back, -EINPROGRESS where the call
+ * 	was interrupted after the request was sent, see esdm_invoke
  */
 int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *result);
 
@@ -861,12 +906,16 @@ int esdm_rpcc_selftest_int(struct esdm_rpcc_selftest_result *result,
  * This call uses the unprivileged RPC endpoint of the ESDM server. It therefore
  * can be invoked by any user.
  *
- * @param [out] buf Buffer to be filled with human-readable status information.
- *		    The string will be NULL-terminated.
+ * Like esdm_rpcc_status_json, a document that does not fit into the buffer
+ * leaves it empty and returns -EMSGSIZE.
+ *
+ * @param [out] buf Buffer to be filled with the status of the Jitter RNG as a
+ *		    JSON object. The string will be NULL-terminated.
  * @param [in] buflen Size of the buffer provided by the caller.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, -EMSGSIZE if the document does not fit into the
+ *	    buffer, < 0 on other errors (-EINTR means connection was
+ *	    interrupted and the caller may try again)
  */
 int esdm_rpcc_jent_status(char *buf, size_t buflen);
 
@@ -883,7 +932,14 @@ int esdm_rpcc_jent_status_int(char *buf, size_t buflen, void *int_data);
  * @brief Invoke a function up to 5 times if EINTR was returned
  *
  * This macro is intended to be used with the RPC calls above to repeat a call
- * when the connection cannot be initially established.
+ * that was interrupted through the interrupt function.
+ *
+ * Only calls of the unprivileged endpoint return -EINTR, as only they may be
+ * sent again. A call of the privileged endpoint that is interrupted after its
+ * request went out returns -EINPROGRESS instead: the server may apply the
+ * request all the same, and applying it twice - such as crediting entropy
+ * twice - is worse than reporting the interruption. It is not repeated here
+ * and should not be repeated by the caller either.
  */
 #define esdm_invoke(x)                                                         \
 	do {                                                                   \

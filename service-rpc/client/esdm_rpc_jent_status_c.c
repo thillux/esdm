@@ -42,14 +42,22 @@ static void esdm_rpcc_jent_status_cb(const StatusResponse *response,
 
 	esdm_rpcc_error_check(response, buffer);
 	buffer->ret = response->ret;
-	if (response->ret < 0)
+	if (response->ret < 0) {
+		if (buffer->buf && buffer->buflen)
+			buffer->buf[0] = '\0';
 		return;
+	}
 	if (!response->buffer || !buffer->buflen || !buffer->buf) {
 		buffer->ret = -EFAULT;
 		return;
 	}
 
-	snprintf(buffer->buf, buffer->buflen, "%s", response->buffer);
+	/* A JSON document, so not truncated - see esdm_rpcc_status_json_cb */
+	if (snprintf(buffer->buf, buffer->buflen, "%s", response->buffer) >=
+	    (int)buffer->buflen) {
+		buffer->buf[0] = '\0';
+		buffer->ret = -EMSGSIZE;
+	}
 }
 
 DSO_PUBLIC

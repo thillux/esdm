@@ -48,7 +48,7 @@ static void esdm_rpcc_get_seed_cb(const RandValResponse *response,
 
 	esdm_rpcc_error_check(response, buffer);
 
-	buffer->ret = response->ret;
+	buffer->ret = esdm_rpcc_randval_ret(response->ret);
 
 	/*
 	 * Track the copied length separately from the caller's capacity: the
@@ -73,6 +73,10 @@ static void esdm_rpcc_get_seed_cb(const RandValResponse *response,
 		memcpy(buffer->buf, response->randval.data, buffer->copied);
 	}
 
+	/* A seed is never longer than the bytes that came with it */
+	if (buffer->ret > 0 && (size_t)buffer->ret > buffer->copied)
+		buffer->ret = -EPROTO;
+
 	/* Zeroization of response is handled in esdm_rpc_client_read_handler */
 }
 
@@ -93,7 +97,13 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	msg.len = buflen;
+	/*
+	 * A seed is far smaller than one answer can carry, so a larger buffer
+	 * asks for no more than that. The server refuses anything beyond it
+	 * with the size it can serve, which is no errno to pass on.
+	 */
+	msg.len = min_size(buflen, ESDM_RPC_MAX_DATA / sizeof(uint64_t) *
+					   sizeof(uint64_t));
 	msg.flags = flags;
 
 	for (;;) {
@@ -120,6 +130,11 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 			goto out;
 
 		ret = buffer.ret;
+		/* The size hint, see above */
+		if (ret < -255) {
+			ret = -EPROTO;
+			goto out;
+		}
 		if (ret >= 0)
 			esdm_test_shm_status_add_rpc_client_written(
 				buffer.copied);
@@ -129,9 +144,11 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
 		/*
 		 * The server-side always invokes the command non-blocking.
 		 * Thus, we need to loop, in case the caller did not request
-		 * non-blocking and ESDM cannot deliver data.
+		 * non-blocking and ESDM cannot deliver data - without holding
+		 * the connection while waiting.
 		 */
-		nanosleep(&esdm_client_poll_ts, NULL);
+		CKINT(esdm_rpcc_unpriv_service_pause(&rpc_conn, int_data,
+						     NULL));
 	}
 
 out:

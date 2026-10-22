@@ -20,9 +20,29 @@
 #ifndef ESDM_RPC_CLIENT_HELPER_H
 #define ESDM_RPC_CLIENT_HELPER_H
 
+#include <errno.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include "esdm_rpc_service.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * The 64-bit return code of a RandValResponse as ssize_t. The server never
+ * sends one of a magnitude beyond ESDM_RPC_MAX_DATA - neither an errno, nor its
+ * negated maximum request size, nor a byte count. A larger one is refused
+ * rather than cut to 32 bits, which may turn an error into a byte count.
+ */
+static inline ssize_t esdm_rpcc_randval_ret(int64_t ret)
+{
+	if (ret < -(int64_t)ESDM_RPC_MAX_DATA ||
+	    ret > (int64_t)ESDM_RPC_MAX_DATA)
+		return -EPROTO;
+	return (ssize_t)ret;
+}
 
 #define esdm_rpcc_error_check(response, buffer)                                \
 	if (!response) {                                                       \
