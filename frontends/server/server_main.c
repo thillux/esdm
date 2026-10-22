@@ -396,19 +396,65 @@ static void daemon_raise_sched_priority(void)
 	}
 }
 
+/*
+ * Let go of the PID file at shutdown.
+ *
+ * Removing it takes write access to its directory - /run, writable for root
+ * only - which the daemon gave up with its privileges. Only a process that
+ * kept them can remove it: the supervisor in PID namespace mode, see
+ * pidns_supervisor_exit(). The daemon itself empties the file instead, through
+ * the descriptor it opened while it was still root. Empty, it names no process
+ * that a PID recycled meanwhile could be taken for, and the next instance
+ * reuses it. systemd removes the file of a PIDFile= service once it stopped.
+ *
+ * The file is emptied while it is still locked: an instance started meanwhile
+ * fails to take the lock and leaves the file alone. Hence this runs once the
+ * daemon is torn down completely, see dealloc().
+ */
+static void pidfile_release(void)
+{
+	if (pidfile_fd == -1)
+		return;
+
+	if (ftruncate(pidfile_fd, 0) == -1)
+		esdm_logger(LOGGER_WARN, LOGGER_C_SERVER,
+			    "Cannot empty pid file: %s\n", strerror(errno));
+
+	/* Expected to fail with the privileges dropped, see above */
+	if (pidfile && unlink(pidfile) == -1)
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+			    "Cannot remove pid file %s: %s\n", pidfile,
+			    strerror(errno));
+
+	close(pidfile_fd);
+	pidfile_fd = -1;
+	free(pidfile);
+	pidfile = NULL;
+}
+
+/*
+ * The daemon forked into the PID namespace terminated: the supervisor, which
+ * kept the privileges, removes what the daemon could not. The PID file names
+ * the supervisor and stays until it is about to exit.
+ */
+static void pidns_supervisor_exit(void)
+{
+	esdm_rpc_server_cleanup();
+	pidfile_release();
+}
+
+/*
+ * The PID file is released last: until it is, its lock keeps another instance
+ * from coming up. One that started while this one still tears down would take
+ * over the status SHM segment, which esdm_fini() then marks as left by its
+ * server - the CUSE daemons and the aux clients would see no server while the
+ * new one serves.
+ */
 static void dealloc(void)
 {
-	if (pidfile_fd != -1) {
-		close(pidfile_fd);
-		pidfile_fd = -1;
-		if (pidfile != NULL) {
-			unlink(pidfile);
-			free(pidfile);
-			pidfile = NULL;
-		}
-	}
-
 	daemon_release();
+
+	pidfile_release();
 }
 
 /*
@@ -671,7 +717,20 @@ int main(int argc, char *argv[])
 		esdm_egd_server_set_pid(getpid());
 		CKINT(linux_isolate_namespace_prefork(fwd_signals,
 						      ARRAY_SIZE(fwd_signals),
-						      esdm_rpc_server_cleanup));
+						      pidns_supervisor_exit));
+
+		/*
+		 * The PID file names the supervisor, which holds its lock and
+		 * removes it - a lockf() lock is not inherited by a child.
+		 * The daemon must not empty it while the supervisor is still
+		 * there, so it only closes the descriptor it inherited.
+		 */
+		if (pidfile_fd != -1) {
+			close(pidfile_fd);
+			pidfile_fd = -1;
+		}
+		free(pidfile);
+		pidfile = NULL;
 	}
 
 	/*

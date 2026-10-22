@@ -1,5 +1,5 @@
 /*
- * Per-UID connection accounting of the server sockets
+ * Per-user connection accounting of the server sockets
  *
  * Copyright (C) 2026, Stephan Mueller <smueller@chronox.de>
  *
@@ -25,14 +25,15 @@
 #include "esdm_peer_limit.h"
 
 /*
- * One UID with connections. Entries only exist while their UID has
- * connections, so the table holds no more of them than there are connections.
+ * One account with connections, see esdm_peer_account.h - the uid member is
+ * the account. Entries only exist while their account has connections, so the
+ * table holds no more of them than there are connections.
  */
 struct esdm_peer_limit_entry {
 	struct esdm_peer_limit_entry *next;
 	uid_t uid;
 	unsigned int count;
-	/* The limit was reported for this UID already */
+	/* The limit was reported for this account already */
 	bool warned;
 };
 
@@ -74,7 +75,7 @@ bool esdm_peer_limit_get(struct esdm_peer_limit *limit, uid_t uid)
 		if (!entry->warned) {
 			esdm_logger(
 				LOGGER_WARN, LOGGER_C_SERVER,
-				"%s: UID %u reached its limit of %u connections, refusing further ones\n",
+				"%s: user %u reached its limit of %u connections, refusing further ones\n",
 				limit->name, (unsigned int)uid,
 				limit->max_per_uid);
 			entry->warned = true;
@@ -160,8 +161,8 @@ unsigned int esdm_peer_limit_max_count(struct esdm_peer_limit *limit)
 	pthread_mutex_lock(&limit->lock);
 
 	/*
-	 * Entries only exist while their UID has connections, so the walk is
-	 * bounded by the connections, not by the UIDs ever seen.
+	 * Entries only exist while their account has connections, so the walk
+	 * is bounded by the connections, not by the accounts ever seen.
 	 */
 	for (i = 0; i < ESDM_PEER_LIMIT_BUCKETS; i++) {
 		for (entry = limit->buckets[i]; entry; entry = entry->next) {

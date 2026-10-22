@@ -54,11 +54,13 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_peer_account.h"
 #include "esdm_peer_limit.h"
 #include "esdm_shm_status.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_server.h"
+#include "esdm_server_socket.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
 #include "linux_support.h"
@@ -90,8 +92,10 @@ struct esdm_rpcs {
 struct esdm_rpcs_connection {
 	struct esdm_rpcs *proto;
 	int child_fd;
-	/* Peer UID, accounted in esdm_rpcs_peer_limit if peer_counted */
+	/* Peer UID, and the user it is accounted to, see esdm_peer_account.h */
 	uid_t peer_uid;
+	uid_t peer_account;
+	/* Accounted in esdm_rpcs_peer_limit, as peer_account */
 	bool peer_counted;
 	uint32_t method_index;
 	uint32_t request_id;
@@ -143,10 +147,15 @@ static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 static atomic_int server_exit = 0;
 
 /*
- * Concurrent connections of one unprivileged UID over all RPC worker threads -
+ * Concurrent connections of one unprivileged user over all RPC worker threads -
  * root is exempt. Each worker serves up to 1024 connections and all of them
  * share one RLIMIT_NOFILE with the EGD interface; without a bound per peer a
  * single local user could exhaust them and lock every other client out.
+ *
+ * A user is its account, see esdm_peer_account.h, not the UID it connects
+ * under: the UIDs of its /etc/subuid range it may map in a user namespace and
+ * connect as count as its own, so it cannot multiply the bound by spreading
+ * its connections over them.
  *
  * A client process holds up to one connection per online node, and idle ones
  * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC. A fixed bound would therefore
@@ -154,26 +163,27 @@ static atomic_int server_exit = 0;
  * bound scales with the online nodes instead, admitting
  * ESDM_RPC_PROCESSES_PER_UID such processes, but never less than
  * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps both: no single
- * UID can take more than half of RLIMIT_NOFILE, which leaves the other half to
- * the remaining users and the EGD interface (see esdm_rpcs_peer_limit_init()).
+ * user can take more than half of RLIMIT_NOFILE, which leaves the other half
+ * to the remaining users and the EGD interface (see
+ * esdm_rpcs_peer_limit_init()).
  */
 #define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
 #define ESDM_RPC_PROCESSES_PER_UID 16
 
 /*
- * The per-UID bound alone does not protect the descriptors: a user can map the
- * UIDs of its /etc/subuid range in a user namespace, connect as each of them,
- * and keep the connections from being reaped as idle with a cheap request
- * every second. The unprivileged connections are therefore also bounded in
- * total, leaving ESDM_RPC_RESERVED_FDS of RLIMIT_NOFILE - but at most half of
- * it - to the EGD interface (up to 2048 connections), the privileged interface
- * and the server itself. The bound is split evenly over the worker threads,
- * each holding at most ESDM_RPCS_MAX_WORKER_CONNECTIONS.
+ * The per-user bound alone does not protect the descriptors: a few users
+ * together exhaust them, and keep their connections from being reaped as idle
+ * with a cheap request every second. The unprivileged connections are
+ * therefore also bounded in total, leaving ESDM_RPC_RESERVED_FDS of
+ * RLIMIT_NOFILE - but at most half of it - to the EGD interface (up to 2048
+ * connections), the privileged interface and the server itself. The bound is
+ * split evenly over the worker threads, each holding at most
+ * ESDM_RPCS_MAX_WORKER_CONNECTIONS.
  *
  * A worker whose slots are all taken stops accepting while another worker has
  * a free slot. Once all are taken, it does not turn a new connection away -
  * whoever holds the slots would lock everybody else out - but closes one of
- * its connections to make room: the least recently active one of the UID with
+ * its connections to make room: the least recently active one of the user with
  * the most connections in that worker. The clients reconnect transparently, so
  * service goes on for everybody, at the price of churn under attack. Never
  * closed are a connection with a request not read yet, and any connection of
@@ -191,7 +201,7 @@ static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
 	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
 
 /*
- * Size the per-UID bound of the RPC interface. To be called before the first
+ * Size the per-user bound of the RPC interface. To be called before the first
  * RPC worker thread starts.
  */
 static void esdm_rpcs_peer_limit_init(void)
@@ -212,8 +222,11 @@ static void esdm_rpcs_peer_limit_init(void)
 								  UINT_MAX);
 
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-		    "Admitting at most %u RPC connections per unprivileged UID\n",
+		    "Admitting at most %u RPC connections per unprivileged user\n",
 		    esdm_rpcs_peer_limit.max_per_uid);
+
+	/* While the privileges are still held, see esdm_peer_account.h. */
+	esdm_peer_account_init();
 }
 
 /* Connection slots of each of @num_threads workers serving @proto */
@@ -774,13 +787,119 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 		rpc_conn->child_fd = -1;
 	}
 	if (rpc_conn->peer_counted)
-		esdm_peer_limit_put(&esdm_rpcs_peer_limit, rpc_conn->peer_uid);
+		esdm_peer_limit_put(&esdm_rpcs_peer_limit,
+				    rpc_conn->peer_account);
 	/*
 	 * No per-connection request buffer to wipe here anymore - the shared
 	 * per-worker esdm_rpcs_reqbuf is zeroized after every request in
 	 * esdm_rpcs_read()/esdm_rpcs_pack_internal().
 	 */
 	free(rpc_conn);
+}
+
+/*
+ * Time a worker may spend per round of its event loop on the calls that
+ * collect from the entropy sources, see esdm_rpcs_expensive_begin().
+ *
+ * A worker serves the requests of up to ESDM_RPCS_MAX_EVENTS ready connections
+ * per round, one after the other. A prediction resistant request of at most
+ * ESDM_RPC_MAX_PR_REQUEST_SIZE bytes costs a full reseed each - some 6 ms with
+ * the Jitter RNG as the only entropy source, more with slower sources - and a
+ * request for seed material collects from every entropy source just the same
+ * (esdm_get_seed()). Unbound, a client spreading such requests over a few
+ * hundred connections holds up every other client of that worker for seconds
+ * per round. The prediction resistant DRNG and the seed collection serve one
+ * caller at a time anyway (esdm_pr_lock, and the lock of esdm_get_seed()), so
+ * the bound costs no throughput of either, only how long a worker may be tied
+ * to them at a stretch. Both kinds of calls share it: what holds up the other
+ * clients is the time spent on them together.
+ *
+ * A time rather than a number of requests, as the cost of one depends on the
+ * entropy sources. The first request of a round is always served, so even a
+ * collection longer than this makes progress.
+ */
+#define ESDM_RPCS_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
+
+/*
+ * Time this worker thread spent in such calls in the current round of its
+ * event loop. Only bounded inside a worker's event loop: a request handed to
+ * the service any other way - the fuzz harnesses do - is not part of a round.
+ */
+static __thread struct {
+	bool in_round;
+	uint64_t spent_ns;
+} esdm_rpcs_round;
+
+static uint64_t esdm_rpcs_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* A new round of this worker's event loop begins. */
+static void esdm_rpcs_round_start(void)
+{
+	esdm_rpcs_round.in_round = true;
+	esdm_rpcs_round.spent_ns = 0;
+}
+
+/*
+ * May the calling worker start a call collecting from the entropy sources in
+ * this round, see ESDM_RPCS_ROUND_BUDGET_NS? @what names the call for the log.
+ * If so, @start receives the time it starts, to be handed to
+ * esdm_rpcs_expensive_end() once it returned.
+ */
+static bool esdm_rpcs_expensive_begin(const char *what, uint64_t *start)
+{
+	if (esdm_rpcs_round.in_round &&
+	    esdm_rpcs_round.spent_ns >= ESDM_RPCS_ROUND_BUDGET_NS) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+			    "%s: budget of this round used up - client to retry\n",
+			    what);
+		return false;
+	}
+
+	*start = esdm_rpcs_now_ns();
+
+	return true;
+}
+
+/* Charge a call started with esdm_rpcs_expensive_begin() to the round. */
+static void esdm_rpcs_expensive_end(uint64_t start)
+{
+	esdm_rpcs_round.spent_ns += esdm_rpcs_now_ns() - start;
+}
+
+ssize_t esdm_rpcs_get_random_bytes_pr(uint8_t *buf, size_t buflen)
+{
+	uint64_t start;
+	ssize_t ret;
+
+	if (!esdm_rpcs_expensive_begin("Prediction resistant generation",
+				       &start))
+		return -EAGAIN;
+
+	ret = esdm_get_random_bytes_pr_noblock(buf, buflen);
+	esdm_rpcs_expensive_end(start);
+
+	return ret;
+}
+
+ssize_t esdm_rpcs_get_seed(uint64_t *buf, size_t nbytes, unsigned int flags)
+{
+	uint64_t start;
+	ssize_t ret;
+
+	if (!esdm_rpcs_expensive_begin("Seed collection", &start))
+		return -EAGAIN;
+
+	ret = esdm_get_seed(buf, nbytes, flags | ESDM_GET_SEED_NONBLOCK);
+	esdm_rpcs_expensive_end(start);
+
+	return ret;
 }
 
 static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
@@ -845,10 +964,10 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 	{
 		if (n == ARRAY_SIZE(uids))
 			break;
-		uids[n++] = rpc_conn->peer_uid;
+		uids[n++] = rpc_conn->peer_account;
 	}
 
-	/* The UID with the most connections */
+	/* The user with the most connections */
 	qsort(uids, n, sizeof(uids[0]), esdm_rpcs_uid_cmp);
 	for (i = 0; i < n; i++) {
 		run = (i && uids[i] == uids[i - 1]) ? run + 1 : 1;
@@ -859,13 +978,14 @@ esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
 	}
 
 	/*
-	 * The least recent idle one of that UID, else of any UID - which is
-	 * also the choice when no UID holds more than one. Only without an idle
-	 * one, one with an unread answer, chosen the same way.
+	 * The least recent idle one of that user, else of any user - which is
+	 * also the choice when no user holds more than one. Only without an
+	 * idle one, one with an unread answer, chosen the same way.
 	 */
 	TAILQ_FOREACH(rpc_conn, list, tailq)
 	{
-		bool preferred = (best_run > 1 && rpc_conn->peer_uid == best);
+		bool preferred =
+			(best_run > 1 && rpc_conn->peer_account == best);
 		enum esdm_rpcs_conn_state state;
 
 		if (!preferred && cand[esdm_rpcs_conn_idle][0])
@@ -909,8 +1029,9 @@ static bool esdm_rpcs_make_room(int epfd,
 		return false;
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
-		    "Closing client FD %d of UID %u to make room\n",
-		    victim->child_fd, (unsigned int)victim->peer_uid);
+		    "Closing client FD %d of UID %u (user %u) to make room\n",
+		    victim->child_fd, (unsigned int)victim->peer_uid,
+		    (unsigned int)victim->peer_account);
 
 	for (i = 0; i < num; i++) {
 		if (pending[i].data.ptr == victim)
@@ -1100,6 +1221,9 @@ static int esdm_rpcs_handler(void *args)
 			goto out;
 		}
 
+		/* The events below are this round, see ESDM_RPCS_ROUND_BUDGET_NS */
+		esdm_rpcs_round_start();
+
 		bool do_cleanup = false;
 
 		for (int i = 0; i < nfds; i++) {
@@ -1188,13 +1312,21 @@ static int esdm_rpcs_handler(void *args)
 				{
 					struct ucred cred;
 					socklen_t cred_len = sizeof(cred);
+					bool admitted = false;
 
 					if (getsockopt(accepted_fd, SOL_SOCKET,
 						       SO_PEERCRED, &cred,
-						       &cred_len) < 0 ||
-					    !esdm_peer_limit_get(
-						    &esdm_rpcs_peer_limit,
-						    cred.uid)) {
+						       &cred_len) == 0) {
+						rpc_conn->peer_uid = cred.uid;
+						rpc_conn->peer_account =
+							esdm_peer_account(
+								accepted_fd,
+								&cred);
+						admitted = esdm_peer_limit_get(
+							&esdm_rpcs_peer_limit,
+							rpc_conn->peer_account);
+					}
+					if (!admitted) {
 						esdm_logger(
 							LOGGER_DEBUG,
 							LOGGER_C_RPC,
@@ -1204,7 +1336,6 @@ static int esdm_rpcs_handler(void *args)
 							rpc_conn);
 						continue;
 					}
-					rpc_conn->peer_uid = cred.uid;
 					rpc_conn->peer_counted = true;
 				}
 
@@ -1443,6 +1574,13 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 
 	CKNULL(proto->service, -EINVAL);
 
+	/*
+	 * Done by esdm_rpcs_peer_limit_init() already for the server - but not
+	 * for a harness serving the interface, whose first accept would wait
+	 * for it otherwise.
+	 */
+	esdm_peer_account_init();
+
 	if (proto->privileged) {
 		num_threads = 1;
 	} else {
@@ -1537,9 +1675,13 @@ out:
 	return ret;
 }
 
-/* Open the socket that we want to use for receiving data. */
-static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
-			   ProtobufCService *service, struct esdm_rpcs *proto)
+/*
+ * Open the socket that we want to use for receiving data. A Unix domain socket
+ * file is created with @mode, see esdm_server_bind_unix().
+ */
+static int esdm_rpcs_start(const char *unix_socket, mode_t mode,
+			   uint16_t tcp_port, ProtobufCService *service,
+			   struct esdm_rpcs *proto)
 {
 	struct sockaddr_un addr_un;
 	struct sockaddr_in addr_in;
@@ -1583,8 +1725,16 @@ static int esdm_rpcs_start(const char *unix_socket, uint16_t tcp_port,
 		return -errsv;
 	}
 
-	if (bind(fd, address, address_len) < 0) {
-		errsv = errno;
+	/*
+	 * The socket file gets its access mode as it is created: setting it
+	 * with a chmod(2) of the path afterwards would follow a symlink swapped
+	 * in for the socket meanwhile - and run as root.
+	 */
+	if (unix_socket)
+		errsv = -esdm_server_bind_unix(fd, &addr_un, mode);
+	else
+		errsv = bind(fd, address, address_len) < 0 ? errno : 0;
+	if (errsv) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "RPC Server: cannot bind to socket: %s\n",
 			    strerror(errsv));
@@ -1685,24 +1835,21 @@ static atomic_bool esdm_rpcs_self_bound_socket = false;
 /*
  * Obtain the listening socket, preferring one handed over by systemd.
  *
- * @systemd_socket is set to true when systemd owns the socket, in which case
- * its lifecycle and its access mode are systemd's business, not ours.
+ * A socket bound here is created with @mode. One handed over by systemd is
+ * left as it is: its lifecycle and its access mode are systemd's business, not
+ * ours.
  */
 static int esdm_rpcs_start_socket(const char *socket_name,
-				  const char *socket_path,
+				  const char *socket_path, mode_t mode,
 				  ProtobufCService *service,
-				  struct esdm_rpcs *proto, bool *systemd_socket)
+				  struct esdm_rpcs *proto)
 {
 	int ret;
 
-	*systemd_socket = false;
-
 	if (systemd_listen_fds() > 0) {
 		ret = esdm_rpcs_start_systemd(socket_name, service, proto);
-		if (!ret) {
-			*systemd_socket = true;
+		if (!ret)
 			return 0;
-		}
 
 		/*
 		 * A socket that was handed over but is unusable is a hard
@@ -1725,7 +1872,7 @@ static int esdm_rpcs_start_socket(const char *socket_name,
 		atomic_store(&esdm_rpcs_self_bound_socket, true);
 	}
 
-	return esdm_rpcs_start(socket_path, 0, service, proto);
+	return esdm_rpcs_start(socket_path, mode, 0, service, proto);
 }
 
 /* Terminating the RPC server. */
@@ -1743,7 +1890,6 @@ static int esdm_rpcs_unpriv_init(void *args)
 	struct esdm_rpcs unpriv_proto;
 	ProtobufCService *unpriv_service =
 		(ProtobufCService *)&unpriv_access_service;
-	bool systemd_socket;
 	int ret;
 
 	(void)args;
@@ -1754,29 +1900,17 @@ static int esdm_rpcs_unpriv_init(void *args)
 	unpriv_proto.server_listening_fd = -1;
 	unpriv_proto.privileged = false;
 
-	/* Create server handler for privileged interface in main thread */
-	CKINT(esdm_rpcs_start_socket("ESDM_RPC_UNPRIV_SOCKET",
-				     ESDM_RPC_UNPRIV_SOCKET, unpriv_service,
-				     &unpriv_proto, &systemd_socket));
-
 	/*
-	 * Make unprivileged socket available for all users. A socket handed
-	 * over by systemd carries the access mode of its .socket unit
-	 * (SocketMode=); overriding that here would silently ignore the
-	 * administrator's configuration.
+	 * Create the server handler for the unprivileged interface, its socket
+	 * available for all users. A socket handed over by systemd carries the
+	 * access mode of its .socket unit (SocketMode=), which is left alone:
+	 * overriding it would silently ignore the administrator's
+	 * configuration.
 	 */
-	if (!systemd_socket && chmod(ESDM_RPC_UNPRIV_SOCKET,
-				     S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
-					     S_IROTH | S_IWOTH) == -1) {
-		ret = -errno;
-
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"Failed to set permissions for Unix domain socket %s: %s\n",
-			ESDM_RPC_UNPRIV_SOCKET, strerror(errno));
-
-		goto out;
-	}
+	CKINT(esdm_rpcs_start_socket(
+		"ESDM_RPC_UNPRIV_SOCKET", ESDM_RPC_UNPRIV_SOCKET,
+		S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH,
+		unpriv_service, &unpriv_proto));
 
 	/* Notify the mother that the unprivileged thread is initialized. */
 	atomic_store(&esdm_rpc_init_state, esdm_rpcs_state_unpriv_init);
@@ -1843,7 +1977,8 @@ int esdm_rpcs_fuzz_serve(const char *socket_path, ProtobufCService *service,
 	 * socket activated, and a stray LISTEN_FDS in its environment would
 	 * otherwise take it to a descriptor that is not its own.
 	 */
-	CKINT(esdm_rpcs_start(socket_path, 0, service, &proto));
+	CKINT(esdm_rpcs_start(socket_path, S_IRUSR | S_IWUSR, 0, service,
+			      &proto));
 
 	/*
 	 * What is skipped compared to the interface initialization below is the
@@ -1871,7 +2006,6 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	struct esdm_rpcs priv_proto;
 	ProtobufCService *priv_service =
 		(ProtobufCService *)&priv_access_service;
-	bool systemd_socket;
 	int ret;
 
 	thread_set_name(rpc_priv_server, 0);
@@ -1880,24 +2014,16 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	priv_proto.server_listening_fd = -1;
 	priv_proto.privileged = true;
 
-	/* Create server handler for privileged interface in main thread */
+	/*
+	 * Create the server handler for the privileged interface in the main
+	 * thread, its socket available for root only - from its creation on,
+	 * so the file never has a looser mode for somebody else to connect
+	 * through, not even for a moment. See above on the socket activation
+	 * case.
+	 */
 	CKINT(esdm_rpcs_start_socket("ESDM_RPC_PRIV_SOCKET",
-				     ESDM_RPC_PRIV_SOCKET, priv_service,
-				     &priv_proto, &systemd_socket));
-
-	/* Make privileged socket available for root only - see above on the
-	 * socket activation case. */
-	if (!systemd_socket &&
-	    chmod(ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR) == -1) {
-		int errsv = errno;
-
-		esdm_logger(
-			LOGGER_ERR, LOGGER_C_ANY,
-			"Failed to set permissions for Unix domain socket %s: %s\n",
-			ESDM_RPC_PRIV_SOCKET, strerror(errsv));
-		ret = -errsv;
-		goto out;
-	}
+				     ESDM_RPC_PRIV_SOCKET, S_IRUSR | S_IWUSR,
+				     priv_service, &priv_proto));
 
 	/*
 	 * Create the optional EGD compatibility socket while the privileges to

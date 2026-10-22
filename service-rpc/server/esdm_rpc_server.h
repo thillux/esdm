@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "config.h"
 
@@ -44,6 +45,33 @@ extern "C" {
  *	 whether its callers is privileged.
  */
 bool esdm_rpc_client_is_privileged(void *closure_data);
+
+/**
+ * @brief Generate prediction resistant bytes for an RPC request
+ *
+ * esdm_get_random_bytes_pr_noblock() within the share of the calling worker:
+ * a worker serves the requests of all its ready connections one after the
+ * other, and each of these generations costs reseeds, so they are bounded per
+ * round of the worker's event loop. Beyond the bound, -EAGAIN is returned
+ * without generating anything - the answer the clients already get while
+ * another worker holds the PR DRNG, and retry on.
+ *
+ * @return as esdm_get_random_bytes_pr_noblock()
+ */
+ssize_t esdm_rpcs_get_random_bytes_pr(uint8_t *buf, size_t buflen);
+
+/**
+ * @brief Collect seed material for an RPC request
+ *
+ * esdm_get_seed() with ESDM_GET_SEED_NONBLOCK added to @flags, within the same
+ * share of the calling worker as esdm_rpcs_get_random_bytes_pr(): each call
+ * collects from all entropy sources, at the cost of a reseed. Beyond the bound,
+ * -EAGAIN is returned without collecting anything - the answer the clients
+ * already get while another caller collects seed material, and retry on.
+ *
+ * @return as esdm_get_seed()
+ */
+ssize_t esdm_rpcs_get_seed(uint64_t *buf, size_t nbytes, unsigned int flags);
 
 int esdm_rpc_server_init(const char *username, const char *groupname);
 void esdm_rpc_server_fini(void);
