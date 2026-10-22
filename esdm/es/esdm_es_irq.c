@@ -551,8 +551,7 @@ static void esdm_irq_es_state(struct json_object *obj)
 	if (esdm_irq_entropy_fd >= 0)
 		esdm_irq_set_entropy_rate_locked(esdm_irq_requested_bits_set);
 
-	esdm_kernel_state(obj, esdm_irq_entropy_fd, ESDM_IRQ_STATUS_JSON,
-			  ESDM_IRQ_STATUS);
+	esdm_kernel_state(obj, esdm_irq_entropy_fd, ESDM_IRQ_STATUS_JSON);
 
 	mutex_unlock(&irq_mutex);
 }

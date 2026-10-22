@@ -184,11 +184,10 @@ void esdm_kernel_read(struct entropy_es *eb_es, int fd, unsigned int ioctl_cmd,
 
 /*
  * Add the state the kernel add-on reports for an entropy source to @obj: its
- * JSON status (@ioctl_json), or for an add-on older than that, its status text
- * (@ioctl_txt) turned into members.
+ * JSON status (@ioctl_json).
  */
-void esdm_kernel_state(struct json_object *obj, int fd, unsigned int ioctl_json,
-		       unsigned int ioctl_txt);
+void esdm_kernel_state(struct json_object *obj, int fd,
+		       unsigned int ioctl_json);
 
 /* Set the requested bit size */
 void esdm_kernel_set_requested_bits(uint32_t *configured_bits,

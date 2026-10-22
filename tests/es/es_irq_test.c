@@ -87,8 +87,7 @@ static int es_irq_getstate(void)
 	/*
 	 * The members come from the kernel module (esdm_irq_es_state_json()
 	 * of kernel/esdm_es/esdm_es_irq.c), so this pins the two
-	 * together - or for a module older than its JSON status, from its
-	 * status text.
+	 * together.
 	 */
 	if (!es_state_has(obj, "drbg_for_operating_entropy_pool",
 			  json_type_string) ||

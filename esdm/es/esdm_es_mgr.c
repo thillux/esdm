@@ -21,7 +21,6 @@
 
 #define _GNU_SOURCE
 #include <assert.h>
-#include <ctype.h>
 #include <errno.h>
 #include <json-c/json.h>
 #include <stdint.h>
@@ -514,87 +513,6 @@ void esdm_kernel_set_requested_bits(uint32_t *configured_bits,
 }
 
 /*
- * Turn a label of the status text of the kernel add-on into a JSON member
- * name: the label is lower-cased and every run of non-alphanumeric characters
- * becomes one underscore, e.g. "per-CPU interrupt collection size" turns into
- * "per_cpu_interrupt_collection_size" - the name the add-on gives the member
- * in its JSON status.
- */
-static void esdm_kernel_state_key(const char *label, char *key, size_t keylen)
-{
-	bool pending_sep = false;
-	size_t used = 0;
-
-	while (*label && used < keylen - 1) {
-		unsigned char c = (unsigned char)*label++;
-
-		if (!isalnum(c)) {
-			pending_sep = true;
-			continue;
-		}
-
-		if (pending_sep && used) {
-			key[used++] = '_';
-			if (used >= keylen - 1)
-				break;
-		}
-
-		key[used++] = (char)tolower(c);
-		pending_sep = false;
-	}
-
-	key[used] = '\0';
-}
-
-/* A value of the status text: a number or a flag as such, else a string */
-static struct json_object *esdm_kernel_state_value(const char *val)
-{
-	long long num;
-	char *end;
-
-	if (!strcmp(val, "true") || !strcmp(val, "false"))
-		return json_object_new_boolean(!strcmp(val, "true"));
-
-	errno = 0;
-	num = strtoll(val, &end, 10);
-	if (!errno && end != val && !*end)
-		return json_object_new_int64(num);
-
-	return json_object_new_string(val);
-}
-
-/*
- * The status text of an add-on older than its JSON status: lines of the shape
- * " Label: value", which become "label": value.
- */
-static void esdm_kernel_state_txt(struct json_object *obj, char *status)
-{
-	char *line, *saveptr = NULL;
-
-	for (line = strtok_r(status, "\n", &saveptr); line;
-	     line = strtok_r(NULL, "\n", &saveptr)) {
-		char key[128];
-		char *val = strchr(line, ':');
-
-		/* Lines without a label carry no member */
-		if (!val)
-			continue;
-
-		*val++ = '\0';
-		while (*line == ' ' || *line == '\t')
-			line++;
-		while (*val == ' ' || *val == '\t')
-			val++;
-
-		esdm_kernel_state_key(line, key, sizeof(key));
-		if (!key[0])
-			continue;
-
-		json_object_object_add(obj, key, esdm_kernel_state_value(val));
-	}
-}
-
-/*
  * The JSON status of the add-on.
  *
  * @return true if it is a JSON object, whose members were added to @obj
@@ -626,10 +544,9 @@ static bool esdm_kernel_state_json(struct json_object *obj, const char *status)
  * @param [in] obj JSON object the state is added to
  * @param [in] fd file descriptor to the entropy source
  * @param [in] ioctl_json IOCTL command reading the JSON status
- * @param [in] ioctl_txt IOCTL command reading the status text
  */
-void esdm_kernel_state(struct json_object *obj, int fd, unsigned int ioctl_json,
-		       unsigned int ioctl_txt)
+void esdm_kernel_state(struct json_object *obj, int fd,
+		       unsigned int ioctl_json)
 {
 	char status[512];
 
@@ -641,24 +558,13 @@ void esdm_kernel_state(struct json_object *obj, int fd, unsigned int ioctl_json,
 	}
 
 	/* The kernel fills as much as the IOCTL says, which has to fit */
-	if (_IOC_SIZE(ioctl_json) >= sizeof(status) ||
-	    _IOC_SIZE(ioctl_txt) >= sizeof(status))
+	if (_IOC_SIZE(ioctl_json) >= sizeof(status))
 		goto err;
 
 	memset(status, 0, sizeof(status));
 	if (ioctl(fd, ioctl_json, status) >= 0 &&
 	    esdm_kernel_state_json(obj, status))
 		return;
-
-	/*
-	 * An add-on older than its JSON status, or one whose document is cut
-	 * short: its status text.
-	 */
-	memset(status, 0, sizeof(status));
-	if (ioctl(fd, ioctl_txt, status) >= 0) {
-		esdm_kernel_state_txt(obj, status);
-		return;
-	}
 
 err:
 	json_object_object_add(

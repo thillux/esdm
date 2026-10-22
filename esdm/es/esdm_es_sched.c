@@ -493,8 +493,7 @@ static void esdm_sched_es_state(struct json_object *obj)
 		esdm_sched_set_entropy_rate_locked(
 			esdm_sched_requested_bits_set);
 
-	esdm_kernel_state(obj, esdm_sched_entropy_fd, ESDM_SCHED_STATUS_JSON,
-			  ESDM_SCHED_STATUS);
+	esdm_kernel_state(obj, esdm_sched_entropy_fd, ESDM_SCHED_STATUS_JSON);
 
 	mutex_unlock(&sched_mutex);
 }
