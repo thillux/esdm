@@ -26,15 +26,15 @@
 
 #include "binhexbin.h"
 
-static uint8_t bin_char(const char hex)
+static int bin_char(const char hex)
 {
 	if (48 <= hex && 57 >= hex)
-		return (uint8_t)(hex - 48);
+		return hex - 48;
 	if (65 <= hex && 70 >= hex)
-		return (uint8_t)(hex - 55);
+		return hex - 55;
 	if (97 <= hex && 102 >= hex)
-		return (uint8_t)(hex - 87);
-	return 0;
+		return hex - 87;
+	return -1;
 }
 
 /*
@@ -44,13 +44,25 @@ static uint8_t bin_char(const char hex)
  * @bin output buffer with binary data
  * @binlen length of already allocated bin buffer (should be at least
  *	   half of hexlen -- if not, only a fraction of hexlen is converted)
+ *
+ * return: 0 on success, -EINVAL if hex holds a character that is no hex
+ *	   digit - bin is not touched then
  */
-void hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
-	     const size_t binlen)
+int hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
+	    const size_t binlen)
 {
 	size_t i;
 	size_t avail = binlen;
 	size_t chars;
+
+	/*
+	 * Reject the whole input rather than decoding a non-hex character as
+	 * a zero nibble, which would silently yield a different value.
+	 */
+	for (i = 0; i < hexlen; i++) {
+		if (bin_char(hex[i]) < 0)
+			return -EINVAL;
+	}
 
 	/*
 	 * handle odd-length of strings where the first digit is the least
@@ -60,8 +72,8 @@ void hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
 	 */
 	if (hexlen & 1) {
 		if (!avail)
-			return;
-		bin[0] = bin_char(hex[0]);
+			return 0;
+		bin[0] = (uint8_t)bin_char(hex[0]);
 		bin++;
 		hex++;
 		avail--;
@@ -71,8 +83,10 @@ void hex2bin(const char *hex, const size_t hexlen, uint8_t *bin,
 
 	for (i = 0; i < chars; i++) {
 		bin[i] = (uint8_t)(bin_char(hex[(i * 2)]) << 4);
-		bin[i] |= bin_char(hex[((i * 2) + 1)]);
+		bin[i] |= (uint8_t)bin_char(hex[((i * 2) + 1)]);
 	}
+
+	return 0;
 }
 
 /*
@@ -92,6 +106,7 @@ int hex2bin_alloc(const char *hex, const size_t hexlen, uint8_t **bin,
 {
 	uint8_t *out = NULL;
 	size_t outlen = 0;
+	int ret;
 
 	if (!hexlen)
 		return -EINVAL;
@@ -102,7 +117,11 @@ int hex2bin_alloc(const char *hex, const size_t hexlen, uint8_t **bin,
 	if (!out)
 		return -errno;
 
-	hex2bin(hex, hexlen, out, outlen);
+	ret = hex2bin(hex, hexlen, out, outlen);
+	if (ret) {
+		free(out);
+		return ret;
+	}
 	*bin = out;
 	*binlen = outlen;
 	return 0;

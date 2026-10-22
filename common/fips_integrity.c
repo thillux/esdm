@@ -197,34 +197,34 @@ static int process_checkfile(const char *checkfile, const char *targetfile)
 		size_t binhashlen;
 		size_t hexhashlen = 0; // length of hash hex value
 		size_t linelen = strlen(buf);
-		size_t i;
 		unsigned char calculated[ESDM_SHA_MAX_SIZE_DIGEST];
 
-		if (linelen == 0)
-			break;
+		/*
+		 * Remove the line terminator (LF, CRLF) and any trailing blank
+		 * or non-printable byte - down to the first character, so a
+		 * line holding nothing else is empty afterwards.
+		 */
+		while (linelen > 0 && !isgraph((unsigned char)buf[linelen - 1]))
+			buf[--linelen] = '\0';
 
-		/* remove trailing CR and reduce buffer length */
-		for (i = linelen - 1; i > 0; i--) {
-			if (!isprint(buf[i])) {
-				buf[i] = '\0';
-				linelen--;
-			} else
-				break;
-		}
+		/*
+		 * Tolerate blank lines, like a trailing empty one: they hold no
+		 * digest. Every other line has to verify, and a file without
+		 * any digest still fails below.
+		 */
+		if (!linelen)
+			continue;
 
 		hexhash = buf;
 		hexhashlen = linelen;
 
-		if (!hexhash || !hexhashlen) {
-			fprintf(stderr, FIPS_INTEGRITY_LOGGER_PREFIX
-				"Invalid checkfile format\n");
-			ret = -EINVAL;
+		ret = hex2bin_alloc(hexhash, hexhashlen, &binhash, &binhashlen);
+		if (ret < 0) {
+			if (ret == -EINVAL)
+				fprintf(stderr, FIPS_INTEGRITY_LOGGER_PREFIX
+					"Invalid checkfile format\n");
 			goto out;
 		}
-
-		ret = hex2bin_alloc(hexhash, hexhashlen, &binhash, &binhashlen);
-		if (ret < 0)
-			goto out;
 
 		esdm_hmac_init(hmac_ctx, (uint8_t *)fipscheck_hmackey,
 			       sizeof(fipscheck_hmackey) - 1);
@@ -252,8 +252,11 @@ static int process_checkfile(const char *checkfile, const char *targetfile)
 		checked_any = 1;
 	}
 
-	if (!checked_any)
+	if (!checked_any) {
+		fprintf(stderr, FIPS_INTEGRITY_LOGGER_PREFIX
+			"No reference value in %s\n", checkfile);
 		ret = -EBADF;
+	}
 
 out:
 	esdm_hmac_zero(hmac_ctx);
@@ -336,8 +339,23 @@ int fips_create_checkfile(const char *checkfile, const char *targetfile)
 
 out:
 	esdm_hmac_zero(hmac_ctx);
-	if (file && file != stdout)
-		fclose(file);
+	if (file && file != stdout) {
+		/*
+		 * The HMAC only reaches the file with fclose() - a full disk
+		 * shows there. And the file was created here, exclusively: one
+		 * left behind without a valid HMAC would make every later check
+		 * fail, and a retry fail with -EEXIST, so remove it.
+		 */
+		if (fclose(file) && !ret) {
+			fprintf(stderr, FIPS_INTEGRITY_LOGGER_PREFIX
+				"Failed to write hash to HMAC control file\n");
+			ret = -EFAULT;
+		}
+		if (ret)
+			unlink(checkfile);
+	} else if (file == stdout && fflush(stdout) && !ret) {
+		ret = -EFAULT;
+	}
 	if (memblock)
 		munmap(memblock, size);
 

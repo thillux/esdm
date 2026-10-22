@@ -64,7 +64,7 @@ static void esdm_hash_drbg_dealloc(void *drng)
 {
 	struct esdm_drbg_state *drbg = (struct esdm_drbg_state *)drng;
 
-	esdm_drbg_zero_free(drbg);
+	esdm_drbg_hash_zero_free(drbg);
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
 		    "Hash DRBG core zeroized and freed\n");
 }

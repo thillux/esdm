@@ -184,6 +184,7 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 					   const uint8_t *addtl,
 					   size_t addtllen, bool test_mode)
 {
+	static const uint8_t kat_nonce[16] = { 0 };
 	struct esdm_openssl_drng_state *state = drng;
 	struct timespec current_time = { 0 };
 	OSSL_PARAM params[3] = { 0 };
@@ -216,6 +217,17 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 		 *
 		 * Note: const is cast away due to OpenSSL's OSSL_PARAM API
 		 * requiring void*. The buffer is not modified by OpenSSL.
+		 *
+		 * Note 2: TEST-RAND keeps a heap copy of TEST_ENTROPY and
+		 * TEST_NONCE for as long as it lives and releases it with a
+		 * plain OPENSSL_free() - not cleansed - when the next reseed
+		 * replaces it or the context is freed (test_rng.c as of
+		 * OpenSSL 3.6.3). ESDM cannot reach that copy: replacing
+		 * it with zeros right after seeding would only free the seed
+		 * earlier, just as uncleansed, as OpenSSL allocates the
+		 * replacement before it frees the old copy. Closing this
+		 * needs OPENSSL_clear_free() in TEST-RAND or a seed source
+		 * provider of ESDM's own.
 		 */
 		params[0] = OSSL_PARAM_construct_octet_string(
 			OSSL_RAND_PARAM_TEST_ENTROPY, (void *)inbuf, inbuflen);
@@ -223,6 +235,14 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 			params[1] = OSSL_PARAM_construct_octet_string(
 				OSSL_RAND_PARAM_TEST_NONCE, (void *)addtl,
 				addtllen);
+		} else if (test_mode) {
+			/*
+			 * The KATs were computed with a 16 byte zero nonce, while
+			 * a struct timespec is only 8 bytes on 32-bit glibc.
+			 */
+			params[1] = OSSL_PARAM_construct_octet_string(
+				OSSL_RAND_PARAM_TEST_NONCE, (void *)kat_nonce,
+				sizeof(kat_nonce));
 		} else {
 			params[1] = OSSL_PARAM_construct_octet_string(
 				OSSL_RAND_PARAM_TEST_NONCE,
@@ -253,14 +273,7 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 	} else {
 		params[0] = OSSL_PARAM_construct_octet_string(
 			OSSL_RAND_PARAM_TEST_ENTROPY, (void *)inbuf, inbuflen);
-		if (addtl) {
-			params[1] = OSSL_PARAM_construct_octet_string(
-				OSSL_RAND_PARAM_TEST_NONCE, (void *)addtl,
-				addtllen);
-			params[2] = OSSL_PARAM_construct_end();
-		} else {
-			params[1] = OSSL_PARAM_construct_end();
-		}
+		params[1] = OSSL_PARAM_construct_end();
 
 		if (!EVP_RAND_CTX_set_params(state->seed_source, params)) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_MD,
@@ -270,7 +283,13 @@ static int esdm_openssl_drbg_seed_internal(void *drng, const uint8_t *inbuf,
 			goto out;
 		}
 
-		if (!EVP_RAND_reseed(state->drbg, 0, NULL, 0, NULL, 0)) {
+		/*
+		 * A reseed never asks for a nonce, so the additional data must
+		 * go in as the reseed's additional input - setting it as the
+		 * TEST-RAND nonce would leave it unused.
+		 */
+		if (!EVP_RAND_reseed(state->drbg, 0, NULL, 0,
+				     addtl, addtl ? addtllen : 0)) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_MD,
 				    "Failed to reseed DRBG\n");
 			ret = -EFAULT;

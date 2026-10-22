@@ -30,18 +30,30 @@ extern "C" {
 
 struct esdm_chacha20_drng_ctx {
 	struct esdm_sym_ctx cc20;
+	/*
+	 * Generating from the zero key of a fresh or zeroized state would give
+	 * predictable output - refused until the DRNG is seeded.
+	 */
+	unsigned int seeded : 1;
 };
 
+/*
+ * The state follows the context rounded up to the alignment of the state:
+ * with the seeded flag, the context is no multiple of it on 32-bit systems,
+ * and the state would extend past the allocation.
+ */
+#define ESDM_CC20_DRNG_HDR_SIZE                                                \
+	ESDM_ALIGN(sizeof(struct esdm_chacha20_drng_ctx),                      \
+		   ESDM_SYM_ALIGNMASK(esdm_chacha20))
 #define ESDM_CC20_DRNG_STATE_SIZE (ESDM_SYM_STATE_SIZE(esdm_chacha20))
 #define ESDM_CC20_DRNG_CTX_SIZE                                                \
-	(ESDM_CC20_DRNG_STATE_SIZE + sizeof(struct esdm_chacha20_drng_ctx))
+	(ESDM_CC20_DRNG_STATE_SIZE + ESDM_CC20_DRNG_HDR_SIZE)
 
 #define _ESDM_CC20_DRNG_SET_CTX(name, ctx, offset)                             \
 	_ESDM_SYM_SET_CTX((&name->cc20), esdm_chacha20, ctx, offset)
 
 #define ESDM_CC20_DRNG_SET_CTX(name)                                           \
-	_ESDM_CC20_DRNG_SET_CTX(name, name,                                    \
-				sizeof(struct esdm_chacha20_drng_ctx))
+	_ESDM_CC20_DRNG_SET_CTX(name, name, ESDM_CC20_DRNG_HDR_SIZE)
 
 /**
  * @brief Zeroize Hash context allocated with either ESDM_HASH_CTX_ON_STACK or
@@ -53,10 +65,9 @@ static inline void esdm_cc20_drng_zero(struct esdm_chacha20_drng_ctx *cc20_ctx)
 {
 	struct esdm_sym_ctx *sym_ctx = &cc20_ctx->cc20;
 
-	memset_secure((uint8_t *)cc20_ctx +
-			      sizeof(struct esdm_chacha20_drng_ctx),
-		      0, ESDM_CC20_DRNG_STATE_SIZE);
+	memset_secure(sym_ctx->sym_state, 0, ESDM_CC20_DRNG_STATE_SIZE);
 	esdm_sym_init(sym_ctx);
+	cc20_ctx->seeded = 0;
 }
 
 /**
@@ -117,10 +128,11 @@ void esdm_cc20_drng_zero_free(struct esdm_chacha20_drng_ctx *cc20_ctx);
  * of random numbers, an attacker cannot deduce the already generated
  * random numbers.
  *
- * @return 0 upon success; < 0 on error
+ * @return 0 upon success; -EINVAL if the DRNG was not seeded since its
+ *	   allocation or last zeroization
  */
-void esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
-			     uint8_t *outbuf, size_t outbuflen);
+int esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
+			    uint8_t *outbuf, size_t outbuflen);
 
 /**
  * @brief Reseed the ChaCha20 DRNG
@@ -133,10 +145,10 @@ void esdm_cc20_drng_generate(struct esdm_chacha20_drng_ctx *cc20_ctx,
  * noise sources. This is followed by seeding the DRNG with the caller-provided
  * data.
  *
- * @return 0 upon succes; < 0 on error
+ * @return 0 upon succes; -EINVAL for an empty seed
  */
-void esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
-			 const uint8_t *inbuf, size_t inbuflen);
+int esdm_cc20_drng_seed(struct esdm_chacha20_drng_ctx *cc20_ctx,
+			const uint8_t *inbuf, size_t inbuflen);
 
 #ifdef __cplusplus
 }

@@ -70,8 +70,12 @@ endif
 
 if get_option('crypto_backend') == 'leancrypto'
 	conf_data.set('ESDM_LEANCRYPTO', true)
+	# Since leancrypto 1.6.0, lc_hash_init() reports a failed self test
+	conf_data.set('ESDM_LEANCRYPTO_HASH_INIT_RET',
+		      leancrypto_dep.version().version_compare('>= 1.6.0'))
 else
 	conf_data.set('ESDM_LEANCRYPTO', false)
+	conf_data.set('ESDM_LEANCRYPTO_HASH_INIT_RET', false)
 endif
 
 if get_option('crypto_backend') == 'openssl'
@@ -309,6 +313,12 @@ conf_data.set('ESDM_NUM_AUX_POOLS', get_option('num-aux-pools'))
 conf_data.set('ESDM_AUX_INPUT_HAS_FULL_ENTROPY', get_option('aux-has-full-entropy').enabled())
 
 conf_data.set('ESDM_MEMORY_DEBUG', get_option('memory-debug').enabled())
+
+# fips_enabled() trusts ESDM_SERVER_FORCE_FIPS only through secure_getenv(),
+# which also refuses it to a binary gaining privileges through file capabilities
+conf_data.set('HAVE_SECURE_GETENV',
+	      cc.has_function('secure_getenv',
+			      prefix: '#define _GNU_SOURCE\n#include <stdlib.h>'))
 
 # Guards the entry points the fuzz harnesses drive the RPC interfaces
 # through - see tests/fuzz.

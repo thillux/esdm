@@ -30,8 +30,42 @@ hmac_sha2_512_tester = executable(
 		link_with: esdm_static_lib,
 	)
 
+# The built-in SHA-3 is only part of the library when it is the conditioning
+# hash (hash_sha3_512). It is tested in every build all the same, compiled into
+# the test where the library does not carry it.
+sha3_tester_src = [ 'sha3_tester.c' ]
+if not get_option('hash_sha3_512').enabled()
+	sha3_tester_src += files('../../crypto/sha3.c')
+endif
+
+sha3_tester = executable(
+		'sha3_tester',
+		sha3_tester_src,
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
+# Likewise the built-in ChaCha20 and its DRNG, which the library only carries
+# with drng_chacha20.
+chacha20_tester_src = [ 'chacha20_tester.c' ]
+if not get_option('drng_chacha20').enabled()
+	chacha20_tester_src += files('../../crypto/chacha20.c',
+				     '../../crypto/chacha20_drng.c')
+endif
+
+chacha20_tester = executable(
+		'chacha20_tester',
+		chacha20_tester_src,
+		dependencies: dependencies_server,
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+	)
+
 test('SHA256', sha256_tester)
 test('SHA512', sha512_tester)
+test('SHA3', sha3_tester)
+test('ChaCha20', chacha20_tester)
 
 test('HMAC SHA256', hmac_sha2_256_tester)
 test('HMAC SHA512', hmac_sha2_512_tester)
@@ -45,4 +79,24 @@ if get_option('drng_hash_drbg').enabled()
 			link_with: esdm_static_lib,
 		)
 	test('Hash DRBG SHA512', hash_drbg_tester)
+
+	drbg_healthcheck_tester = executable(
+			'drbg_healthcheck_tester',
+			[ 'drbg_healthcheck_tester.c' ],
+			dependencies: dependencies_server,
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+		)
+	test('DRBG health check', drbg_healthcheck_tester)
+endif
+
+if get_option('crypto_backend') == 'leancrypto'
+	leancrypto_drbg_tester = executable(
+			'leancrypto_drbg_tester',
+			[ 'leancrypto_drbg_tester.c' ],
+			dependencies: dependencies_server,
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+		)
+	test('leancrypto DRBG', leancrypto_drbg_tester)
 endif

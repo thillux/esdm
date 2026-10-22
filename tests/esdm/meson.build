@@ -35,6 +35,23 @@ if get_option('fips140')
 	test('ESDM FIPS mode detection', esdm_fips_test)
 endif
 
+# The OpenSSL DRNG backend is compiled into the test, like the units above, so
+# its callbacks are reached without a running ESDM.
+if get_option('crypto_backend') == 'openssl'
+	esdm_openssl_reseed_test = executable(
+		'esdm_openssl_reseed_test',
+		[ files('../../esdm/esdm_openssl.c'),
+		  'esdm_openssl_reseed_test.c' ],
+		include_directories: [ include_dirs_esdm_lib,
+				       include_directories('../common') ],
+		dependencies: [ dependencies_esdm_lib ],
+		link_with: esdm_common_static_lib,
+	)
+
+	test('ESDM OpenSSL DRNG reseed additional data',
+	     esdm_openssl_reseed_test)
+endif
+
 if get_option('esdm-server').enabled()
 	esdm_status_test = executable(
 		'esdm_status_test',

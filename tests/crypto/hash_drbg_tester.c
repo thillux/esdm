@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "esdm_hash_drbg_sha512.h"
 #include "selftest_kat.h"
@@ -94,13 +95,13 @@ static int hash_drbg_tester(void)
 		return 1;
 
 	if (esdm_drbg_seed(drbg_stack, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	/* Checks the output and that an output off by a byte is rejected */
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
@@ -109,13 +110,13 @@ static int hash_drbg_tester(void)
 
 	/* Rerun to verify that drbg_zero works properly */
 	if (esdm_drbg_seed(drbg_stack, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
 
@@ -123,32 +124,32 @@ static int hash_drbg_tester(void)
 
 	/* Seed material off by its first byte must not produce that output */
 	if (esdm_kat_modify(mod, ent_nonce, sizeof(mod)))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_seed(drbg_stack, mod, sizeof(mod), pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg_stack, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 
 	ret += esdm_kat_check_differs(act, exp, sizeof(exp)) ? 1 : 0;
 
 	esdm_drbg_zero(drbg_stack);
 
 	if (esdm_drbg_hash_alloc(&drbg))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_seed(drbg, ent_nonce, 64, pers, 32))
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg, act, sizeof(exp), addtl1, 32) < 0)
-		goto out;
+		goto err;
 
 	if (esdm_drbg_generate(drbg, act, sizeof(exp), addtl2, 32) < 0)
-		goto out;
+		goto err;
 #endif
 #if 0
 	static const uint8_t ent_nonce[] = {
@@ -283,13 +284,103 @@ static int hash_drbg_tester(void)
 	ret += esdm_kat_check(act, exp, sizeof(exp)) ? 1 : 0;
 
 out:
-	esdm_drbg_zero_free(drbg);
+	esdm_drbg_hash_zero_free(drbg);
 	return ret;
+
+	/* A DRBG that cannot be set up or asked for output fails the test */
+err:
+	printf("hash DRBG seed, generate or allocation failed\n");
+	ret = 1;
+	goto out;
+}
+
+/*
+ * mlock()/munlock() do not nest per page: every allocated state has to own
+ * its pages, so that freeing one cannot unlock the memory of another.
+ */
+static int hash_drbg_locked_mem_tester(void)
+{
+	static const uint8_t seed[64] = { 0x01 };
+	struct esdm_drbg_state *drbg1 = NULL, *drbg2 = NULL;
+	uintptr_t ps = (uintptr_t)sysconf(_SC_PAGESIZE);
+	uint8_t act[32];
+	int ret = 1;
+
+	if (esdm_drbg_hash_alloc(&drbg1) || esdm_drbg_hash_alloc(&drbg2))
+		goto out;
+
+	if ((uintptr_t)drbg1 % ps || (uintptr_t)drbg2 % ps) {
+		printf("DRBG state not page aligned\n");
+		goto out;
+	}
+
+	/* The surviving state stays usable after its neighbour is gone */
+	esdm_drbg_hash_zero_free(drbg1);
+	drbg1 = NULL;
+	if (esdm_drbg_seed(drbg2, seed, sizeof(seed), NULL, 0) ||
+	    esdm_drbg_generate(drbg2, act, sizeof(act), NULL, 0) < 0)
+		goto out;
+
+	ret = 0;
+
+out:
+	esdm_drbg_hash_zero_free(drbg1);
+	esdm_drbg_hash_zero_free(drbg2);
+	return ret;
+}
+
+/* Locked memory of the process in kB as /proc reports it, -1 if unknown */
+static long vm_locked_kb(void)
+{
+	char line[128];
+	long kb = -1;
+	FILE *f = fopen("/proc/self/status", "r");
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "VmLck: %ld kB", &kb) == 1)
+			break;
+	}
+	fclose(f);
+
+	return kb;
+}
+
+/*
+ * The SP800-90A uninstantiate function releases a state from
+ * esdm_drbg_hash_alloc() including its memory lock.
+ */
+static int hash_drbg_uninstantiate_tester(void)
+{
+	struct esdm_drbg_state *drbg = NULL;
+	long before = vm_locked_kb(), locked, after;
+
+	if (esdm_drbg_hash_alloc(&drbg))
+		return 1;
+	locked = vm_locked_kb();
+	esdm_drbg_zero_free(drbg);
+	after = vm_locked_kb();
+
+	/* Without the privilege or budget to lock, there is nothing to see */
+	if (before < 0 || locked <= before) {
+		printf("DRBG state not locked, unlock not checked\n");
+		return 0;
+	}
+
+	if (after != before) {
+		printf("DRBG state still locked after uninstantiate (%ld kB, expected %ld kB)\n",
+		       after, before);
+		return 1;
+	}
+
+	return 0;
 }
 
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
-	return hash_drbg_tester();
+	return hash_drbg_tester() + hash_drbg_locked_mem_tester() +
+	       hash_drbg_uninstantiate_tester();
 }

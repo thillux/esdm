@@ -31,6 +31,7 @@
  */
 
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -57,6 +58,43 @@ int esdm_config_fips_enabled(void);
 int esdm_config_fips_enabled(void)
 {
 	return getenv(POST_ENV) ? 1 : 0;
+}
+
+/*
+ * The flag file as fips.c sees it. fopen() is interposed for the whole
+ * process - fips.c is compiled into it - so a child can make the file fail to
+ * open with a given errno, or read from another file in its place. Every other
+ * open goes to the C library.
+ */
+#define FIPS_FLAG_FILE "/proc/sys/crypto/fips_enabled"
+static int test_flag_errno;
+static const char *test_flag_file;
+
+FILE *fopen(const char *path, const char *mode)
+{
+	static FILE *(*libc_fopen)(const char *, const char *);
+
+	if (!libc_fopen) {
+		/* ISO C knows no conversion of dlsym()'s answer */
+		void *sym = dlsym(RTLD_NEXT, "fopen");
+
+		memcpy(&libc_fopen, &sym, sizeof(libc_fopen));
+	}
+	if (!libc_fopen) {
+		errno = ENOSYS;
+		return NULL;
+	}
+
+	if (path && !strcmp(path, FIPS_FLAG_FILE)) {
+		if (test_flag_errno) {
+			errno = test_flag_errno;
+			return NULL;
+		}
+		if (test_flag_file)
+			path = test_flag_file;
+	}
+
+	return libc_fopen(path, mode);
 }
 
 /* What the kernel says, independently of what fips.c makes of it. */
@@ -159,6 +197,43 @@ static void child_latched_after_set(void)
 
 	CHECK(fips_enabled() == first,
 	      "the FIPS mode changed after it had already been decided");
+}
+
+/* A kernel without FIPS support has no flag file: no FIPS mode */
+static void child_flag_absent(void)
+{
+	unsetenv("ESDM_SERVER_FORCE_FIPS");
+	test_flag_errno = ENOENT;
+
+	CHECK(!fips_enabled(), "FIPS mode is on without a flag file");
+}
+
+/*
+ * A flag file that is there but cannot be opened leaves the mode open, and the
+ * ESDM must not run outside FIPS mode on a kernel that may be in it. The answer
+ * is the one kept, too: a later call that could read the flag must not change
+ * the mode the ESDM was set up in.
+ */
+static void child_flag_unreadable(void)
+{
+	unsetenv("ESDM_SERVER_FORCE_FIPS");
+	test_flag_errno = EACCES;
+
+	CHECK(fips_enabled(), "an unreadable FIPS flag was taken for no FIPS");
+
+	test_flag_errno = 0;
+	test_flag_file = "/dev/null";
+	CHECK(fips_enabled(),
+	      "the FIPS mode changed once the flag was readable");
+}
+
+/* The same for a flag file that opens but yields nothing */
+static void child_flag_empty(void)
+{
+	unsetenv("ESDM_SERVER_FORCE_FIPS");
+	test_flag_file = "/dev/null";
+
+	CHECK(fips_enabled(), "an empty FIPS flag was taken for no FIPS");
 }
 
 static void child_latched_after_unset(void)
@@ -271,6 +346,9 @@ int main(int argc, char *argv[])
 	run_child(child_kernel, "decided by the kernel");
 	run_child(child_latched_after_set, "latched against a later set");
 	run_child(child_latched_after_unset, "latched against a later unset");
+	run_child(child_flag_absent, "no flag file");
+	run_child(child_flag_unreadable, "an unreadable flag file");
+	run_child(child_flag_empty, "an empty flag file");
 
 	test_post();
 

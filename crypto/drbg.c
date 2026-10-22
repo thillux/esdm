@@ -23,6 +23,7 @@
 #include <stdlib.h>
 
 #include "esdm_drbg.h"
+#include "esdm_hash_drbg_sha512.h"
 #include "visibility.h"
 
 /*************************************************************************
@@ -99,17 +100,20 @@ ssize_t esdm_drbg_generate(struct esdm_drbg_state *drbg, uint8_t *buf,
 DSO_PUBLIC
 void esdm_drbg_zero_free(struct esdm_drbg_state *drbg)
 {
-	if (!drbg)
-		return;
-
-	esdm_drbg_zero(drbg);
-
-	free(drbg);
+	/*
+	 * The Hash DRBG is the only DRBG and esdm_drbg_hash_alloc() its only
+	 * allocator. Its state is page-locked memory owning its pages, which
+	 * must be unlocked before it is freed - leave that to the matching
+	 * release function.
+	 */
+	esdm_drbg_hash_zero_free(drbg);
 }
 
 DSO_PUBLIC
 int esdm_drbg_healthcheck_sanity(struct esdm_drbg_state *drbg)
 {
+	/* Fixed test seed - the DRBG is zeroized again before returning */
+	static const uint8_t test_seed[32] = { 0x5a };
 	unsigned char buf[16] = { 0 };
 	size_t max_addtllen, max_request_bytes;
 	ssize_t len = 0;
@@ -126,19 +130,37 @@ int esdm_drbg_healthcheck_sanity(struct esdm_drbg_state *drbg)
 	max_addtllen = esdm_drbg_max_addtl();
 	max_request_bytes = esdm_drbg_max_request_bytes();
 
+	/*
+	 * An unseeded DRBG refuses every generate request before looking at
+	 * the lengths, which would let the limit checks below pass without
+	 * ever being evaluated. Seed it, and make sure it generates for a
+	 * request within the limits: with the DRBG seeded and a valid output
+	 * buffer, the -EINVAL expected below can only come from the limits.
+	 */
+	if (esdm_drbg_seed(drbg, test_seed, sizeof(test_seed), NULL, 0))
+		goto out;
+	len = esdm_drbg_generate(drbg, buf, sizeof(buf), NULL, 0);
+	if (len != (ssize_t)sizeof(buf))
+		goto out;
+
 	/* overflow addtllen with additonal info string */
 	len = esdm_drbg_generate(drbg, buf, sizeof(buf), buf, max_addtllen + 1);
-	if (len > 0)
+	if (len != -EINVAL)
 		goto out;
 
 	/* overflow max_bits */
 	len = esdm_drbg_generate(drbg, buf, (max_request_bytes + 1), NULL, 0);
-	if (len > 0)
+	if (len != -EINVAL)
 		goto out;
 
 	/* overflow max addtllen with personalization string */
+	if (esdm_drbg_seed(drbg, test_seed, sizeof(test_seed), buf,
+			   max_addtllen + 1) != -EINVAL)
+		goto out;
+
+	/* a missing DRBG handle */
 	len = esdm_drbg_generate(NULL, buf, sizeof(buf), NULL, 0);
-	if (len >= 0)
+	if (len != -EINVAL)
 		goto out;
 
 	ret = 0;

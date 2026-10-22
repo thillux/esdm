@@ -94,10 +94,18 @@ static void test_hex2bin(void)
 	hex2bin("", 0, bin, sizeof(bin));
 	CHECK_EQ(bin[0], CANARY);
 
-	/* Non-hex characters decode as zero nibbles */
+	/*
+	 * Non-hex characters are rejected instead of decoding as zero
+	 * nibbles, wherever they are, and nothing is written then.
+	 */
 	memset(bin, CANARY, sizeof(bin));
-	hex2bin("z1", 2, bin, sizeof(bin));
-	CHECK_EQ(bin[0], 0x01);
+	CHECK_EQ(hex2bin("z1", 2, bin, sizeof(bin)), -EINVAL);
+	CHECK_EQ(bin[0], CANARY);
+	CHECK_EQ(hex2bin("0z", 2, bin, sizeof(bin)), -EINVAL);
+	CHECK_EQ(hex2bin("abc ", 4, bin, sizeof(bin)), -EINVAL);
+	CHECK_EQ(hex2bin("0102g3", 6, bin, 1), -EINVAL);
+	CHECK_EQ(bin[0], CANARY);
+	CHECK_EQ(hex2bin("09afAF", 6, bin, sizeof(bin)), 0);
 }
 
 static void test_hex2bin_alloc(void)
@@ -124,6 +132,11 @@ static void test_hex2bin_alloc(void)
 		CHECK_EQ(bin[1], 0xbc);
 	}
 	free(bin);
+	bin = NULL;
+
+	/* Non-hex input is reported and allocates nothing for the caller */
+	CHECK_EQ(hex2bin_alloc("0x0a", 4, &bin, &binlen), -EINVAL);
+	CHECK(bin == NULL, "bin set on error");
 }
 
 static void test_bin2hex(void)
