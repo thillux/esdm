@@ -55,6 +55,21 @@ serves the non\-blocking semantics, and like the kernel's
 it is always readable and writable to
 .BR poll (2).
 .PP
+A device opened with
+.B O_SYNC
+is read from the prediction resistance DRNG of the ESDM, which is reseeded from
+the entropy sources for each request \- for either daemon, so that a read of
+.B esdm\-cuse\-urandom
+then waits for the ESDM to be fully seeded as well, or fails with
+.B EAGAIN
+with
+.BR O_NONBLOCK .
+.B O_DSYNC
+alone does not ask for it, although the C library defines
+.B O_SYNC
+as a flag of its own together with
+.BR O_DSYNC .
+.PP
 Both daemons must be started as root and drop to an unprivileged user after
 the device has been created. On systemd installations they are normally
 started through the shipped
@@ -78,10 +93,18 @@ Minor number of the device to create.
 .BR \-n ", " \-\-name= \fINAME\fR
 Name of the device to create below
 .IR /dev .
-Mandatory.
+Defaults to
+.B esdm
+for
+.B esdm\-cuse\-random
+and
+.B uesdm
+for
+.BR esdm\-cuse\-urandom .
 .TP
 .BR \-v ", " \-\-verbosity= \fINUM\fR
-Logging verbosity level.
+Logging verbosity level. Errors and warnings are logged at any level; the
+default is 3, 4 adds verbose messages, and 5 and above more debugging output.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 Unprivileged user to switch to once the device exists. Defaults to
@@ -106,6 +129,14 @@ Run in the foreground.
 .TP
 .B \-s
 Disable multi\-threaded operation.
+.TP
+.BI "\-o max_threads=" NUM
+Maximum number of worker threads serving the device, 1024 by default. Workers
+are started on demand; a request waiting for the ESDM, such as a read of
+.I /dev/random
+before the ESDM is seeded, holds its worker until it is answered; once all of
+them are taken, every other request waits for one to become free. Needs
+libfuse 3.12 or later, older versions ignore it with a warning.
 .TP
 .BR \-S ", " \-\-syslog
 Log via syslog.
@@ -151,6 +182,21 @@ or
 .BR write (2),
 so that a stopped or crashed ESDM does not take the system's random device
 down with it.
+.PP
+The
+.BR ioctl (2)
+commands crediting entropy,
+.B RNDADDTOENTCNT
+and
+.BR RNDADDENTROPY ,
+are handed to that descriptor only when the request certainly did not reach
+the ESDM, such as while no
+.BR esdm\-server (8)
+is listening. A request the ESDM may have applied fails with the error of the
+request instead \- one left unanswered for 60 seconds, or whose connection the
+ESDM closed as it restarted \- as the kernel would credit its entropy a second
+time. A caller interrupting such a command is told
+.BR EINTR .
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-proc (8),

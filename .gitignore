@@ -14,8 +14,8 @@ core.*
 /result-*
 result
 result-*
-/addon/linux_esdm_es/result
-/addon/linux_esdm_es/result-*
+/kernel/esdm_es/result
+/kernel/esdm_es/result-*
 
 # caches and local test state
 /.cache/
@@ -29,3 +29,6 @@ result-*
 
 # byte code of the raw measurement analysis helpers
 __pycache__/
+
+# PDFs generated from the Typst sources by doc/typst/build.sh
+/doc/typst/*.pdf

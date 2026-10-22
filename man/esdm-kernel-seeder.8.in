@@ -8,15 +8,23 @@ esdm\-kernel\-seeder \- periodically seed the Linux kernel RNG from the ESDM
 .B esdm\-kernel\-seeder
 draws random data from
 .BR esdm\-server (8)
-over the unprivileged RPC interface and inserts it into the Linux kernel RNG,
-crediting it with entropy. It fills the role an
+over the unprivileged RPC interface and inserts it into the Linux kernel RNG.
+It fills the role an
 .BR rngd (8)
 has for the kernel, but with the ESDM as the source.
 .PP
 This is required whenever the ESDM runs the interrupt entropy source, because
-that source deprives the kernel RNG of its main entropy input. It is
-worthwhile in every other configuration as well, since the kernel then also
-benefits from the entropy sources only the ESDM has access to.
+that source deprives the kernel RNG of its main entropy input. The daemon
+then credits each insertion with 256 bits of entropy, the size of the
+kernel's pool, as the data is entropy the kernel does not get otherwise.
+It is worthwhile in every other configuration as well, since the kernel then
+also benefits from the entropy sources only the ESDM has access to, but the
+data is not credited: the ESDM credits its kernel RNG entropy source with what
+the kernel gathers from its interrupts, and crediting the data again would
+count that entropy twice. Whether the interrupt entropy source runs is taken
+from the status of the ESDM before every insertion. The build option
+.B linux\-reseed\-entropy\-count
+sets a fixed number of bits to credit each insertion with instead.
 .PP
 The daemon inserts data at start\-up and afterwards once per seeding interval.
 Until the first insertion has succeeded it retries every two seconds instead
@@ -43,7 +51,10 @@ Print a usage summary and exit.
 Seconds between two seeding operations. A non\-numeric argument is rejected.
 .TP
 .BR \-v ", " \-\-verbosity
-Increase the logging verbosity. May be given repeatedly.
+Increase the logging verbosity. May be given repeatedly, the count being the
+verbosity level. Errors and warnings are logged at any level, the default
+included; \-vvvv adds verbose messages, and each further \-v more debugging
+output.
 .TP
 .BR \-s ", " \-\-syslog
 Log to syslog instead of standard output and standard error.
@@ -52,7 +63,10 @@ Log to syslog instead of standard output and standard error.
 Draw the data from the prediction\-resistance generator of the ESDM, and force
 a reseed of the kernel CRNG right after every insertion. This mode is selected
 automatically when the ESDM was built for the AIS 20/31 NTG.1 seeding
-strategy.
+strategy (meson option
+.BR ais2031_ntg1 )
+or with the jitter RNG in its own NTG.1 mode
+.RB ( es_jent_ntg1 ).
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP

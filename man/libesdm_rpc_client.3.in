@@ -1,4 +1,4 @@
-.TH LIBESDM_RPC_CLIENT 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_RPC_CLIENT 3 "2026-10-16" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_rpc_client \- client library for the ESDM server RPC interface
 .SH SYNOPSIS
@@ -71,6 +71,16 @@ freed. Passing NULL to a put call is a no\-op.
 Limit the number of connection pool nodes the client keeps. Call before
 initializing a service.
 .PP
+The pool has a node for every online CPU, or as many as this limit allows, and
+a node connects to the server when it is used first. A call takes the node its
+thread had last if that one is free, the free one of the lowest number
+otherwise, and waits for a busy one only if all of them are busy. So a process
+holds as many connections as it has calls in flight at the same time \- one
+for a process calling from one thread at a time, whichever CPUs it runs on.
+A call that is served in several parts \- a request larger than one answer
+carries, or one for prediction resistant data \- puts its node back between
+them.
+.PP
 Every RPC call listed below exists in two forms: a plain one, and one suffixed
 .BR _int ()
 that takes an additional
@@ -80,6 +90,54 @@ the application tell its own concurrent requests apart. The plain form is the
 .BR _int ()
 form with a NULL
 .IR int_data .
+.SS Encryption
+A library built with DTLS (meson option
+.BR dtls )
+asks the server to encrypt every new connection with DTLS 1.2, with a STARTDTLS
+request in the clear, and does the handshake when the server agrees. All
+requests and answers then pass encrypted. The DTLS is opportunistic: a server
+that does not agree \- one started without
+.B \-\-dtls
+(see
+.BR esdm\-server (8)),
+one built without DTLS, or one of ESDM 1.2.3 or before, which does not know the
+request \- is used in the clear, without the call failing: on the same
+connection once the server answered, on a new one should it close the
+connection instead. A server answering neither the request nor the one the
+library sends right behind it is waited for a second at the most \- the time
+asking for DTLS and the handshake may take together \-, and the call goes on in
+the clear on a new connection then, as it does should the handshake fail. A
+connection whose server did not agree or did not complete the handshake does
+not ask again for a minute. The DTLS is unauthenticated, keyed with a
+pre\-shared key that is a constant of the ESDM and no secret; it and its cipher
+suites are described in
+.B ENCRYPTION
+of
+.BR esdm\-server (8).
+With debug logging, every connection is logged with whether it is encrypted.
+.PP
+A new connection costs the handshake, one to two milliseconds, and the first
+one of a process a few milliseconds more to set up the TLS stack. As the server
+closes idle connections and the library reconnects after half of that time,
+this cost comes once per call after a second of idleness at the most.
+.PP
+The TLS stack takes random numbers from the operating system during the
+handshake. In a process whose
+.BR getrandom (2)
+or
+.BR getentropy (3)
+is served by this library \- one preloading
+.BR libesdm_getrandom ,
+for instance \- that is a call of this library made while it is in the middle of
+setting up the connection. Such a call fails at once with
+.BR \-EDEADLK ,
+which libesdm_getrandom answers from the kernel, rather than waiting for the
+connection it is called for.
+.PP
+A child created with
+.BR fork (2)
+does not use the connections of its parent, encrypted or not: it closes them in
+its process, leaves the connection of the parent alone, and connects anew.
 .SS Obtaining random data
 .TP
 .BI "ssize_t esdm_rpcc_get_random_bytes(uint8_t *" buf ", size_t " buflen ");"
@@ -150,6 +208,9 @@ is cut short there, still NUL\-terminated, and
 is returned. The server caps the report at just under 64 KiB
 .RB ( ESDM_RPC_MAX_STATUS_DATA );
 a longer one arrives cut short in the same way, with the same return value.
+On any other error,
+.I buf
+holds the empty string rather than the report of an earlier call.
 .TP
 .BI "int esdm_rpcc_status_json(char *" buf ", size_t " buflen ");"
 The same information as a JSON document. A document is never cut short: when it
@@ -170,7 +231,12 @@ as a JSON document, with the error handling of
 means the node has no DRNG instance.
 .TP
 .BI "int esdm_rpcc_drng_status_pr_json(char *" buf ", size_t " buflen ");"
-The same for the DRNG instance serving prediction resistant requests.
+The same for the DRNG instance serving prediction resistant requests. Its
+counters and seeding times are null, as they would tell about the requests of
+other users \- see
+.BR esdm_status_drng_pr_json ()
+in
+.BR libesdm (3).
 .TP
 .BI "int esdm_rpcc_jent_status(char *" buf ", size_t " buflen ");"
 Internal status of the Jitter RNG entropy source as a JSON document, with the
@@ -205,9 +271,6 @@ Set the write wakeup threshold.
 .BI "int esdm_rpcc_set_min_reseed_secs(unsigned int " seconds ");"
 Set that time. Zero seconds reseeds before every request, values above one hour
 are capped to it.
-.TP
-.BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
-Set the token label and user PIN of the PKCS#11 entropy source.
 .TP
 .BI "int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *" result ");"
 Run the self tests of the server now. Returns 0 if every self test passed and
@@ -257,6 +320,10 @@ nor the caller should repeat it.
 .B \-EFAULT
 means the service was never initialized or has been torn down underneath the
 caller.
+.B \-EDEADLK
+means the call was made from inside the DTLS of a connection of the library,
+see
+.BR Encryption .
 .B \-EMSGSIZE
 means the request does not fit into one message of just under 64 KiB, which
 limits the entropy buffer of

@@ -27,11 +27,22 @@ It is extensible as follows:
   can be deselected during compile time or its entropy rate altered
   during startup time.
 
+* Entropy sources can be developed outside of the ESDM against
+  `libesdm_es_ext` and served to it by a process of their own over a Unix
+  domain socket - see [External Entropy Sources].
+
 * The cryptographic primitives can be altered by simply providing a new
   backend for hash algorithms or DRNG algorithms. See the `drng_chacha20`
   configuration option replacing the SP800-90A DRBG with a ChaCha20-based
   DRNG, or the `hash_sha3_512` configuration option replacing the SHA2-512
   conditioning hash with SHA3-512.
+
+* The entropy pools - the auxiliary pool, which data written into the ESDM
+  goes to, and the conditioning pool of the eBPF entropy sources - are each
+  an XDRBG-256: the XDRBG over SHAKE256 (Kelsey, Lucks, Mueller, IACR ToSC
+  2024(1)) with a state of 512 bits, provided by the crypto backend. Each
+  insert is part of the seed of its next reseed, and an extraction reseeds
+  and generates, so that the output never reveals the state of the pool.
 
 * Different DRNG Seeding strategies can be defined, by modifying one location
   in the code that governs the initial and reseeding operation of the DRNGs.
@@ -43,10 +54,10 @@ specifications:
   compliant entropy source. In addition, the Intel RDSEED instruction is
   claimed to provide an SP800-90B entropy source. Also, when using the
   scheduler-based entropy source - which is only implemented for the Linux
-  kernel using the code in `addon/linux_esdm_es`, a separate SP800-90B
+  kernel using the code in `kernel/esdm_es`, a separate SP800-90B
   entropy source is provided. In addition, when using the interrupt-based
   entropy source - which is only implemented for the Linux kernel using the
-  code in `addon/linux_esdm_es`, a separate SP800-90B entropy source is
+  code in `kernel/esdm_es`, a separate SP800-90B entropy source is
   provided. If the kernel-based jitter entropy source shall be used, please
   compile your Linux kernel with CONFIG_CRYPTO_JITTERENTROPY.
 
@@ -72,7 +83,8 @@ The following dependencies are required:
   installed or obtain the sources from the
   [Protobuf-C Github website](https://github.com/protobuf-c/protobuf-c).
 
-* json-c: The ESDM library renders its JSON status documents with it.
+* json-c 0.14 or later: The ESDM library renders its JSON status documents
+  with it.
 
 The following dependencies are required provided the respective functionality
 is enabled during compile time:
@@ -95,18 +107,33 @@ is enabled during compile time:
   distribution or from the
   [libfuse Github website](https://github.com/libfuse/libfuse/).
 
-* Botan >= 3.0: If the Botan backend for cryptographic operations shall be used
+* libp11: If the PKCS#11 entropy source `esdm-es-pkcs11` is enabled as a
+  compile time option, libp11 is required, either from your distribution or
+  from the [libp11 Github website](https://github.com/OpenSC/libp11). Its
+  tests use SoftHSM (`softhsm2-util`) when it is installed.
+
+* Botan >= 3.2: If the Botan backend for cryptographic operations shall be used
   and is enabled as a compile time option get Botan either from your distribution
   or from the
-  [botan Github website](https://github.com/randombit/botan).
+  [botan Github website](https://github.com/randombit/botan). 3.2 is the first
+  version with the SHAKE-256 XOF (`Botan::XOF`) the auxiliary pool takes.
 
 * OpenSSL >= 3.0: If the OpenSSL backend for cryptographic operations shall be
   used and is enabled as a compile time option, or if the OpenSSL ESDM seed
   source shall be compiled when the compile time option is enabled, obtain OpenSSL either from your distribution or from the
   [OpenSSL website](https://www.openssl.org/source/).
 
-* leancrypto: If the leancrypto backend for cryptographic operations shall be
-  enabled during compile time, obtain leancrypto from the
+* GnuTLS >= 3.6.8 with FIPS140 mode and nettle >= 3.6: If the GnuTLS backend
+  for cryptographic operations shall be enabled during compile time, GnuTLS has
+  to be built with `--enable-fips140-mode`: only such a build exports the
+  SP800-90A CTR DRBG (`drbg_aes_init`, `drbg_aes_reseed`, `drbg_aes_generate`)
+  the backend drives, and distribution packages usually are not built that way.
+  nettle provides the AES core of the derivation function in front of that DRBG
+  and the SHAKE-256 of the auxiliary pool. Obtain GnuTLS from the
+  [GnuTLS website](https://www.gnutls.org/) and nettle from your distribution.
+
+* leancrypto >= 1.0: If the leancrypto backend for cryptographic operations
+  shall be enabled during compile time, obtain leancrypto from the
   [leancrypto](https://leancrypto.org) website.
 
 Beyond those dependencies, only POSIX support is required.
@@ -171,7 +198,7 @@ Botan typically provide higher DRBG performance than the builtin backend.
 
 The ESDM provides a new, currently unique entropy source: the scheduler-based
 entropy source. It requires additional kernel support which is provided
-in the directory `addon/linux_esdm_es/`. Please see the `README.md` there
+in the directory `kernel/esdm_es/`. Please see the `README.md` there
 how to enable the support in the kernel.
 
 In any case, it is harmless to enable the ESDM user space support for the
@@ -196,11 +223,12 @@ The deltas are collected in per-CPU buffers and handed to a BPF ring
 buffer once a buffer is full - or, for a CPU that falls quiet with a
 partially filled one, after an idle deadline, so that nothing collected
 lingers unaccounted. The `esdm-server` reads them from there when it wants
-entropy and conditions them into a per-source entropy pool with the
-configured hash; it stops reading once that pool holds all the entropy one
-output block can carry, and an extraction fetches what its block still
-costs. Events collected while nobody reads fill the buffers up and are then
-dropped - nothing needs them, and what is already collected is no worse.
+entropy and conditions them into a per-source entropy pool, an XDRBG-256 over
+SHAKE256 like the auxiliary pool; it stops reading once that pool holds all
+the entropy one output block can carry, and an extraction fetches what its
+block still costs. Events collected while nobody reads fill the buffers up and
+are then dropped - nothing needs them, and what is already collected is no
+worse.
 
 Only events the health tests vouch for are collected, so no health state
 travels with them. What the programs report back - the deltas each CPU
@@ -212,14 +240,129 @@ Requirements: a kernel with BTF support (`CONFIG_DEBUG_INFO_BTF`, standard
 on the common distributions; kernel 5.15 or later on x86_64, 6.1 or later
 on arm64), libbpf >= 1.2, and `clang` plus `bpftool` at build time. The
 programs are loaded during the privileged initialization phase of the
-`esdm-server`. Like all timing entropy sources, at most one of `es_irq`,
+`esdm-server`, which keeps operating their maps after it dropped its
+privileges: it reads the SP800-90B health state of the programs from them and
+erases the collected events when the sources are unloaded. Kernels before
+5.19 refuse that to an unprivileged process while
+`kernel.unprivileged_bpf_disabled` is set, as distributions of that time do by
+default - Ubuntu 22.04 among them. The sources check for it during the
+initialization and disable themselves where they could not operate their maps
+after the privilege drop, so on such a kernel they need
+`kernel.unprivileged_bpf_disabled = 0`, which opens `bpf(2)` to every user.
+Like all timing entropy sources, at most one of `es_irq`,
 `es_sched`, `es_irq_ebpf` and `es_sched_ebpf` may be credited with a
 non-zero entropy rate.
 
 The default entropy rate of both sources is 0 (uncredited): determine the
 appropriate rate for a deployment environment with the measurement tooling
-in `addon/es_ebpf_testing/` before crediting the sources, see its
+in `tests/es_ebpf_testing/` before crediting the sources, see its
 `README.md`.
+
+### External Entropy Sources
+
+Noise sources that are not part of the ESDM are served to it by a provider: a
+process of its own, which the `esdm-server` reads over a Unix domain socket -
+`esdm-server --es_ext_socket /run/my-es.socket`, or the meson option
+`es_ext_socket_path`. The ESDM loads no code of a source into its own process:
+a provider keeps its own privileges, address space and life cycle, and a
+source that crashes takes its provider down, not the ESDM.
+
+A provider is written against `esdm_es_ext.h` of `libesdm_es_ext`: the
+callbacks of the source, a `struct esdm_es_ext_plugin` - an `init`, `fini`,
+`get_entropy` and `selftest` callback, an `entropy_rate` declaring the rate of
+the source, and a `status_json` callback reporting a status of its own as a
+JSON object, which the ESDM status shows as the `provider` member of the
+source, next to the fields of the provider server - and a `main()` handing
+them to `esdm_es_ext_provider_main()`, which takes the command line of a
+provider program and serves them:
+
+```
+static const struct esdm_es_ext_plugin my_source = {
+	.version = ESDM_ES_EXT_PLUGIN_VERSION,
+	.name = "my-noise-source",
+	.get_entropy = my_get_entropy,
+};
+
+int main(int argc, char *argv[])
+{
+	return esdm_es_ext_provider_main(&my_source, argc, argv);
+}
+```
+
+```
+cc -o my-provider my_provider.c $(pkg-config --cflags --libs esdm_es_ext)
+my-provider --socket /run/my-es.socket
+esdm-server --es_ext_socket /run/my-es.socket
+```
+
+The `name` of the source, up to 32 bytes of UTF-8, is the name the ESDM shows
+the source under, its name in the ES table kept as its `instance`; `--name`
+and `--entropy_rate` of the provider program declare others - see
+`libesdm_es_ext(3)` and the example in `es-ext/example/`. The provider has to
+run as root, or as the user given with `--es_ext_socket_uid`, and serves root
+and `nobody`, the user the ESDM runs as, or the users of its `--client_uid`;
+the protocol is documented in `esdm_es_ext.h` for providers written without
+the library. `esdm-es-pkcs11` is such a provider program, see
+[PKCS#11 Entropy Source].
+
+A block is credited with the entropy the source claims for it, capped by
+the rate of the source: the one configured with `es_ext_socket_entropy_rate`
+(or `--es_ext_socket_entropy_rate`), else the one the provider declares in its
+answer to INFO, else 0, so a provider declaring none is credited only once a
+rate is configured. Accepting the user of a provider means trusting the rate
+it declares; the status shows the rate of each source and where it comes
+from. A source claiming more than the block holds, or failing, is credited
+with nothing until it delivers again, and one failing its self test until a
+self test passes.
+
+The ESDM has one source by default, `ExternalSocket`. The meson option
+`es_ext_socket_num` gives it up to 16, `ExternalSocket0`, `ExternalSocket1`,
+... in the status, each an entropy source of its own with its own provider,
+rate and state. The options above configure one source each: the i-th entry
+of the comma separated meson option, the n-th occurrence of the
+`esdm-server` option for the n-th source; a single meson rate or uid applies
+to all sources. A provider serves one source - several providers run as
+several processes on sockets of their own:
+
+```
+/usr/libexec/a-provider --socket /run/esdm-es-a.socket
+/usr/libexec/b-provider --socket /run/esdm-es-b.socket
+esdm-server --es_ext_socket /run/esdm-es-a.socket \
+	--es_ext_socket /run/esdm-es-b.socket
+```
+
+### PKCS#11 Entropy Source
+
+The random number generator of a PKCS#11 token - a smartcard, a USB token, an
+HSM or SoftHSM - is served to the ESDM by `esdm-es-pkcs11` (meson option
+`es_pkcs11`), a provider of its own reading the token with `C_GenerateRandom`
+through libp11. The ESDM reads it through one of its provider socket sources
+and knows nothing of PKCS#11: neither `libesdm` nor `esdm-server` load a
+PKCS#11 module or link libp11.
+
+```
+esdm-es-pkcs11 --module /usr/lib/softhsm/libsofthsm2.so \
+	--token_label my-token --pin_file /etc/esdm/pkcs11-pin \
+	--socket /run/esdm-es-pkcs11.socket
+esdm-server --es_ext_socket /run/esdm-es-pkcs11.socket \
+	--es_ext_socket_uid esdm-es-pkcs11
+```
+
+Without `--socket`, the daemon serves
+`/run/esdm-es-pkcs11/esdm-es-pkcs11.socket`, in a directory its unit creates.
+
+The daemon takes the token of the given label, or the first one with a random
+number generator, logs in only if a PIN is configured and the token asks for
+it, never tries a PIN the token refused again, and looks for a token that is
+not there, or was lost, at most every 5 seconds. The PIN comes from a file or
+the systemd credential `pkcs11-pin` - never from the command line. It declares
+`PKCS#11` and the token label as the name of the source and the rate of
+`es_pkcs11_entropy_rate` (or `--entropy_rate`), and reports the token, the
+login and the last error as the `provider` status of the source. Its systemd
+unit `esdm-es-pkcs11.service` runs it as the system user `esdm-es-pkcs11` in
+a sandbox, ordered before `esdm-server.service`, which a drop-in setting
+`ESDM_SERVER_OPTIONS` points at it - see `esdm-es-pkcs11(8)`. A build with
+another provider needs one provider socket source more (`es_ext_socket_num`).
 
 ## Testing
 
@@ -275,6 +418,10 @@ The ESDM consists of the following components:
   respective mount namespace. If you have multiple mount namespaces, you need
   to start the daemon in each mount namespace or make the files otherwise
   available if its services shall be available there.
+
+* `esdm-es-pkcs11`: The PKCS#11 entropy source, serving the random number
+  generator of a PKCS#11 token to the `esdm-server`, which reads it as an
+  external entropy source - see [PKCS#11 Entropy Source].
 
 * `esdm-cuse-random`: The ESDM CUSE daemon creates a device file that behaves
   identically to /dev/random. It must be started as root. Reading, writing and
@@ -338,15 +485,13 @@ The ESDM consists of the following components:
   shared memory - which makes it usable where the RPC interface cannot be
   reached. Its algorithms carry the property `provider=esdm-egd`, so it can be
   loaded next to the RPC based ones, and the socket it uses is named with the
-  `egd_socket` key of its `openssl.cnf` section. Note that the EGD protocol
-  cannot express prediction resistance: a request explicitly asking for it is
-  refused rather than served with ordinary random data.
+  `egd_socket` key of its `openssl.cnf` section. The EGD protocol itself cannot
+  express prediction resistance; a request asking for it is served with the
+  ESDM's own prediction resistant read command on the same socket.
 
-  `libesdm-egd-provider-pr.so` is the prediction resistance counterpart. Since
-  the protocol cannot select the generator per request, that is a property of
-  the socket - the ESDM serves a second EGD socket from
-  `esdm_get_random_bytes_pr()` - so this variant simply defaults to that socket
-  and accepts prediction resistance requests. Its algorithms carry
+  `libesdm-egd-provider-pr.so` is the prediction resistance counterpart: it
+  serves every request from `esdm_get_random_bytes_pr()` with that command,
+  whatever OpenSSL asked for, over the same socket. Its algorithms carry
   `provider=esdm-egd-pr`.
 
 * `libesdm_egd_client`: A small client library for the ESDM's EGD interface,
@@ -369,7 +514,7 @@ The ESDM consists of the following components:
 
 * `esdm-tool`: This tool can be used to test ESDM and interact with it without
   building an own tool with the rpc_client library or using the CUSE devices.
-  With the help of esdm-tool `esdm-wait-unti-fully-seeded.service` is implemented.
+  With the help of esdm-tool `esdm-wait-until-fully-seeded.service` is implemented.
   Add this service as a dependency of your early system start if you'd like to
   guarantee, that all services started in succession can expect ESDM to return
   fast.

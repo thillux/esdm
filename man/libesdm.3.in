@@ -73,23 +73,71 @@ Terminate the entropy sources and the DRNG manager and release all resources.
 This also stops a monitor started with
 .BR esdm_init_monitor ().
 The ESDM cannot be initialized again afterwards.
+.SH FORK
+A process that calls
+.BR fork (2)
+after
+.BR esdm_init ()
+hands its ESDM down to the child, the states of all DRNGs included. Before a
+DRNG produces its first output in the child, or takes its next seed there, it
+is reseeded with data unique to the child \- 32 bytes of the kernel's random
+number generator, the process ID and the time \- and a reseed from the entropy
+sources is forced to follow by the usual rules: the child repeats neither the
+random numbers of its parent nor those of another child.
+.PP
+The threads of the ESDM are not inherited: the child has no reseed worker, no
+entropy source monitor and no periodic self tests, and the reseed worker is not
+started again in it. Its DRNGs are reseeded by the requests that run into their
+reseed condition.
+As with any library using threads, a lock that another thread of the parent
+held at the moment of the fork stays taken in the child \- one of the ESDM's
+own threads among them, such as the reseed worker while it reseeds a DRNG \-
+and a request of the child that needs it waits forever. A child that is to
+rely on the ESDM is better off with
+.BR libesdm_rpc_client (3),
+or with an ESDM of its own, initialized after the fork. A child leaves with
+.BR _exit (2)
+or
+.BR execve (2),
+not with
+.BR esdm_fini (),
+which waits for the threads of the parent and tears down the status shared
+memory segment the parent still serves.
 .SH OBTAINING RANDOM DATA
 .TP
 .BI "ssize_t esdm_get_random_bytes(uint8_t *" buf ", size_t " nbytes ");"
 Random data without a guarantee that the ESDM is fully seeded.
 .TP
 .BI "ssize_t esdm_get_random_bytes_full(uint8_t *" buf ", size_t " nbytes ");"
-Random data, blocking until the ESDM is fully seeded.
+Random data, blocking until the ESDM is fully seeded and until all
+.I nbytes
+are generated \- also while the DRNGs reached the most they may generate
+without a full reseed and wait for it, which in a build capping that output
+(SP800\-90C, FIPS 140, AIS 20/31 DRG.4) sustained load makes them do all the
+time. Fewer bytes, or an error, are returned only after an error that no wait
+cures, such as a failed self test.
 .TP
 .BI "ssize_t esdm_get_random_bytes_full_noblock(uint8_t *" buf ", size_t " nbytes ");"
-The same, but returning an error instead of blocking.
+The same, but returning an error instead of blocking:
+.B \-EAGAIN
+while the ESDM is not operational. It may also return fewer bytes than asked
+for, when a DRNG reached that limit on the way. When every DRNG the request
+could go to is at that limit, it is served by the initial DRNG after its
+reseed, for which it waits.
 .TP
 .BI "ssize_t esdm_get_random_bytes_pr(uint8_t *" buf ", size_t " nbytes ");"
 Random data with prediction resistance: the DRNG is reseeded from the entropy
-sources for this request.
+sources for this request, and hands out no more than the entropy collected
+for it \- possibly fewer bytes than asked for, or none. The callers take turns
+at this DRNG in the order they came; while others wait for theirs, a turn lasts
+one block of the security strength.
 .TP
 .BI "ssize_t esdm_get_random_bytes_pr_noblock(uint8_t *" buf ", size_t " nbytes ");"
-The same, but returning an error instead of blocking.
+The same, but returning
+.B \-EAGAIN
+while the ESDM is not operational, and taking a single turn: it waits for it
+no longer than one block of each caller ahead of it, and with others waiting it
+returns after one block, the caller asking again for the rest.
 .TP
 .BI "ssize_t esdm_get_seed(uint64_t *" buf ", size_t " nbytes ", enum esdm_get_seed_flags " flags ");"
 Fill
@@ -116,12 +164,22 @@ All of these return the number of bytes written, or a negative errno value.
 .SH STATUS
 .TP
 .BI "int esdm_status(char *" buf ", size_t " buflen ");"
-Status of the ESDM and its entropy sources as human readable text.
+Status of the ESDM and its entropy sources as human readable text: the JSON
+document of
+.BR esdm_status_json ()
+printed with a line "Label: value" per member and a section, indented one
+space deeper, per object \- one per entropy source and DRNG instance.
+Returns 0 on success and
+.B \-EMSGSIZE
+if the report does not fit into the buffer; what fits is left in it,
+NUL\-terminated.
 .TP
 .BI "int esdm_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document. Both return 0 on success and
+The same information as a JSON document. Returns 0 on success and
 .B \-EMSGSIZE
-if the report does not fit into the buffer; what fits is left in it.
+if the document does not fit into the buffer. A document is never cut short:
+a consumer could not tell half a JSON document from a whole one, so the buffer
+then holds the empty string.
 .TP
 .BI "void esdm_status_machine(struct esdm_status_st *" status ");"
 The same information in a structure meant for programmatic use.
@@ -134,10 +192,26 @@ as a JSON document. Returns 0 on success,
 if the node has no DRNG instance, which tells a caller walking the nodes
 from 0 upwards that it reached the end, and
 .B \-EMSGSIZE
-if the document does not fit into the buffer.
+if the document does not fit into the buffer, which then holds the empty
+string as for
+.BR esdm_status_json ().
 .TP
 .BI "int esdm_status_drng_pr_json(char *" buf ", size_t " buflen ");"
-The same for the DRNG instance serving prediction resistance requests.
+The same for the DRNG instance serving prediction resistance requests. That
+DRNG is seeded anew for every request, so its counters and seeding times
+would tell every local user how much prediction resistant data others asked
+for, and when:
+.IR seconds_until_reseed ,
+.IR requests_since_fully_seeded ,
+.IR generated_bits_since_fully_seeded ,
+.IR seed_generation ,
+.I last_seeding_time
+and
+.I seconds_since_last_reseed
+are null for it, here and in the status of
+.BR esdm_status_json ()
+and
+.BR esdm_status ().
 .TP
 .BI "void esdm_version(char *" buf ", size_t " buflen ");"
 Version information.
@@ -187,7 +261,8 @@ Size of the auxiliary pool, in bits.
 Entropy accounted for in the auxiliary pool, in bits.
 .TP
 .BI "uint32_t esdm_get_digestsize(void);"
-Digest size of the conditioning hash, in bits.
+Size of the state of the XDRBG-256 operating an auxiliary pool, in bits:
+the most entropy a pool holds.
 .TP
 .BI "void esdm_pool_set_entropy(uint32_t " entropy_bits ");"
 Set the entropy accounted for in the auxiliary pool.

@@ -2,6 +2,7 @@
 # the .TH line, so building the documentation needs no extra tool chain.
 man_conf_data = configuration_data()
 man_conf_data.set('VERSION', meson.project_version())
+man_conf_data.set('EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
 
 # Pages that are always installed: the ESDM library, plus the client libraries
 # that are built unconditionally.
@@ -39,6 +40,14 @@ endif
 
 if get_option('esdm-aux-client').enabled()
 	man_pages += [ 'libesdm_aux_client.3' ]
+endif
+
+if get_option('esdm-es-ext').enabled()
+	man_pages += [ 'libesdm_es_ext.3' ]
+endif
+
+if get_option('es_pkcs11').enabled()
+	man_pages += [ 'esdm-es-pkcs11.8' ]
 endif
 
 if get_option('openssl-rand-provider').enabled()

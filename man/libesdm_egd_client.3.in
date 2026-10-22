@@ -1,4 +1,4 @@
-.TH LIBESDM_EGD_CLIENT 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_EGD_CLIENT 3 "2026-10-19" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_egd_client \- client library for the ESDM EGD interface
 .SH SYNOPSIS
@@ -20,11 +20,19 @@ The reason to use this rather than
 is reach: the EGD interface needs nothing but a single UNIX domain stream
 socket \- no protobuf, no shared memory, no second socket \- so it works in
 places the RPC interface cannot go, such as a chroot that can be handed
-exactly one socket. The price is the protocol: it is a legacy one that can
-neither express prediction resistance nor transfer more than
+exactly one socket. The price is the protocol: it is a legacy one that cannot
+transfer more than
 .B ESDM_EGD_MAX_TRANSFER
 (255) bytes per request, though this client splits larger requests
-transparently.
+transparently \- the commands of a blocking read of up to 64 KiB go out at
+once and their answers are read after, one round trip per 64 KiB rather than
+per transfer. Nor can it express prediction resistance: the ESDM offers that
+with a read command of its own on the same socket, which
+.BR esdm_egd_client_get_random_pr ()
+and
+.BR esdm_egd_client_get_random_pr_nonblock ()
+use, see
+.BR esdm\-server (8).
 .SS Clients and concurrency
 A client owns exactly one connection. The EGD protocol carries no request
 identifiers \- responses are matched to requests purely by their order on the
@@ -116,6 +124,25 @@ is at most
 .BR ESDM_EGD_MAX_TRANSFER .
 Use this only where a short answer is acceptable \- a seed consumer wants
 .BR esdm_egd_client_get_random ().
+.TP
+.BI "int esdm_egd_client_get_random_pr(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ");"
+Like
+.BR esdm_egd_client_get_random (),
+but served by the prediction resistance DRNG of the ESDM, which hands out no
+more than its entropy sources just delivered: the answer takes as long as
+collecting that entropy does. That DRNG takes a seed for each 32 bytes
+.RB ( ESDM_EGD_PR_GENERATION )
+a transfer begins, so a larger request is split into transfers of
+.B ESDM_EGD_MAX_PR_TRANSFER
+(224) bytes rather than 255: it costs as many seeds as it has 32 bytes, begun
+ones included. The ESDM\-specific command this uses is unknown to
+other EGD daemons, which close the connection on it \- the call fails then.
+.TP
+.BI "int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"
+Like
+.BR esdm_egd_client_get_random_nonblock (),
+but served by the prediction resistance DRNG: the answer holds what its
+entropy sources can deliver right away, often less than asked for.
 .TP
 .BI "int esdm_egd_client_entropy_count(struct esdm_egd_client *" client ", uint32_t *" entropy_bits ");"
 Entropy the ESDM currently holds, in bits.

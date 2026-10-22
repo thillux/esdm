@@ -1,4 +1,4 @@
-.TH LIBESDM_GETRANDOM 3 "2026-08-05" "ESDM @VERSION@" "ESDM Manual"
+.TH LIBESDM_GETRANDOM 3 "2026-10-20" "ESDM @VERSION@" "ESDM Manual"
 .SH NAME
 libesdm_getrandom \- route getrandom(2) and getentropy(3) to the ESDM
 .SH SYNOPSIS
@@ -28,12 +28,25 @@ Linking against it with
 redirects the calls at link time; the library then also provides
 .BR __wrap_getrandom ()
 and
-.BR __wrap_getentropy (),
-and keeps
+.BR __wrap_getentropy ().
+In such a program,
 .BR __real_getrandom ()
 and
 .BR __real_getentropy ()
-available for the original kernel behaviour.
+do not reach the kernel: the linker turns them into references to
+.BR getrandom ()
+and
+.BR getentropy (),
+which this library exports as well, so they are answered by the ESDM, too. A
+program that needs the kernel RNG calls the system call itself, e.g.
+.IR "syscall(SYS_getrandom, buf, len, flags)" .
+Only a program linked without
+.B \-\-wrap
+that calls the library's
+.BR __real_getrandom ()
+or
+.BR __real_getentropy ()
+by name gets the system call from them.
 .PP
 Should the ESDM be unreachable, the call falls back to the
 .BR getrandom (2)
@@ -54,6 +67,25 @@ and fails with
 instead. Should the ESDM stop being fully seeded while a request is served,
 the call waits about half a second for it, and then returns the data obtained
 until then or, without any, fails with
+.BR EAGAIN .
+Nor does a call with
+.B GRND_NONBLOCK
+or
+.B GRND_INSECURE
+wait longer than a moment, 20 ms, for a connection that requests of other
+threads of the process hold \- see
+.BR CONNECTIONS :
+then
+.B GRND_NONBLOCK
+and
+.B GRND_INSECURE
+are answered by the kernel, as without an ESDM, and
+.B GRND_NONBLOCK
+together with
+.B GRND_RANDOM
+or
+.B GRND_SEED
+fails with
 .BR EAGAIN .
 .B GRND_RANDOM
 selects the prediction\-resistance generator, and
@@ -80,6 +112,24 @@ and
 are contradictory combinations and are rejected with
 .BR EINVAL ,
 as is any unknown flag.
+.SH CONNECTIONS
+The calls reach the ESDM over the unprivileged RPC interface of
+.BR esdm\-server (8),
+on connections the threads of a process share. A connection is opened when a
+request finds all others busy, so a process holds as many as it has requests in
+flight at the same time \- one for a process asking from one thread at a time,
+whichever CPUs it runs on \- up to the number the library was built with (the
+meson option
+.BR linux\-getrandom\-num\-nodes ,
+4 by default) and the number of online CPUs. Every connection is a file
+descriptor of the process and counts against the connections the server admits
+per user, which is why the library, preloaded into processes of every kind,
+does not open more. A large request puts its connection back between the parts
+it is served in, so a long read of prediction resistant data does not keep the
+other threads of the process waiting for its end. The server closes a
+connection that was idle for the idle timeout of its build (two seconds by
+default); the descriptor stays open in the process until a request uses that
+connection again and connects anew.
 .SH RETURN VALUE
 .BR getrandom ()
 returns the number of bytes written or \-1 with

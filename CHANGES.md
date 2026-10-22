@@ -9,10 +9,39 @@ libesdm-egd-provider.so, an OpenSSL 3 RAND provider based on it: both need
 nothing but the one EGD socket and therefore work where the RPC interface
 cannot be reached, OpenSSH's sandboxed pre-authentication child included
 
-* Add a second EGD socket serving the prediction resistance generator
-(esdm-server-egd-pr.socket, --egd_socket_pr) together with the matching
-libesdm-egd-provider-pr.so - the EGD protocol cannot ask for prediction
-resistance per request, so it is a property of the socket
+* EGD interface: ESDM-specific commands on the same socket for what the EGD
+protocol cannot express - prediction resistance reads (0xe0, 0xe1), reading
+without waiting for full seeding (0xe2), the state (0xe3), the status as text
+and JSON (0xe4, 0xe5), and, for a peer with UID 0 only, crediting entropy,
+clearing the entropy count, reseeding and setting write_wakeup_threshold and
+urandom_min_reseed_secs (0xe6 - 0xea); codes far from the standard ones, so
+EGD clients are unaffected. libesdm_egd_client offers the prediction resistance
+reads (esdm_egd_client_get_random_pr), libesdm-egd-provider.so serves OpenSSL's
+prediction resistance requests with them and libesdm-egd-provider-pr.so all
+requests
+
+* EGD interface: reads beyond the 255 bytes of one transfer cost a round trip
+per 64 KiB rather than per 255 bytes - libesdm_egd_client sends the commands of
+a blocking read at once, the esdm_cdev module the commands of up to 64 KiB and
+takes the answers in bulk, and the esdm-server answers a run of the same read
+command with one response. The EGD server reads the coarse
+monotonic clock for its timeouts, and the DRNGs for their reseed interval,
+which a clocksource without a vDSO serves without a system call.
+esdm-cdev-check measures the throughput of the devices of the module
+
+* Add the kernel module esdm_cdev (kernel/esdm_cdev): /dev/esdm_random,
+/dev/esdm_urandom and /proc/esdm served from the ESDM over its EGD socket, with
+the ioctls of the kernel's random devices - the counterpart of the CUSE
+frontend in the kernel, leaving the kernel's own devices untouched; it falls
+back to the kernel's RNG while the ESDM is not reachable
+
+* esdm_cdev: the checks of the module are esdm-cdev-check (tests/esdm_cdev), a
+C program in place of the Python script of the 1.2.4 development versions:
+meson test runs those that hold next to the ESDM of the machine (suite
+esdm_cdev) where the module is loaded and skips them elsewhere, the build option
+esdm-cdev-check installs the program with its man page, and the VM test of the flake runs every
+check with it, without Python; the checks include that the reads waiting for
+the ESDM wait for an ESDM not operational, and the credit of writes
 
 * Split the build option ais2031 into ais2031_ntg1 (NTG.1 seeding strategy),
 ais2031_drg3 (DRG.3 class) and ais2031_drg4 (DRG.4.10 reseeding limits), which
@@ -34,17 +63,65 @@ es_irq_ebpf): no kernel patches required, in-program SP800-90B health tests,
 zeroization of every collected raw sample when the sources are unloaded - the
 in-program collection buffers and the ring buffer holding the events included -
 raw entropy measurement tooling including the SP800-90B restart test in
-addon/es_ebpf_testing
+tests/es_ebpf_testing
 
 * Centralize asynchronous buffer management to collect entropy from slow entropy sources
 
 * Add TPM2 entropy source
 
-* Add PKCS11 entropy source
+* Add the PKCS#11 entropy source esdm-es-pkcs11 (meson option es_pkcs11): a provider of its own serving the random number generator of a PKCS#11 token, read with C_GenerateRandom through libp11, on a Unix domain socket the ESDM reads through one of its ExternalSocket sources (esdm-server --es_ext_socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket --es_ext_socket_uid esdm-es-pkcs11) - neither libesdm nor esdm-server load a PKCS#11 module or link libp11; it takes the token of --token_label, or the first one with a random number generator, from the module of --module, logs in only if a PIN is configured and the token asks for a login, never tries a PIN the token refused again, looks for a token that is lost or not there yet at most every 5 seconds - loading the module anew where its slots hold none -, tests a token whenever it is bound, declares "PKCS#11" and the token label as the name and es_pkcs11_entropy_rate (or --entropy_rate) as the rate of the source, and reports the module, the token label, the token and its slot, whether it is present and logged in to, the PIN state and the last error in its status; the PIN is the first line of a file (--pin_file) or the systemd credential pkcs11-pin (--pin_credential), never an option or a build setting; esdm-es-pkcs11.service runs it as the system user esdm-es-pkcs11 of a sysusers.d file, sandboxed, with ImportCredential=pkcs11-pin and the options of ESDM_ES_PKCS11_OPTIONS, ordered before esdm-server.service, which passes ESDM_SERVER_OPTIONS on to the server; see esdm-es-pkcs11(8)
+
+* Add external entropy sources: noise sources developed outside of the ESDM, served by a provider process the ESDM reads over a Unix domain socket with a documented protocol (ExternalSocket ES: esdm-server --es_ext_socket, meson option es_ext_socket_path; the provider has to run as root or as the user of --es_ext_socket_uid / es_ext_socket_peer_uid) - the ESDM loads no code of a source into its own process; a block is credited with the entropy the source claims, capped by the rate of the source - the one configured with es_ext_socket_entropy_rate, --es_ext_socket_entropy_rate or esdm_config_es_ext_socket_entropy_rate_set(), else the one the provider declares in its answer to INFO, capped at 256, else 0; the status shows the rate as "entropy_rate" and its "entropy_rate_source", and auto configures none -, with nothing while the source fails or claims more than the block holds, and with nothing after a failed self test until a self test passes; the ES monitor finds out on its own when a failed source delivers again; a build has es_ext_socket_num provider socket sources (meson option, 1 to 16, 1 by default - a build without any disables es_ext), each an entropy source of its own with its own provider, rate, accepted user and state - ExternalSocket as the one source, ExternalSocket0, ExternalSocket1, ... with several -, configured by the i-th entry of the comma separated meson options (a single rate or uid for all sources), by the n-th occurrence of the esdm-server options and by the libesdm calls esdm_es_ext_socket_set_path(), esdm_es_ext_socket_set_peer_uid() and esdm_config_es_ext_socket_entropy_rate[_set](), which take the index of the source first; a source declares its name in the answer of its provider to the INFO request of the socket protocol, asked once per connection, and the ESDM shows the source under it in the "name" member of its status and in its log, keeping the name of its entry - ExternalSocket, or ExternalSocket0, ExternalSocket1, ... with several - as its "instance"; a name that is no 1 to 32 bytes of UTF-8 without control characters, or that of another entropy source, is refused, and a provider older than INFO is connected to again without asking
+
+* Add libesdm_es_ext (esdm_es_ext.h, libesdm_es_ext(3)), the library a provider is developed against: the callbacks of a source - struct esdm_es_ext_plugin with init, fini, get_entropy, selftest, status_json and entropy_rate, the latter called after init -, the provider server serving them on a Unix domain socket (esdm_es_ext_server_*()), and esdm_es_ext_provider_main(), the whole main() of a provider program: it takes the command line of a provider - --socket, --mode, --client_uid (root and nobody served by default, nobody else), --no_dtls, --name and --entropy_rate declaring a name and a rate in place of those of the callbacks, -v -, sets the source up and serves it until SIGTERM, SIGINT or SIGHUP, telling systemd when it is ready; the example in es-ext/example is such a program, and esdm-es-pkcs11 is one with the options of its token next to the common ones; several providers run as several processes, each on a socket of its own
+
+* Incompatible with the 1.2.4 development versions, which loaded an external entropy source into the ESDM as a plugin library as well: the ExternalLib entropy sources, esdm-server --es_ext_lib and --es_ext_lib_entropy_rate, the meson options es_ext_lib_num, es_ext_lib_path and es_ext_lib_entropy_rate, esdm_config_es_ext_lib_entropy_rate[_set]() and esdm_es_ext_lib_set_path() of libesdm, esdm_es_ext_plugin_load(), esdm_es_ext_plugin_unload(), struct esdm_es_ext_plugin_handle, ESDM_ES_EXT_PLUGIN_SYMBOL and ESDM_ES_EXT_PLUGIN_EXPORT of libesdm_es_ext, and esdm-es-ext-serve, which served a plugin library, with its man page are removed - an external entropy source is served by a provider process only, read over the provider socket of an ExternalSocket source: a struct esdm_es_ext_plugin of its callbacks - the name kept, as providers are built against it - and a main() returning esdm_es_ext_provider_main(), which takes the command line esdm-es-ext-serve had but --plugin; es_ext_socket_num is 1 at least; libesdm and libesdm_es_ext keep their soversion, as everything removed was new in 1.2.4
+
+* Incompatible with the 1.2.4 development versions, whose PKCS#11 entropy source was part of the ESDM: esdm-tool --pkcs11-pin and --pkcs11-token-label, esdm-server --pkcs11_module, esdm_rpcc_set_pkcs11_config[_int]() of libesdm_rpc_client, esdm_config_es_pkcs11_entropy_rate[_set]() of libesdm and the meson options es_pkcs11_pin and es_pkcs11_entropy_blocks are removed - the module, the token label and the PIN are configuration of esdm-es-pkcs11, and es_pkcs11_module_path, es_pkcs11_token_label and es_pkcs11_entropy_rate are its defaults; the slot of the RPC call stays as RpcReservedSetPkcs11Config, which the server answers with -EOPNOTSUPP, so that the calls after it keep their index on the wire
+
+* External entropy sources: a provider can report a JSON status of its own - the STATUS request of the socket protocol; the ESDM accepts a JSON object of at most 1024 bytes (ESDM_ES_EXT_PROTO_STATUS_MAX) from a provider, and shows it as the "provider" member of the ExternalSocket ES status, skipping it rather than waiting while the source is read; any provider served by libesdm_es_ext answers STATUS with {"server": {...}, "plugin": ...}, fields of its own - version, plugin_api, the name and the entropy_rate it declares, dtls of the connection, clients, client_slots, requests, the selftest verdict, uptime_seconds - next to the status the callback status_json of its source reports, a JSON object of at most 512 bytes, which is null for a source without one, a failing one, one that is no valid JSON object and one that does not fit
+
+* Add opportunistic DTLS to the connections between the processes of the ESDM (meson option dtls, disabled by default): DTLS 1.2 of the TLS stack of the crypto backend - OpenSSL, GnuTLS or Botan - with an ephemeral key exchange keyed with a pre-shared key built into the ESDM, unauthenticated, protecting the data against reading on the socket path rather than the peer's identity; a client asks for it on every new connection and goes on in the clear with a server that does not know or refuses it, so old and new clients and servers keep working together
+  * RPC: both interfaces of esdm-server, the RPC client library and with it the getrandom(2) shim, which uses the kernel instead while the DTLS itself asks for random numbers; offered by esdm-server --dtls only, the clear being the default; at most 64 encrypted connections per unprivileged user and 256 per worker
+  * External entropy sources: the ExternalSocket ES asks the provider for it (STARTDTLS request of the protocol), which the provider server of libesdm_es_ext agrees to once esdm_es_ext_server_set_dtls() enabled it - a provider program with --dtls
+
+* DTLS of the connections: ECDHE with a pre-shared key built into the ESDM - the identity "esdm-opportunistic-dtls" and its SHA-256, a constant of every build and no secret, as the DTLS stays unauthenticated - instead of ECDHE-ECDSA with an ephemeral self-signed server certificate, on curves of 256 bits of security and with AES-256, in cipher suites both NIST SP 800-52r2 and BSI TR-02102-2 allow: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 (RFC 8442) on brainpoolP512r1 between two builds with Botan, TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with Encrypt-then-MAC on secp521r1 with OpenSSL and GnuTLS, which have no ECDHE-PSK suite with AES-GCM, and between them and Botan; X25519, P-256, ChaCha20-Poly1305 and AES-128 are no longer negotiated, and a CBC session without Encrypt-then-MAC is refused (by an OpenSSL server, a GnuTLS and a Botan peer); the key exchange is not post-quantum, as ML-KEM is defined for TLS 1.3 and none of the TLS stacks has DTLS 1.3; incompatible with the DTLS of the 1.2.4 development versions - the handshake between them fails, and the client goes on in the clear on a new connection
+
+* DTLS: no TLS stack retransmits a flight of its handshake any more - OpenSSL did after a second, GnuTLS gave up after a minute -, a record a Botan peer could not send at once is sent with the next call instead of being lost, a GnuTLS peer sends the alert of a failed handshake, and esdm_dtls_want() tells POLLOUT when the DTLS waits for the socket to take a record
+
+* DTLS: a secure minimal mode, set up in one place per TLS stack - no session cache, no session tickets issued or asked for, no pre-shared key of resumption, no renegotiation either way (OpenSSL: the legacy one with an old server neither; GnuTLS and Botan end a connection whose peer asks for one), no compression, no heartbeat -, and the DTLS requires the extended master secret (RFC 7627) of every peer, next to Encrypt-then-MAC for CBC: a session without either is refused. A client of Botan still sends an empty session_ticket extension in the ClientHello of DTLS 1.2, and a server of GnuTLS or Botan a session ID nothing keeps, which neither TLS stack lets leave out. The tests read the handshakes off the wire - two connections between the same contexts, each a full handshake
+
+* Map each worker of the unprivileged RPC interface and of the EGD interface of esdm-server to a node DRNG (esdm_drng_node_bind() of libesdm): RPC worker i to node i + 1, EGD worker i to the last node minus i, wrapping around past node 0, whose initial DRNG nobody is mapped to; a request of a mapped worker goes to its node DRNG straight away, without the read lock over the node array and without probing the other DRNGs, and is served as before - by the first free fully seeded node DRNG, the initial one only if none is - while its node DRNG is not fully seeded, being reseeded or at its maximum output without full reseed. No DRNG is added: the node DRNGs are seeded, reseeded and reported as before, and the prediction resistant requests stay with the prediction resistance DRNG. esdm-server --no_fixed_drng_mapping serves the workers as every other caller. Measured with rpc_bench on 8 cores of an AMD Ryzen 9 5950X for the server and 8 for the clients, 32 byte requests without fips140: up to 27% more requests per second with 2 to 4 RPC clients and 16% with 4 EGD clients, otherwise within the run-to-run spread; with fips140 the throughput stays bound by the reseeds of the DRNGs either way
+
+* Kernel Jitter RNG ES: the kernel crypto API RNG it reads is configurable - meson option es_jent_kernel_name (jitterentropy_rng by default) and esdm-server --es_jent_kernel_name, e.g. for a jitterentropy kernel module registering its RNG under another name; the status names it
+
+* Entropy pools: each auxiliary pool and the conditioning pool of the eBPF entropy sources is an XDRBG-256 - the XDRBG over SHAKE256 with a state of 512 bits - instead of a pair of conditioning hashes; whatever is inserted is the seed of the next reseed and an extraction reseeds and generates; the SHAKE256 is that of the crypto backend (nettle >= 3.6 for the GnuTLS backend, Botan >= 3.2), the crypto self test covers it with a known-answer test of the XDRBG, and esdm_get_digestsize() reports the size of the state
+
+* Kernel module esdm_es: the DRBG post-processing the interrupt and scheduler entropy sources is the XDRBG-256 of the ESDM (esdm/crypto/esdm_xdrbg.c, the one of the auxiliary pools), compiled into the module and operated on the SHAKE256 of the kernel's SHA-3 library, on every kernel that has it (CONFIG_CRYPTO_LIB_SHA3, selected e.g. by CONFIG_CRYPTO_SHA3, which Linux 7.2 and later require); its known-answer test runs when the module is loaded; the HMAC_DRBG the module carried for Linux 7.2 and later is gone; a kernel without the SHA-3 library uses the HMAC_DRBG with SHA-512 of the kernel crypto API as the only one, so the module parameter esdm_drbg_type, which selected the Hash_DRBG or the CTR_DRBG instead, is gone
+
+* Status: the status is built as JSON only, the entropy sources report their state as a JSON object, and every text status - esdm_status(), RPC, shared memory, CUSE, esdm-tool - is the JSON status printed as text; numbers are JSON numbers, the eBPF ES reports a permanent health test failure as a member of its own, and the ExternalSocket ES no longer reports "root0" for a provider accepted only as root
+
+* The shell scripts of the repository run with set -euxo pipefail and bash
+
+* The source tree of the library is sorted into esdm/es, esdm/crypto,
+esdm/drng and esdm/status
+
+* The kernel modules moved from addon/linux_esdm_es and addon/linux_esdm_cdev to kernel/esdm_es and kernel/esdm_cdev and are built from the source tree, sharing code with the ESDM instead of carrying copies: the IOCTL interface of /dev/esdm_es (kernel/shared/esdm_es_ioctl.h) with the interrupt and scheduler entropy sources, the security strength, the SP800-90C oversampling and the seed sizes making up the entropy buffers that interface hands over (esdm/drng/esdm_seed_sizes.h), the cutoffs of the SP800-90B health tests (kernel/shared/esdm_health_cutoffs.h) with the eBPF entropy sources, the XDRBG-256 with the auxiliary pools, and the EGD protocol (service-egd/esdm_egd_protocol.h) of esdm_cdev with the EGD interface
+
+* The test tooling moved from addon to tests, named after the meson options
+building it: the validation helpers esdm-getrawentropy and esdm-extractlsb
+from addon/test to tests/validation-helpers, the raw entropy measurement
+tooling of the eBPF entropy sources (esdm-ebpf-collect and its analysis
+scripts) from addon/es_ebpf_testing to tests/es_ebpf_testing. The installed
+tools are unchanged.
+
+* The design document and the presentation are Typst sources with their figures
+as draw.io, PlantUML and Typst plot sources (doc/typst, nix build .#esdm-doc),
+brought in line with the code; the presentations before v1.0.0 are dropped
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
-* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
+* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in - under sustained load not enough: the node is then spent until the worker reseeds it in its next pass
 
 * fix: esdm_get_seed() hands back the output of all entropy sources again, the zero-entropy ones collected as additional data included, without clearing the entropy estimates of the creditable sources; the returned entropy count covers the creditable sources only
 
@@ -55,6 +132,8 @@ addon/es_ebpf_testing
 * fix: An interrupted RPC call left its answer on the connection, where it was handed out as the reply to the next call and every call after it; the connection is now dropped when a call abandons its answer (found by the new fuzz harnesses)
 
 * fix: The OpenSSL RAND providers stored a new context lock over the old one when locking was enabled twice, leaking it and leaving the users of the shared context locking different things (found by the new fuzz harnesses)
+
+* fix: Linux kernel addon: the requested entropy and the entropy rate set with ESDM_IRQ_CONF / ESDM_SCHED_CONF belong to the descriptor of /dev/esdm_es they are set on. Kept for the whole module, an ESDM crediting a source with nothing - the default for the scheduler ES - had the source deliver nothing to every other ESDM, and one crediting it had the source credited for the others
 
 * Add fuzz harnesses for the RPC requests, responses and wire codec, the server as a client reaches it, both sides of the EGD interface and the library API (build option 'fuzzing', see tests/fuzz/README.md); beyond crashes they check what the code promised, and when building with -Dfuzzing=enabled their seeds are additionally replayed as regression tests by the ordinary test suite (meson test), also without libFuzzer
 
@@ -90,9 +169,11 @@ addon/es_ebpf_testing
 
 * libesdm: export only the supported API, versioned by a linker version script (symbol versions LIBESDM_1.0 for the API of esdm.h and esdm_config.h, LIBESDM_PRIVATE_1.0 for in-tree consumers); every other DSO_PUBLIC symbol is hidden
 
+* libesdm_rpc_client, libesdm_egd_client and libesdm_aux_client: export only the functions their installed headers declare, versioned by linker version scripts - the thread pool of the common library they link is no longer exported, and the logger only in a private node of the RPC and the aux client, where the ESDM frontends linking them interpose their own; every function of 1.2.3 an installed header declares is still exported. The OpenSSL RAND providers export nothing but OSSL_provider_init, so the EGD client linked into the EGD providers no longer binds to a libesdm_egd_client.so of the application loading them
+
 * Add man pages for esdm-server, esdm-tool, the CUSE daemons, esdm-proc, esdm-kernel-seeder, esdm-server-signal-helper, esdm-ebpf-collect, esdm-getrawentropy, esdm-extractlsb, the OpenSSL providers and the libesdm, libesdm_rpc_client, libesdm_egd_client, libesdm_getrandom and libesdm_aux_client libraries
 
-* esdm-server and the CUSE daemons no longer fork into an isolating PID namespace by default; pass --pid_namespace to enable it (without it, esdm-server removes its IPC resources itself at exit, best effort)
+* esdm-server and the CUSE daemons no longer fork into an isolating PID namespace by default; pass --pid_namespace to enable it (without it, the IPC resources stay in place at exit, as the daemon has dropped the privileges to remove them, and the next start replaces them)
 
 * CPU ES: retry RDSEED up to 1024 times with PAUSE in between, as it underflows routinely under load, and retry transient RNDRRS failures on aarch64 the same way; a read failure no longer disables the CPU ES for the lifetime of the daemon, it is credited with no entropy until the next successful read
 
@@ -220,7 +301,7 @@ addon/es_ebpf_testing
 
 * fix: the maximum bits without full reseed is clamped to INT_MAX, as a larger value silently disabled the limit; the RPC client bounds the resubmission of a request by time rather than by attempts, independent of client-rx-tx-timeout-exponent; esdm_drbg_zero_free() unlocks the state memory
 
-* EGD server: served by one worker thread per online CPU, at most four, each serving the clients it accepted on both sockets, so a request waiting for a DRNG reseed no longer holds up every other EGD client; the workers run in thread slots reserved for them rather than in the shared pool
+* EGD server: served by one worker thread per online CPU, at most four, each serving the clients it accepted, so a request waiting for a DRNG reseed no longer holds up every other EGD client; the workers run in thread slots reserved for them rather than in the shared pool
 
 * fix: esdm_rpcc_get_random_bytes() sends a request again that the ESDM answered with -EAGAIN - the DRNG serving it reached its maximum output without full reseed - at once and, should that be answered the same way, after the poll interval, as esdm_rpcc_get_random_bytes_full() does; a blocking read of /dev/urandom no longer fails with EAGAIN
 
@@ -232,7 +313,7 @@ addon/es_ebpf_testing
 
 * hardening: zero all used registers on return (-fzero-call-used-regs=used instead of used-gpr); pass the code generation hardening flags to the link as well, as LTO builds silently dropped -fzero-call-used-regs
 
-* ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes) and esdm-plain builds the default configuration
+* ci: build and test the default configuration without fips140 next to the FIPS builds; flake: nixosConfigurations are provided without a system level (nix flake check passes), and esdm-plain builds the esdm package without fips140 and sp80090c - and so without the SP800-90C configuration they imply - and runs the test suite on it
 
 * fix: esdm.spec names the jitterentropy packages as openSUSE ships them
 
@@ -343,6 +424,112 @@ addon/es_ebpf_testing
 * fix: esdm-server keeps the PID file locked until it is torn down and takes the lock only on the file at the path; libesdm_aux_client trusts a segment of the caller's real UID only when the caller runs unprivileged
 
 * fix: Linux kernel addon: the ring generation is taken before the startup test check, so a health test failure in between is caught; the scheduler ES reports the real registration error; esdm_getrawentropy bounds --samples
+
+* fix: RNDADDTOENTCNT and the EGD command 0xe6 add the credited bits to the auxiliary pool under its lock (esdm_pool_add_entropy()), instead of storing the oversampling-reduced sum of all pools back into the first one, which credited the entropy of the other pools twice, credited again what an extraction took in between and lost 64 bits per call with oversampling; a pool holding no data is credited nothing; an insertion picks the auxiliary pool by the room of its raw count, so a full pool no longer swallows bits while another one has room
+
+* fix: the self tests run before the first seeding of esdm_init() and esdm_reinit(), and no entropy source is credited before its self test passed - an external source failing its self test at start-up fully seeded every DRNG before
+
+* fix: the OpenSSL RAND providers report no maximum request size, so OpenSSL no longer splits a prediction resistant request and serves all but its first 256 bytes from the ordinary DRNG
+
+* fix: EGD server: one status report (0xe4, 0xe5) per connection and round, so a client pipelining them cannot stall a worker; the input buffer is wiped behind every consumed command; EGD client: a wait interrupted by signals keeps its timeout
+
+* fix: DTLS: the OpenSSL backend clears the error queue before each call, so an error the application left behind no longer fails a receive or send and resets the connection; decrypted records are wiped before OpenSSL and GnuTLS free them; esdm_dtls_recv() keeps the parts of a message within the buffer it allocated for it; the Botan backend builds with Botan before 3.13
+
+* fix: external entropy sources: the status never waits for a request in progress, and the status of a provider is fetched at most every 5 seconds; a provider status with NaN, an infinity or invalid UTF-8 is refused; a provider restarted between two status calls is no longer taken for one without STATUS; a provider slow to answer STATUS is not asked again for a minute instead of holding the source for two timeouts and reconnecting without DTLS; the provider server of libesdm_es_ext gives the slot of the client idle longest to a new one when all are taken, and the ESDM reconnects at once to a provider that closed its connection
+
+* fix: PKCS#11 ES: a PIN the token refused is never tried again - every retry consumed one of the token's PIN attempts; TPM2 and PKCS#11 ES recover on the device and module opened before the privilege drop; their status no longer waits for a read in progress; a token label that is not UTF-8 is reported as valid JSON
+
+* fix: Jitter RNG ES: a collector whose reads fail its health tests credits nothing and fails the self test until a read succeeds again or the self test replaces it
+
+* fix: eBPF ES: the sources are disabled with an error where their maps are out of reach after the privilege drop - Linux before 5.19 with kernel.unprivileged_bpf_disabled set - instead of running without their health state and without wiping their samples; a failed insertion into the conditioning pool drops the credit of the events it discarded; the status reads the health state under its lock
+
+* fix: status: the status segment and /proc/esdm/status hold the whole report (16 KiB, segment version 5) and mark a report cut short; esdm_rpcc_status(), esdm_rpcc_status_json() and esdm_rpcc_jent_status() empty the buffer when they fail; the prediction resistance DRNG reports no request figures, which revealed the size and time of the requests of other users; json-c 0.14 or later is required
+
+* fix: esdm_cdev: a write copies the user memory before it takes a connection to the ESDM, and a request waits for a connection at most the timeout, so stalled writers cannot block the readers; RNDADDENTROPY credits once all of its data is in, never more than that data; a state-changing command is never repeated after a signal, so RNDADDTOENTCNT is not credited twice; poll() reports what a read does; the reconnect backoff grows against an ESDM that accepts connections but does not answer; kernel_connect() gets the address in a struct sockaddr_storage
+
+* fix: Linux kernel addon: the kernel's HMAC_DRBG is instantiated with V and C zeroed rather than with uninitialized memory; the testing interface hands out nothing under lockdown, also not the data of a boot test enabled at runtime
+
+* fix: esdm-kernel-seeder credits the kernel again (256 bits per insertion) while the ESDM runs the interrupt ES and linux-reseed-entropy-count is 0
+
+* fix: CUSE: RNDADDTOENTCNT and RNDADDENTROPY fall back to the kernel only for a request that did not reach the ESDM, so nothing is credited twice; an interrupted request fails with EINTR
+
+* fix: esdm-server ignores SIGUSR1 until its suspend handler is installed; esdm-server, the CUSE daemons, esdm-proc and esdm-kernel-seeder log errors and warnings without -v; esdm-tool fails when a status option cannot fetch the status, and prints the status unabridged; a stress worker that cannot allocate its buffer ends instead of hanging its tool
+
+* The documentation describes the jitter RNG NTG.1 shortcut, the errors, signals and wiping of esdm_cdev, the sandboxed EGD client, the DTLS wait of the RPC client, the status of a short buffer, where the init of a source runs, the getrandom shim's __real_*() under --wrap, the IPC resources at shutdown, the eBPF event data, the options of the frontends as they are, the stricter argument checks of RNDADDENTROPY in esdm_cdev, the configuration IOCTL of /dev/esdm_es, and the task wakeup hook and event rings of esdm_es
+
+* Add rpc_bench (meson test --benchmark): the throughput and the CPU time per request of the RPC interface by the calls of its consumers - full, prediction resistant and unseeded reads, getrandom(2) through libesdm_getrandom and, for comparison, the kernel's -, in requests of 32 bytes to 1 MiB, from several threads of several processes
+
+* RPC client: a read larger than one answer carries asks for no more than the server serves from its first request on, rather than learning that by a request refused for its size on every call - a round trip saved per call, one in three for a read of 64 KiB
+
+* DTLS: a message wipes what it took of the record buffers instead of all of them, and the buffer of the records received is not zeroed for every receive - 16 to 33 KiB of memset on either side per message, also for every look at an empty socket
+
+* RPC client: waits for the answer before reading it rather than first finding the socket empty, which took a system call - and on an encrypted connection the receive path of the DTLS - per request
+
+* RPC client: reads the coarse monotonic clock for its own timeouts and the age of a connection, which a clocksource without a vDSO serves without a system call; a deadline of the caller keeps the precise clock
+
+* RPC client: a process holds as many connections as it has calls in flight at the same time, not one per CPU its threads ran on - a call takes the connection its thread had last, or the free one of the lowest number
+
+* RPC client: a call served in several parts - a read beyond 64 KiB, or of prediction resistant data - puts its connection back between them, so that the other threads of the process are not held up for the length of the call
+
+* fix: libesdm_getrandom: getrandom() with GRND_NONBLOCK or GRND_INSECURE waited for as long as requests of other threads held the connections - minutes, with several threads reading prediction resistant data -; it waits 20 ms at most now, and is then answered by the kernel as without an ESDM - a prediction resistant or seed read with GRND_NONBLOCK fails with EAGAIN
+
+* libesdm_getrandom: up to four connections per process (meson option linux-getrandom-num-nodes, which was 1), opened as concurrent requests need them, so the threads of a process are served in parallel
+
+* fix: esdm_cdev: only O_SYNC selects the prediction resistant read, no longer O_DSYNC alone; /proc/esdm/uuid is served by the kernel's RNG while the ESDM cannot serve it, as /dev/esdm_urandom is, instead of being empty; the /proc/esdm snapshots are charged to the memory cgroup of the opener, and their copy in the seq_file buffer is wiped
+
+* fix: esdm_es: ESDM_IRQ_CONF / ESDM_SCHED_CONF refuse an invalid requested entropy before they reset the entropy source; a failing module init tears down only what it set up; the module builds with W=1, against every kernel of the flake with the warnings as errors
+
+* fix: with sp80090c, fips140 or ais2031_drg4, node DRNGs that reach the 2^17 bit cap under sustained load are reseeded by the worker in its next pass, every one of them, with a reseed rather than a new instantiation, and the worker is told each time; reaching the cap no longer clears the state that all DRNGs are seeded, so esdm_get_seed() keeps serving
+
+* fix: esdm_get_random_bytes_full() blocks until the whole request is served instead of returning -EAGAIN or a short count, also while the ESDM is out of operation for a moment; the initial DRNG is reseeded before it is declared spent and no longer takes the ESDM out of operation under load; esdm_get_random_bytes_full_noblock() falls back to the initial DRNG after its reseed instead of answering -EAGAIN
+
+* fix: the prediction resistance DRNG serves its callers in turns, in the order they came, instead of a trylock answering -EAGAIN: one client pipelining prediction resistant reads on one EGD worker no longer starves those of the other workers and of the RPC interface; the EGD server generates one block of 32 bytes per call, so a round of a worker overruns its 25 ms by one seeding at most, and a non-blocking prediction resistant read (0xe0) answers at most 32 bytes
+
+* security: a child of fork() reseeds every DRNG with data unique to it before its first output instead of repeating the random numbers of its parent, see the FORK section of libesdm(3)
+
+* security: esdm-server-signal-helper --resume requests the privileged reseed of all DRNGs (RNDRESEEDCRNG) - the write into the auxiliary pool it made reseeded nothing; the reseed interval counts the time suspended (CLOCK_BOOTTIME)
+
+* fix: esdm_reinit() keeps the data and the entropy of the auxiliary pool, as documented
+
+* fix: RPC server: a request sent as its connection was being closed as idle or to make room is no longer lost - a connection with a request waiting is not idle, and one the server closes itself is shut down for reading first and still answers what its client sent before
+
+* fix: RPC server: a worker accepts up to 512 new connections per round instead of one, so a burst of clients connecting to a busy worker is served in turn with the others instead of being let in one per round while those accepted first went idle and were reaped
+
+* fix: CUSE: O_DSYNC alone selected the prediction resistant read; --username=USER set the user "=USER"
+
+* fix: OpenSSL RNG and SEED-SRC providers and libesdm_getrandom: with Botan, a process crashed in exit() when its connection was released after the static destructors of the TLS stack, e.g. by OPENSSL_cleanup(); the DTLS layer no longer calls into the TLS stack once the process exits
+
+* fix: RPC client: a prediction resistant answer without data failed the call with -EFAULT; it counts as -EAGAIN now (the blocking call retries, the non-blocking one ends); RPC client and server call the protobuf-c closures through their own type (undefined behaviour, reported by clang's -fsanitize=function)
+
+* fix: esdm-server --pid_namespace: the supervisor could not fork once the daemon ended; esdm_aux_client.h includes <time.h> for struct timespec
+
+* fix: EGD server: what a client sent before the server closed its connection - idle, or to make room for a new one - is taken rather than discarded: a connection with input waiting is not idle, and the server shuts reading down before it closes, so a write that succeeded is never lost and a later one fails
+
+* libesdm_egd_client splits a prediction resistant read into transfers of 224 bytes (ESDM_EGD_MAX_PR_TRANSFER), a multiple of the 32 bytes the prediction resistance DRNG generates per seed, so n bytes cost ceil(n/32) seeds rather than one more per transfer
+
+* fix: External ES socket: every new connection to a provider runs its self test before the provider is credited, so a restarted provider is tested at once; the ESDM status waits at most 500 ms for the STATUS of a provider, which keeps its connection and has its late answer shown when it arrives, and no longer reconnects to a provider; retry, probe and backoff deadlines are kept in nanoseconds rather than whole seconds; a status or name with C1 controls or Unicode bidirectional controls is refused
+
+* fix: esdm-es-pkcs11: only a login the token refuses because of the PIN drops the PIN, other login failures keep it and retry; a token reporting its user PIN on the final try is not logged in to (status pin "final_try"); a PIN given on the command line is not repeated in error messages
+
+* fix: the kernel IRQ add-on loaded after the ESDM started caps the credit of the kernel RNG as well; the interrupt and scheduler sources stay credited while their cache has drained the kernel, so cached blocks are no longer spent uncounted; the per-CPU flush timer of the eBPF sources is pinned to its CPU on Linux 6.7+ and armed anew when lost; the example external entropy source reads its device without blocking, with 1 s per request at most
+
+* esdm-server --groupname: the group becomes the group of the process after the privilege drop; it and the group of the user are the supplementary groups, so what the daemon may access is unchanged
+
+* tests: sanitizer findings and crashes in daemons the tests start fail the test; the RPC regression tests of tests/fuzz run in every build; each public header is compiled on its own; the test environments wait for daemons to accept connections
+
+* fix: esdm_cdev on Linux 7.3, whose kernel threads look paths up in an empty root of their own: the module connects to the ESDM and reads the kernel's boot_id in the file system context of init again, instead of failing both with -ENOENT and serving every read from the kernel's RNG
+
+* fix: with a jitterentropy before 3.7.0, the RPC call for the status of the Jitter RNG answers with the empty report {} again instead of failing with -ENOENT
+
+* ci: the nix workflow builds esdm_es and esdm_cdev against every kernel of nixpkgs on x86_64 and aarch64, boots the esdm_cdev and eBPF VM tests of each kernel next to the esdm_es one, and runs every other check of the flake; the test CI runs on Ubuntu 26.04 next to 24.04, on x86_64 and arm64, and in containers of Arch Linux, Debian stable, Fedora, openSUSE Tumbleweed, SUSE Linux Enterprise Server 15 SP7 and 16.0 and Red Hat Enterprise Linux 9 and 10, with the OpenSSL of each, the default configuration and the Botan, GnuTLS and leancrypto a distribution packages
+
+* common/ is sorted into subfolders by type - tls/ (the DTLS layer), log/, sys/, testmode/, threading/, util/ -, as esdm/ was; the headers keep being included by their names
+
+* RPC server: a new connection of the unprivileged interface is handed to the worker serving the fewest connections, if that is another one with fewer than the worker that accepted it and a free slot - into a queue of that worker, signalled by an eventfd it waits for - rather than served by whichever worker the kernel woke first, which piled up to 5 of 16 clients on one worker while others had none; esdm-server --no_conn_balancing leaves the connections where they were accepted. rpc_bench, 32 byte requests, server on 8 cores and clients on 8 others of an AMD Ryzen 9 5950X, without fips140: 1.27 times the requests per second at 8 clients and twice at 16 (p50 25 instead of 79 us, p99 57 instead of 162 us), within the run-to-run spread at 4 clients; 1-3 us more server CPU per request, as more workers wake for fewer requests each
+
+* DTLS layer: the TLS stacks of all three backends reach their socket through one place, common/tls/esdm_dtls_io.c - the BIO of OpenSSL, the push and pull functions of GnuTLS, the callbacks of Botan -, with send(2) with MSG_NOSIGNAL and recv(2), non-blocking, as before
+
+* esdm-server starts unprivileged as well: it runs as that user then, dropping nothing and without its namespaces and the entropy sources needing root; a client running as that user is privileged next to root. rpc_bench starts its server so without root, in a user namespace of its own
 
 Changes 1.2.3
 * Fix handling of non-blocking server response

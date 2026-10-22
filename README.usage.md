@@ -97,10 +97,11 @@ The components are:
   implementation: `libcrypto.so` (OpenSSL), `libgnutls.so` together with
   `libnettle.so`, `libbotan-3.so` or `libleancrypto.so`.
 
-The last two are attested wherever they are loaded from; the server names any
-component whose reference value is missing, so starting it once tells you which
-files still need one. Write them when the module is installed, over the files as
-they were built:
+The last two are attested wherever they are loaded from. The server stops at
+the first component whose reference value is missing or does not match, and
+names that one only - so write the reference values of all of them when the
+module is installed, over the files as they were built, rather than finding
+them one start at a time:
 
 ```
 esdm-tool --fips-targetfile /usr/bin/esdm-server \
@@ -130,16 +131,20 @@ is present.
 When enabling the compile time option of `ais2031_ntg1`, the ESDM server
 operates NTG.1 compliant to AIS 20/31 (2024, version 3.0) right away when using
 the interfaces that are documented to block until sufficient initial entropy
-is present. Two entropy sources have to deliver 240 bits of entropy each before
-a DRNG is considered fully seeded.
+is present. On top of the 256 bits of entropy the initial seeding of a DRNG
+needs in any case - 384 bits with the SP800-90C oversampling of an `sp80090c`,
+`fips140` or `ais2031_drg3` build - two entropy sources have to deliver 240 bits
+of entropy each before a DRNG is considered fully seeded.
 
 If the jitter RNG is operated in its own NTG.1 mode - the compile time option
 `es_jent_ntg1` together with jitterentropy 3.7.0 or later providing secure
 memory - then it is an NTG.1 conformant RNG by itself. In that case a second
 entropy source adds nothing to the NTG.1 property and the ESDM server seeds
-from the jitter RNG alone, once it delivered its 240 bits of entropy. The
-requirement is bound to the jitter RNG: another entropy source delivering the
-same amount of entropy does not replace it.
+from the jitter RNG without one, once it delivered at least 240 bits of entropy
+and the entropy sources together the 256 (384) bits of the initial seeding:
+unless other entropy sources make up the difference, the jitter RNG has to
+deliver all of them itself. The requirement is bound to the jitter RNG: another
+entropy source delivering the same amount of entropy does not replace it.
 
 The compile time option of `ais2031_drg4` is independent of it and caps the
 request size based reseeding limits to the values required by DRG.4.10 of the
@@ -249,6 +254,10 @@ unprivileged as well:
   mirrors the rule of the RPC interface, where inserting data with an entropy
   claim is reserved for the privileged interface.
 
+* The ESDM's own commands changing the entropy accounting or the DRNGs, see
+  below, are refused to everybody but a privileged (UID 0) caller in the same
+  way.
+
 Note that the EGD protocol transfers data in the clear over the socket and
 caps every single transfer at 255 bytes. It exists for compatibility with
 legacy consumers - new applications should use the ESDM RPC interface, the
@@ -257,6 +266,33 @@ device files or `getrandom(2)`.
 Point the consumers at the socket, e.g. for libgcrypt at build time with
 `--with-egd-socket=/run/esdm-egd.socket` or at runtime with
 `gcry_control(GCRYCTL_SET_RNDEGD_SOCKET, "/run/esdm-egd.socket")`.
+
+### ESDM extensions of the protocol
+
+What the EGD protocol cannot express, the socket offers with commands of the
+ESDM's own. Their codes lie far from the five standard ones, so no EGD client
+sends one by accident, and an EGD daemon that does not know them closes the
+connection as it does for any unknown command. Numbers are big endian, like
+those of EGD; `service-egd/esdm_egd_protocol.h` holds the wire format.
+
+| Command | Request | Answer |
+|---------|---------|--------|
+| `0xe0` PR read non-blocking | length byte | like `0x01`, from the prediction resistance DRNG |
+| `0xe1` PR read blocking | length byte | like `0x02`, from the prediction resistance DRNG |
+| `0xe2` read unseeded | length byte | like `0x01`, `/dev/urandom` semantics; empty before the ESDM is operational |
+| `0xe3` get state | - | count byte, then that many 4 byte fields: flags (operational, fully seeded), entropy count, pool size, write wakeup threshold, reseed seconds |
+| `0xe4` status | - | 4 byte length (at most 65536), the status text |
+| `0xe5` status JSON | - | 4 byte length, the status as JSON document (empty if it does not fit) |
+| `0xe6` add to entropy count | 4 byte bits | 4 byte status - privileged |
+| `0xe7` clear pool | - | 4 byte status - privileged |
+| `0xe8` reseed | - | 4 byte status - privileged |
+| `0xe9` set write wakeup threshold | 4 byte bits | 4 byte status - privileged |
+| `0xea` set reseed seconds | 4 byte seconds | 4 byte status - privileged |
+
+The privileged ones change the entropy accounting or the DRNGs and are only
+carried out for a peer connected with UID 0 - the same rule as for the entropy
+claim of the standard write command. Anybody else is answered `-EPERM`, and the
+connection stays usable. The status is 0 or a negative errno.
 
 ### Own consumers of the EGD interface
 
@@ -272,8 +308,8 @@ one socket, for instance:
 * `libesdm-egd-provider.so` is an OpenSSL 3 RAND provider built on it. Unlike
   `libesdm-rng-provider.so` it needs no RPC client, and it tags its algorithms
   with `provider=esdm-egd` so both can be loaded side by side. Its counterpart
-  `libesdm-egd-provider-pr.so` is served by the prediction resistance socket
-  described below and tags its algorithms `provider=esdm-egd-pr`:
+  `libesdm-egd-provider-pr.so` serves every request with prediction resistance,
+  as described below, and tags its algorithms `provider=esdm-egd-pr`:
 
 ```
    [provider_sect]
@@ -292,31 +328,25 @@ one socket, for instance:
 ```
 
   Without the `egd_socket` key the socket is taken from the `ESDM_EGD_SOCKET`
-  environment variable and, failing that, from the path the respective provider
-  was built with. The variable names the ordinary socket, so the `-pr` provider
-  skips it.
+  environment variable and, failing that, from the path the provider was built
+  with. Both providers use the same socket.
 
 ### Prediction resistance
 
 The EGD protocol has no notion of prediction resistance and therefore no way to
-ask for it per request. It is a property of the socket instead: a second socket
-answers every request from `esdm_get_random_bytes_pr()` rather than from
-`esdm_get_random_bytes_full()`. Enable it with
+ask for it. The ESDM serves it on the same socket with read commands of its
+own, answered from `esdm_get_random_bytes_pr()` rather than from
+`esdm_get_random_bytes_full()` (see "ESDM extensions of the protocol" below and
+`esdm_egd_client_get_random_pr()`). An EGD daemon other than the ESDM does not
+know them and closes the connection, so a request for prediction resistance
+fails there rather than being served ordinary random data.
 
-```
-   systemctl enable --now esdm-server-egd-pr.socket
-```
-
-or with `esdm-server --egd_socket_pr <path>`; its path is set at build time with
-`-Desdm-server-egd-pr-socket-path=`. The two sockets are independent and either
-can be enabled on its own.
-
-Consequently the ordinary provider refuses a request that explicitly asks for
-prediction resistance, rather than quietly serving it ordinary random data,
-while `libesdm-egd-provider-pr.so` - which talks to the prediction resistance
-socket - accepts it. Note that this generator hands out no more than the
-entropy sources just produced, so answers take as long as collecting that
-entropy does.
+`libesdm-egd-provider.so` serves a request that asks for prediction resistance
+with that command, and `libesdm-egd-provider-pr.so` serves every request with
+it. Note that this generator hands out no more than the entropy sources just
+produced, so answers take as long as collecting that entropy does; the server
+generates such answers within a budget per connection and round of its event
+loop, so that they cannot hold up the other clients.
 
 ### Sandboxed consumers
 
@@ -340,10 +370,15 @@ afterwards stays within those permitted calls. Setting `OPENSSL_CONF` on the
 
 The corresponding check is `nix build .#checks.<system>.egd_openssh`.
 
-The one thing such a consumer cannot do is reconnect: a process that has already
-confined itself, or that forks after connecting, cannot open a new connection.
-The client therefore reports a failure there rather than recovering from it,
-whereas an unconfined consumer sees a restarted ESDM transparently.
+The one thing such a consumer cannot do is reconnect, and the client cannot tell
+that it runs confined. When its connection is gone - closed by a restart of the
+ESDM, or by the server running short of connection slots - or when it runs in a
+child forked after connecting, which drops the inherited connection, the next
+request calls `socket` and `connect` to open a new connection, and the seccomp
+filter kills the process for that rather than failing the call. A confined
+consumer therefore has to be connected before it confines itself, and a process
+forking into the sandbox cannot be served at all; an unconfined consumer sees a
+restarted ESDM transparently.
 
 ## Additional Hardening Measures
 
