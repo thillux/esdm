@@ -201,11 +201,14 @@ const struct fuse_ctx *fuse_req_ctx(fuse_req_t req)
 	return &test_ctx;
 }
 
+/* Whether the caller of the requests that follow interrupted them */
+static bool test_req_interrupted;
+
 int fuse_req_interrupted(fuse_req_t req)
 {
 	(void)req;
 
-	return 0;
+	return test_req_interrupted;
 }
 
 int fuse_notify_poll(struct fuse_pollhandle *ph)
@@ -1133,6 +1136,102 @@ static void test_privileged_in_progress(void)
 }
 
 /*
+ * The kernel fallback takes a request to credit entropy only when it certainly
+ * did not reach the ESDM. One without an answer may have been applied by the
+ * ESDM - after the time a privileged request is waited for, or with the
+ * connection closed by a restarting server -, and is failed with the error of
+ * the RPC instead, as is every answer of the server. A caller that interrupted
+ * its request is told EINTR, also when the request had not gone out yet.
+ *
+ * The fallback goes to /dev/null, whose ENOTTY tells that it ran.
+ */
+static void test_privileged_fallback_unsent(void)
+{
+	static const int unsent[] = { -ENOENT, -ECONNREFUSED, -EACCES,
+				      -EPIPE, -ESHUTDOWN, -EMSGSIZE };
+	static const int maybe_applied[] = { -ETIMEDOUT, -ECONNRESET, -EPROTO,
+					     -EIO, -EFAULT, -EPERM, -EINVAL };
+	uint8_t raw[sizeof(struct rand_pool_info) + 32] = { 0 };
+	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
+	uint32_t bits = 8;
+	size_t i;
+	int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/null: %s", strerror(errno));
+		return;
+	}
+
+	caller_is_root(true);
+	rpi->buf_size = 32;
+	rpi->entropy_count = 8;
+
+	for (i = 0; i < ARRAY_SIZE(unsent); i++) {
+		priv_rpc_ret = unsent[i];
+
+		ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+		CHECK(reply.kind == REPLY_ERR && reply.err == ENOTTY,
+		      "RNDADDENTROPY failing with %d did not go to the kernel",
+		      unsent[i]);
+
+		ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, fd);
+		CHECK(reply.kind == REPLY_ERR && reply.err == ENOTTY,
+		      "RNDADDTOENTCNT failing with %d did not go to the kernel",
+		      unsent[i]);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(maybe_applied); i++) {
+		priv_rpc_ret = maybe_applied[i];
+
+		ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+		CHECK(reply.kind == REPLY_ERR && reply.err == -maybe_applied[i],
+		      "RNDADDENTROPY failing with %d went to the kernel or was answered with %d",
+		      maybe_applied[i], reply.err);
+
+		ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, fd);
+		CHECK(reply.kind == REPLY_ERR && reply.err == -maybe_applied[i],
+		      "RNDADDTOENTCNT failing with %d went to the kernel or was answered with %d",
+		      maybe_applied[i], reply.err);
+	}
+	CHECK_EQ(raise_calls, drop_calls);
+
+	/*
+	 * Interrupted before the request went out (-EAGAIN), or while the
+	 * connection was attempted: an interruption, not a success of the
+	 * fallback.
+	 */
+	test_req_interrupted = true;
+	priv_rpc_ret = -EAGAIN;
+
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	priv_rpc_ret = -ECONNREFUSED;
+
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+	CHECK_EQ(raise_calls, drop_calls);
+
+	test_req_interrupted = false;
+	caller_is_root(false);
+	close(fd);
+}
+
+/*
  * The privileged half of the ioctl handler. With no ESDM answering, each of
  * these falls back to the kernel device, which is the path a privileged ioctl
  * takes while the daemon is down - and every one of them has to leave the
@@ -1418,6 +1517,14 @@ static void test_read_nonblock(void)
 	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
 
+	/*
+	 * Nor does it opened with O_DSYNC, which is part of O_SYNC but does not
+	 * ask for prediction resistance on its own - the seeding of which it
+	 * would have waited for.
+	 */
+	read_call(O_NONBLOCK | O_DSYNC, esdm_rpcc_get_random_bytes_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
 	/* A blocking reader is served - here from the fallback */
 	read_call(0, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
@@ -1435,6 +1542,18 @@ static void test_read_nonblock(void)
 	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
 	CHECK_EQ(reply.kind, REPLY_BUF);
 	CHECK_EQ(reply.size, 32);
+
+	/*
+	 * O_DSYNC alone is a read of seeded data, the timed one of the
+	 * non-blocking reader - test_full_timeout() leaves the time it was
+	 * given, the prediction resistant call does not.
+	 */
+	memset(&full_timeout_ts, 0, sizeof(full_timeout_ts));
+	read_call(O_NONBLOCK | O_DSYNC, esdm_rpcc_get_random_bytes_full_int,
+		  fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK(full_timeout_ts.tv_sec || full_timeout_ts.tv_nsec,
+	      "O_DSYNC alone was read with prediction resistance");
 
 	test_read_pr_nonblock(fd);
 	test_read_full_nonblock(fd);
@@ -1688,7 +1807,7 @@ static void test_shm_status(void)
 	 * trusted.
 	 */
 	esdm_cuse_shm_status->infolen = ESDM_SHM_STATUS_INFO_SIZE * 2;
-	ioctl_call(42, NULL, 0, sizeof(reply.buf), -1);
+	ioctl_call(42, NULL, 0, ESDM_SHM_STATUS_INFO_SIZE * 2, -1);
 	CHECK(reply.kind == REPLY_IOCTL &&
 		      reply.size == ESDM_SHM_STATUS_INFO_SIZE,
 	      "an oversized info length was not clamped to the segment");
@@ -1714,10 +1833,53 @@ static void test_shm_status(void)
 	shmctl(test_server_shmid, IPC_RMID, NULL);
 }
 
+/*
+ * The user to drop to, in every form the usage offers: --username=USER, the
+ * one it shows, used to come out as "=USER".
+ */
+static void test_option_username(void)
+{
+	static const struct {
+		const char *argv[3];
+		const char *user;
+	} cases[] = {
+		{ { "esdm-cuse", "--username=alice", NULL }, "alice" },
+		{ { "esdm-cuse", "--username", "bob" }, "bob" },
+		{ { "esdm-cuse", "-u", "carol" }, "carol" },
+		{ { "esdm-cuse", "-udave", NULL }, "dave" },
+	};
+	unsigned int i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		char *argv[3];
+		int argc = cases[i].argv[2] ? 3 : 2;
+		struct fuse_args args;
+		struct esdm_cuse_param param = { 0 };
+
+		memcpy(argv, cases[i].argv, sizeof(argv));
+		args = (struct fuse_args)FUSE_ARGS_INIT(argc, argv);
+
+		CHECK_EQ(fuse_opt_parse(&args, &param, esdm_cuse_opts,
+					esdm_cuse_process_arg),
+			 0);
+		CHECK(param.username &&
+			      !strcmp(param.username, cases[i].user),
+		      "%s %s: the user is %s rather than %s", argv[1],
+		      argc > 2 ? argv[2] : "",
+		      param.username ? param.username : "(none)",
+		      cases[i].user);
+
+		free(param.username);
+		fuse_opt_free_args(&args);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
+
+	test_option_username();
 
 	caller_is_root(false);
 
@@ -1744,6 +1906,7 @@ int main(int argc, char *argv[])
 	test_pollmask();
 	test_privileged_ioctls();
 	test_privileged_in_progress();
+	test_privileged_fallback_unsent();
 	test_shm_status();
 
 	return common_test_result("cuse_device");

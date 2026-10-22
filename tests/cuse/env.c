@@ -52,27 +52,36 @@ void esdm_cuse_dev_file(char *outfile, size_t outfilelen, const char *name)
 
 void env_fini(void)
 {
+	int failed = 0;
+
 	raise_privilege();
 	esdm_test_shm_status_fini();
 
 	if (random_pid > 0) {
 		printf("Killing random PID %u\n", random_pid);
 		kill(random_pid, SIGTERM);
-		waitpid(random_pid, NULL, 0);
+		failed |= test_env_reap_daemon(random_pid, "esdm-cuse-random");
 	}
 	random_pid = 0;
 	if (urandom_pid > 0) {
 		printf("Killing urandom PID %u\n", urandom_pid);
 		kill(urandom_pid, SIGTERM);
-		waitpid(urandom_pid, NULL, 0);
+		failed |= test_env_reap_daemon(urandom_pid,
+					       "esdm-cuse-urandom");
 	}
 	urandom_pid = 0;
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		failed |= test_env_reap_daemon(server_pid, "esdm-server");
 	}
 	server_pid = 0;
+
+	/* All of them are gone - see test_env_reap_daemon_or_fail() */
+	if (failed) {
+		fflush(stdout);
+		exit(1);
+	}
 }
 
 /*
@@ -160,9 +169,9 @@ int env_init(int disable_fallback)
 		return EFAULT;
 	}
 	server_pid = pid;
-	/* The server is up once it has bound its unprivileged RPC socket */
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+	/* The server is up once it accepts on its unprivileged RPC socket */
+	test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+			       TEST_WAIT_TIMEOUT_MS);
 
 	/* random forking */
 	pid = fork();
@@ -228,7 +237,7 @@ void env_kill_server(void)
 		printf("Killing server PID %u\n", server_pid);
 		raise_privilege();
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 	nanosleep(&ts, NULL);

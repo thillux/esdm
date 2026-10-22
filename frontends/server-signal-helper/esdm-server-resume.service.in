@@ -8,6 +8,7 @@ Description=Entropy Source and DRNG Manager Daemon Resume Trigger
 After=esdm-server.service
 Wants=esdm-server.service
 After=systemd-suspend.service systemd-hybrid-sleep.service systemd-hibernate.service
+After=systemd-suspend-then-hibernate.service
 
 [Service]
 Type=oneshot

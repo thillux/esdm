@@ -50,6 +50,7 @@
 
 #include "common_test.h"
 #include "egd_peer.h"
+#include "esdm_egd_protocol.h"
 
 /* The provider module, and the property that selects its algorithms */
 #define TEST_EGD_PROVIDER "libesdm-egd-provider"
@@ -237,27 +238,83 @@ static void test_ctx_params(void)
 }
 
 /*
- * The EGD protocol has no way to ask for prediction resistance, so a request
- * that insists on it is refused rather than answered with ordinary data. That
- * is the one property this provider cannot deliver, and quietly pretending
- * otherwise is the failure worth guarding against.
+ * The EGD protocol has no way to ask for prediction resistance, the ESDM has a
+ * command of its own for it: a request that insists on it has to go out as
+ * that command rather than be answered with ordinary data, and one that does
+ * not must not cost the PR DRNG anything.
  */
-static void test_prediction_resistance_refused(void)
+static void test_prediction_resistance(struct egd_peer *peer)
 {
 	EVP_RAND_CTX *rctx = rand_ctx_new("CTR-DRBG");
 	unsigned char buf[32];
+	unsigned int pr_before;
 
 	if (!rctx)
 		return;
 
-	CHECK(EVP_RAND_instantiate(rctx, 256, 1, NULL, 0, NULL) == 0,
-	      "a prediction resistant instantiation was accepted");
+	CHECK(EVP_RAND_instantiate(rctx, 256, 1, NULL, 0, NULL) == 1,
+	      "a prediction resistant instantiation was refused: %s",
+	      last_error());
 
-	/* And again on the request itself, for a context instantiated without */
-	CHECK(EVP_RAND_instantiate(rctx, 256, 0, NULL, 0, NULL) == 1,
-	      "the RNG could not be instantiated: %s", last_error());
-	CHECK(EVP_RAND_generate(rctx, buf, sizeof(buf), 256, 1, NULL, 0) == 0,
-	      "a prediction resistant request was answered");
+	pr_before = egd_peer_pr_requests(peer);
+	CHECK(EVP_RAND_generate(rctx, buf, sizeof(buf), 256, 1, NULL, 0) == 1,
+	      "a prediction resistant request was not answered: %s",
+	      last_error());
+	CHECK(egd_peer_pr_requests(peer) > pr_before,
+	      "a prediction resistant request went out as an ordinary read");
+
+	pr_before = egd_peer_pr_requests(peer);
+	CHECK(EVP_RAND_generate(rctx, buf, sizeof(buf), 256, 0, NULL, 0) == 1,
+	      "an ordinary request was not answered: %s", last_error());
+	CHECK(egd_peer_pr_requests(peer) == pr_before,
+	      "an ordinary request went out as a prediction resistant read");
+
+	EVP_RAND_CTX_free(rctx);
+}
+
+/*
+ * A prediction resistant request larger than the maximum request size the
+ * provider reports is split by OpenSSL, which asks for prediction resistance
+ * with the first part only. The provider therefore reports a size OpenSSL never
+ * splits at, and splits into EGD transfers itself: every one of them has to go
+ * out as the prediction resistant read, not merely the first.
+ */
+static void test_prediction_resistance_large(struct egd_peer *peer)
+{
+	EVP_RAND_CTX *rctx = rand_ctx_new("CTR-DRBG");
+	unsigned char buf[1024];
+	unsigned int requests_before, pr_before, seeds_before, requests, pr,
+		seeds;
+
+	if (!rctx)
+		return;
+
+	CHECK(EVP_RAND_instantiate(rctx, 256, 1, NULL, 0, NULL) == 1,
+	      "a prediction resistant instantiation was refused: %s",
+	      last_error());
+
+	requests_before = egd_peer_requests(peer);
+	pr_before = egd_peer_pr_requests(peer);
+	seeds_before = egd_peer_pr_generations(peer);
+	CHECK(EVP_RAND_generate(rctx, buf, sizeof(buf), 256, 1, NULL, 0) == 1,
+	      "a prediction resistant request of %zu bytes was not answered: %s",
+	      sizeof(buf), last_error());
+	requests = egd_peer_requests(peer) - requests_before;
+	pr = egd_peer_pr_requests(peer) - pr_before;
+	seeds = egd_peer_pr_generations(peer) - seeds_before;
+
+	CHECK(pr == requests,
+	      "%u of the %u reads of a prediction resistant request of %zu bytes went out as ordinary ones",
+	      requests - pr, requests, sizeof(buf));
+	CHECK(pr == (sizeof(buf) + ESDM_EGD_MAX_PR_TRANSFER - 1) /
+			    ESDM_EGD_MAX_PR_TRANSFER,
+	      "a prediction resistant request of %zu bytes took %u prediction resistant reads",
+	      sizeof(buf), pr);
+
+	/* Split so that it costs the ESDM no more seeds than its size */
+	CHECK(seeds == sizeof(buf) / ESDM_EGD_PR_GENERATION,
+	      "a prediction resistant request of %zu bytes cost %u seeds, expected %zu",
+	      sizeof(buf), seeds, sizeof(buf) / ESDM_EGD_PR_GENERATION);
 
 	EVP_RAND_CTX_free(rctx);
 }
@@ -448,7 +505,8 @@ int main(int argc, char *argv[])
 	test_algorithms_provided();
 	test_generate();
 	test_ctx_params();
-	test_prediction_resistance_refused();
+	test_prediction_resistance(peer);
+	test_prediction_resistance_large(peer);
 	test_as_seed_source();
 
 	/* Takes the peer down, so everything that needs it has run by now */

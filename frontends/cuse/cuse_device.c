@@ -834,10 +834,13 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 	fallback_fd = esdm_test_fallback_fd(fallback_fd);
 
 	/*
+	 * O_SYNC asks for prediction resistance. It is a bit of its own plus
+	 * O_DSYNC, which alone does not ask for it - as with esdm_cdev.
+	 *
 	 * The blocking PR call waits for as long as the PR DRNG is busy or not
 	 * operational, which an O_NONBLOCK reader must not.
 	 */
-	if (fi->flags & O_SYNC)
+	if ((fi->flags & O_SYNC) == O_SYNC)
 		get = (fi->flags & O_NONBLOCK) ?
 			      esdm_rpcc_get_random_bytes_pr_nonblock_int :
 			      esdm_rpcc_get_random_bytes_pr_int;
@@ -1051,20 +1054,56 @@ out:
 }
 
 /*
- * Whether a privileged RPC was interrupted after its request went out
- * (-EINPROGRESS): the ESDM may apply it all the same, so it must not be
- * followed by the kernel fallback, which would credit the entropy a second
- * time. Its effect is unknown then, as that of an interrupted ioctl of the
- * kernel can be, whose caller is told EINTR - and is gone anyway, as the
- * RPC is only interrupted when the caller interrupted its request.
+ * Whether the caller of a failed privileged RPC interrupted its request. The
+ * RPC is abandoned then, after its request went out (-EINPROGRESS) - the ESDM
+ * may apply it all the same - or before (-EAGAIN, or the error of a connection
+ * attempt cut short). Either way the caller is told EINTR, as for an
+ * interrupted ioctl of the kernel, whose effect is unknown as well, and it is
+ * not served by the kernel fallback: it is gone, and the fallback could credit
+ * the entropy a second time.
  */
-static bool esdm_cuse_priv_in_progress(int *ret)
+static bool esdm_cuse_priv_interrupted(fuse_req_t req, int *ret)
 {
-	if (*ret != -EINPROGRESS)
+	if (*ret != -EINPROGRESS && !fuse_req_interrupted(req))
 		return false;
 
 	*ret = -EINTR;
 	return true;
+}
+
+/*
+ * Whether a failed privileged RPC certainly did not reach the ESDM, which is
+ * when the kernel fallback may take the request instead - it keeps the ioctl
+ * working while there is no ESDM to take it.
+ *
+ * A request that went out may have been applied by the ESDM whatever the RPC
+ * reports, and the fallback would credit its entropy a second time. The RPC
+ * client does not know whether the server applied a request once the answer
+ * is missing: after the time a privileged request is waited for (-ETIMEDOUT),
+ * when the server closed the connection, e.g. as it restarts (-ECONNRESET),
+ * or with a garbled answer. It does not send such a request again either.
+ *
+ * So the fallback takes only the errors that occur before a request goes out
+ * and that the server does not answer with: no server listening on the socket
+ * (-ENOENT, -ECONNREFUSED) or not to be reached by the caller (-EACCES), the
+ * connection gone and not to be re-established for the send (-EPIPE), the
+ * RPC client shut down (-ESHUTDOWN), a request too large for a message
+ * (-EMSGSIZE). A send that timed out also reports -ETIMEDOUT, which is left to
+ * the caller as well, and so is every answer of the server.
+ */
+static bool esdm_cuse_priv_unsent(int ret)
+{
+	switch (ret) {
+	case -ENOENT:
+	case -ECONNREFUSED:
+	case -EACCES:
+	case -EPIPE:
+	case -ESHUTDOWN:
+	case -EMSGSIZE:
+		return true;
+	default:
+		return false;
+	}
 }
 
 void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
@@ -1139,8 +1178,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 
 			esdm_invoke(esdm_rpcc_rnd_add_to_ent_cnt_int(
 				ent_count_bits, req));
-			/* In case of an error, update the kernel */
-			if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+			/* The kernel takes what certainly did not reach the ESDM */
+			if (ret && !esdm_cuse_priv_interrupted(req, &ret) &&
+			    esdm_cuse_priv_unsent(ret)) {
 				if (backend_fd >= 0 &&
 				    ioctl(backend_fd, RNDADDTOENTCNT,
 					  &ent_count_bits) == -1)
@@ -1206,8 +1246,9 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			(const uint8_t *)rpi->buf, (size_t)rpi->buf_size,
 			ent_count_bits, req));
 
-		/* In case of an error, update the kernel */
-		if (ret && !esdm_cuse_priv_in_progress(&ret)) {
+		/* The kernel takes what certainly did not reach the ESDM */
+		if (ret && !esdm_cuse_priv_interrupted(req, &ret) &&
+		    esdm_cuse_priv_unsent(ret)) {
 			if (backend_fd >= 0 &&
 			    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
 				ret = -errno;
@@ -1237,7 +1278,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			    ioctl(backend_fd, RNDCLEARPOOL) == -1)
 				ret = -errno;
 		} else {
-			esdm_cuse_priv_in_progress(&ret);
+			esdm_cuse_priv_interrupted(req, &ret);
 		}
 		esdm_cuse_drop_privilege_transient();
 		if (ret)
@@ -1261,7 +1302,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			    ioctl(backend_fd, RNDRESEEDCRNG) == -1)
 				ret = -errno;
 		} else {
-			esdm_cuse_priv_in_progress(&ret);
+			esdm_cuse_priv_interrupted(req, &ret);
 		}
 		esdm_cuse_drop_privilege_transient();
 		if (ret)
@@ -1768,8 +1809,9 @@ static const char *usage =
 	"    --help|-h               print this help message\n"
 	"    --maj=MAJ|-M MAJ        device major number\n"
 	"    --min=MIN|-m MIN        device minor number\n"
-	"    --name=NAME|-n NAME     device name (mandatory)\n"
-	"    --verbosity=NUM|-v NUM  verbosity level\n"
+	"    --name=NAME|-n NAME     device name (default: esdm or uesdm)\n"
+	"    --verbosity=NUM|-v NUM  verbosity level (default and minimum: 3,\n"
+	"                            errors and warnings)\n"
 	"    --username=USER|-u USER unprivileged user name (default: \"nobody\")\n"
 	"    --pid_namespace         fork the daemon into an isolating PID namespace\n"
 	"                            (refuses the privileged ioctls to every caller)\n"
@@ -1796,7 +1838,14 @@ static const struct fuse_opt esdm_cuse_opts[] = {
 	ESDM_CUSE_OPT("-v %u", verbosity),
 	ESDM_CUSE_OPT("--verbosity=%u", verbosity),
 	ESDM_CUSE_OPT("-u %s", username),
+	/*
+	 * fuse_opt takes "--username=USER" for the template "--username %s" as
+	 * well, with "=USER" as the value. The template below takes the value
+	 * after the "=", and comes after that one, as fuse_opt applies every
+	 * template an argument matches, in the order of this table.
+	 */
 	ESDM_CUSE_OPT("--username %s", username),
+	ESDM_CUSE_OPT("--username=%s", username),
 	ESDM_CUSE_OPT("--pid_namespace", pid_namespace),
 	/* cuse_lowlevel_setup() ignores it, see esdm_cuse_session_loop() */
 	ESDM_CUSE_OPT("max_threads=%u", max_threads),
@@ -1896,7 +1945,7 @@ int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct esdm_cuse_param param = { 0, 0, NULL, NULL, 1, 0, 0, 0, 0, 0 };
+	struct esdm_cuse_param param = { .verbosity = LOGGER_WARN };
 	char dev_name[128] = "DEVNAME=";
 	char devname[20];
 	const char *dev_info_argv[] = { dev_name };
@@ -1911,7 +1960,12 @@ int main_common(const char *_devname, const char *target, const char *semname,
 		goto out;
 	}
 
-	esdm_logger_set_verbosity(param.verbosity);
+	/*
+	 * Errors and warnings are logged at every level - a lower one would
+	 * have the daemon fail without saying why.
+	 */
+	esdm_logger_set_verbosity((enum esdm_logger_verbosity)max_uint32(
+		param.verbosity, LOGGER_WARN));
 
 	if (param.syslog) {
 		esdm_logger_enable_syslog("esdm-cuse");

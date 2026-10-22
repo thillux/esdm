@@ -44,7 +44,7 @@ void env_fini(void)
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 }
@@ -109,16 +109,16 @@ int env_init(void)
 	server_pid = pid;
 
 	/*
-	 * The server is up once it has bound its unprivileged RPC socket and
-	 * serving EGD once that socket is there as well. Unlike the other test
-	 * environments, a server that never comes up is an error here rather
-	 * than left to the test: one of the tests is expected to fail, and
-	 * must not pass merely because there was nothing to talk to.
+	 * The server is up once it accepts on its unprivileged RPC socket, and
+	 * serving EGD once it accepts on that socket as well. Unlike the other
+	 * test environments, a server that never comes up is an error here
+	 * rather than left to the test: one of the tests is expected to fail,
+	 * and must not pass merely because there was nothing to talk to.
 	 */
-	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-				TEST_WAIT_TIMEOUT_MS) ||
-	    !test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
-				TEST_WAIT_TIMEOUT_MS)) {
+	if (!test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+				    TEST_WAIT_TIMEOUT_MS) ||
+	    !test_wait_for_listener(ESDM_TEST_EGD_SOCKET, SOCK_STREAM,
+				    TEST_WAIT_TIMEOUT_MS)) {
 		env_fini();
 		ret = ETIMEDOUT;
 	}

@@ -7,6 +7,14 @@ if get_option('linux-getrandom').enabled()
 			dependencies: esdm_getrandom_dep
 		)
 
+	getrandom_threads_test = executable(
+			'getrandom_threads_test',
+			[ 'getrandom_threads_test.c', 'env.c' ],
+			include_directories: include_dirs_server,
+			dependencies: [ esdm_getrandom_dep,
+					dependency('threads') ]
+		)
+
 	getrandom_get_seed_test = executable(
 			'getrandom_get_seed_test',
 			[ 'getrandom_get_seed_test.c', 'env.c' ],
@@ -65,6 +73,15 @@ if get_option('linux-getrandom').enabled()
 
 	test('System call getrandom', getrandom_syscall,
 		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()])
+
+	# The connections the threads of a process share: one per request in
+	# flight, a call that must not block answered while other threads
+	# hold them all, in a forked child as well. It waits for the server to
+	# be seeded, and reads prediction resistant data for a while.
+	test('System call getrandom from several threads',
+		getrandom_threads_test,
+		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()],
+		timeout: 180)
 
 	test('System call getrandom get_seed', getrandom_get_seed_test,
 		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()],

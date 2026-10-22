@@ -34,7 +34,18 @@
 /* The GNU test protocol's hard error: the test could not be run at all */
 #define TEST_SETUP_ERROR 99
 
-static bool test_random(void)
+/*
+ * The RSA key generation draws on the provider for its prime candidates and the
+ * bases of its primality tests: a 4096 bit key took some 540 requests, 290 of
+ * them of 256 bytes. Served with prediction resistance, each costs the ESDM a
+ * seed per 32 bytes, some 2500 seeds for the key - 25 to 100 seconds and more
+ * on 16 CPUs. The provider doing so makes a 2048 bit key instead, some 410
+ * requests costing about 1000 seeds.
+ */
+#define TEST_RSA_BITS 4096
+#define TEST_RSA_BITS_PR 2048
+
+static bool test_random(unsigned int rsa_bits)
 {
 	unsigned char bytes[300];
 	int ret;
@@ -44,7 +55,7 @@ static bool test_random(void)
 	if (ret != 1)
 		return false;
 
-	EVP_PKEY *pkey = EVP_RSA_gen(4096);
+	EVP_PKEY *pkey = EVP_RSA_gen(rsa_bits);
 	if (pkey == NULL)
 		return false;
 	EVP_PKEY_free(pkey);
@@ -108,56 +119,9 @@ static bool test_instantiate(bool prediction_resistance)
 }
 
 /*
- * The EGD provider has to refuse prediction resistance, as the EGD protocol
- * cannot ask for it. Any failure of an instance with prediction resistance
- * would look like that refusal, though - a provider that cannot reach the
- * server fails it just as well. So the same provider has to serve an instance
- * without prediction resistance, and the instance with it has to fail for the
- * reason the provider gives when it refuses.
- */
-static int test_instantiate_pr_refused(void)
-{
-	const char *data;
-	unsigned long err;
-	bool refused = false;
-	int flags;
-
-	if (!test_instantiate(false)) {
-		fprintf(stderr,
-			"An instance without prediction resistance fails\n");
-		return EXIT_FAILURE;
-	}
-
-	ERR_clear_error();
-	if (test_instantiate(true)) {
-		fprintf(stderr, "Prediction resistance was not refused\n");
-		return EXIT_FAILURE;
-	}
-
-	while ((err = ERR_get_error_all(NULL, NULL, NULL, &data, &flags))) {
-		char reason[256];
-
-		ERR_error_string_n(err, reason, sizeof(reason));
-		fprintf(stderr, "%s: %s\n", reason,
-			(flags & ERR_TXT_STRING) ? data : "");
-		if ((flags & ERR_TXT_STRING) &&
-		    strstr(data, "cannot request prediction resistance"))
-			refused = true;
-	}
-
-	if (!refused) {
-		fprintf(stderr,
-			"The instance with prediction resistance failed, but not because the provider refused it\n");
-		return EXIT_FAILURE;
-	}
-
-	return EXIT_SUCCESS;
-}
-
-/*
  * Returns EXIT_SUCCESS, EXIT_FAILURE if the test itself failed, or
  * TEST_SETUP_ERROR if it could not be run at all - a provider that does not
- * load must not count as the refusal one of the tests expects.
+ * load is no failure of the test.
  */
 static int performTest(char *test, char *type)
 {
@@ -170,6 +134,12 @@ static int performTest(char *test, char *type)
 		prov_name = "libesdm-rng-provider";
 	} else if (strncmp(type, "seed-src", strlen("seed-src")) == 0) {
 		prov_name = "libesdm-seed-src-provider";
+	} else if (strcmp(type, "egd-pr") == 0) {
+		/*
+		 * The same over the same socket, serving every request with
+		 * the ESDM's prediction resistant read command.
+		 */
+		prov_name = "libesdm-egd-provider-pr";
 	} else if (strncmp(type, "egd", strlen("egd")) == 0) {
 		/*
 		 * The EGD provider reaches the ESDM over the EGD protocol
@@ -195,9 +165,10 @@ static int performTest(char *test, char *type)
 	}
 
 	if (strncmp(test, "random", strlen("random")) == 0) {
-		ret = test_random() ? EXIT_SUCCESS : EXIT_FAILURE;
-	} else if (strcmp(test, "instantiate_pr_refused") == 0) {
-		ret = test_instantiate_pr_refused();
+		ret = test_random(strcmp(type, "egd-pr") ? TEST_RSA_BITS :
+							   TEST_RSA_BITS_PR) ?
+			      EXIT_SUCCESS :
+			      EXIT_FAILURE;
 	} else if (strncmp(test, "instantiate_pr", strlen("instantiate_pr")) ==
 		   0) {
 		ret = test_instantiate(true) ? EXIT_SUCCESS : EXIT_FAILURE;

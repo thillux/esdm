@@ -3,7 +3,7 @@
 This directory contains the measurement tooling for the eBPF-based
 scheduler and interrupt entropy sources (`es_sched_ebpf`, `es_irq_ebpf`).
 It serves the same purpose as the `esdm_raw_*` debugfs interfaces of the
-`linux_esdm_es` kernel add-on: obtaining raw, unconditioned noise source
+`esdm_es` kernel module (`kernel/esdm_es`): obtaining raw, unconditioned noise source
 data for an SP800-90B entropy assessment.
 
 The assessment uses the NIST SP800-90B test suite throughout. The BSI
@@ -33,7 +33,7 @@ and the ESDM server itself never records raw data.
    assess them one at a time. Perform one collection on an idle system and
    one under load (e.g. `stress-ng --cpu N --io N`):
 
-       sudo ./build/addon/es_ebpf_testing/esdm-ebpf-collect \
+       sudo ./build/tests/es_ebpf_testing/esdm-ebpf-collect \
             --source sched --cpu 0 --events 1000000 --out sched_idle_cpu0.txt
 
    The output is one decimal time delta per line: the time between two
@@ -77,7 +77,7 @@ and the ESDM server itself never records raw data.
 
    Doing it by hand is two commands:
 
-       ./build/addon/test/esdm-extractlsb raw.txt raw-8.bin 1000000 FF
+       ./build/tests/validation-helpers/esdm-extractlsb raw.txt raw-8.bin 1000000 FF
        ea_non_iid raw-8.bin 8
 
    Repeat for every CPU that shall be credited and take the **minimum**
@@ -130,8 +130,9 @@ data are four events - and the oversampling rate is `ceil(1 / H)`.
 The two have to agree. The accounting credits the smaller of what each yields,
 `min(rate / 4, 1 / OSR)` bits per event, and `OSR` is a whole number: an event
 measured above 1 bit cannot be claimed as such, because `OSR = 1` is the most
-precise setting there is. `analyze_non_iid.sh` caps its suggestion at
-`4 / OSR` accordingly.
+precise setting there is. `analyze_non_iid.sh` suggests no rate - it passes the
+estimate through as it stands - so cap the rate derived from it at `4 / OSR`
+accordingly.
 
 Use the **minimum** across all measured environments, CPUs, bit widths and
 load profiles, and configure it at build time
@@ -144,8 +145,12 @@ The same measurement determines the oversampling rate the SP800-90B
 health tests are parameterized with, configured at build time
 (`-Des_sched_ebpf_osr=N`, `-Des_irq_ebpf_osr=N`). It is the number of
 events required per bit of entropy, `OSR = ceil(1 / H)` for the measured
-min-entropy `H` per event - rounded **up**, so the RCT and APT cutoffs are
-never less strict than the measurement warrants. Keep it consistent with
+min-entropy `H` per event - rounded **up**, so the source is never credited
+with more entropy per event than the measurement warrants. The RCT and APT
+cutoffs grow with the OSR, so the rounding makes them looser than `1 / H`
+itself would: the tests assume less entropy per event than measured, and
+tolerate longer runs and more frequent values before they fail. Keep it
+consistent with
 the entropy rate: an event contributes its 64 bit delta, so 256 bits of data
 are four events and a rate above `4 / OSR` claims more than the assessment
 supports - the accounting caps it and the server logs a warning on startup.
@@ -161,10 +166,11 @@ CPU, with the timer granularity already divided out.
 The eBPF program forms them, always between two events the CPU observed back
 to back, and hands each one over on its own. Nothing user space receives can
 therefore span a gap: a record the ring buffer had no room for is a sample
-that never arrives, not a delta stretched across the ones it swallowed. Two
-events yield no delta at all - the first one a CPU sees, and the first one
-after a reset, whose predecessor was taken before the timer granularity was
-known.
+that never arrives, not a delta stretched across the ones it swallowed. The
+first 101 events of every CPU yield no delta at all - the 100 time stamps the
+timer granularity is learned from, and the one after them, which only becomes
+the predecessor of the first delta. Every run of `esdm-ebpf-collect` starts
+over with them.
 
 `--events` counts written deltas, so an interrupted collection yields exactly
 the requested number and the losses show up as a longer collection rather than

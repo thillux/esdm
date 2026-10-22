@@ -31,6 +31,7 @@
 #include "config.h"
 #include "constructor.h"
 #include "esdm_rpc_client.h"
+#include "esdm_rpc_client_internal.h"
 #include "esdm_rpc_service.h"
 #include "math_helper.h"
 #include "mutex.h"
@@ -68,6 +69,13 @@ static void esdm_getrandom_lib_init(void)
 		goto out;
 	}
 
+	/*
+	 * The connections this process may hold, see the meson option
+	 * linux-getrandom-num-nodes. They are opened as the requests in flight
+	 * at the same time need them, see esdm_rpcc_get_service(): a process
+	 * that asks from one thread at a time - most of those this library is
+	 * preloaded into - holds one, as it did when this was the limit.
+	 */
 #if ESDM_GETRANDOM_NUM_NODES > 0
 	esdm_rpcc_set_max_online_nodes(ESDM_GETRANDOM_NUM_NODES);
 #endif
@@ -117,25 +125,6 @@ static void esdm_getrandom_lib_exit(void)
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags);
 
 /*
- * Whether a request for seeded randomness would block. The ESDM blocks such a
- * request until it is fully seeded, and its RPC client keeps asking until then,
- * so GRND_NONBLOCK has to be honored here, before the request is made.
- *
- * Returns 1 if it would block, 0 if not and < 0 if the ESDM cannot tell.
- */
-static int esdm_getrandom_would_block(void)
-{
-	bool fully_seeded = false;
-	int ret;
-
-	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
-	if (ret < 0)
-		return ret;
-
-	return !fully_seeded;
-}
-
-/*
  * How long one chunk of a GRND_NONBLOCK request for seeded randomness may take.
  *
  * esdm_getrandom_would_block() only tells how the ESDM was when it answered.
@@ -153,6 +142,68 @@ static int esdm_getrandom_would_block(void)
 #define ESDM_GETRANDOM_NONBLOCK_TIMEOUT_NS 500000000L
 
 /*
+ * How long a request that must not block - GRND_NONBLOCK, GRND_INSECURE - waits
+ * for a connection should all of them be busy.
+ *
+ * The connections of the process are shared by all its threads, and they are
+ * mostly free again a moment later: a call puts its connection back between
+ * the parts it is served in. But a thread reading prediction resistant data,
+ * or many MiB, takes it again right away, and a waiter may not get it before
+ * that read ends - seconds later. A non-blocking request does not wait for
+ * that: after this short time it is served as if no ESDM answered - by the
+ * kernel - or, where only the ESDM may answer it, fails with EAGAIN. See
+ * esdm_rpcc_set_unpriv_checkout_deadline().
+ */
+#define ESDM_GETRANDOM_NONBLOCK_CHECKOUT_NS 20000000L
+
+/*
+ * Bound the waits for a connection of the calls that follow, see above.
+ *
+ * Returns the deadline in place before, which esdm_getrandom_nonblock_end()
+ * puts back.
+ */
+static const struct timespec *
+esdm_getrandom_nonblock_begin(struct timespec *deadline)
+{
+	clock_gettime(CLOCK_MONOTONIC, deadline);
+	deadline->tv_nsec += ESDM_GETRANDOM_NONBLOCK_CHECKOUT_NS;
+	if (deadline->tv_nsec >= 1000000000L) {
+		deadline->tv_sec++;
+		deadline->tv_nsec -= 1000000000L;
+	}
+	return esdm_rpcc_set_unpriv_checkout_deadline(deadline);
+}
+
+static void esdm_getrandom_nonblock_end(const struct timespec *prev)
+{
+	esdm_rpcc_set_unpriv_checkout_deadline(prev);
+}
+
+/*
+ * Whether a request for seeded randomness would block. The ESDM blocks such a
+ * request until it is fully seeded, and its RPC client keeps asking until then,
+ * so GRND_NONBLOCK has to be honored here, before the request is made.
+ *
+ * Returns 1 if it would block, 0 if not and < 0 if the ESDM cannot tell - also
+ * -EBUSY when no connection became free in time.
+ */
+static int esdm_getrandom_would_block(void)
+{
+	bool fully_seeded = false;
+	const struct timespec *prev;
+	struct timespec deadline;
+	int ret;
+
+	prev = esdm_getrandom_nonblock_begin(&deadline);
+	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+	esdm_getrandom_nonblock_end(prev);
+	if (ret < 0)
+		return ret;
+
+	return !fully_seeded;
+}
+
+/*
  * Obtain seeded randomness without waiting for the ESDM to become seeded.
  *
  * The request is split into chunks of what one RPC carries, each with its own
@@ -160,8 +211,9 @@ static int esdm_getrandom_would_block(void)
  * timed RPC call reports an error only, discarding what it obtained before.
  *
  * Returns the number of bytes obtained, which is less than @length only when
- * the ESDM stopped serving midway, -EAGAIN when it served nothing without
- * blocking, < 0 on other errors.
+ * the ESDM stopped serving midway or the connections stayed busy, -EAGAIN when
+ * it served nothing without blocking, -EBUSY when no connection became free in
+ * time for the first chunk, < 0 on other errors.
  */
 static ssize_t esdm_getrandom_full_nonblock(uint8_t *buffer, size_t length)
 {
@@ -174,9 +226,14 @@ static ssize_t esdm_getrandom_full_nonblock(uint8_t *buffer, size_t length)
 			.tv_nsec = ESDM_GETRANDOM_NONBLOCK_TIMEOUT_NS
 		};
 		size_t todo = min_size(ESDM_RPC_MAX_DATA, length - done);
+		const struct timespec *prev;
+		struct timespec deadline;
 
+		/* The connection within the short wait, the answer within ts */
+		prev = esdm_getrandom_nonblock_begin(&deadline);
 		esdm_invoke(esdm_rpcc_get_random_bytes_full_timeout(
 			buffer + done, todo, &ts));
+		esdm_getrandom_nonblock_end(prev);
 		if (ret < 0)
 			break;
 		done += (size_t)ret;
@@ -256,21 +313,33 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	}
 
 	if (flags & GRND_INSECURE) {
+		const struct timespec *prev;
+		struct timespec deadline;
+
+		/* Without a connection in time, the kernel answers below */
+		prev = esdm_getrandom_nonblock_begin(&deadline);
 		esdm_invoke(esdm_rpcc_get_random_bytes(buffer, length));
+		esdm_getrandom_nonblock_end(prev);
 	} else if (flags & GRND_RANDOM) {
 		if (!(flags & GRND_NONBLOCK)) {
 			esdm_invoke(
 				esdm_rpcc_get_random_bytes_pr(buffer, length));
 		} else {
+			const struct timespec *prev;
+			struct timespec deadline;
+
 			/*
 			 * Seeded is not enough: the RPC client waits for as
 			 * long as the PR DRNG is busy or not operational.
 			 * That is the ESDM's answer, not a failure, so it is
-			 * not handed to the kernel either.
+			 * not handed to the kernel either - nor are the
+			 * connections being busy beyond the deadline.
 			 */
+			prev = esdm_getrandom_nonblock_begin(&deadline);
 			esdm_invoke(esdm_rpcc_get_random_bytes_pr_nonblock(
 				buffer, length));
-			if (ret == -EAGAIN) {
+			esdm_getrandom_nonblock_end(prev);
+			if (ret == -EAGAIN || ret == -EBUSY) {
 				errno = EAGAIN;
 				return -1;
 			}
@@ -278,11 +347,21 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	} else if (flags & GRND_SEED) {
 		unsigned int seed_flags =
 			(flags & GRND_NONBLOCK) ? ESDM_GET_SEED_NONBLOCK : 0;
+		const struct timespec *prev = NULL;
+		struct timespec deadline;
 
 		seed_flags |= (flags & GRND_FULLY_SEEDED) ?
 				      ESDM_GET_SEED_FULLY_SEEDED :
 				      0;
+		if (flags & GRND_NONBLOCK)
+			prev = esdm_getrandom_nonblock_begin(&deadline);
 		esdm_invoke(esdm_rpcc_get_seed(buffer, length, seed_flags));
+		if (flags & GRND_NONBLOCK) {
+			esdm_getrandom_nonblock_end(prev);
+			/* The connections stayed busy */
+			if (ret == -EBUSY)
+				ret = -EAGAIN;
+		}
 		if (ret < 0) {
 			errno = (int)(-ret);
 			ret = -1;

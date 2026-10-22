@@ -70,11 +70,50 @@ test('OpenSSL 3.x EGD Provider - instance full', openssl_rng_tester,
 	env: tester_esdm_env,
 )
 
-# The EGD protocol has no way to ask for prediction resistance, so this
-# provider refuses rather than quietly handing back data that does not have the
-# property the caller asked for. The tester checks for the refusal itself,
-# rather than taking any failure for it.
-test('OpenSSL 3.x EGD Provider - instance pr is refused', openssl_rng_tester,
-	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr_refused', 'egd'],
+# The EGD protocol has no way to ask for prediction resistance, the ESDM serves
+# it with a command of its own on the same socket.
+test('OpenSSL 3.x EGD Provider - instance pr', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'egd'],
 	env: tester_esdm_env,
 )
+
+# The variant serving every request with prediction resistance. Its RSA key
+# generation costs the ESDM a seed for each 32 bytes it asks for - about 1000
+# even for the smaller key it makes, see the tester - which took 9 to 17
+# seconds on an idle machine with 16 CPUs, and close to 50 at a load of 144.
+test('OpenSSL 3.x EGD PR Provider - simple random', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'random', 'egd-pr'],
+	env: tester_esdm_env,
+	timeout: 120,
+)
+
+test('OpenSSL 3.x EGD PR Provider - instance full', openssl_rng_tester,
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_full', 'egd-pr'],
+	env: tester_esdm_env,
+)
+
+# The RNG and SEED-SRC providers on a connection encrypted with DTLS, at the
+# exit of the process using them: torn down by OPENSSL_cleanup(), after the
+# static destructors of the TLS stack. Against rpc_dtls_test serving stand-in
+# services, which needs no privileges, on the RPC sockets fixed at build time,
+# hence alone. Skips without DTLS. Linked with OpenSSL alone, as a program
+# using the providers is: the TLS stack comes with the provider, loaded after
+# OpenSSL registered its cleanup.
+openssl_dtls_exit_test = executable(
+		'openssl_dtls_exit_test',
+		[ 'openssl_dtls_exit_test.c' ],
+		include_directories: include_dirs_client,
+		dependencies: [ dependency('libprotobuf-c'), openssl_dep ],
+	)
+
+foreach provider : [ [ 'RNG', 'libesdm-rng-provider' ],
+		     [ 'SEED-SRC', 'libesdm-seed-src-provider' ] ]
+	test('OpenSSL 3.x ' + provider[0] + ' Provider - DTLS at the exit',
+		openssl_dtls_exit_test,
+		args: [ meson.project_build_root() + '/frontends/openssl-provider',
+			provider[1] ],
+		env: [ 'ESDM_RPC_DTLS_SERVER=' + rpc_dtls_test.full_path() ],
+		depends: [ rpc_dtls_test ],
+		timeout: 60,
+		is_parallel: false)
+endforeach

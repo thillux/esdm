@@ -374,8 +374,12 @@ bit of entropy. It determines the RCT and APT cutoffs applied inside the
 eBPF program.
 
 Set it from the min-entropy measured with the es_ebpf_testing support:
-OSR = ceil(1 / H), rounded up so that the cutoffs are never less strict
-than the measurement warrants. The value must be consistent with
+OSR = ceil(1 / H), rounded up so that the source is never credited with
+more entropy per event than the measurement warrants. The cutoffs grow
+with the OSR, so the rounding makes them looser than 1 / H itself would:
+the tests assume less entropy per event than measured, and tolerate longer
+runs and more frequent values before they fail. The value must be
+consistent with
 es_sched_ebpf_entropy_rate: as 256 bits of data are four events, a rate of
 4 / OSR bits per 256 data bits is the most the assessment supports. The
 accounting caps anything above that and the server logs a warning.
@@ -453,8 +457,12 @@ bit of entropy. It determines the RCT and APT cutoffs applied inside the
 eBPF program.
 
 Set it from the min-entropy measured with the es_ebpf_testing support:
-OSR = ceil(1 / H), rounded up so that the cutoffs are never less strict
-than the measurement warrants. The value must be consistent with
+OSR = ceil(1 / H), rounded up so that the source is never credited with
+more entropy per event than the measurement warrants. The cutoffs grow
+with the OSR, so the rounding makes them looser than 1 / H itself would:
+the tests assume less entropy per event than measured, and tolerate longer
+runs and more frequent values before they fail. The value must be
+consistent with
 es_irq_ebpf_entropy_rate: as 256 bits of data are four events, a rate of
 4 / OSR bits per 256 data bits is the most the assessment supports. The
 accounting caps anything above that and the server logs a warning.
@@ -1032,8 +1040,15 @@ Using CUSE, the device files are provided.
 option('linux-getrandom', type: 'feature', value: 'enabled',
        description: 'Enable the Linux getrandom system call support.')
 
-option('linux-getrandom-num-nodes', type: 'integer', value: 1, min: 0, max: 64,
-       description: 'Number of DRNG nodes to allocate for getrandom. 0 means no limit.')
+option('linux-getrandom-num-nodes', type: 'integer', value: 4, min: 0, max: 64,
+       description: '''Connections to the ESDM a process with libesdm-getrandom holds at most.
+
+The library is preloaded into processes of every kind, and every connection is
+a descriptor of the process and counts against the limits of the server per
+user and in total. A connection is opened only when a request finds all others
+busy, so a process holds as many as it has requests in flight at the same time,
+at most this number and the online CPUs. 1 serves the threads of a process one
+request at a time, 0 means no limit beyond the online CPUs.''')
 
 option('openssl-rand-provider', type: 'feature', value: 'disabled',
        description: '''Enable the OpenSSL >= 3 RAND/SEED-SRC provider support.
@@ -1047,7 +1062,14 @@ like hash algorithms.
 option('linux-reseed-interval', type: 'integer', value: 120,
        description: 'interval between forced Linux kernel RNG reseeds (in seconds)')
 option('linux-reseed-entropy-count', type: 'integer', value: 0, min: 0, max: 512,
-       description: 'amount of entropy to account on kernel reseed (without es_irq)')
+       description: '''Entropy in bits esdm-kernel-seeder credits each insertion into the Linux kernel RNG with
+
+With 0, an insertion is credited with 256 bits, the kernel's pool, while the
+ESDM runs the interrupt entropy source, which deprives the kernel RNG of its
+interrupts, and with nothing otherwise, as the ESDM then credits its kernel
+RNG entropy source with what the kernel gathers. Any other value is credited
+in either case.
+''')
 
 option('esdm-server', type: 'feature', value: 'enabled',
        description: 'Enable the ESDM server')

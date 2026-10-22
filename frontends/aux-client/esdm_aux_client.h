@@ -21,6 +21,7 @@
 #define ESDM_AUX_CLIENT_H
 
 #include <semaphore.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {

@@ -83,10 +83,10 @@ esdm_openssl_egd_provider_lib = library(
 )
 pkgconfig.generate(esdm_openssl_egd_provider_lib)
 
-# Variant talking to the prediction resistance EGD socket. The protocol cannot
-# select the generator per request, so this is a matter of which socket the
-# provider connects to - which is exactly what the different default path here
-# expresses. Its algorithms carry "provider=esdm-egd-pr".
+# Variant serving every request from the prediction resistance DRNG, over the
+# same EGD socket with the ESDM's prediction resistant read command, whatever
+# the prediction_resistance flag passed in by OpenSSL. Its algorithms carry
+# "provider=esdm-egd-pr".
 esdm_openssl_egd_provider_pr_lib = library(
 	'esdm-egd-provider-pr',
 	[

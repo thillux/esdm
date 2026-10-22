@@ -1,4 +1,22 @@
 if get_option('esdm-server').enabled()
+	# The entropy the seeder credits an insertion with, decided from the
+	# status of the ESDM. The translation unit is compiled into the test,
+	# with its main() renamed out of the way, so this needs neither a
+	# server nor the kernel.
+	kernel_seeder_credit_test = executable(
+		'kernel_seeder_credit_test',
+		[ 'kernel_seeder_credit_test.c' ],
+		c_args: [ '-Dmain=esdm_kernel_seeder_main_unused' ],
+		include_directories: [
+			include_dirs_client,
+			include_directories('../../frontends/kernel-seeder'),
+			include_directories('../common') ],
+		dependencies: [ dependencies_client, json_c_dep ],
+		link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ],
+	)
+
+	test('Kernel entropy feeder credit', kernel_seeder_credit_test)
+
 	kernel_seeder_tester = executable(
 		'kernel_seeder_tester',
 		[ 'kernel_seeder_test.c' ],

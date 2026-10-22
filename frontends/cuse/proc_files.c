@@ -343,8 +343,13 @@ static int esdm_proc_get_status(struct esdm_proc_file *file)
 
 	/*
 	 * A report that did not fit is served as far as it got: it stays
-	 * readable, and what is here is all the file has room for.
+	 * readable, and what is here is all the file has room for. It says
+	 * so, as a read of the file has no other way to tell.
 	 */
+	if (ret == -EMSGSIZE)
+		esdm_shm_status_mark_truncated(file->valdata,
+					       ESDM_PROC_BUF_LEN);
+
 	if (ret && ret != -EMSGSIZE)
 		esdm_proc_empty_file(file);
 	else
@@ -831,7 +836,8 @@ static void show_help(const char *progname)
 {
 	printf("usage: %s [options] <mountpoint>\n\n", progname);
 	printf("File-system specific options:\n"
-	       "    --verbosity=<u>     Verbosity level\n"
+	       "    --verbosity=<u>     Verbosity level (minimum: 3, errors and\n"
+	       "                        warnings)\n"
 	       "    --relabel           Perform automatic SELinux relabeling\n"
 	       "    --syslog            Log via syslog\n"
 	       "\n");
@@ -902,7 +908,14 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	esdm_logger_set_verbosity(esdm_proc_options.verbosity);
+	/*
+	 * Errors and warnings are logged at every level, the default of 0
+	 * included - a lower one would have the daemon fail without saying why.
+	 */
+	esdm_logger_set_verbosity(
+		esdm_proc_options.verbosity > LOGGER_WARN ?
+			(enum esdm_logger_verbosity)esdm_proc_options.verbosity :
+			LOGGER_WARN);
 
 	if (esdm_proc_options.syslog) {
 		esdm_logger_enable_syslog("esdm-proc");
