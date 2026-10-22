@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for the part of common/linux_support.c that does not need privileges:
+ * Tests for the part of common/sys/linux_support.c that does not need privileges:
  * the personalization string the server derives from the DMI product UUID, and
  * the PID namespace supervisor, inside a user namespace where one can be had.
  *

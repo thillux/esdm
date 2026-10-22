@@ -17,33 +17,40 @@
  * DAMAGE.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
-#include "es_ebpf/esdm_es_irq_ebpf.h"
+#include "esdm_es_irq_ebpf.h"
 #include "esdm_config.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+#include "../es_state_check.h"
+#include "es_irq_events.h"
 #include "esdm_logger.h"
 
+/* Reads from the disk per round, each one interrupt of the block device */
+#define ES_IRQ_EBPF_TEST_READS 4000
+
 /*
- * Generate interrupt and softirq events: short sleeps arm hrtimers whose
- * expiry raises timer interrupts and softirqs on the local CPU.
+ * Generate interrupt events. The program is attached to irq_handler_entry,
+ * which the handlers of device interrupts pass - not the local timer interrupt
+ * that expiring hrtimers raise, so sleeping creates no event for it. See
+ * es_irq_events.h.
  */
 static void create_irq_events(void)
 {
-	struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
-	unsigned int i;
+	int ret = es_irq_events(ES_IRQ_EBPF_TEST_READS);
 
-	for (i = 0; i < 5000; i++)
-		nanosleep(&ts, NULL);
+	if (ret)
+		printf("ES InterruptEBPF - info: no interrupt events created: %s\n",
+		       strerror(-ret));
 }
 
 /* Drain the ring buffer into the conditioning pool */
@@ -54,22 +61,28 @@ static void consume_events(void)
 
 static int es_irq_ebpf_getstate(void)
 {
-	char buf[500];
+	struct json_object *obj = es_state_get(esdm_es[esdm_int_es_irq_ebpf]);
+	struct json_object *loaded = NULL;
+	int ret = 0;
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[esdm_int_es_irq_ebpf]->state(buf, sizeof(buf));
-
-	if (!strstr(buf, "eBPF programs loaded: true") ||
-	    !strstr(buf, "Available entropy") ||
-	    !strstr(buf, "Oversampling Rate") ||
-	    !strstr(buf, "Entropy Rate per 256 data bits")) {
+	if (!json_object_object_get_ex(obj, "ebpf_programs_loaded", &loaded) ||
+	    !json_object_get_boolean(loaded) ||
+	    !es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "oversampling_rate", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int) ||
+	    !es_state_has(obj, "health_test_failures", json_type_int) ||
+	    !es_state_has(obj, "permanent_failure", json_type_boolean)) {
 		printf("ES InterruptEBPF - fail: state information contains unexpected content: %s\n",
-		       buf);
-		return 1;
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES InterruptEBPF - pass: state information found:\n%s\n",
+		       es_state_print(obj));
 	}
-	printf("ES InterruptEBPF - pass: state information found:\n%s\n", buf);
 
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_irq_ebpf_poolsize(void)
@@ -101,16 +114,17 @@ static int es_irq_ebpf_getdata(void)
 {
 	struct entropy_es eb_es;
 	uint8_t zero[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
-	uint32_t loops;
+	uint32_t loops, delivered = 0;
 
 	memset(&zero, 0, sizeof(zero));
 
 	/*
-	 * The interrupt ES observes only hardware and soft interrupts, which are
-	 * far sparser than context switches - especially in a lightly loaded VM
-	 * - so it commonly credits well below the full security strength per
-	 * extraction. The test therefore checks that the pipeline delivers
-	 * conditioned data and that the accounting stays self-consistent, rather
+	 * The interrupt ES observes only device interrupts, which are far
+	 * sparser than context switches - especially in a lightly loaded VM -
+	 * so it may credit below the full security strength per extraction,
+	 * even with the events created before. The test therefore checks that
+	 * the pipeline delivers conditioned data, that the accounting stays
+	 * self-consistent and that some entropy is credited at all, rather
 	 * than demanding a fixed entropy amount.
 	 */
 	for (loops = 0; loops < 3; loops++) {
@@ -134,6 +148,18 @@ static int es_irq_ebpf_getdata(void)
 
 		printf("ES InterruptEBPF - pass: get_ent delivered %u bits\n",
 		       eb_es.e_bits);
+		if (eb_es.e_bits)
+			delivered++;
+	}
+
+	/*
+	 * Each iteration creates device interrupts before it asks, so a source
+	 * that never credits any entropy is broken - not merely sparse.
+	 */
+	if (!delivered) {
+		printf("ES InterruptEBPF - fail: get_ent did not credit entropy in any of %u iterations\n",
+		       loops);
+		return 1;
 	}
 
 	return 0;

@@ -32,6 +32,13 @@
  * way - the DRNGs are freed and the managers are terminated for good, and a
  * further esdm_init() fails with -ESHUTDOWN instead of bringing them back.
  *
+ * A child of fork() inherits the ESDM, but none of its threads. Each of its
+ * DRNGs is reseeded with data unique to the child before it produces output
+ * there, so the child repeats neither its parent's random numbers nor another
+ * child's. A lock held by another thread of the parent at the moment of the
+ * fork - the ESDM's own threads included - stays taken in the child, and the
+ * child must not call esdm_fini(). See the FORK section of libesdm(3).
+ *
  * @return: 0 on success, -ESHUTDOWN after esdm_fini(), < 0 on other errors
  */
 int esdm_init(void);
@@ -40,7 +47,8 @@ int esdm_init(void);
  * @brief esdm_reinit() - reinitialize the ESDM library
  *
  * The reinitialization implies that all parts re-initialized like the entropy
- * sources or the configuration but without loosing any state or entropy.
+ * sources or the configuration but without losing any state or entropy - the
+ * auxiliary pool keeps what it absorbed and the entropy credited to it.
  *
  * It is intended to re-initialize the ESDM after configuration changes or
  * entropy source changes, i.e. after esdm_init() was run.
@@ -96,6 +104,14 @@ ssize_t esdm_get_random_bytes(uint8_t *buf, size_t nbytes);
  * switchable DRNG support, that may support other DRNGs such as the SP800-90A
  * DRBG.
  *
+ * The call blocks until the ESDM is operational and until all @nbytes are
+ * generated - also while the DRNGs it could be served from reached the most
+ * they may generate without a full reseed, which in a build capping that
+ * output (SP800-90C, FIPS 140, AIS 20/31 DRG.4) sustained load makes them do
+ * all the time, and are waiting for their reseed. It returns fewer bytes, or
+ * an error if there are none, only after an error that no wait cures, such as
+ * a failed self test or an ESDM being finalized.
+ *
  * @buf: buffer to store the random bytes
  * @nbytes: size of the buffer
  *
@@ -106,6 +122,12 @@ ssize_t esdm_get_random_bytes_full(uint8_t *buf, size_t nbytes);
 /**
  * @brief see esdm_get_random_bytes_full except that in case of blocking,
  * it returns -EAGAIN.
+ *
+ * It returns -EAGAIN while the ESDM is not operational. It may return fewer
+ * bytes than asked for, when a DRNG reached the most it may generate without
+ * a full reseed on the way - asking again for the rest is the caller's
+ * business. When every DRNG the request could go to is at that limit, it is
+ * served by the initial DRNG after its reseed, for which it waits.
  */
 ssize_t esdm_get_random_bytes_full_noblock(uint8_t *buf, size_t nbytes);
 
@@ -122,6 +144,10 @@ ssize_t esdm_get_random_bytes_full_noblock(uint8_t *buf, size_t nbytes);
  * than requested by the caller. Also, the caller MUST be prepared that this
  * call returns 0 bytes, i.e. it did not generate data.
  *
+ * The callers take turns at the prediction resistance DRNG, in the order they
+ * came: while others wait for theirs, a turn lasts one block of the security
+ * strength, i.e. one seeding. This call takes as many turns as it needs.
+ *
  * @buf: buffer to store the random bytes
  * @nbytes: size of the buffer
  *
@@ -132,6 +158,11 @@ ssize_t esdm_get_random_bytes_pr(uint8_t *buf, size_t nbytes);
 /**
  * @brief see esdm_get_random_bytes_pr except that in case of blocking,
  * it returns -EAGAIN.
+ *
+ * It returns -EAGAIN while the ESDM is not operational. It does wait for its
+ * turn at the prediction resistance DRNG - no longer than one block of each
+ * caller ahead of it - but takes only that one: with others waiting, it
+ * returns after one block, and the caller asks again for the rest.
  */
 ssize_t esdm_get_random_bytes_pr_noblock(uint8_t *buf, size_t nbytes);
 
@@ -222,7 +253,9 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
  * @brief esdm_status() - Get status information on ESDM
  *
  * The report holds the ESDM properties, one section per entropy source and
- * one section per DRNG instance.
+ * one section per DRNG instance. It is the status of esdm_status_json()
+ * printed as text: a member is a "Label: value" line, an object a section of
+ * lines indented one space deeper.
  *
  * A report that does not fit into the buffer is not handed out as complete:
  * what was assembled stays in the buffer - half a report is still readable -
@@ -335,19 +368,38 @@ uint32_t esdm_avail_poolsize_aux(void);
 uint32_t esdm_get_aux_ent(void);
 
 /**
- * @brief Obtain the size of the message digest of the conditioner used by the
- *	  ESDM
+ * @brief Obtain the size of the state of the XDRBG-256 operating an auxiliary
+ *	  pool, which is the most entropy a pool holds
  *
- * @return message digest size in bits
+ * @return state size in bits
  */
 uint32_t esdm_get_digestsize(void);
 
 /**
  * @brief Set the entropy level of the auxiliary pool
  *
+ * A non-zero level is set for the first auxiliary pool, zero for all of them.
+ * A pool that holds no data, as nothing was inserted into it since the ESDM
+ * was (re)initialized, is left at zero.
+ *
  * @param [in] entropy_bits Entropy rate in bits
  */
 void esdm_pool_set_entropy(uint32_t entropy_bits);
+
+/**
+ * @brief Credit entropy to the data in the auxiliary pool
+ *
+ * Adds the entropy to that of the first auxiliary pool, the one
+ * esdm_pool_set_entropy() sets, up to the most a pool holds,
+ * esdm_get_digestsize() - what RNDADDTOENTCNT of the kernel's random devices
+ * does. The bits are added as given: where esdm_get_aux_ent() discounts the
+ * oversampling of the pool, it does so for these as well. A pool that holds
+ * no data, as nothing was inserted into it since the ESDM was
+ * (re)initialized, is credited nothing.
+ *
+ * @param [in] entropy_bits Entropy in bits to add
+ */
+void esdm_pool_add_entropy(uint32_t entropy_bits);
 
 /**
  * @brief Force a reseed of all DRNGs in the ESDM

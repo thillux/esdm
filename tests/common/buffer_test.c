@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/buffer.c - the buffer allocation helper and the state it
+ * Tests for common/util/buffer.c - the buffer allocation helper and the state it
  * leaves behind, including the refusal to allocate over an already allocated
  * buffer (which would leak it) and the requirement that buffer_free() resets
  * the descriptor so it can be reused.

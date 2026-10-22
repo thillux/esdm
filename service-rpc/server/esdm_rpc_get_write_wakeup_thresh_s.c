@@ -34,5 +34,5 @@ void esdm_rpc_get_write_wakeup_thresh(
 
 	response.val = esdm_get_write_wakeup_bits();
 	response.ret = 0;
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 }

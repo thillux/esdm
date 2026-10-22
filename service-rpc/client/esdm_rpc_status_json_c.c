@@ -34,9 +34,10 @@ struct esdm_get_status_json_buf {
 	size_t buflen;
 };
 
-static void esdm_rpcc_status_json_cb(const StatusResponse *response,
+static void esdm_rpcc_status_json_cb(const ProtobufCMessage *message,
 				     void *closure_data)
 {
+	const StatusResponse *response = (const StatusResponse *)message;
 	struct esdm_get_status_json_buf *buffer =
 		(struct esdm_get_status_json_buf *)closure_data;
 
@@ -80,11 +81,20 @@ int esdm_rpcc_status_json_int(char *buf, size_t buflen, void *int_data)
 	};
 	int ret;
 
+	/*
+	 * Emptied before anything can fail: without a connection, or without
+	 * a response, the callback never runs, and the buffer would still
+	 * hold the document of an earlier call.
+	 */
+	if (buf && buflen)
+		buf[0] = '\0';
+
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
 	msg.maxlen = ESDM_RPC_MAX_DATA;
-	unpriv_access__rpc_status_json(&rpc_conn->service, &msg,
-				       esdm_rpcc_status_json_cb, &buffer);
+	unpriv_access__rpc_status_json(
+		&rpc_conn->service, &msg,
+		(StatusResponse_Closure)esdm_rpcc_status_json_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

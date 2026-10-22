@@ -185,8 +185,6 @@ static void test_privileged_commands_refused(void)
 		{ "-W", "some entropy" },
 		{ "--endless-stress", NULL },
 		{ "--selftest", NULL },
-		{ "--pkcs11-pin", "1234" },
-		{ "--pkcs11-token-label", "a-token" },
 #ifdef ESDM_HAS_AUX_CLIENT
 		{ "--seed-via-os", NULL },
 		{ "--reseed-via-os", NULL },
@@ -212,31 +210,36 @@ static void test_privileged_commands_refused(void)
 }
 
 /*
- * "--pkcs11-pin -" reads the PIN rather than taking it from the command line,
- * where it would be visible in the process listing.
+ * The PKCS#11 entropy source is esdm-es-pkcs11 now, which takes its token label
+ * and PIN from its own configuration: the options that set them over RPC are
+ * gone - refused as unknown, for root as for anybody, rather than taken - and
+ * the usage no longer offers them.
  */
-static void test_pkcs11_pin_from_stdin(void)
+static void test_pkcs11_options_gone(void)
 {
-	const char *const opts[] = { "--pkcs11-pin", "-", NULL };
+	static const char *const cases[][2] = {
+		{ "--pkcs11-pin", "1234" },
+		{ "--pkcs11-pin", "-" },
+		{ "--pkcs11-token-label", "a-token" },
+	};
+	const char *const help[] = { "-h", NULL };
 	struct test_run r;
-	int rc;
+	size_t i;
 
-	if (!geteuid()) {
-		printf("running as root - skipping the PIN reading checks\n");
-		return;
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		const char *const opts[] = { cases[i][0], cases[i][1], NULL };
+		int rc = test_run(&r, opts, "1234\n");
+
+		CHECK(rc != EXIT_SUCCESS, "%s %s was accepted (status %d)",
+		      cases[i][0], cases[i][1], rc);
+		CHECK(strstr(r.err, "unrecognized option") != NULL,
+		      "%s was not refused as unknown (output: %.200s)",
+		      cases[i][0], r.err);
 	}
 
-	/* A PIN is there to be read: the run gets as far as the root check */
-	rc = test_run(&r, opts, "1234\n");
-	CHECK_EQ(rc, EXIT_FAILURE);
-	CHECK(strstr(r.err, "must start as root") != NULL,
-	      "the PIN was not read from stdin (output: %.200s)", r.err);
-
-	/* Nothing to read is a failure of its own, and is reported as one */
-	rc = test_run(&r, opts, NULL);
-	CHECK_EQ(rc, EXIT_FAILURE);
-	CHECK(strstr(r.err, "failed to read PKCS#11 PIN") != NULL,
-	      "an unreadable PIN was not reported (output: %.200s)", r.err);
+	test_run(&r, help, NULL);
+	CHECK(strstr(r.err, "pkcs11") == NULL,
+	      "the usage still offers a PKCS#11 option");
 }
 
 /*
@@ -260,13 +263,13 @@ static void test_without_server(void)
 		{ { "--get-seed", NULL }, "Unable to fetch seed", EXIT_FAILURE },
 		{ { "-w", "1", NULL }, "Waiting another round", EXIT_FAILURE },
 		/*
-		 * The status commands report the failure but exit successfully:
-		 * they have no result to withhold. Only the message is checked
-		 * here, the status is what it is.
+		 * The status commands fail as well: a script asking for the
+		 * status must not take the missing document for an empty one.
 		 */
-		{ { "-s", NULL }, "Fetching ESDM status failed", -1 },
-		{ { "--status-json", NULL }, "Fetching ESDM status failed", -1 },
-		{ { "-J", NULL }, "jitterentropy status failed", -1 },
+		{ { "-s", NULL }, "Fetching ESDM status failed", EXIT_FAILURE },
+		{ { "--status-json", NULL }, "Fetching ESDM status failed",
+		  EXIT_FAILURE },
+		{ { "-J", NULL }, "jitterentropy status failed", EXIT_FAILURE },
 		{ { "--benchmark-mode", "pr", NULL },
 		  "Failed to get bytes from ESDM", EXIT_FAILURE },
 	};
@@ -300,10 +303,9 @@ static void test_without_server(void)
 	for (i = 0; i < n; i++) {
 		int rc = test_run_wait(&runs[i]);
 
-		if (cases[i].status != -1)
-			CHECK(rc == cases[i].status,
-			      "%s without a server: got status %d, expected %d",
-			      cases[i].opts[0], rc, cases[i].status);
+		CHECK(rc == cases[i].status,
+		      "%s without a server: got status %d, expected %d",
+		      cases[i].opts[0], rc, cases[i].status);
 		CHECK(strstr(runs[i].err, cases[i].says) != NULL,
 		      "%s without a server did not report \"%s\" (output: %.300s)",
 		      cases[i].opts[0], cases[i].says, runs[i].err);
@@ -389,7 +391,7 @@ int main(int argc, char *argv[])
 	test_malformed_numbers();
 	test_out_of_range_numbers();
 	test_privileged_commands_refused();
-	test_pkcs11_pin_from_stdin();
+	test_pkcs11_options_gone();
 	test_without_server();
 	test_fips_checkfile();
 

@@ -52,6 +52,7 @@
 #include <stdlib.h>
 
 #include "common_test.h"
+#include "../es_state_check.h"
 
 #define TEST_MULTIPLIER 4
 
@@ -175,21 +176,19 @@ static void check_oversampling(void)
 /* The multiplier is part of what the source reports about itself. */
 static void check_state(void)
 {
-	char buf[512], expected[64];
+	struct json_object *obj = es_state_get(&esdm_es_cpu);
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es_cpu.state(buf, sizeof(buf));
-
-	snprintf(expected, sizeof(expected), " Data multiplier: %u\n",
-		 esdm_cpu_multiplier());
-	CHECK(strstr(buf, expected) != NULL,
-	      "state does not report the multiplier as \"%s\":\n%s", expected,
-	      buf);
+	CHECK(es_state_int(obj, "data_multiplier", -1) ==
+		      (int64_t)esdm_cpu_multiplier(),
+	      "state does not report the multiplier %u:\n%s",
+	      esdm_cpu_multiplier(), es_state_print(obj));
 
 	/* With a multiplier there is a conditioning hash, and it has a name. */
-	CHECK(strstr(buf, "Hash for compressing data: N/A") == NULL,
+	CHECK(es_state_has(obj, "hash_for_compressing_data", json_type_string),
 	      "state reports no conditioning hash despite a multiplier of %u:\n%s",
-	      esdm_cpu_multiplier(), buf);
+	      esdm_cpu_multiplier(), es_state_print(obj));
+
+	json_object_put(obj);
 }
 
 int main(int argc, char *argv[])

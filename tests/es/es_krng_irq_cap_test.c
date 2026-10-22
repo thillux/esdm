@@ -27,10 +27,21 @@
  * full rate although the kernel had lost its main source.
  *
  * The interrupt ES is compiled into the test, so the descriptor of the add-on
- * can be faked: one that is open is all the kernel RNG asks about.
+ * can be faked: one that is open is all the kernel RNG asks about. And so can
+ * the add-on loaded after the ESDM started, which the ESDM holds no descriptor
+ * of: the kernel shows its module in sysfs, a directory of the test here,
+ * looked for anew on every call.
  */
 
 #include "config.h"
+
+#include <sys/stat.h>
+
+static char test_dir[] = "/tmp/esdm-krng-irq-cap-XXXXXX";
+static char test_module[sizeof(test_dir) + 16];
+
+#define ESDM_IRQ_ADDON_SYSFS test_module
+#define ESDM_IRQ_ADDON_PROBE_INTERVAL_MS 0
 
 /* The unit whose state is faked */
 #include "esdm_es_irq.c"
@@ -58,11 +69,18 @@ int main(int argc, char *argv[])
 		return 77;
 	}
 
+	if (!mkdtemp(test_dir)) {
+		printf("cannot create a directory - skipping\n");
+		return 77;
+	}
+	snprintf(test_module, sizeof(test_module), "%s/esdm_es", test_dir);
+
 	esdm_config_es_irq_entropy_rate_set(0);
 	esdm_config_es_krng_entropy_rate_set(ESDM_DRNG_SECURITY_STRENGTH_BITS);
 	uncapped = krng_credit();
 	if (uncapped <= ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY) {
 		printf("the kernel RNG is not credited above the cap - skipping\n");
+		rmdir(test_dir);
 		return 77;
 	}
 
@@ -95,6 +113,19 @@ int main(int argc, char *argv[])
 	CHECK(!esdm_irq_present(), "a closed add-on is reported present");
 	esdm_config_es_krng_entropy_rate_set(ESDM_DRNG_SECURITY_STRENGTH_BITS);
 	CHECK_EQ(krng_credit(), uncapped);
+
+	/*
+	 * Loaded after the ESDM started, not opened: the module is there, and
+	 * the kernel RNG capped all the same - until it is unloaded
+	 */
+	CHECK(!mkdir(test_module, 0700), "cannot create %s", test_module);
+	CHECK(esdm_irq_present(), "an add-on loaded later is not present");
+	CHECK(!esdm_irq_enabled(), "an add-on not opened counts as credited");
+	CHECK_EQ(krng_credit(), ESDM_ES_IRQ_MAX_KERNEL_RNG_ENTROPY);
+	rmdir(test_module);
+	CHECK(!esdm_irq_present(), "an add-on unloaded is reported present");
+	CHECK_EQ(krng_credit(), uncapped);
+	rmdir(test_dir);
 
 	return common_test_result("ES kernel RNG IRQ cap");
 }

@@ -63,6 +63,31 @@ extern "C" {
  */
 int esdm_server_bind_unix(int fd, const struct sockaddr_un *addr, mode_t mode);
 
+/**
+ * @brief Bind a Unix domain socket with a given mode and group
+ *
+ * As esdm_server_bind_unix(), with the socket file created with the group
+ * @gid rather than with the one of the process - by the binding thread
+ * switching its file system gid, which no other thread of the process sees.
+ * So the file belongs to the group from its creation on, without a chown(2) of
+ * the path following the bind(2), for the reason given there.
+ *
+ * Switching to @gid takes CAP_SETGID, or @gid being the real, effective or
+ * saved gid of the process - a supplementary group does not do. A directory
+ * with the set-group-ID bit hands its own group to the file regardless.
+ *
+ * @param [in] fd Socket to bind, of the AF_UNIX family
+ * @param [in] addr Address to bind @fd to
+ * @param [in] mode Access mode of the socket file
+ * @param [in] gid Group of the socket file, (gid_t)-1 for the one of the
+ *		   process
+ *
+ * @return 0 on success, -EPERM if the group cannot be taken on, < 0 on other
+ *	   errors - errno is not set
+ */
+int esdm_server_bind_unix_group(int fd, const struct sockaddr_un *addr,
+				mode_t mode, gid_t gid);
+
 #ifdef __cplusplus
 }
 #endif

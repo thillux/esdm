@@ -81,8 +81,6 @@ LIBESDM_RPC_CLIENT_1.0 {
 		esdm_rpcc_get_min_reseed_secs_int;
 		esdm_rpcc_set_min_reseed_secs;
 		esdm_rpcc_set_min_reseed_secs_int;
-		esdm_rpcc_set_pkcs11_config;
-		esdm_rpcc_set_pkcs11_config_int;
 		esdm_rpcc_selftest;
 		esdm_rpcc_selftest_int;
 		esdm_rpcc_jent_status;
@@ -106,6 +104,9 @@ LIBESDM_RPC_CLIENT_1.0 {
  *
  * The thread pool is not needed here: nothing in the client uses it, it is
  * only linked for the thread name in the log records.
+ *
+ * libesdm_getrandom bounds the wait for a connection of the calls that must
+ * not block, see esdm_rpc_client_internal.h.
  */
 LIBESDM_RPC_CLIENT_PRIVATE_1.0 {
 	global:
@@ -113,4 +114,7 @@ LIBESDM_RPC_CLIENT_PRIVATE_1.0 {
 		_esdm_logger;
 		esdm_logger_enable_syslog;
 		esdm_logger_set_verbosity;
+
+		/* esdm_rpc_client_internal.h */
+		esdm_rpcc_set_unpriv_checkout_deadline;
 } LIBESDM_RPC_CLIENT_1.0;

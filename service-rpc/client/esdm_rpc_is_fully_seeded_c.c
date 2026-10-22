@@ -35,9 +35,11 @@ struct esdm_is_fully_seeded_buf {
 	bool fully_seeded;
 };
 
-static void esdm_rpcc_is_fully_seeded_cb(const IsFullySeededResponse *response,
+static void esdm_rpcc_is_fully_seeded_cb(const ProtobufCMessage *message,
 					 void *closure_data)
 {
+	const IsFullySeededResponse *response =
+		(const IsFullySeededResponse *)message;
 	struct esdm_is_fully_seeded_buf *buffer =
 		(struct esdm_is_fully_seeded_buf *)closure_data;
 
@@ -65,9 +67,10 @@ int esdm_rpcc_is_fully_seeded_int(bool *fully_seeded, void *int_data)
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	unpriv_access__rpc_is_fully_seeded(&rpc_conn->service, &msg,
-					   esdm_rpcc_is_fully_seeded_cb,
-					   &buffer);
+	unpriv_access__rpc_is_fully_seeded(
+		&rpc_conn->service, &msg,
+		(IsFullySeededResponse_Closure)esdm_rpcc_is_fully_seeded_cb,
+		&buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

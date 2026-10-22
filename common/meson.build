@@ -2,30 +2,43 @@
 # share it with libesdm, so it takes them from the library instead of linking
 # copies of its own - see esdm_server_common_static_lib.
 common_state_src = files([
-	'esdm_logger.c',
-	'threading_support.c',
+	'log/esdm_logger.c',
+	'threading/threading_support.c',
 ])
 
-# for i in $(ls *.c | sort); do echo "'$i',"; done
 common_src = files([
-	'binhexbin.c',
-	'buffer.c',
-	'helper.c',
-	'linux_support.c',
-	'os_random.c',
-	'xoshiro_prng.c',
+	'sys/linux_support.c',
+	'sys/os_random.c',
+	'util/binhexbin.c',
+	'util/buffer.c',
+	'util/helper.c',
+	'util/xoshiro_prng.c',
 ])
 
 if get_option('systemd').enabled()
-	common_src += files(['systemd_support.c'])
+	common_src += files(['sys/systemd_support.c'])
 endif
 
 if get_option('testmode').enabled()
-	common_src += files(['test_pertubation.c'])
+	common_src += files(['testmode/test_pertubation.c'])
 endif
 
 if get_option('fips140')
-	common_src += files(['fips_integrity.c'])
+	common_src += files(['sys/fips_integrity.c'])
+endif
+
+# The DTLS of the connections - see esdm_dtls.h and the dtls option in the
+# top-level meson.build -, by the backend of the TLS stack of the crypto
+# backend, see esdm_dtls_backend.h. The top-level meson.build refuses dtls with
+# a crypto backend that has no TLS stack.
+if get_option('dtls').enabled()
+	common_src += files([
+		'tls/esdm_dtls.c',
+		'tls/esdm_dtls_' + get_option('crypto_backend') +
+			(get_option('crypto_backend') == 'botan' ? '.cpp' : '.c'),
+		'tls/esdm_dtls_io.c',
+		'tls/esdm_dtls_session.c',
+	])
 endif
 
 common_stateless_src = common_src
@@ -148,8 +161,7 @@ disable_es_buf = sp80090c and not get_option('es_buf_force')
 # 2^31, meson having no bitwise operators.
 foreach es_blocks_opt : ['es_jent_entropy_blocks', 'es_irq_entropy_blocks',
 			 'es_sched_entropy_blocks', 'es_hwrand_entropy_blocks',
-			 'es_tpm2_entropy_blocks', 'es_pkcs11_entropy_blocks',
-			 'es_jent_kernel_entropy_blocks']
+			 'es_tpm2_entropy_blocks', 'es_jent_kernel_entropy_blocks']
 	es_blocks = get_option(es_blocks_opt)
 	if es_blocks != 0 and (es_blocks < 4 or 2147483648 % es_blocks != 0)
 		error(es_blocks_opt + ' must be 0 or a power of two of at least 4')
@@ -231,22 +243,126 @@ else
 	conf_data.set('ESDM_TPM2_ENTROPY_BLOCKS', 0)
 endif
 
-conf_data.set('ESDM_ES_PKCS11', get_option('es_pkcs11').enabled())
+# The defaults of esdm-es-pkcs11, the PKCS#11 entropy source served to the
+# ESDM as an external one - see es-ext/meson.build
 conf_data.set('ESDM_PKCS11_ENTROPY_RATE',
 	      get_option('es_pkcs11_entropy_rate'))
 conf_data.set_quoted('ESDM_PKCS11_MODULE_PATH',
 		     get_option('es_pkcs11_module_path'))
 conf_data.set_quoted('ESDM_PKCS11_TOKEN_LABEL',
 		     get_option('es_pkcs11_token_label'))
-conf_data.set_quoted('ESDM_PKCS11_PIN', get_option('es_pkcs11_pin'))
-if get_option('es_pkcs11_entropy_blocks') >= 4 and not disable_es_buf
-	conf_data.set('ESDM_PKCS11_ENTROPY_BLOCKS',
-		      get_option('es_pkcs11_entropy_blocks'))
-else
-	conf_data.set('ESDM_PKCS11_ENTROPY_BLOCKS', 0)
-endif
 
+conf_data.set('ESDM_ES_EXT', get_option('es_ext').enabled())
+
+# The external entropy sources: their number, and the X-macro
+# ESDM_EXT_SOCKET_INSTANCES(X) expanding X(i) for each of their indices i, from
+# which the code generates what each instance needs - see esdm_es_extsock.c
+es_ext_socket_num = 0
+if get_option('es_ext').enabled()
+	es_ext_socket_num = get_option('es_ext_socket_num')
+endif
+es_ext_instances = []
+foreach i : range(es_ext_socket_num)
+	es_ext_instances += 'X(@0@)'.format(i)
+endforeach
+conf_data.set('ESDM_EXT_SOCKET_NUM', es_ext_socket_num)
+conf_data.set('ESDM_EXT_SOCKET_INSTANCES(X)', ' '.join(es_ext_instances))
+
+
+# The configuration of the external sources: the i-th entry of a list sets
+# ESDM_EXT_SOCKET_*_<i> for the i-th source. A path for each source, or for
+# fewer, the others getting none; a rate or a uid for each source, or one for
+# all of them.
+foreach es_ext_opt : [
+		[ 'es_ext_socket_path', 'ESDM_EXT_SOCKET_PATH_' ],
+		[ 'es_ext_socket_entropy_rate',
+		  'ESDM_EXT_SOCKET_ENTROPY_RATE_' ],
+		[ 'es_ext_socket_peer_uid', 'ESDM_EXT_SOCKET_PEER_UID_' ] ]
+	es_ext_name = es_ext_opt[0]
+	es_ext_num = es_ext_socket_num
+	es_ext_is_path = es_ext_name.endswith('_path')
+	es_ext_is_uid = es_ext_name.endswith('_uid')
+
+	# Every value is checked, whether a source of the build takes it or
+	# not: a rate is a number from 0 to 256 or auto, a uid one from 0 to
+	# 4294967294 or -1. What is left is the value without white space
+	# around it.
+	es_ext_vals = []
+	foreach es_ext_raw : get_option(es_ext_name)
+		es_ext_val = es_ext_raw.strip()
+		es_ext_vals += es_ext_val
+		if es_ext_is_path or \
+		   (es_ext_is_uid and es_ext_val == '-1') or \
+		   (not es_ext_is_uid and es_ext_val == 'auto')
+			continue
+		endif
+
+		es_ext_int = -2
+		if es_ext_val != '' and es_ext_val.strip('0123456789') == ''
+			# Nothing but digits
+			es_ext_int = es_ext_val.to_int()
+		endif
+		if es_ext_is_uid and (es_ext_int < 0 or es_ext_int > 4294967294)
+			error('@0@ takes uids from 0 to 4294967294, or -1, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		elif not es_ext_is_uid and (es_ext_int < 0 or es_ext_int > 256)
+			error('@0@ takes entropy rates from 0 to 256 or auto, not "@1@"'.format(
+			      es_ext_name, es_ext_val))
+		endif
+	endforeach
+
+	if es_ext_num == 0
+		# No source is built: say so, unless it is the default
+		es_ext_default = es_ext_is_uid ? [ '-1' ] : []
+		if get_option(es_ext_name) != es_ext_default
+			warning('@0@ is ignored, as es_ext is disabled'.format(
+				es_ext_name))
+		endif
+		continue
+	endif
+
+	if es_ext_is_path
+		if es_ext_vals.length() > es_ext_num
+			error('@0@ names @1@ paths, for @2@ sources'.format(
+			      es_ext_name, es_ext_vals.length(), es_ext_num))
+		endif
+	elif es_ext_vals.length() <= 1
+		# None configured for any source, or one for all
+		es_ext_one = es_ext_is_uid ? '-1' : 'auto'
+		if es_ext_vals.length() == 1
+			es_ext_one = es_ext_vals[0]
+		endif
+
+		es_ext_vals = []
+		foreach i : range(es_ext_num)
+			es_ext_vals += es_ext_one
+		endforeach
+	elif es_ext_vals.length() != es_ext_num
+		error('@0@ takes one value for all sources or one for each of the @1@ sources, not @2@ values'.format(
+		      es_ext_name, es_ext_num, es_ext_vals.length()))
+	endif
+
+	foreach i : range(es_ext_num)
+		es_ext_define = es_ext_opt[1] + i.to_string()
+		es_ext_val = i < es_ext_vals.length() ? es_ext_vals[i] : ''
+		if es_ext_is_path
+			conf_data.set_quoted(es_ext_define, es_ext_val)
+		elif es_ext_val == 'auto'
+			# No rate configured: the one the source declares
+			conf_data.set(es_ext_define, 'ESDM_ES_EXT_ENTROPY_RATE_AUTO')
+		elif es_ext_val == '-1'
+			conf_data.set(es_ext_define, -1)
+		else
+			conf_data.set(es_ext_define, es_ext_val.to_int())
+		endif
+	endforeach
+endforeach
+conf_data.set('ESDM_DTLS', get_option('dtls').enabled())
 conf_data.set('ESDM_ES_JENT_KERNEL', get_option('es_jent_kernel').enabled())
+if get_option('es_jent_kernel_name') == '' or get_option('es_jent_kernel_name').contains('"')
+	error('es_jent_kernel_name must name a kernel crypto API RNG')
+endif
+conf_data.set_quoted('ESDM_JENT_KERNEL_NAME', get_option('es_jent_kernel_name'))
 conf_data.set('ESDM_JENT_KERNEL_ENTROPY_RATE',
 	      get_option('es_jent_kernel_entropy_rate'))
 if get_option('es_jent_kernel_entropy_blocks') >= 4 and not disable_es_buf
@@ -256,17 +372,16 @@ else
 	conf_data.set('ESDM_JENT_KERNEL_ENTROPY_BLOCKS', 0)
 endif
 
+# Only the sources built in count: the rate of a disabled one is not used
 timing_es_credited = 0
-foreach timing_es_rate_option : [ 'es_irq_entropy_rate',
-				  'es_sched_entropy_rate',
-				  'es_irq_ebpf_entropy_rate',
-				  'es_sched_ebpf_entropy_rate' ]
-	if get_option(timing_es_rate_option) > 0
+foreach timing_es : [ 'es_irq', 'es_sched', 'es_irq_ebpf', 'es_sched_ebpf' ]
+	if get_option(timing_es).enabled() and \
+	   get_option(timing_es + '_entropy_rate') > 0
 		timing_es_credited += 1
 	endif
 endforeach
 if timing_es_credited > 1
-	error('It is not permissible to award more than one of the interrupt and scheduler-based entropy sources (es_irq, es_sched, es_irq_ebpf, es_sched_ebpf) an entropy rate greater than zero. Adjust the respective entropy rate options to zero.')
+	error('It is not permissible to award more than one of the enabled interrupt and scheduler-based entropy sources (es_irq, es_sched, es_irq_ebpf, es_sched_ebpf) an entropy rate greater than zero. Adjust the respective entropy rate options to zero, or disable the source.')
 endif
 
 conf_data.set('ESDM_SELINUX_ENABLED', get_option('selinux').enabled())
@@ -337,7 +452,6 @@ conf_data.set_quoted('ESDM_SERVER_RPC_BASE_PATH_PRIVILEGED', get_option('esdm-se
 # unit places it, and therefore where an EGD client looks for it unless it is
 # told otherwise.
 conf_data.set_quoted('ESDM_SERVER_EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
-conf_data.set_quoted('ESDM_SERVER_EGD_PR_SOCKET_PATH', get_option('esdm-server-egd-pr-socket-path'))
 
 conf_data.set('ESDM_RPC_IDLE_TIMEOUT_USEC', get_option('esdm-server-rpc-idle-timeout-usec'))
 

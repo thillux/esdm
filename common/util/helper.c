@@ -1,0 +1,301 @@
+/*
+ * Copyright (C) 2022 - 2026, Stephan Mueller <smueller@chronox.de>
+ *
+ * License: see LICENSE file in root directory
+ *
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ALL OF
+ * WHICH ARE HEREBY DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
+ * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF NOT ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
+ */
+
+#include "config.h"
+
+#include "arch.h"
+
+#ifdef ESDM_MEMORY_DEBUG
+#include <malloc.h>
+#include <mcheck.h>
+#endif
+
+#include <errno.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/auxv.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "helper.h"
+#include "math_helper.h"
+
+#define ESDM_NSEC_PER_SEC 1000000000LL
+
+static long long esdm_timespec_ns(const struct timespec *ts)
+{
+	return (long long)ts->tv_sec * ESDM_NSEC_PER_SEC +
+	       (long long)ts->tv_nsec;
+}
+
+/*
+ * The time the system spent suspended, in nanoseconds: how far CLOCK_BOOTTIME
+ * is ahead of CLOCK_MONOTONIC. Read afresh in the first call of each second of
+ * the coarse monotonic clock, noted in esdm_suspended_sec - so a suspend is
+ * seen within a second of the resume, the monotonic clock having stood still
+ * meanwhile.
+ */
+static _Atomic long long esdm_suspended_ns = 0;
+static _Atomic long long esdm_suspended_sec = -1;
+
+/* The time spent suspended as of the coarse monotonic second @sec */
+static long long esdm_suspended(long long sec)
+{
+	struct timespec mono, boot;
+	long long now, seen;
+
+	seen = atomic_load_explicit(&esdm_suspended_ns, memory_order_relaxed);
+	if (atomic_load_explicit(&esdm_suspended_sec, memory_order_relaxed) ==
+	    sec)
+		return seen;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &mono) == -1 ||
+	    clock_gettime(CLOCK_BOOTTIME, &boot) == -1)
+		return seen;
+
+	/*
+	 * The two clocks are read one after the other, so this comes out larger
+	 * than the time spent suspended by what lies between the two reads -
+	 * which differs from one read to the next. Only ever grown: the clock
+	 * built on it must not go back on that account, and the time spent
+	 * suspended does not shrink.
+	 */
+	now = esdm_timespec_ns(&boot) - esdm_timespec_ns(&mono);
+	while (now > seen &&
+	       !atomic_compare_exchange_weak(&esdm_suspended_ns, &seen, now))
+		;
+	atomic_store_explicit(&esdm_suspended_sec, sec, memory_order_relaxed);
+
+	return (now > seen) ? now : seen;
+}
+
+long long esdm_monotonic_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == -1)
+		return 0;
+
+	return (esdm_timespec_ns(&now) +
+		esdm_suspended((long long)now.tv_sec)) /
+	       ESDM_NSEC_PER_SEC;
+}
+
+uint32_t esdm_online_nodes(void)
+{
+	/*
+	 * Atomic as the lazy caching is otherwise a data race: concurrent
+	 * first-time callers (e.g. the privileged and the unprivileged RPC
+	 * client init running in different threads) both evaluate and store it.
+	 * Doing so is harmless - the value is the same for everybody - but it
+	 * has to be a defined operation.
+	 */
+	static _Atomic uint32_t cpus = UINT32_MAX;
+
+	/* We do not need more DRNGs than we have CPUs */
+	if (cpus == UINT32_MAX) {
+#ifdef _GNU_SOURCE
+		long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
+
+		if (ncpus > 0) {
+			/*
+			 * We do not need more DRNGs than we have threads
+			 * available - its counterpart is in function
+			 * esdm_curr_node().
+			 */
+			cpus = min_uint32((uint32_t)ncpus,
+					  THREADING_MAX_WORKER_THREADS);
+		} else {
+			cpus = 1;
+		}
+#else
+		cpus = 1;
+#endif
+	}
+
+	return cpus;
+}
+
+uint32_t esdm_curr_node(void)
+{
+	uint32_t cpu = esdm_arch_curr_node();
+
+	/*
+	 * Limit the CPU selection by number of available threads - this is the
+	 * counterpart to esdm_config_online_nodes.
+	 */
+	return (cpu % esdm_online_nodes());
+}
+
+ssize_t esdm_safe_read(int fd, uint8_t *buf, size_t buflen)
+{
+	ssize_t readlen;
+	ssize_t bytes_read = 0;
+
+	do {
+		readlen = read(fd, buf, buflen);
+		if (readlen > 0) {
+			buflen -= (size_t)readlen;
+			buf += (size_t)readlen;
+			bytes_read += readlen;
+		} else if (readlen == 0) {
+			goto out;
+		} else if (errno != EINTR) {
+			/*
+			 * Like read(2)/write(2): what was transferred before
+			 * the error is reported, the error is left for the
+			 * next call - the data cannot be put back.
+			 */
+			if (!bytes_read)
+				bytes_read = -errno;
+			goto out;
+		}
+	} while (buflen);
+
+out:
+	return bytes_read;
+}
+
+ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen)
+{
+	ssize_t writelen;
+	ssize_t bytes_written = 0;
+
+	do {
+		writelen = write(fd, buf, buflen);
+		if (writelen > 0) {
+			buflen -= (size_t)writelen;
+			buf += (size_t)writelen;
+			bytes_written += writelen;
+		} else if (writelen == 0) {
+			goto out;
+		} else if (errno != EINTR) {
+			/*
+			 * Like read(2)/write(2): what was transferred before
+			 * the error is reported, the error is left for the
+			 * next call - the data cannot be put back.
+			 */
+			if (!bytes_written)
+				bytes_written = -errno;
+			goto out;
+		}
+	} while (buflen);
+
+out:
+	return bytes_written;
+}
+
+int esdm_fd_at_path(int fd, const char *path)
+{
+	struct stat fd_sb, path_sb;
+
+	if (!path)
+		return -EINVAL;
+
+	if (fstat(fd, &fd_sb) == -1)
+		return -errno;
+
+	/* lstat(): a symbolic link is not the file it points to */
+	if (lstat(path, &path_sb) == -1) {
+		if (errno == ENOENT || errno == ENOTDIR)
+			return 0;
+		return -errno;
+	}
+
+	return fd_sb.st_dev == path_sb.st_dev && fd_sb.st_ino == path_sb.st_ino;
+}
+
+/*
+ * Whether the caller's own uid is one to trust: only when the caller runs with
+ * no more privileges than its user has anyway. A set-uid or set-gid program
+ * linking the aux client runs on behalf of whoever invoked it, who would
+ * otherwise create the segment while no server runs and tell the program what
+ * it likes - AT_SECURE covers those, file capabilities and security module
+ * transitions alike. A real uid other than the effective one is a program that
+ * changed its identity: the CUSE daemon, which dropped only its effective uid,
+ * keeps root as real uid, which is trusted anyway.
+ */
+static bool esdm_shm_caller_uid_trusted(void)
+{
+	return getauxval(AT_SECURE) == 0 && getuid() == geteuid();
+}
+
+/*
+ * Root, the server's uid, or the uid of an unprivileged caller: a segment the
+ * latter created can only be planted by somebody who controls the caller
+ * anyway.
+ */
+static bool esdm_shm_uid_trusted(uid_t uid, uid_t server_uid)
+{
+	return uid == 0 || uid == server_uid ||
+	       (uid == getuid() && esdm_shm_caller_uid_trusted());
+}
+
+bool esdm_shm_created_by_server(const struct shmid_ds *buf,
+				const char *server_socket)
+{
+	struct stat sb;
+	/* root, unless the socket names somebody else */
+	uid_t server_uid = 0;
+
+	if (!buf)
+		return false;
+
+	/*
+	 * Only a socket counts: a plain file at the path tells nothing about
+	 * who runs the server. Without one, no server runs that is not root.
+	 */
+	if (server_socket && !stat(server_socket, &sb) && S_ISSOCK(sb.st_mode))
+		server_uid = sb.st_uid;
+
+	/*
+	 * The creator is what matters: the owner of a segment can hand it to
+	 * any uid with IPC_SET, the creator stays. The owner is checked as
+	 * well, as the server never hands its segment to somebody else, which
+	 * could then change its permissions.
+	 */
+	return esdm_shm_uid_trusted(buf->shm_perm.cuid, server_uid) &&
+	       esdm_shm_uid_trusted(buf->shm_perm.uid, server_uid);
+}
+
+void may_enable_memory_debugging()
+{
+#ifdef ESDM_MEMORY_DEBUG
+	/* perform consistency checks */
+	mcheck_pedantic(NULL);
+
+	/* release memory fast, in order to
+	 * check total consumption externally */
+	mallopt(M_TRIM_THRESHOLD, 0);
+	mallopt(M_MMAP_THRESHOLD, 0);
+	mallopt(M_MMAP_MAX, -1);
+
+	/* set newly allocated and freed memory
+	 * to this value */
+	mallopt(M_PERTURB, 0xff);
+
+	/* memory options should be called very early,
+	 * logger is typically not set up*/
+	fprintf(stderr,
+		"WARNING: Memory debugging enabled. Don't use in production.\n");
+#endif
+}

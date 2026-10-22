@@ -38,10 +38,10 @@ struct esdm_get_random_bytes_buf {
 	size_t buflen;
 };
 
-static void
-esdm_rpcc_get_random_bytes_cb(const RandValResponse *response,
-			      void *closure_data)
+static void esdm_rpcc_get_random_bytes_cb(const ProtobufCMessage *message,
+					  void *closure_data)
 {
+	const RandValResponse *response = (const RandValResponse *)message;
 	struct esdm_get_random_bytes_buf *buffer =
 		(struct esdm_get_random_bytes_buf *)closure_data;
 
@@ -70,7 +70,9 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_buf buffer;
-	size_t maxbuflen = buflen, orig_buflen = buflen;
+	/* See esdm_rpcc_get_random_bytes_full_int() */
+	size_t maxbuflen = min_size(buflen, ESDM_RPC_MAX_DATA),
+	       orig_buflen = buflen;
 	unsigned int eagain = 0;
 	ssize_t ret = 0;
 
@@ -84,7 +86,8 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 		msg.len = min_size(maxbuflen, buflen);
 
 		unpriv_access__rpc_get_random_bytes(
-			&rpc_conn->service, &msg, esdm_rpcc_get_random_bytes_cb,
+			&rpc_conn->service, &msg,
+			(RandValResponse_Closure)esdm_rpcc_get_random_bytes_cb,
 			&buffer);
 
 		/*
@@ -139,6 +142,11 @@ ssize_t esdm_rpcc_get_random_bytes_int(uint8_t *buf, size_t buflen,
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;
+
+		/* See esdm_rpcc_get_random_bytes_full_int() */
+		if (buflen)
+			CKINT(esdm_rpcc_unpriv_service_next(&rpc_conn, int_data,
+							    NULL));
 	}
 
 out:

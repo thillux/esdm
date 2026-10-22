@@ -21,16 +21,19 @@
  */
 
 /*
- * A blocking read of the largest size on each of many connections to the
- * prediction resistant socket. Each generation costs a reseed, and a request
- * of that size takes several - one per connection and round of the worker's
- * event loop. A worker serves every client it accepted, on both sockets, and
- * none while it generates: without a bound of the round, its other clients
- * wait for one generation per such connection, round after round.
+ * A prediction resistant blocking read of the largest size on each of many
+ * connections. Each generation costs a reseed, and a request of that size
+ * takes several - one per connection and round of the worker's event loop. A
+ * worker serves every client it accepted, and none while it generates: without
+ * a bound of the round, its other clients wait for one generation per such
+ * connection, round after round.
  *
- *   - a cheap command of a client of the other socket is answered within a
- *     fraction of the time one generation for each of the connections takes,
- *   - every request is answered in full nonetheless.
+ *   - a cheap command of another client is answered within a fraction of the
+ *     time one generation for each of the connections takes,
+ *   - every request is answered in full nonetheless,
+ *   - and a generation is of one block of the PR DRNG at most, so a round runs
+ *     over its budget by one seeding at most, while a request of more is
+ *     assembled in rounds following one another at once.
  *
  * Like the other EGD server tests, the server runs in this process with a
  * single worker, and no daemon is needed. Unlike them, the ESDM has to be
@@ -105,7 +108,6 @@ int set_fd_nonblocking(int fd)
 
 static char tmpdir[] = "/tmp/esdm-egd-pr-budget-test-XXXXXX";
 static char sockpath[sizeof(tmpdir) + 32];
-static char sockpath_pr[sizeof(tmpdir) + 32];
 
 static int ret = 0;
 
@@ -233,11 +235,128 @@ static uint64_t test_pr_cost_us(void)
 	return best;
 }
 
+/*
+ * One generation is of one block of the PR DRNG at most, a seeding's worth:
+ * the round budget cannot stop a generation half-way, and one of the largest
+ * request at once would make the round run over by all of its seedings. The
+ * non-blocking read answers with what one generation gave it.
+ */
+static void test_piece(void)
+{
+	const uint8_t cmd[2] = { ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK,
+				 ESDM_EGD_MAX_TRANSFER };
+	uint8_t answer[1 + ESDM_EGD_MAX_TRANSFER] = { 0 };
+	unsigned int i;
+	int fd;
+
+	printf("EGD PR budget: one generation is one block\n");
+
+	fd = test_connect(sockpath);
+	CHECK(fd >= 0, "cannot connect");
+	if (fd < 0)
+		return;
+
+	/* An empty answer says nothing - the entropy sources did not deliver */
+	for (i = 0; i < 10; i++) {
+		if (test_send(fd, cmd, sizeof(cmd)) ||
+		    test_recv(fd, answer, 1, TEST_RESPONSE_MS) ||
+		    (answer[0] &&
+		     test_recv(fd, answer + 1, answer[0], TEST_RESPONSE_MS))) {
+			CHECK(0, "no answer to the non-blocking read");
+			break;
+		}
+		if (answer[0])
+			break;
+	}
+
+	printf("  %u bytes answered to a non-blocking read of %u\n", answer[0],
+	       ESDM_EGD_MAX_TRANSFER);
+	CHECK(answer[0] <= 32,
+	      "one generation produced %u bytes, more than one block of 32",
+	      answer[0]);
+
+	close(fd);
+}
+
+/*
+ * A blocking read of more than one block is assembled over as many rounds, and
+ * they follow one another at once: between its pieces, the request waits for
+ * nothing but the next round's budget, not for the poll interval of a request
+ * waiting for entropy. Timed against the same blocks generated directly,
+ * before and after, the slower of the two counting - the poll interval would
+ * add 50 ms to each request of two blocks, a second over all of them.
+ */
+#define TEST_PIECES_REQUESTS 20
+#define TEST_PIECES_BLOCKS 2
+
+/* The blocks of the requests generated directly, in microseconds */
+static uint64_t test_pieces_direct_us(void)
+{
+	uint8_t block[32];
+	uint64_t start = test_now_us();
+	unsigned int i;
+
+	for (i = 0; i < TEST_PIECES_REQUESTS * TEST_PIECES_BLOCKS; i++) {
+		if (esdm_get_random_bytes_pr_noblock(block, sizeof(block)) <= 0)
+			return 0;
+	}
+
+	return test_now_us() - start;
+}
+
+static void test_pieces(void)
+{
+	const uint8_t cmd[2] = { ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
+				 32 * TEST_PIECES_BLOCKS };
+	uint8_t answer[32 * TEST_PIECES_BLOCKS];
+	uint64_t start, direct_us, after_us, egd_us;
+	unsigned int i;
+	int fd;
+
+	printf("EGD PR budget: a request of %u blocks, %u times\n",
+	       TEST_PIECES_BLOCKS, TEST_PIECES_REQUESTS);
+
+	direct_us = test_pieces_direct_us();
+	if (!direct_us) {
+		printf("  SKIPPED: the PR DRNG does not deliver here\n");
+		return;
+	}
+
+	fd = test_connect(sockpath);
+	CHECK(fd >= 0, "cannot connect");
+	if (fd < 0)
+		return;
+
+	start = test_now_us();
+	for (i = 0; i < TEST_PIECES_REQUESTS; i++) {
+		if (test_send(fd, cmd, sizeof(cmd)) ||
+		    test_recv(fd, answer, sizeof(answer), TEST_RESPONSE_MS)) {
+			CHECK(0, "request %u was not answered", i);
+			break;
+		}
+	}
+	egd_us = test_now_us() - start;
+
+	after_us = test_pieces_direct_us();
+	if (after_us > direct_us)
+		direct_us = after_us;
+
+	printf("  %llu ms through the EGD server, %llu ms for the blocks directly\n",
+	       (unsigned long long)(egd_us / 1000),
+	       (unsigned long long)(direct_us / 1000));
+	CHECK(egd_us < 2 * direct_us + 500000,
+	      "the requests took %llu ms, their blocks %llu ms - the pieces waited between rounds",
+	      (unsigned long long)(egd_us / 1000),
+	      (unsigned long long)(direct_us / 1000));
+
+	close(fd);
+}
+
 static void test_flood(void)
 {
 	static int fds[TEST_MAX_CONNS];
 	static uint8_t answer[ESDM_EGD_MAX_TRANSFER];
-	const uint8_t cmd[2] = { ESDM_EGD_CMD_READ_BLOCK,
+	const uint8_t cmd[2] = { ESDM_EGD_CMD_ESDM_PR_READ_BLOCK,
 				 ESDM_EGD_MAX_TRANSFER };
 	unsigned int i, conns, opened = 0, answered = 0, probes = 0;
 	uint64_t cost, round_us, worst_us = 0, deadline;
@@ -264,7 +383,7 @@ static void test_flood(void)
 	other = test_connect(sockpath);
 	CHECK(other >= 0 &&
 		      test_cmd_entropy_count(other, TEST_RESPONSE_MS) == 0,
-	      "the client of the other socket is not served");
+	      "the other client is not served");
 	if (other < 0)
 		return;
 
@@ -273,7 +392,7 @@ static void test_flood(void)
 	 * those accepted only once the requests go out would trickle in.
 	 */
 	for (opened = 0; opened < conns; opened++) {
-		fds[opened] = test_connect(sockpath_pr);
+		fds[opened] = test_connect(sockpath);
 		if (fds[opened] < 0 ||
 		    test_cmd_entropy_count(fds[opened], TEST_RESPONSE_MS)) {
 			CHECK(0, "connection %u is not served", opened);
@@ -293,8 +412,7 @@ static void test_flood(void)
 		uint64_t start = test_now_us();
 
 		if (test_cmd_entropy_count(other, TEST_RESPONSE_MS)) {
-			CHECK(0,
-			      "the client of the other socket was not served");
+			CHECK(0, "the other client was not served");
 			break;
 		}
 		if (test_now_us() - start > worst_us)
@@ -369,16 +487,16 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	snprintf(sockpath, sizeof(sockpath), "%s/egd.sock", tmpdir);
-	snprintf(sockpath_pr, sizeof(sockpath_pr), "%s/egd-pr.sock", tmpdir);
 
-	if (esdm_egd_server_enable(sockpath) ||
-	    esdm_egd_server_enable_pr(sockpath_pr) ||
-	    esdm_egd_server_socket_init() || esdm_egd_server_start()) {
-		printf("Cannot serve the EGD sockets in %s\n", tmpdir);
+	if (esdm_egd_server_enable(sockpath) || esdm_egd_server_socket_init() ||
+	    esdm_egd_server_start()) {
+		printf("Cannot serve the EGD socket in %s\n", tmpdir);
 		ret = 1;
 		goto out;
 	}
 
+	test_piece();
+	test_pieces();
 	test_flood();
 
 out:

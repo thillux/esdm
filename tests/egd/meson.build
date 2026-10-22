@@ -74,14 +74,19 @@ if get_option('esdm-server').enabled()
 	# The same setup for the end of a connection, the client's and the
 	# server's. The insertion command has no response, so the server's call
 	# into the auxiliary pool is renamed to a counting wrapper in the test.
-	# Idle connections time out after a second, and the per-UID limit is
-	# small enough for the test to run into it.
+	# So are its calls rendering a status report and waiting for the events
+	# of a round, which tells the reports rendered per round. Idle
+	# connections time out after a second, and the per-UID limit is small
+	# enough for the test to run into it.
 	egd_server_conn_test = executable(
 			'egd_server_conn_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_conn_test.c' ],
 			c_args: [
 				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-Desdm_status=test_status',
+				'-Desdm_status_json=test_status_json',
+				'-Depoll_wait=test_epoll_wait',
 				'-DESDM_EGD_IDLE_TIMEOUT_MS=1000',
 				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=48',
 			],
@@ -97,9 +102,15 @@ if get_option('esdm-server').enabled()
 	# down to a few slots, more of them per UID than in all - a single UID
 	# stands for a user connecting under each UID of its subordinate range
 	# - and slots are short from three quarters of them on. Idle
-	# connections time out after three seconds, well above how long the
-	# tests not about them take. Several UIDs, and the tests needing them,
-	# take root.
+	# connections time out after eight seconds, well above how long the
+	# tests not about them take even under a sanitizer: opening all slots
+	# and touching all but two of them one after the other took close to
+	# three seconds in the TSan build, and the last ones were then closed
+	# as idle before their turn. Several UIDs, and the tests needing them,
+	# take root. The server's calls into the auxiliary pool, waiting for
+	# the events of a round and shutting a connection down are renamed to
+	# wrappers in the test, which count the insertions and send one on a
+	# connection in the middle of a round or of its closing.
 	egd_server_evict_test = executable(
 			'egd_server_evict_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
@@ -108,7 +119,10 @@ if get_option('esdm-server').enabled()
 				'-DESDM_EGD_MAX_CONNECTIONS=16',
 				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=24',
 				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=12',
-				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=8000',
+				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-Depoll_wait=test_epoll_wait',
+				'-Dshutdown=test_shutdown',
 			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
@@ -131,6 +145,21 @@ if get_option('esdm-server').enabled()
 
 	test('EGD server prediction resistance budget',
 		egd_server_pr_budget_test, timeout: 300)
+
+	# The same with several workers, one client flooding the prediction
+	# resistance DRNG and others asking for a block each. Timed, so not
+	# alongside other tests.
+	egd_server_pr_fairness_test = executable(
+			'egd_server_pr_fairness_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_pr_fairness_test.c' ],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server prediction resistance fairness',
+		egd_server_pr_fairness_test, timeout: 120, is_parallel: false)
 
 	# The per-UID connection accounting shared by the RPC and EGD servers,
 	# compiled into the test to inspect its table. Needs no server.

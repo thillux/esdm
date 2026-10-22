@@ -36,7 +36,7 @@ void esdm_rpc_status_json(UnprivAccess_Service *service,
 
 	if (request == NULL) {
 		response.ret = -(int32_t)ESDM_RPC_MAX_DATA;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 		return;
 	}
 
@@ -53,7 +53,7 @@ void esdm_rpc_status_json(UnprivAccess_Service *service,
 	status = calloc(1, alloc_size);
 	if (!status) {
 		response.ret = -ENOMEM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 		return;
 	}
 
@@ -63,7 +63,7 @@ void esdm_rpc_status_json(UnprivAccess_Service *service,
 	 */
 	response.ret = esdm_status_json(status, alloc_size);
 	response.buffer = status;
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 
 	free(status);
 }

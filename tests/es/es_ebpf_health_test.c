@@ -21,14 +21,14 @@
  * Known-answer tests for the SP800-90B health test cutoff computation of
  * the eBPF entropy sources: the RCT cutoffs follow SP800-90B section 4.4.1
  * with alpha = 2^-30 / 2^-60 and the APT cutoffs match the tables of the
- * ESDM Linux kernel add-on (addon/linux_esdm_es/esdm_health.h).
+ * ESDM kernel module esdm_es (kernel/esdm_es/esdm_health.h).
  */
 
 #include <stdint.h>
 #include <stdio.h>
 
 #include "config.h"
-#include "es_ebpf/esdm_es_ebpf.h"
+#include "esdm_es_ebpf.h"
 
 struct cutoff_kat {
 	uint32_t osr;

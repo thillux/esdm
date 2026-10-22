@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/conv_be_le.h.
+ * Tests for common/util/conv_be_le.h.
  *
  * Built twice: once as-is, where the byte swaps resolve to the compiler
  * builtins, and once with CONVERSION_TEST defined, which is the only thing that
@@ -35,7 +35,7 @@
 /*
  * Note: crypto/ carries its own trimmed copies of bitshift_le.h/bitshift_be.h
  * and sits in front of common/ on the include path, so the accessors are
- * pulled in through common/bitshift.h - whose own quoted includes resolve
+ * pulled in through common/util/bitshift.h - whose own quoted includes resolve
  * next to itself - rather than by including them directly.
  */
 #include "bitshift.h"

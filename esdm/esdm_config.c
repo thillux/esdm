@@ -18,6 +18,7 @@
  * DAMAGE.
  */
 
+#include <errno.h>
 #include <limits.h>
 
 #include "build_bug_on.h"
@@ -26,7 +27,8 @@
 #include "esdm_config_internal.h"
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
-#include "es_ebpf/esdm_es_irq_ebpf.h"
+#include "esdm_es_extsock.h"
+#include "esdm_es_irq_ebpf.h"
 #include "esdm_es_irq.h"
 #include "esdm_es_mgr.h"
 #include "fips.h"
@@ -53,8 +55,10 @@ struct esdm_config {
 	_Atomic uint32_t esdm_es_sched_ebpf_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_hwrand_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_tpm2_entropy_rate_bits;
-	_Atomic uint32_t esdm_es_pkcs11_entropy_rate_bits;
 	_Atomic uint32_t esdm_es_jent_kernel_entropy_rate_bits;
+#if ESDM_EXT_SOCKET_NUM > 0
+	_Atomic uint32_t esdm_es_ext_socket_entropy_rate_bits[ESDM_EXT_SOCKET_NUM];
+#endif
 	_Atomic uint32_t esdm_drng_max_wo_reseed;
 	_Atomic uint32_t esdm_drng_max_wo_reseed_bits;
 	_Atomic uint32_t esdm_drng_reseed_thresh;
@@ -74,6 +78,9 @@ struct esdm_config {
  * Clamp such a limit to INT_MAX. UINT32_MAX stays: it disables the limit on
  * purpose.
  */
+/* The rates of the external sources, one per instance */
+#define ESDM_CONFIG_EXT_SOCKET_RATE(i) [i] = ESDM_EXT_SOCKET_ENTROPY_RATE_##i,
+
 #define ESDM_CONFIG_MAX_WO_RESEED_BITS(val)                                    \
 	(((val) == UINT32_MAX || (val) <= INT_MAX) ? (uint32_t)(val) :         \
 						     (uint32_t)INT_MAX)
@@ -133,14 +140,19 @@ static struct esdm_config esdm_config = {
 	.esdm_es_tpm2_entropy_rate_bits = ESDM_TPM2_ENTROPY_RATE,
 
 	/*
-	 * See documentation of ESDM_PKCS11_ENTROPY_RATE
-	 */
-	.esdm_es_pkcs11_entropy_rate_bits = ESDM_PKCS11_ENTROPY_RATE,
-
-	/*
 	 * See documentation of ESDM_JENT_KERNEL_ENTROPY_RATE
 	*/
 	.esdm_es_jent_kernel_entropy_rate_bits = ESDM_JENT_KERNEL_ENTROPY_RATE,
+#if ESDM_EXT_SOCKET_NUM > 0
+	/*
+	 * See the meson option es_ext_socket_entropy_rate: the cap of what the
+	 * provider of an external entropy source socket is credited with for
+	 * its claims, or ESDM_ES_EXT_ENTROPY_RATE_AUTO for the one the provider
+	 * declares
+	 */
+	.esdm_es_ext_socket_entropy_rate_bits = { ESDM_EXT_SOCKET_INSTANCES(
+		ESDM_CONFIG_EXT_SOCKET_RATE) },
+#endif
 
 	/*
 	 * See documentation of ESDM_DRNG_MAX_WITHOUT_RESEED.
@@ -393,21 +405,6 @@ void esdm_config_es_tpm2_entropy_rate_set(uint32_t ent)
 }
 
 DSO_PUBLIC
-uint32_t esdm_config_es_pkcs11_entropy_rate(void)
-{
-	return esdm_config.esdm_es_pkcs11_entropy_rate_bits;
-}
-
-DSO_PUBLIC
-void esdm_config_es_pkcs11_entropy_rate_set(uint32_t ent)
-{
-	uint32_t val = esdm_config_entropy_rate_max(ent);
-
-	esdm_config.esdm_es_pkcs11_entropy_rate_bits = val;
-	esdm_es_add_entropy();
-}
-
-DSO_PUBLIC
 uint32_t esdm_config_es_jent_kernel_entropy_rate(void)
 {
 	return esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
@@ -420,6 +417,61 @@ void esdm_config_es_jent_kernel_entropy_rate_set(uint32_t ent)
 
 	esdm_config.esdm_es_jent_kernel_entropy_rate_bits = val;
 	esdm_es_add_entropy();
+}
+
+#if ESDM_EXT_SOCKET_NUM > 0
+/*
+ * The rate configured for an external source: capped as any rate, but
+ * ESDM_ES_EXT_ENTROPY_RATE_AUTO, no rate configured, kept as it is
+ */
+static uint32_t esdm_config_es_ext_rate(uint32_t ent)
+{
+	return ent == ESDM_ES_EXT_ENTROPY_RATE_AUTO ?
+		       ent :
+		       esdm_config_entropy_rate_max(ent);
+}
+#endif
+
+uint32_t esdm_config_es_ext_socket_entropy_rate_configured(unsigned int idx)
+{
+#if ESDM_EXT_SOCKET_NUM > 0
+	if (idx < ESDM_EXT_SOCKET_NUM)
+		return esdm_config.esdm_es_ext_socket_entropy_rate_bits[idx];
+#else
+	(void)idx;
+#endif
+	return ESDM_ES_EXT_ENTROPY_RATE_AUTO;
+}
+
+/* The rate the source is credited at, see esdm_es_extsock.c */
+DSO_PUBLIC
+uint32_t esdm_config_es_ext_socket_entropy_rate(unsigned int idx)
+{
+#if ESDM_EXT_SOCKET_NUM > 0
+	if (idx < ESDM_EXT_SOCKET_NUM)
+		return esdm_es_extsock_entropy_rate(idx, NULL);
+#else
+	(void)idx;
+#endif
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_config_es_ext_socket_entropy_rate_set(unsigned int idx, uint32_t ent)
+{
+#if ESDM_EXT_SOCKET_NUM > 0
+	if (idx >= ESDM_EXT_SOCKET_NUM)
+		return -EINVAL;
+
+	esdm_config.esdm_es_ext_socket_entropy_rate_bits[idx] =
+		esdm_config_es_ext_rate(ent);
+	esdm_es_add_entropy();
+	return 0;
+#else
+	(void)idx;
+	(void)ent;
+	return -EINVAL;
+#endif
 }
 
 DSO_PUBLIC
@@ -534,6 +586,9 @@ uint32_t esdm_config_curr_node(void)
 int esdm_config_init(void)
 {
 	uint32_t complete_entropy_rate = 0;
+#if ESDM_EXT_SOCKET_NUM > 0
+	unsigned int i;
+#endif
 
 	/*
 	 * Sanity checks - if runtime configuration is added, it must be
@@ -576,15 +631,23 @@ int esdm_config_init(void)
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_tpm2_entropy_rate_bits);
 	complete_entropy_rate += esdm_config.esdm_es_tpm2_entropy_rate_bits;
-	esdm_config.esdm_es_pkcs11_entropy_rate_bits =
-		esdm_config_entropy_rate_max(
-			esdm_config.esdm_es_pkcs11_entropy_rate_bits);
-	complete_entropy_rate += esdm_config.esdm_es_pkcs11_entropy_rate_bits;
 	esdm_config.esdm_es_jent_kernel_entropy_rate_bits =
 		esdm_config_entropy_rate_max(
 			esdm_config.esdm_es_jent_kernel_entropy_rate_bits);
 	complete_entropy_rate +=
 		esdm_config.esdm_es_jent_kernel_entropy_rate_bits;
+	/*
+	 * The rates of the external entropy sources cap what an external
+	 * provider claims - and it may not be configured at all. They do not
+	 * tell whether the sources the ESDM manages can seed it, which is what
+	 * the check below is about.
+	 */
+#if ESDM_EXT_SOCKET_NUM > 0
+	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+		esdm_config.esdm_es_ext_socket_entropy_rate_bits[i] =
+			esdm_config_es_ext_rate(
+				esdm_config.esdm_es_ext_socket_entropy_rate_bits[i]);
+#endif
 
 	if (!complete_entropy_rate) {
 		esdm_logger_status(

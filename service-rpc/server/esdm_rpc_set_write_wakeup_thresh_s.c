@@ -36,14 +36,14 @@ void esdm_rpc_set_write_wakeup_thresh(
 
 	if (request == NULL) {
 		response.ret = -EFAULT;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		esdm_set_write_wakeup_bits(request->wakeup);
 
 		response.ret = 0;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	}
 }

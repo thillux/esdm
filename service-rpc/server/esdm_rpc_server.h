@@ -53,8 +53,10 @@ bool esdm_rpc_client_is_privileged(void *closure_data);
  * a worker serves the requests of all its ready connections one after the
  * other, and each of these generations costs reseeds, so they are bounded per
  * round of the worker's event loop. Beyond the bound, -EAGAIN is returned
- * without generating anything - the answer the clients already get while
- * another worker holds the PR DRNG, and retry on.
+ * without generating anything - the answer the clients get while the ESDM is
+ * not operational, and retry on. A request of another worker using the PR
+ * DRNG is no reason for it: the generation waits for its turn there, one
+ * block of each request ahead of it.
  *
  * @return as esdm_get_random_bytes_pr_noblock()
  */
@@ -75,6 +77,47 @@ ssize_t esdm_rpcs_get_seed(uint64_t *buf, size_t nbytes, unsigned int flags);
 
 int esdm_rpc_server_init(const char *username, const char *groupname);
 void esdm_rpc_server_fini(void);
+
+/**
+ * @brief Offer DTLS on the RPC interfaces, or refuse it
+ *
+ * Refused by default: every connection is served in the clear. Offered, with
+ * DTLS built (meson option dtls), a client asking for it with STARTDTLS - see
+ * ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h - is served encrypted. Takes
+ * effect for the STARTDTLS requests to come; to be called before
+ * esdm_rpc_server_init(), which sets the DTLS up.
+ *
+ * @param [in] enable Offer DTLS (true) or refuse it (false)
+ */
+void esdm_rpc_server_set_dtls(bool enable);
+
+/**
+ * @brief Spread the new connections over the workers, or not
+ *
+ * By default, a worker of the unprivileged RPC interface that accepts a new
+ * connection hands it to the worker serving the fewest connections, if that is
+ * another one with fewer than it. Switched off, a connection stays with the
+ * worker that accepted it - the first one the kernel woke for it. To be called
+ * before esdm_rpc_server_init().
+ *
+ * @param [in] enable Spread the connections (true) or not (false)
+ */
+void esdm_rpc_server_set_conn_balancing(bool enable);
+
+/**
+ * @brief Map each worker to a node DRNG of its own, or not
+ *
+ * By default, each worker of the unprivileged RPC interface, and of the EGD
+ * interface (see esdm_egd_server_set_drng_mapping()), serves the random numbers
+ * its clients ask for - all but the prediction resistant ones - from a node
+ * DRNG it is mapped to, see esdm_drng_node_bind(): neither the lock of the node
+ * array nor that of a DRNG another worker uses is taken on the way. Switched
+ * off, they are served by the first free node DRNG they find, as every other
+ * caller is. To be called before esdm_rpc_server_init().
+ *
+ * @param [in] enable Each worker its node DRNG (true), or not (false)
+ */
+void esdm_rpc_server_set_drng_mapping(bool enable);
 
 /**
  * @brief Remove a left-over Unix domain socket of a previous server instance
@@ -124,6 +167,13 @@ void esdm_rpc_server_signal_exit_safe(void);
 
 #ifdef ESDM_FUZZING
 /**
+ * @brief Is the connection of a request encrypted with DTLS?
+ * @param [in] closure_data What the service receives with the request
+ * @return true if the request came, and its answer goes, as DTLS records
+ */
+bool esdm_rpcs_fuzz_conn_encrypted(void *closure_data);
+
+/**
  * @brief Hand one buffer to the server as if it had just been read off a client
  * 	connection
  * @param [in] service The RPC service the request is directed at
@@ -147,6 +197,7 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
  */
 int esdm_rpcs_fuzz_serve(const char *socket_path, ProtobufCService *service,
 			 bool privileged);
+
 #endif /* ESDM_FUZZING */
 
 #ifdef __cplusplus

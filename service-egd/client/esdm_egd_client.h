@@ -58,8 +58,9 @@ extern "C" {
  *
  * Compared to the RPC client this needs nothing but a single Unix domain stream
  * socket, which makes it reachable from places the RPC interface is not, such
- * as a chroot. The price is a legacy protocol that can express neither
- * prediction resistance nor transfers above 255 bytes (split transparently).
+ * as a chroot. The price is a legacy protocol that cannot express transfers
+ * above 255 bytes (split transparently); prediction resistance is reached
+ * through a command of the ESDM's own, which other EGD daemons do not know.
  *
  * Syscall discipline
  * ------------------
@@ -137,9 +138,11 @@ const char *esdm_egd_client_socket_path(const struct esdm_egd_client *client);
 /**
  * @brief Obtain random data, waiting for the ESDM to become operational
  *
- * Requests larger than one protocol transfer are split transparently. On
- * failure @buf is cleansed, so a partial transfer can never be mistaken for a
- * complete one.
+ * Requests larger than one protocol transfer are split transparently, the
+ * commands of up to 64 KiB sent at once and their answers read after, which
+ * takes one round trip per 64 KiB rather than one per transfer. On failure
+ * @buf is cleansed, so a partial transfer can never be mistaken for a complete
+ * one.
  *
  * @param [in] client Client to use
  * @param [out] buf Buffer to fill
@@ -170,7 +173,45 @@ int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
 					size_t *generated);
 
 /**
+ * @brief Obtain prediction resistant random data, waiting for it
+ *
+ * Like esdm_egd_client_get_random(), but served by the ESDM's prediction
+ * resistance DRNG, which hands out no more than its entropy sources just
+ * delivered - the answer takes as long as collecting that entropy does. The
+ * ESDM-specific command this uses is unknown to other EGD daemons, which
+ * close the connection on it: the call fails then.
+ *
+ * @param [in] client Client to use
+ * @param [out] buf Buffer to fill
+ * @param [in] buflen Number of bytes to obtain
+ *
+ * @return 0 on success, < 0 on error
+ */
+int esdm_egd_client_get_random_pr(struct esdm_egd_client *client, uint8_t *buf,
+				  size_t buflen);
+
+/**
+ * @brief Obtain prediction resistant random data without waiting
+ *
+ * Like esdm_egd_client_get_random_nonblock(), but served by the prediction
+ * resistance DRNG: the answer holds what its entropy sources can deliver
+ * right away, often less than asked for.
+ *
+ * @param [in] client Client to use
+ * @param [out] buf Buffer to fill
+ * @param [in] buflen Number of bytes to ask for, at most
+ *		      ESDM_EGD_MAX_TRANSFER
+ * @param [out] generated Number of bytes actually delivered
+ *
+ * @return 0 on success, < 0 on error
+ */
+int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *client,
+					   uint8_t *buf, size_t buflen,
+					   size_t *generated);
+
+/**
  * @brief Query the amount of entropy the ESDM currently holds
+
  *
  * @param [in] client Client to use
  * @param [out] entropy_bits Available entropy in bits

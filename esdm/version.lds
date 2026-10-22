@@ -53,6 +53,7 @@ LIBESDM_1.0 {
 		/* esdm.h - entropy pool handling */
 		esdm_pool_insert_aux;
 		esdm_pool_set_entropy;
+		esdm_pool_add_entropy;
 		esdm_avail_entropy;
 		esdm_avail_entropy_aux;
 		esdm_avail_poolsize_aux;
@@ -100,10 +101,10 @@ LIBESDM_1.0 {
 		esdm_config_es_jent_entropy_rate_set;
 		esdm_config_es_jent_kernel_entropy_rate;
 		esdm_config_es_jent_kernel_entropy_rate_set;
+		esdm_config_es_ext_socket_entropy_rate;
+		esdm_config_es_ext_socket_entropy_rate_set;
 		esdm_config_es_krng_entropy_rate;
 		esdm_config_es_krng_entropy_rate_set;
-		esdm_config_es_pkcs11_entropy_rate;
-		esdm_config_es_pkcs11_entropy_rate_set;
 		esdm_config_es_sched_ebpf_entropy_rate;
 		esdm_config_es_sched_ebpf_entropy_rate_set;
 		esdm_config_es_sched_entropy_rate;
@@ -138,18 +139,29 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_jent_status;
 
 		/*
-		 * esdm_es_pkcs11.h - the module the server sets from its
-		 * command line and the token configuration it sets from its
-		 * RPC handler. Only built when es_pkcs11 is enabled;
-		 * the linker is asked for --undefined-version so naming them
+		 * esdm_es_jent_kernel.h - the kernel RNG the server sets from
+		 * its command line. Only built when es_jent_kernel is enabled;
+		 * the linker is asked for --undefined-version so naming it
 		 * here costs nothing in a build without that source.
 		 */
-		esdm_es_pkcs11_set_module_path;
-		esdm_es_pkcs11_set_pin;
-		esdm_es_pkcs11_set_token_label;
+		esdm_es_jent_kernel_set_name;
+
+		/*
+		 * esdm_es_extsock.h - the provider socket the server sets
+		 * from its command line. Only built when es_ext is enabled.
+		 */
+		esdm_es_ext_socket_set_path;
+		esdm_es_ext_socket_set_peer_uid;
 
 		/* esdm_shm_status.h */
 		esdm_shm_status_cleanup_ipc;
+
+		/*
+		 * esdm_drng_mgr.h - the node DRNG each worker of the RPC and
+		 * the EGD interface of the server is mapped to.
+		 */
+		esdm_drng_node_bind;
+		esdm_drng_node_unbind;
 
 		/*
 		 * esdm_drng_mgr.h / esdm_es_mgr.h - the self tests the server

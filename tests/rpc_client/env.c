@@ -44,7 +44,7 @@ void env_fini(void)
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 
@@ -97,9 +97,9 @@ int env_init(void)
 		return EFAULT;
 	}
 	server_pid = pid;
-	/* The server is up once it has bound its unprivileged RPC socket */
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+	/* The server is up once it accepts on its unprivileged RPC socket */
+	test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+			       TEST_WAIT_TIMEOUT_MS);
 
 out:
 	return ret;
@@ -114,7 +114,7 @@ void env_kill_server(void)
 	if (server_pid > 0) {
 		printf("Killing server PID %u\n", server_pid);
 		kill(server_pid, SIGTERM);
-		waitpid(server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	}
 	server_pid = 0;
 	nanosleep(&ts, NULL);

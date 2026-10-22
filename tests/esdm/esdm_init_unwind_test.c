@@ -1,10 +1,10 @@
 /*
  * Test that a failed esdm_init() tears down what it set up
  *
- * The auxiliary pool cannot allocate its hash states, so the entropy source
- * manager fails after the DRNG manager came up. esdm_init() reports the error
- * and must not leave the DRNG manager behind - nor report success when it is
- * called again on what it tore down.
+ * The auxiliary pool cannot allocate the context of its XOF, so the entropy
+ * source manager fails after the DRNG manager came up. esdm_init() reports the
+ * error and must not leave the DRNG manager behind - nor report success when it
+ * is called again on what it tore down.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -33,18 +33,25 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_logger.h"
 
-static struct esdm_hash_cb esdm_iu_hash_cb;
+static struct esdm_xof_cb esdm_iu_xof_cb;
+static int (*esdm_iu_xof_alloc_real)(void **xof);
+static unsigned int esdm_iu_xof_allocs;
 
-static int esdm_iu_hash_alloc(void **hash)
+/*
+ * The first context is that of the self test of the DRNG manager, which
+ * comes up before the entropy source manager: only the ones after it fail.
+ */
+static int esdm_iu_xof_alloc(void **xof)
 {
-	(void)hash;
-	return -ENOMEM;
+	if (esdm_iu_xof_allocs++)
+		return -ENOMEM;
+	return esdm_iu_xof_alloc_real(xof);
 }
 
 int main(int argc, char *argv[])
 {
 	struct esdm_drng *drng = esdm_drng_init_instance();
-	const struct esdm_hash_cb *hash_cb = drng->hash_cb;
+	const struct esdm_xof_cb *xof_cb = esdm_default_xof_cb;
 	int ret;
 
 	(void)argc;
@@ -52,13 +59,14 @@ int main(int argc, char *argv[])
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
-	/* The default hash, except that no state can be allocated for it */
-	esdm_iu_hash_cb = *hash_cb;
-	esdm_iu_hash_cb.hash_alloc = esdm_iu_hash_alloc;
-	drng->hash_cb = &esdm_iu_hash_cb;
+	/* The default XOF, except that no context of the pool can be allocated */
+	esdm_iu_xof_cb = *xof_cb;
+	esdm_iu_xof_alloc_real = xof_cb->xof_alloc;
+	esdm_iu_xof_cb.xof_alloc = esdm_iu_xof_alloc;
+	esdm_default_xof_cb = &esdm_iu_xof_cb;
 
 	ret = esdm_init();
-	drng->hash_cb = hash_cb;
+	esdm_default_xof_cb = xof_cb;
 
 	if (!ret) {
 		printf("esdm_init() succeeded without the aux pool\n");

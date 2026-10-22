@@ -55,7 +55,7 @@ if get_option('es_jent').enabled()
 	es_jent_selftest_fail_tester = executable(
 		'es_jent_selftest_fail_tester',
 		[ esdm_ipc_ns, 'es_jent_selftest_fail_test.c' ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 	)
@@ -66,7 +66,7 @@ if get_option('es_jent').enabled()
 	es_jent_collector_lost_tester = executable(
 		'es_jent_collector_lost_tester',
 		[ esdm_ipc_ns, 'es_jent_collector_lost_test.c' ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 	)
@@ -167,9 +167,23 @@ if get_option('es_irq').enabled()
 		link_with: esdm_static_lib,
 	)
 
-	# The interrupt generator sleeps 5000 times per round, so the wall clock
-	# is dominated by the rounds rather than by the work.
+	# The interrupt generator reads from the disk 4000 times per round, so
+	# the wall clock is dominated by the rounds rather than by the work.
 	test('ES Interrupt', es_irq_tester, timeout: 300)
+endif
+
+# The configuration of the kernel add-on per descriptor of /dev/esdm_es, which
+# the ESDMs of the tests running in parallel each open - talking to the device
+# directly, so no source is compiled in.
+if get_option('es_irq').enabled() or get_option('es_sched').enabled()
+	es_kernel_conf_tester = executable(
+		'es_kernel_conf_tester',
+		[ 'es_kernel_conf_test.c' ],
+		include_directories: include_dirs_server,
+	)
+
+	test('ES kernel configuration per descriptor', es_kernel_conf_tester,
+	     timeout: 120)
 endif
 
 # The interrupt and the scheduler source compiled into the test, which fills
@@ -270,33 +284,6 @@ if get_option('es_irq_ebpf').enabled()
 	test('ES Interrupt eBPF', es_irq_ebpf_tester, timeout: 120)
 endif
 
-if get_option('es_pkcs11').enabled()
-	es_pkcs11_tester = executable(
-		'es_pkcs11_tester',
-		[ esdm_ipc_ns, 'es_pkcs11_test.c' ],
-		include_directories: include_dirs_server,
-		link_with: esdm_static_lib,
-	)
-	test('ES PKCS11', es_pkcs11_tester)
-
-	# The test above passes with the source switched off for want of a
-	# token, so it never reaches the half that matters. SoftHSM is a
-	# PKCS#11 module that needs no hardware, so when the build points at
-	# one this test creates a token and drives the source against it for
-	# real. It skips at runtime if softhsm2-util is not installed.
-	if get_option('es_pkcs11_module_path') != ''
-		es_pkcs11_softhsm_tester = executable(
-			'es_pkcs11_softhsm_tester',
-			[ esdm_ipc_ns, 'es_pkcs11_softhsm_test.c' ],
-			dependencies: dependencies_server,
-			include_directories: include_dirs_server,
-			link_with: esdm_static_lib,
-		)
-		test('ES PKCS11 with SoftHSM', es_pkcs11_softhsm_tester,
-			timeout: 120)
-	endif
-endif
-
 # The health tests the eBPF programs run are plain C, which the test compiles
 # in - see the file header. It needs neither libbpf nor eBPF support, so it is
 # built whether or not an eBPF entropy source is.
@@ -331,7 +318,7 @@ if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 		link_with: esdm_static_lib,
 	)
 
-	test('ES eBPF conditioning pool hash failure', es_ebpf_pool_tester)
+	test('ES eBPF conditioning pool', es_ebpf_pool_tester)
 endif
 
 if get_option('es_jent_kernel').enabled()
@@ -357,4 +344,16 @@ if get_option('es_jent_kernel').enabled()
 	)
 	test('ES Kernel Jitter RNG that stops delivering',
 	     es_jent_kernel_read_fail_tester)
+
+	# The same stand-in, knowing two RNGs - see the file header.
+	es_jent_kernel_name_tester = executable(
+		'es_jent_kernel_name_tester',
+		[ esdm_ipc_ns, 'es_jent_kernel_name_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+	test('ES Kernel Jitter RNG of a configured name',
+	     es_jent_kernel_name_tester)
 endif

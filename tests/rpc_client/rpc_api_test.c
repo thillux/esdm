@@ -41,7 +41,9 @@
 #include "config.h"
 #include "env.h"
 #include "esdm_rpc_client.h"
+#include "esdm_rpc_client_internal.h"
 #include "esdm_rpc_service.h"
+#include "priv_access.pb-c.h"
 
 /*
  * The privileged calls change the state of the ESDM the unprivileged ones
@@ -330,26 +332,77 @@ static void test_rnd_clear_pool(void)
 	CHECK_EQ(ret, 0);
 }
 
-static void test_set_pkcs11_config(void)
-{
+struct test_reserved_answer {
+	bool answered;
 	int ret;
+};
 
+/* Of the type protobuf-c calls a closure with, see service-rpc/client */
+static void test_reserved_cb(const ProtobufCMessage *message,
+			     void *closure_data)
+{
+	const RetResponse *response = (const RetResponse *)message;
+	struct test_reserved_answer *answer = closure_data;
+
+	if (!response)
+		return;
+	answer->answered = true;
+	answer->ret = response->ret;
+}
+
+/*
+ * The slot of the call that configured the PKCS#11 entropy source, which
+ * esdm-es-pkcs11 serves now, is kept so that the self test after it keeps its
+ * index on the wire: the server answers it with -EOPNOTSUPP - also when a
+ * client that still knows the call sends the token label and the PIN along,
+ * in fields the request no longer has. The generated stub addresses the slot
+ * by its index, as such a client does; the self test after it is checked by
+ * test_selftest().
+ */
+static void test_reserved_pkcs11_slot(void)
+{
+	EmptyRequest msg = EMPTY_REQUEST__INIT;
+	esdm_rpc_client_connection_t *rpc_conn = NULL;
+	struct test_reserved_answer answer = { .answered = false, .ret = 0 };
 	/*
-	 * Only a build with the PKCS#11 entropy source has anywhere to put
-	 * this, so the call is expected to be refused otherwise. What is under
-	 * test either way is that the two strings survive the trip - a refusal
-	 * still travels through the same pack and unpack.
+	 * As SetPkcs11ConfigRequest had them: token_label = 2, pin = 4 - the
+	 * encoding after the tag, the length in front of the string (octal, as
+	 * a hexadecimal escape would take the letters after it along)
 	 */
-	esdm_invoke(esdm_rpcc_set_pkcs11_config("esdm-test-token",
-						"esdm-test-pin"));
-#ifdef ESDM_ES_PKCS11
-	/* No such token in the test environment - see esdm_es_pkcs11.h */
-	CHECK(ret == 0 || ret == -ENODEV || ret == -ENOENT || ret == -EACCES,
-	      "set_pkcs11_config returned an unexpected value %d", ret);
-#else
-	CHECK_EQ(ret, -ENOENT);
-#endif
-	printf("set_pkcs11_config returned %d\n", ret);
+	uint8_t label[] = "\017esdm-test-token";
+	uint8_t pin[] = "\0041234";
+	ProtobufCMessageUnknownField fields[] = {
+		{ .tag = 2,
+		  .wire_type = PROTOBUF_C_WIRE_TYPE_LENGTH_PREFIXED,
+		  .len = sizeof(label) - 1,
+		  .data = label },
+		{ .tag = 4,
+		  .wire_type = PROTOBUF_C_WIRE_TYPE_LENGTH_PREFIXED,
+		  .len = sizeof(pin) - 1,
+		  .data = pin },
+	};
+
+	CHECK_EQ(esdm_rpcc_get_priv_service(&rpc_conn, NULL), 0);
+	if (!rpc_conn)
+		return;
+
+	priv_access__rpc_reserved_set_pkcs11_config(
+		&rpc_conn->service, &msg, (RetResponse_Closure)test_reserved_cb,
+		&answer);
+	CHECK(answer.answered, "the reserved call was not answered");
+	CHECK_EQ(answer.ret, -EOPNOTSUPP);
+
+	answer.answered = false;
+	msg.base.n_unknown_fields = sizeof(fields) / sizeof(fields[0]);
+	msg.base.unknown_fields = fields;
+	priv_access__rpc_reserved_set_pkcs11_config(
+		&rpc_conn->service, &msg, (RetResponse_Closure)test_reserved_cb,
+		&answer);
+	CHECK(answer.answered,
+	      "the reserved call with the fields of the old one was not answered");
+	CHECK_EQ(answer.ret, -EOPNOTSUPP);
+
+	esdm_rpcc_put_priv_service(rpc_conn);
 }
 
 static void test_selftest(void)
@@ -423,13 +476,13 @@ int main(int argc, char *argv[])
 	test_write_wakeup_thresh_roundtrip();
 	test_min_reseed_secs_roundtrip();
 
-	/* The self tests, run on demand */
+	/* The self tests, run on demand, and the slot before them */
+	test_reserved_pkcs11_slot();
 	test_selftest();
 
 	/* Last, they disturb what the calls above observe */
 	test_rnd_reseed_crng();
 	test_rnd_clear_pool();
-	test_set_pkcs11_config();
 
 	ret = common_test_result("rpc_api");
 

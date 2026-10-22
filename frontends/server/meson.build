@@ -31,7 +31,6 @@ if get_option('systemd').enabled()
 	After=esdm-server-unpriv.socket
 
 	After=esdm-server-egd.socket
-	After=esdm-server-egd-pr.socket
 	# SOCKET ACTIVATION END
 	'''
 	)
@@ -95,14 +94,16 @@ esdm_server_service = configure_file(
 install_data(esdm_server_service,
 	     install_dir: get_option('prefix') / 'lib/systemd/system')
 
+# The socket units: the server only takes the sockets of systemd with the
+# systemd support. Without it, it binds the paths itself and would fail on
+# those systemd holds already, so they are not installed then - the EGD socket
+# is served with --egd_socket instead.
 server_socket_priv_conf_data = configuration_data()
 server_socket_priv_conf_data.set('SOCKET_PATH', get_option('esdm-server-rpc-path-privileged') + '/esdm-rpc-priv.socket')
 esdm_server_priv_socket = configure_file(
 	input : 'esdm-server-priv.socket.in',
 	output : 'esdm-server-priv.socket',
 	configuration : server_socket_priv_conf_data)
-install_data(esdm_server_priv_socket,
-	     install_dir: get_option('prefix') / 'lib/systemd/system')
 
 server_socket_egd_conf_data = configuration_data()
 server_socket_egd_conf_data.set('SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
@@ -110,20 +111,6 @@ esdm_server_egd_socket = configure_file(
 	input : 'esdm-server-egd.socket.in',
 	output : 'esdm-server-egd.socket',
 	configuration : server_socket_egd_conf_data)
-install_data(esdm_server_egd_socket,
-	     install_dir: get_option('prefix') / 'lib/systemd/system')
-
-# Counterpart serving the prediction resistance generator. The EGD protocol
-# cannot ask for prediction resistance per request, so it gets a socket of its
-# own - see esdm_egd_server_enable_pr().
-server_socket_egd_pr_conf_data = configuration_data()
-server_socket_egd_pr_conf_data.set('SOCKET_PATH', get_option('esdm-server-egd-pr-socket-path'))
-esdm_server_egd_pr_socket = configure_file(
-	input : 'esdm-server-egd-pr.socket.in',
-	output : 'esdm-server-egd-pr.socket',
-	configuration : server_socket_egd_pr_conf_data)
-install_data(esdm_server_egd_pr_socket,
-	     install_dir: get_option('prefix') / 'lib/systemd/system')
 
 server_socket_unpriv_conf_data = configuration_data()
 server_socket_unpriv_conf_data.set('SOCKET_PATH', get_option('esdm-server-rpc-path-unprivileged') + '/esdm-rpc-unpriv.socket')
@@ -131,5 +118,9 @@ esdm_server_unpriv_socket = configure_file(
 	input : 'esdm-server-unpriv.socket.in',
 	output : 'esdm-server-unpriv.socket',
 	configuration : server_socket_unpriv_conf_data)
-install_data(esdm_server_unpriv_socket,
-	     install_dir: get_option('prefix') / 'lib/systemd/system')
+
+if get_option('systemd').enabled()
+	install_data([ esdm_server_priv_socket, esdm_server_egd_socket,
+		       esdm_server_unpriv_socket ],
+		     install_dir: get_option('prefix') / 'lib/systemd/system')
+endif

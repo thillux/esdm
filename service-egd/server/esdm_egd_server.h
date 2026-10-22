@@ -39,9 +39,9 @@ extern "C" {
  * RAND_egd() - draw from the ESDM unmodified.
  *
  * Opt-in: disabled unless this call is made or systemd hands over a socket
- * named ESDM_EGD_SOCKET (see esdm_egd_server_socket_init()). This enables the
- * socket serving the ordinary fully seeded generator; see
- * esdm_egd_server_enable_pr() for the prediction resistance counterpart.
+ * named ESDM_EGD_SOCKET (see esdm_egd_server_socket_init()). Next to the
+ * standard EGD commands, the socket serves the ESDM's own, see
+ * esdm_egd_protocol.h - prediction resistant reads among them.
  *
  * Only records the request, and must be invoked before esdm_rpc_server_init(),
  * i.e. while the server is still single-threaded and privileged.
@@ -51,22 +51,6 @@ extern "C" {
  * @return 0 on success, < 0 on error
  */
 int esdm_egd_server_enable(const char *socket_path);
-
-/**
- * @brief Enable the prediction resistance variant of the EGD interface
- *
- * The EGD protocol cannot ask for prediction resistance per request, so it is a
- * property of the socket: every request on this second one is served from
- * esdm_get_random_bytes_pr() rather than esdm_get_random_bytes_full(). That
- * generator delivers no more than the entropy sources just produced, so answers
- * take as long as collecting that entropy does. Everything stated at
- * esdm_egd_server_enable() applies here too; the two sockets are independent.
- *
- * @param [in] socket_path Path of the Unix domain socket to create
- *
- * @return 0 on success, < 0 on error
- */
-int esdm_egd_server_enable_pr(const char *socket_path);
 
 /**
  * @brief Set the PID the EGD get PID command reports
@@ -119,6 +103,19 @@ int esdm_egd_server_socket_init(void);
 int esdm_egd_server_start(void);
 
 /**
+ * @brief Map each EGD worker to a node DRNG of its own, or not
+ *
+ * By default, each worker thread serves the reads of its clients - all but the
+ * prediction resistant ones - from a node DRNG it is mapped to, see
+ * esdm_drng_node_bind(). Switched off, they are served by the first free node
+ * DRNG they find, as every other caller is. To be called before
+ * esdm_egd_server_start().
+ *
+ * @param [in] enable Each worker its node DRNG (true), or not (false)
+ */
+void esdm_egd_server_set_drng_mapping(bool enable);
+
+/**
  * @brief Async-signal-safe shutdown trigger for the EGD worker
  *
  * Only performs an atomic store; the worker observes it within the bounded
@@ -135,7 +132,7 @@ void esdm_egd_server_signal_exit_safe(void);
 void esdm_egd_server_fini(void);
 
 /**
- * @brief Remove the EGD sockets from the file system
+ * @brief Remove the EGD socket from the file system
  *
  * A socket the server bound itself is also the server's to remove; one handed
  * over by systemd socket activation is left to systemd. As with the RPC
@@ -147,15 +144,14 @@ void esdm_egd_server_cleanup(void);
 #ifdef ESDM_FUZZING
 /**
  * @brief Hand one stream of client bytes to the EGD connection state machine
- * @param [in] prediction_resistance Serve as the prediction resistance socket?
  * @param [in] out_fd Descriptor the responses are written to
  * @param [in] data The records, see above
  * @param [in] len Number of bytes in @p data
  * @return 0 when the connection remained usable, < 0 when it would have been
  * 	closed - which for a malformed stream is the expected outcome
  */
-int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
-			 const uint8_t *data, size_t len);
+int esdm_egd_fuzz_stream(int out_fd, const uint8_t *data, size_t len);
+
 #endif /* ESDM_FUZZING */
 
 #ifdef __cplusplus

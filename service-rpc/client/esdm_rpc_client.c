@@ -40,11 +40,13 @@
 #include "config.h"
 #include "constructor.h"
 #include "conv_be_le.h"
+#include "esdm_dtls.h"
 #include "esdm_rpc_client_internal.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
+#include "leak_check.h"
 #include "esdm_logger.h"
 #include "math_helper.h"
 #include "mutex.h"
@@ -178,13 +180,22 @@ static void drop_conn_socket(esdm_rpc_client_connection_t *rpc_conn,
 	if (rpc_conn == NULL) {
 		return;
 	}
+
+	/*
+	 * The DTLS goes with the socket it refers to. Nothing is sent for it -
+	 * no closing alert, the server sees the connection closed as it does
+	 * in the clear.
+	 */
+	esdm_dtls_free(rpc_conn->dtls);
+	rpc_conn->dtls = NULL;
+
 	if (rpc_conn->fd >= 0) {
 		if (shut_down)
 			shutdown(rpc_conn->fd, SHUT_RDWR);
 		close(rpc_conn->fd);
 	}
 	rpc_conn->fd = -1;
-	memset(&rpc_conn->last_used, 0, sizeof(rpc_conn->last_used));
+	rpc_conn->last_used_ms = 0;
 }
 
 static void reset_conn_socket(esdm_rpc_client_connection_t *rpc_conn)
@@ -227,7 +238,8 @@ static bool esdm_rpcc_interrupted(const esdm_rpc_client_connection_t *rpc_conn)
 	return esdm_rpcc_deadline_passed(rpc_conn->deadline);
 }
 
-static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
+/* Open a connection to the server, in the clear. */
+static int esdm_rpcc_open(esdm_rpc_client_connection_t *rpc_conn)
 {
 	const char *socketname = rpc_conn->socketname;
 	struct timespec ts = {
@@ -332,10 +344,343 @@ static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
 		reset_conn_socket(rpc_conn);
 	} else {
 		/* only update this time on a successful connection */
-		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		rpc_conn->last_used_ms = esdm_monotonic_coarse_ms();
 	}
 
 	return -errsv;
+}
+
+/*
+ * CLOCK_MONOTONIC in milliseconds, for the timeouts of the client's own: the
+ * wait for one answer, ESDM_RPCC_RX_TIMEOUT_MS over all of them, the DTLS
+ * setup and its retry. None is shorter than a hundred milliseconds, so the
+ * coarse clock does, which a request reads several times - a few nanoseconds
+ * each, against microseconds for the precise clock on a clocksource the vDSO
+ * cannot read. A deadline of the caller goes by the precise clock instead,
+ * see esdm_rpcc_deadline_passed().
+ */
+static int64_t esdm_rpcc_now_ms(void)
+{
+	return esdm_monotonic_coarse_ms();
+}
+
+#ifdef ESDM_DTLS
+
+/*
+ * How long a new connection may take to agree on DTLS and do the handshake -
+ * the answers to STARTDTLS and the probe, and the handshake, see
+ * ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h. The server answers them as
+ * any request, and handshakes put off for its other clients are taken in its
+ * next round. A server that did not get through in this time is used in the
+ * clear, on a new connection.
+ */
+#define ESDM_RPCC_DTLS_TIMEOUT_MS 1000
+
+/*
+ * How long a connection whose server did not agree to DTLS goes without asking
+ * again. The answer of a server stays the same until it is restarted, and
+ * asking costs a round trip - with a server not knowing STARTDTLS, which closes
+ * the connection on it, a second connection.
+ */
+#define ESDM_RPCC_DTLS_RETRY_MS 60000
+
+/*
+ * The DTLS context of the client side, one for the process. It is set up for
+ * the first connection whose server agrees to DTLS - setting up the TLS stack
+ * takes a few milliseconds, which a process talking to a server refusing it
+ * is spared - and kept for the lifetime of the process: a call of another
+ * thread may use it at any time, and the TLS stack keeps state of its own for
+ * good as well. Should it not be set up, the connections go on in the clear,
+ * not asking any more.
+ */
+static struct esdm_dtls_ctx *esdm_rpcc_dtls_ctx = NULL;
+static atomic_bool esdm_rpcc_dtls_ctx_failed = false;
+static pthread_mutex_t esdm_rpcc_dtls_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct esdm_dtls_ctx *esdm_rpcc_dtls_ctx_get(void)
+{
+	struct esdm_dtls_ctx *ctx;
+
+	pthread_mutex_lock(&esdm_rpcc_dtls_ctx_lock);
+	if (!esdm_rpcc_dtls_ctx && !atomic_load(&esdm_rpcc_dtls_ctx_failed)) {
+		int ret = esdm_dtls_ctx_alloc(false, &esdm_rpcc_dtls_ctx);
+
+		/*
+		 * Kept also when the library is unloaded - by
+		 * OPENSSL_cleanup() at the exit, with the provider using it.
+		 */
+		if (!ret)
+			esdm_leak_intended(esdm_rpcc_dtls_ctx);
+		if (ret) {
+			atomic_store(&esdm_rpcc_dtls_ctx_failed, true);
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_RPC,
+				"DTLS cannot be set up, connecting to the ESDM unencrypted: %s\n",
+				strerror(-ret));
+		}
+	}
+	ctx = esdm_rpcc_dtls_ctx;
+	pthread_mutex_unlock(&esdm_rpcc_dtls_ctx_lock);
+
+	return ctx;
+}
+
+/* Index of the probe method of the interface of @rpc_conn */
+static uint32_t
+esdm_rpcc_dtls_probe_index(const esdm_rpc_client_connection_t *rpc_conn)
+{
+	const ProtobufCServiceDescriptor *desc = rpc_conn->service.descriptor;
+	const ProtobufCMethodDescriptor *method =
+		protobuf_c_service_descriptor_get_method_by_name(
+			desc, desc == &priv_access__descriptor ?
+				      ESDM_RPC_PROTO_STARTDTLS_PROBE_PRIV :
+				      ESDM_RPC_PROTO_STARTDTLS_PROBE);
+
+	return (uint32_t)(method - desc->methods);
+}
+
+/*
+ * Wait for the connection to become readable, until @end_ms on the clock of
+ * esdm_rpcc_now_ms(). It is waited for in slices of the poll interval of an
+ * answer, checking for an interruption between them as a request does.
+ *
+ * @return 0 to look again, -EAGAIN when the caller asked to stop, -ETIMEDOUT
+ *	   at @end_ms, another negative errno if the poll failed
+ */
+static int esdm_rpcc_dtls_wait(esdm_rpc_client_connection_t *rpc_conn,
+			       int64_t end_ms)
+{
+	struct pollfd pfd = { .fd = rpc_conn->fd, .events = POLLIN };
+	int64_t left;
+
+	if (esdm_rpcc_interrupted(rpc_conn))
+		return -EAGAIN;
+
+	left = end_ms - esdm_rpcc_now_ms();
+	if (left <= 0)
+		return -ETIMEDOUT;
+	if (left > ESDM_RPCC_RX_POLL_MS)
+		left = ESDM_RPCC_RX_POLL_MS;
+
+	if (poll(&pfd, 1, (int)left) < 0 && errno != EINTR)
+		return -errno;
+
+	return 0;
+}
+
+/* The answer of a server agreeing to STARTDTLS */
+struct esdm_rpcc_dtls_accept {
+	struct esdm_rpc_proto_sc_header header;
+	uint32_t magic;
+} __attribute__((packed));
+
+/*
+ * Receive the next answer in the clear into @sc, as much of it as the
+ * acceptance of STARTDTLS has, discarding the rest of its message. @len
+ * receives the size of the whole message.
+ *
+ * @return 0 or a negative errno - -ECONNRESET if the server closed the
+ *	   connection, others as esdm_rpcc_dtls_wait()
+ */
+static int esdm_rpcc_dtls_answer(esdm_rpc_client_connection_t *rpc_conn,
+				 struct esdm_rpcc_dtls_accept *sc, size_t *len,
+				 int64_t end_ms)
+{
+	for (;;) {
+		/* MSG_TRUNC: the size of the message, if larger */
+		ssize_t n = recv(rpc_conn->fd, sc, sizeof(*sc),
+				 MSG_DONTWAIT | MSG_TRUNC);
+		int ret;
+
+		if (n == 0)
+			return -ECONNRESET;
+		if (n > 0) {
+			if ((size_t)n < sizeof(sc->header))
+				return -EPROTO;
+
+			sc->header.status_code =
+				le_bswap32(sc->header.status_code);
+			sc->header.method_index =
+				le_bswap32(sc->header.method_index);
+			sc->header.message_length =
+				le_bswap32(sc->header.message_length);
+			sc->header.request_id =
+				le_bswap32(sc->header.request_id);
+			sc->magic = le_bswap32(sc->magic);
+			*len = (size_t)n;
+
+			return 0;
+		}
+		if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+			return -errno;
+
+		ret = esdm_rpcc_dtls_wait(rpc_conn, end_ms);
+		if (ret)
+			return ret;
+	}
+}
+
+/* Send a request header alone, in the clear */
+static int esdm_rpcc_dtls_request(esdm_rpc_client_connection_t *rpc_conn,
+				  uint32_t method_index, uint32_t request_id)
+{
+	struct esdm_rpc_proto_cs_header cs = {
+		.method_index = le_bswap32(method_index),
+		.message_length = 0,
+		.request_id = le_bswap32(request_id),
+	};
+	/* A new connection has room for its first two messages */
+	ssize_t n = send(rpc_conn->fd, &cs, sizeof(cs),
+			 MSG_DONTWAIT | MSG_NOSIGNAL);
+
+	if (n < 0)
+		return -errno;
+
+	return n == (ssize_t)sizeof(cs) ? 0 : -EIO;
+}
+
+/*
+ * Ask the server for DTLS on the connection just opened, and do the handshake
+ * if it agrees - see ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h.
+ *
+ * @return 0 when the connection is encrypted now; -EOPNOTSUPP when it goes on in
+ *	   the clear; -EAGAIN when the caller asked to stop, the connection is gone
+ *	   then; another negative errno when the connection is gone - the server
+ *	   closed it, did not answer in time, or the handshake failed
+ */
+static int esdm_rpcc_startdtls(esdm_rpc_client_connection_t *rpc_conn)
+{
+	const uint32_t probe = esdm_rpcc_dtls_probe_index(rpc_conn);
+	const int64_t end_ms = esdm_rpcc_now_ms() + ESDM_RPCC_DTLS_TIMEOUT_MS;
+	struct esdm_rpcc_dtls_accept sc;
+	struct esdm_dtls_ctx *ctx;
+	struct esdm_dtls *dtls = NULL;
+	bool accepted;
+	size_t len;
+	int ret;
+
+	/* The probe right behind STARTDTLS, without waiting for its answer */
+	CKINT(esdm_rpcc_dtls_request(rpc_conn, ESDM_RPC_PROTO_STARTDTLS,
+				     ESDM_RPC_PROTO_STARTDTLS));
+	CKINT(esdm_rpcc_dtls_request(rpc_conn, probe, 0));
+
+	CKINT(esdm_rpcc_dtls_answer(rpc_conn, &sc, &len, end_ms));
+
+	/*
+	 * The probe answered first: a server leaving STARTDTLS unanswered. The
+	 * answers are matched by order, and none is outstanding.
+	 */
+	if (sc.header.method_index == probe) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+			    "STARTDTLS left unanswered by the server\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (sc.header.method_index != ESDM_RPC_PROTO_STARTDTLS) {
+		ret = -EPROTO;
+		goto out;
+	}
+
+	/* Anything else is a server not switching */
+	accepted =
+		(sc.header.status_code == PROTOBUF_C_RPC_STATUS_CODE_SUCCESS &&
+		 len == sizeof(sc) &&
+		 sc.header.message_length == sizeof(sc.magic) &&
+		 sc.header.request_id == ESDM_RPC_PROTO_STARTDTLS &&
+		 sc.magic == ESDM_RPC_PROTO_STARTDTLS);
+
+	/* The answer to the probe, of no interest beyond its coming */
+	CKINT(esdm_rpcc_dtls_answer(rpc_conn, &sc, &len, end_ms));
+	if (sc.header.method_index != probe) {
+		ret = -EPROTO;
+		goto out;
+	}
+
+	if (!accepted)
+		return -EOPNOTSUPP;
+
+	/* The server waits for the handshake now, whatever comes */
+	ctx = esdm_rpcc_dtls_ctx_get();
+	if (!ctx) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	CKINT(esdm_dtls_alloc(ctx, rpc_conn->fd, ESDM_RPC_MAX_MSG_SIZE, &dtls));
+
+	for (;;) {
+		ret = esdm_dtls_handshake(dtls);
+		if (ret != -EAGAIN)
+			break;
+
+		CKINT(esdm_rpcc_dtls_wait(rpc_conn, end_ms));
+	}
+	if (ret)
+		goto out;
+
+	rpc_conn->dtls = dtls;
+	dtls = NULL;
+
+out:
+	if (ret) {
+		esdm_dtls_free(dtls);
+		reset_conn_socket(rpc_conn);
+	}
+	return ret;
+}
+
+#endif /* ESDM_DTLS */
+
+/*
+ * Open a connection to the server - encrypted if it can be, in the clear if
+ * not, see ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h.
+ *
+ * Asking for DTLS can take up to ESDM_RPCC_DTLS_TIMEOUT_MS on top of the
+ * connection. It ends early as the request does when the caller asks to stop,
+ * which is the -EAGAIN of an interrupted request - nothing of the request has
+ * gone out yet then.
+ */
+static int esdm_connect_proto_service(esdm_rpc_client_connection_t *rpc_conn)
+{
+	int ret = esdm_rpcc_open(rpc_conn);
+
+	if (ret)
+		return ret;
+
+#ifdef ESDM_DTLS
+	if (esdm_rpcc_now_ms() >= rpc_conn->dtls_retry_ms &&
+	    !atomic_load(&esdm_rpcc_dtls_ctx_failed)) {
+		ret = esdm_rpcc_startdtls(rpc_conn);
+		if (ret == -EAGAIN)
+			return ret;
+
+		/* Opportunistic as the DTLS is, the server is used in the clear */
+		if (ret) {
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_RPC,
+				"No DTLS with ESDM server interface %s: %s\n",
+				rpc_conn->socketname,
+				ret == -EOPNOTSUPP ? "not offered" :
+						     strerror(-ret));
+			rpc_conn->dtls_retry_ms =
+				esdm_rpcc_now_ms() + ESDM_RPCC_DTLS_RETRY_MS;
+		}
+
+		/* The connection is gone unless the server just refused */
+		if (ret && ret != -EOPNOTSUPP) {
+			ret = esdm_rpcc_open(rpc_conn);
+			if (ret)
+				return ret;
+		}
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Connected to ESDM server interface %s %s%s\n",
+		    rpc_conn->socketname,
+		    rpc_conn->dtls ? "with DTLS " : "unencrypted",
+		    rpc_conn->dtls ? esdm_dtls_cipher(rpc_conn->dtls) : "");
+#endif
+
+	return 0;
 }
 
 static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
@@ -356,6 +701,40 @@ static int esdm_rpc_client_write_data_fd(esdm_rpc_client_connection_t *rpc_conn,
 			return -EAGAIN;
 
 		retries++;
+
+		if (rpc_conn->dtls) {
+			int rc = esdm_dtls_send(rpc_conn->dtls, data, len);
+
+			if (!rc) {
+				esdm_logger(LOGGER_DEBUG2, LOGGER_C_ANY,
+					    "%zu bytes written encrypted\n",
+					    len);
+				return 0;
+			}
+
+			/*
+			 * The server has none of the request unless it has
+			 * all of it: a request is served once its last record
+			 * is in, and that one did not go out. Whatever the
+			 * reason - the server went away as with EPIPE below, or
+			 * its socket is full -, the connection is of no use any
+			 * more, as the DTLS cannot take up a message cut short.
+			 * The request goes out on a new one, which is safe for
+			 * a privileged request as well.
+			 */
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_RPC,
+				"Encrypted write failed (%s), reconnecting\n",
+				strerror(-rc));
+			err = rc;
+			ret = -1;
+			reset_conn_socket(rpc_conn);
+			rc = esdm_connect_proto_service(rpc_conn);
+			if (rc)
+				return rc;
+			continue;
+		}
+
 		/*
 		 * Only a poll timeout of this very attempt counts - a stale
 		 * one would divert a later EPIPE from the reconnect below.
@@ -499,6 +878,45 @@ out:
 }
 
 /*
+ * Receive a message on the encrypted connection into @buf of @len bytes,
+ * waiting for at most @timeout_ms for it to complete.
+ *
+ * Unlike a message in the clear, an answer may arrive in several records, one
+ * after the other, each waking the poll below. They count as one wait, so a
+ * large answer does not use up the waits of the caller - and a server sending
+ * records forever cannot keep the caller beyond @timeout_ms either.
+ *
+ * @return the size of the message, -EAGAIN when it did not complete in that
+ *	   time, another negative errno when the connection is of no use any more
+ *	   - -ECONNRESET if the server closed it
+ */
+static ssize_t esdm_rpcc_dtls_recv(esdm_rpc_client_connection_t *rpc_conn,
+				   uint8_t *buf, size_t len, int timeout_ms)
+{
+	const int64_t end_ms = esdm_rpcc_now_ms() + timeout_ms;
+
+	for (;;) {
+		struct pollfd pfd = { .fd = rpc_conn->fd, .events = POLLIN };
+		ssize_t n = esdm_dtls_recv(rpc_conn->dtls, buf, len);
+		int64_t left;
+
+		if (n != -EAGAIN)
+			return n;
+
+		left = end_ms - esdm_rpcc_now_ms();
+		if (left <= 0)
+			return -EAGAIN;
+
+		/* A record the DTLS holds already is not signalled any more */
+		if (esdm_dtls_pending(rpc_conn->dtls))
+			continue;
+
+		if (poll(&pfd, 1, (int)left) < 0 && errno != EINTR)
+			return -errno;
+	}
+}
+
+/*
  * Receive the answer, waiting for at most @max_retries rounds of
  * ESDM_RPCC_RX_POLL_MS. Returns -EAGAIN when it did not come in that time.
  */
@@ -538,6 +956,63 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		}
 
 		retries++;
+
+		/*
+		 * The answer is hardly ever there yet when the request just
+		 * went out: the server has to be woken for it first. So the
+		 * first round waits until it is, rather than find the socket
+		 * empty with a read of its own - on an encrypted connection the
+		 * whole receive path of the DTLS layer. It is the round of
+		 * waiting the poll after an empty read below is, ended by the
+		 * same timeout, and the interrupt function was asked before it,
+		 * as before every round. A record the DTLS holds already is not
+		 * signalled by the socket any more.
+		 */
+		if (retries == 1 &&
+		    !(rpc_conn->dtls && esdm_dtls_pending(rpc_conn->dtls))) {
+			struct pollfd pfd = { .fd = rpc_conn->fd,
+					      .events = POLLIN };
+
+			if (!poll(&pfd, 1, CLIENT_RX_TIMEOUT_MS)) {
+				received = -1;
+				continue;
+			}
+		}
+
+		if (rpc_conn->dtls) {
+			received = esdm_rpcc_dtls_recv(rpc_conn, tbuf->reqbuf,
+						       sizeof(tbuf->reqbuf),
+						       CLIENT_RX_TIMEOUT_MS);
+
+			/* One round of waiting, as a poll timeout below */
+			if (received == -EAGAIN) {
+				received = -1;
+				continue;
+			}
+
+			/*
+			 * The DTLS is of no use after an error, and nor is the
+			 * connection - a message too large included, which the
+			 * DTLS refuses rather than reading it partly. A socket
+			 * failing is -EIO to the DTLS, which is what the read
+			 * in the clear below sees as the connection reset by
+			 * the server - one closing it with the request unread,
+			 * as when it reaps it as idle just as the request goes
+			 * out.
+			 */
+			if (received < 0) {
+				ret = received == -EIO ? -ECONNRESET :
+							 (int)received;
+				received = 0;
+				esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+					    "Encrypted read failed: %s\n",
+					    strerror(-ret));
+				reset_conn_socket(rpc_conn);
+				break;
+			}
+
+			goto received;
+		}
 
 		/*
 		 * The server uses SOCK_SEQPACKET which ensures that always the
@@ -596,6 +1071,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			break;
 		}
 
+	received:
 		/*
 		 * The server closed the connection, e.g. reaping it as idle
 		 * just as this request went out. No answer can come any more.
@@ -728,7 +1204,7 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 				memset_secure(tbuf->unpack_buf, 0,
 					      tlh.consumed);
 		}
-		clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+		rpc_conn->last_used_ms = esdm_rpcc_now_ms();
 	} else if (interrupted) {
 		const bool privileged = (rpc_conn->service.descriptor ==
 					 &priv_access__descriptor);
@@ -825,17 +1301,6 @@ out:
 }
 #endif /* ESDM_FUZZING */
 
-/* Milliseconds passed since @start on CLOCK_MONOTONIC. */
-static int64_t esdm_rpcc_elapsed_ms(const struct timespec *start)
-{
-	struct timespec now;
-
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	return ((int64_t)now.tv_sec - (int64_t)start->tv_sec) * 1000LL +
-	       ((int64_t)now.tv_nsec - (int64_t)start->tv_nsec) / 1000000LL;
-}
-
 static void esdm_client_invoke(ProtobufCService *service,
 			       unsigned int method_index,
 			       const ProtobufCMessage *input,
@@ -845,8 +1310,9 @@ static void esdm_client_invoke(ProtobufCService *service,
 	const ProtobufCMethodDescriptor *method = desc->methods + method_index;
 	esdm_rpc_client_connection_t *rpc_conn =
 		(esdm_rpc_client_connection_t *)service;
-	static const int64_t half_server_timeout_ns =
-		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC * 1000 / 2;
+	/* Half the idle timeout of the server, in esdm_rpcc_now_ms() */
+	static const int64_t half_server_timeout_ms =
+		(int64_t)ESDM_RPC_IDLE_TIMEOUT_USEC / 1000 / 2;
 	/* See ESDM_RPCC_PRIV_RX_TIMEOUT_MS and ESDM_RPCC_RX_TIMEOUT_MS */
 	const bool privileged = (desc == &priv_access__descriptor);
 	const unsigned int rx_retries =
@@ -856,8 +1322,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 				   ESDM_RPCC_RX_SUBMISSION_MS /
 					   ESDM_RPCC_RX_POLL_MS);
 	struct esdm_rpcc_tbuf *tbuf = esdm_rpcc_tbuf_get();
-	struct timespec current_time, start_time;
-	int64_t used_before_ns;
+	int64_t start_ms;
 	bool reconnected = false;
 	int ret;
 
@@ -878,17 +1343,9 @@ static void esdm_client_invoke(ProtobufCService *service,
 		goto out;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &start_time);
+	start_ms = esdm_rpcc_now_ms();
 
 	do {
-		clock_gettime(CLOCK_MONOTONIC, &current_time);
-		used_before_ns =
-			((int64_t)current_time.tv_sec -
-			 (int64_t)rpc_conn->last_used.tv_sec) *
-				1000000000LL +
-			((int64_t)current_time.tv_nsec -
-			 (int64_t)rpc_conn->last_used.tv_nsec);
-
 		/*
 		 * Connect to the server if we do not have a connection,
 		 * otherwise reuse the session.
@@ -897,7 +1354,8 @@ static void esdm_client_invoke(ProtobufCService *service,
 		 * ESDM_RPC_IDLE_TIMEOUT_USEC, consider it closed a bit earlier.
 		 */
 		if (rpc_conn->fd == -1 ||
-		    used_before_ns >= half_server_timeout_ns) {
+		    esdm_rpcc_now_ms() - rpc_conn->last_used_ms >=
+			    half_server_timeout_ms) {
 			reset_conn_socket(rpc_conn);
 			CKINT(esdm_connect_proto_service(rpc_conn));
 		}
@@ -929,7 +1387,7 @@ static void esdm_client_invoke(ProtobufCService *service,
 			ret = -EAGAIN;
 		} else if (ret == -EAGAIN &&
 			   (privileged ||
-			    esdm_rpcc_elapsed_ms(&start_time) >=
+			    esdm_rpcc_now_ms() - start_ms >=
 				    ESDM_RPCC_RX_TIMEOUT_MS)) {
 			/*
 			 * The answer did not come in time, again and again - or,
@@ -1361,19 +1819,49 @@ out:
 	return ret;
 }
 
+/*
+ * Check out a connection of the pool, see esdm_rpcc_get_unpriv_service().
+ *
+ * @home_conn is the connection of the pool the calling thread had last, plus
+ * one, 0 for none - an index rather than a pointer, as it outlives the pool it
+ * was taken from, and a fork. @deadline bounds the requests sent on the
+ * connection until it is put back, see esdm_rpcc_get_unpriv_service_deadline();
+ * @checkout_deadline only the wait for a connection, should all of them be
+ * busy. Either may be NULL for none.
+ *
+ * @return 0, -ETIMEDOUT if @deadline passed while waiting for a connection,
+ *	   -EBUSY if @checkout_deadline - another one - did, < 0 on other errors
+ */
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
-	uint32_t *num_conn_ptr, esdm_rpc_client_connection_t **ret_rpc_conn,
-	void *int_data, const struct timespec *deadline)
+	uint32_t *num_conn_ptr, uint32_t *home_conn,
+	esdm_rpc_client_connection_t **ret_rpc_conn, void *int_data,
+	const struct timespec *deadline,
+	const struct timespec *checkout_deadline)
 {
 	esdm_rpc_client_connection_t *rpc_conn_array, *rpc_conn_p;
-	uint32_t node, num_conn;
+	uint32_t node, num_conn, home;
 	bool found_unused_conn = false;
 	int ret = 0;
 	uint32_t i;
 
 	if (!ret_rpc_conn)
 		return -EFAULT;
+
+	/*
+	 * A call from inside the DTLS layer of this very client: the TLS stack
+	 * asked for random numbers while it set up or used a connection, in a
+	 * process where they are served by the ESDM - libesdm_getrandom, or an
+	 * application whose getrandom(3) or getentropy(3) asks the ESDM. The
+	 * outer call holds a connection - with a single one, this call would
+	 * wait for it forever -, and the TLS stack may hold the lock of the
+	 * random number generator it is seeding, which a handshake on another
+	 * connection would wait for. So it fails at once, as when no ESDM is
+	 * there: its caller takes the random numbers from the kernel. See
+	 * esdm_dtls_busy().
+	 */
+	if (esdm_dtls_busy())
+		return -EDEADLK;
 
 	/*
 	 * Hold the reader side from the pointer load until the connection's
@@ -1407,20 +1895,28 @@ static int esdm_rpcc_get_service(
 	node = min_uint32(esdm_rpcc_curr_node(), num_conn - 1);
 
 	/*
-	 * Always using a fixed connection based on the current
-	 * core slows the client down, as under load a thread waiting
-	 * on a reply from ESDM is paused and probably another thread
-	 * also communicating with ESDM scheduled on the same node
-	 * waiting for the RPC connection to become available again
-	 * with no gain.
-	 *
-	 * Try to optimistically find a free connection slot first.
+	 * The connection this thread had last, if it is free, and the free
+	 * one of the lowest index otherwise. A connection is opened when it
+	 * is used first, so the pool grows with the requests that are in
+	 * flight at the same time, up to its size, rather than with the CPUs a
+	 * thread happens to run on: going by the current CPU, a single
+	 * threaded process set up a connection - and its DTLS - for every CPU
+	 * the scheduler moved it to, and the server held them all. A thread
+	 * keeps to its connection as long as nobody else took it meanwhile, so
+	 * the threads of a busy process spread over the pool and stay there.
 	 */
-	for (i = 0; i < num_conn; ++i) {
-		rpc_conn_p = rpc_conn_array + (i + node) % num_conn;
-		if (mutex_w_trylock(&rpc_conn_p->ref_cnt) == 0) {
-			found_unused_conn = true;
-			break;
+	home = *home_conn;
+	if (home && home <= num_conn &&
+	    mutex_w_trylock(&rpc_conn_array[home - 1].ref_cnt) == 0) {
+		rpc_conn_p = rpc_conn_array + home - 1;
+		found_unused_conn = true;
+	} else {
+		for (i = 0; i < num_conn; ++i) {
+			rpc_conn_p = rpc_conn_array + i;
+			if (mutex_w_trylock(&rpc_conn_p->ref_cnt) == 0) {
+				found_unused_conn = true;
+				break;
+			}
 		}
 	}
 
@@ -1448,9 +1944,9 @@ static int esdm_rpcc_get_service(
 		atomic_fetch_add(&rpc_conn_p->waiters, 1);
 		mutex_reader_unlock(&esdm_rpcc_conn_lock);
 
-		if (deadline) {
+		if (checkout_deadline) {
 			lock_ret = mutex_w_timedlock(&rpc_conn_p->ref_cnt,
-						     deadline);
+						     checkout_deadline);
 		} else {
 			mutex_w_lock(&rpc_conn_p->ref_cnt);
 			lock_ret = 0;
@@ -1464,7 +1960,8 @@ static int esdm_rpcc_get_service(
 
 		if (lock_ret) {
 			*ret_rpc_conn = NULL;
-			return -ETIMEDOUT;
+			return checkout_deadline == deadline ? -ETIMEDOUT :
+							       -EBUSY;
 		}
 	} else {
 		mutex_reader_unlock(&esdm_rpcc_conn_lock);
@@ -1483,6 +1980,7 @@ static int esdm_rpcc_get_service(
 		return -ESHUTDOWN;
 	}
 
+	*home_conn = (uint32_t)(rpc_conn_p - rpc_conn_array) + 1;
 	*ret_rpc_conn = rpc_conn_p;
 	rpc_conn_p->interrupt_data = int_data;
 	rpc_conn_p->deadline = deadline;
@@ -1509,13 +2007,64 @@ static _Atomic(esdm_rpc_client_connection_t *) unpriv_rpc_conn = NULL;
 static uint32_t unpriv_rpc_conn_num = 0;
 /* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
 static uint32_t unpriv_rpc_conn_init_ref = 0;
+/* The connection the thread had last, see esdm_rpcc_get_service() */
+static __thread uint32_t unpriv_rpc_conn_home = 0;
+
+/*
+ * The checkout deadline of the calling thread, see
+ * esdm_rpcc_set_unpriv_checkout_deadline().
+ */
+static __thread const struct timespec *unpriv_rpc_checkout_deadline = NULL;
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+DSO_PUBLIC
+const struct timespec *
+esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline)
+{
+	const struct timespec *prev = unpriv_rpc_checkout_deadline;
+
+	unpriv_rpc_checkout_deadline = deadline;
+	return prev;
+}
+
+/*
+ * How long a call waits for the ESDM to become able to serve: until its
+ * deadline, without one until the checkout deadline of the thread, if any.
+ */
+static const struct timespec *
+esdm_rpcc_unpriv_pause_until(const struct timespec *deadline)
+{
+	return deadline ? deadline : unpriv_rpc_checkout_deadline;
+}
+
+/*
+ * How long a checkout waits for a connection: until the earlier of the
+ * deadline of the call and the checkout deadline of the thread, if any.
+ */
+static const struct timespec *
+esdm_rpcc_unpriv_checkout_by(const struct timespec *deadline)
+{
+	const struct timespec *thread = unpriv_rpc_checkout_deadline;
+
+	if (!deadline)
+		return thread;
+	if (!thread)
+		return deadline;
+
+	return (thread->tv_sec < deadline->tv_sec ||
+		(thread->tv_sec == deadline->tv_sec &&
+		 thread->tv_nsec < deadline->tv_nsec)) ?
+		       thread :
+		       deadline;
+}
 
 DSO_PUBLIC
 int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
 				 void *int_data)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, NULL);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     NULL, esdm_rpcc_unpriv_checkout_by(NULL));
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -1524,7 +2073,9 @@ int esdm_rpcc_get_unpriv_service_deadline(
 	const struct timespec *deadline)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, deadline);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
 }
 
 /* Documented with its declaration in esdm_rpc_client_internal.h */
@@ -1532,19 +2083,25 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   void *int_data,
 				   const struct timespec *deadline)
 {
+	const struct timespec *until = esdm_rpcc_unpriv_pause_until(deadline);
 	struct timespec sleep_ts = esdm_client_poll_ts;
 
 	esdm_rpcc_put_unpriv_service(*rpc_conn);
 	*rpc_conn = NULL;
 
-	if (deadline) {
+	/*
+	 * Not beyond the deadline of the call - nor, without one, beyond the
+	 * checkout deadline of the thread: the wait is for the ESDM to be able
+	 * to serve, which a call that must not wait does not do either.
+	 */
+	if (until) {
 		struct timespec now;
 		int64_t left_ns;
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		left_ns = ((int64_t)deadline->tv_sec - (int64_t)now.tv_sec) *
+		left_ns = ((int64_t)until->tv_sec - (int64_t)now.tv_sec) *
 				  1000000000LL +
-			  ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec);
+			  ((int64_t)until->tv_nsec - (int64_t)now.tv_nsec);
 		if (left_ns <= 0)
 			return -ETIMEDOUT;
 
@@ -1558,7 +2115,23 @@ int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 	nanosleep(&sleep_ts, NULL);
 
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data, deadline);
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
+}
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+int esdm_rpcc_unpriv_service_next(esdm_rpc_client_connection_t **rpc_conn,
+				  void *int_data,
+				  const struct timespec *deadline)
+{
+	esdm_rpcc_put_unpriv_service(*rpc_conn);
+	*rpc_conn = NULL;
+
+	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				     &unpriv_rpc_conn_home, rpc_conn, int_data,
+				     deadline,
+				     esdm_rpcc_unpriv_checkout_by(deadline));
 }
 
 DSO_PUBLIC
@@ -1599,13 +2172,16 @@ static _Atomic(esdm_rpc_client_connection_t *) priv_rpc_conn = NULL;
 static uint32_t priv_rpc_conn_num = 0;
 /* Number of outstanding init calls, guarded by esdm_rpcc_conn_lock */
 static uint32_t priv_rpc_conn_init_ref = 0;
+/* The connection the thread had last, see esdm_rpcc_get_service() */
+static __thread uint32_t priv_rpc_conn_home = 0;
 
 DSO_PUBLIC
 int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
 			       void *int_data)
 {
 	return esdm_rpcc_get_service(&priv_rpc_conn, &priv_rpc_conn_num,
-				     rpc_conn, int_data, NULL);
+				     &priv_rpc_conn_home, rpc_conn, int_data,
+				     NULL, NULL);
 }
 
 DSO_PUBLIC
@@ -1697,6 +2273,21 @@ static void reinit_conns_after_fork(
 	 */
 	for (i = 0; i < num_conn; ++i) {
 		/*
+		 * The DTLS of the connection is the parent's: its records go on
+		 * with the parent's sequence numbers, and nothing of it may be
+		 * sent from here. Releasing it is no business of this handler
+		 * either: freeing it goes into the TLS stack, whose locks a
+		 * thread of the parent may have held at the fork - it would
+		 * wait for them forever, in every child of the process, also
+		 * those that only exec. It is left behind, never used - its
+		 * memory is shared with the parent copy-on-write, so it costs
+		 * nothing as long as nobody touches it. Kept reachable for leak
+		 * checkers; a child forking again replaces it.
+		 */
+		rpc_conn_array[i].dtls_orphan = rpc_conn_array[i].dtls;
+		rpc_conn_array[i].dtls = NULL;
+
+		/*
 		 * Close only - no shutdown(). The socket is shared with the
 		 * parent, which may be in the middle of a request on it: a
 		 * shutdown would end the connection for the parent as well,
@@ -1748,6 +2339,15 @@ static void cleanup_after_fork_child(void)
 {
 	reinit_conns_after_fork(&unpriv_rpc_conn, unpriv_rpc_conn_num);
 	reinit_conns_after_fork(&priv_rpc_conn, priv_rpc_conn_num);
+
+#ifdef ESDM_DTLS
+	/*
+	 * A thread of the parent may have been setting up the DTLS context:
+	 * the lock is created anew, and the child sets up a context of its own
+	 * should the parent's not be there.
+	 */
+	pthread_mutex_init(&esdm_rpcc_dtls_ctx_lock, NULL);
+#endif
 
 	/*
 	 * Drop the lock taken by prepare_fork(). Re-initializing rather than

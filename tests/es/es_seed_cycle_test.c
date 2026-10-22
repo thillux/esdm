@@ -21,12 +21,16 @@
  * What one seed cycle costs, entropy source by entropy source.
  *
  * A reseed asks every active entropy source for its share and cannot finish
- * before the slowest of them has answered, so the sum reported at the end is
+ * before the slowest of them has answered, so what is reported at the end is
  * the floor under a reseed - and with it under how often a DRNG can be
  * reseeded before the reseeding, rather than the generation, is what sets the
- * throughput. Which source dominates that sum is the thing worth knowing, and
- * it is not the same source on every machine: a TPM or a PKCS#11 token answers
- * in milliseconds where the CPU source answers in microseconds.
+ * throughput. Asked one after the other, the sources cost their sum; asked in
+ * parallel - a build with es_parallel_fetch on a machine of more than one
+ * CPU, see esdm_get_seed_buffers() - the slowest of them. Both are printed,
+ * the one of this build and machine as the seed cycle. Which source dominates
+ * is the thing worth knowing, and it is not the same source on every machine:
+ * a TPM, or a provider reading a PKCS#11 token, answers in milliseconds where
+ * the CPU source answers in microseconds.
  *
  * The durations are printed rather than asserted on - they belong to the
  * hardware. What is checked is that every source reporting itself as available
@@ -48,6 +52,7 @@
 #include "esdm_es_mgr.h"
 #include "esdm_es_mgr_cb.h"
 #include "esdm_logger.h"
+#include "helper.h"
 
 /*
  * Per source: enough repetitions to average out a scheduling hiccup, but
@@ -130,8 +135,9 @@ static double test_time_es(struct esdm_es_cb *es, uint32_t *first_bits)
 
 int main(int argc, char *argv[])
 {
-	double cycle = 0.0;
+	double sum = 0.0, slowest = 0.0;
 	unsigned int measured = 0;
+	bool parallel = false;
 	uint32_t i;
 	int ret = 0;
 
@@ -173,7 +179,9 @@ int main(int argc, char *argv[])
 		test_print_duration(mean);
 		printf(" | %u bits\n", bits);
 
-		cycle += mean;
+		sum += mean;
+		if (mean > slowest)
+			slowest = mean;
 		measured++;
 	}
 
@@ -183,9 +191,20 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	/* As esdm_get_seed_buffers() and thread_fork_join() decide it */
+#ifdef ESDM_ES_PARALLEL_FETCH
+	parallel = measured > 1 && esdm_online_nodes() > 1;
+#endif
+
+	printf("%-24s | ", "one after the other");
+	test_print_duration(sum);
+	printf(" | the sum of %u sources\n", measured);
+	printf("%-24s | ", "in parallel");
+	test_print_duration(slowest);
+	printf(" | the slowest of them\n");
 	printf("%-24s | ", "one seed cycle");
-	test_print_duration(cycle);
-	printf(" | %u sources\n", measured);
+	test_print_duration(parallel ? slowest : sum);
+	printf(" | %s\n", parallel ? "in parallel" : "one after the other");
 
 out:
 	esdm_fini();

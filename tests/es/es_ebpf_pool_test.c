@@ -18,13 +18,16 @@
  */
 
 /*
- * Test of the conditioning pool of the eBPF entropy sources across a hash
- * failure, and of the fetch and the reported maximum of an uncredited source.
+ * Test of the conditioning pool of the eBPF entropy sources: the XDRBG-256 it
+ * is, its behaviour across an XOF failure, and the fetch and the reported
+ * maximum of an uncredited source.
  *
- * An extraction whose hash chain fails loses what the pool absorbed, and the
+ * An extraction whose XDRBG fails loses what the pool absorbed, and the
  * entropy credited for it. It must not lose the source: the pool once stayed
  * uninitialized after such a failure, every later insert was refused, and the
  * source never credited anything again until it was reset or reinitialized.
+ * An insert whose XDRBG fails loses the same, and must not keep the credit
+ * for it either.
  *
  * The pool needs neither the eBPF programs nor privileges, but its functions
  * are internal to the glue, so the glue is compiled into the test. A source
@@ -33,8 +36,9 @@
  */
 
 /* The unit under test */
-#include "es_ebpf/esdm_es_ebpf.c"
+#include "esdm_es_ebpf.c"
 
+#include "build_bug_on.h"
 #include "common_test.h"
 
 enum ebpf_pool_fail {
@@ -43,24 +47,33 @@ enum ebpf_pool_fail {
 	ebpf_pool_fail_final,
 	/* Starting the pool over fails as well */
 	ebpf_pool_fail_all,
+	/* Absorbing data fails */
+	ebpf_pool_fail_update,
 };
 
 static enum ebpf_pool_fail ebpf_pool_fail = ebpf_pool_fail_none;
-static struct esdm_hash_cb ebpf_pool_hash_cb;
-static const struct esdm_hash_cb *ebpf_pool_hash_real;
+static struct esdm_xof_cb ebpf_pool_xof_cb;
+static const struct esdm_xof_cb *ebpf_pool_xof_real;
 
-static int ebpf_pool_hash_init(void *hash)
+static int ebpf_pool_xof_init(void *xof)
 {
 	if (ebpf_pool_fail == ebpf_pool_fail_all)
 		return -EFAULT;
-	return ebpf_pool_hash_real->hash_init(hash);
+	return ebpf_pool_xof_real->xof_init(xof);
 }
 
-static int ebpf_pool_hash_final(void *hash, uint8_t *digest)
+static int ebpf_pool_xof_update(void *xof, const uint8_t *in, size_t inlen)
+{
+	if (ebpf_pool_fail == ebpf_pool_fail_update)
+		return -EFAULT;
+	return ebpf_pool_xof_real->xof_update(xof, in, inlen);
+}
+
+static int ebpf_pool_xof_final(void *xof, uint8_t *out, size_t outlen)
 {
 	if (ebpf_pool_fail != ebpf_pool_fail_none)
 		return -EFAULT;
-	return ebpf_pool_hash_real->hash_final(hash, digest);
+	return ebpf_pool_xof_real->xof_final(xof, out, outlen);
 }
 
 static uint32_t ebpf_pool_rate_bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
@@ -84,6 +97,50 @@ static uint32_t ebpf_pool_extract(struct esdm_ebpf_es *es)
 	esdm_ebpf_get_ent(es, &eb_es, ESDM_DRNG_SECURITY_STRENGTH_BITS);
 
 	return eb_es.e_bits;
+}
+
+/*
+ * The pool is the XDRBG-256 as specified, with "ESDM eBPF pool " and the name
+ * of the source as alpha: instantiated from the bytes 0x00 ... 0x3f, it
+ * delivers the output of the XDRBG, reseeded from 0x40 ... 0x7f the output
+ * after the reseed - the known answers are computed independently of the
+ * ESDM.
+ */
+static void ebpf_pool_xdrbg(struct esdm_ebpf_es *es)
+{
+	static const uint8_t exp_instantiate[] = {
+		0x42, 0x36, 0xb2, 0x42, 0xf1, 0x78, 0xe4, 0xf4,
+		0xb0, 0x2b, 0x57, 0xbf, 0x08, 0x1c, 0x31, 0xa8,
+		0xd9, 0x88, 0x07, 0x4d, 0xdb, 0xa6, 0x61, 0xb1,
+		0x42, 0xa5, 0x09, 0x6a, 0xe2, 0x70, 0xac, 0xd5,
+	};
+	static const uint8_t exp_reseed[] = {
+		0x1c, 0xf8, 0xf8, 0x29, 0xb4, 0xbc, 0x99, 0x8d,
+		0xc0, 0x2e, 0xe6, 0xdf, 0x0d, 0x6b, 0x59, 0x59,
+		0x5c, 0x4c, 0x44, 0xf1, 0xde, 0x19, 0x0d, 0xa7,
+		0x4e, 0xea, 0xa8, 0x4c, 0x35, 0x53, 0x8c, 0x1d,
+	};
+	struct entropy_es eb_es;
+	uint8_t seed[128];
+	unsigned int i;
+
+	BUILD_BUG_ON(sizeof(exp_instantiate) !=
+		     ESDM_DRNG_SECURITY_STRENGTH_BYTES);
+
+	for (i = 0; i < sizeof(seed); i++)
+		seed[i] = (uint8_t)i;
+
+	CHECK_EQ(esdm_ebpf_pool_insert(es, seed, 64), 0);
+	memset(&eb_es, 0, sizeof(eb_es));
+	esdm_ebpf_get_ent(es, &eb_es, ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	CHECK(!memcmp(eb_es.e, exp_instantiate, sizeof(exp_instantiate)),
+	      "the instantiated pool does not deliver XDRBG-256 output");
+
+	CHECK_EQ(esdm_ebpf_pool_insert(es, seed + 64, 64), 0);
+	memset(&eb_es, 0, sizeof(eb_es));
+	esdm_ebpf_get_ent(es, &eb_es, ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	CHECK(!memcmp(eb_es.e, exp_reseed, sizeof(exp_reseed)),
+	      "the reseeded pool does not deliver XDRBG-256 output");
 }
 
 /*
@@ -145,9 +202,54 @@ static void ebpf_pool_uncredited(struct esdm_ebpf_es *es)
 	ebpf_pool_rate_bits = ESDM_DRNG_SECURITY_STRENGTH_BITS;
 }
 
+/*
+ * An insert whose XDRBG fails discards the pool and the data of every event
+ * credited so far. The count of those events once survived it, and the next
+ * record - absorbed by a new instantiation - was credited on top of it: the
+ * source claimed entropy for data that was gone.
+ */
+static void ebpf_pool_insert_failure(struct esdm_ebpf_es *es)
+{
+	struct esdm_ebpf_event_rec rec;
+	unsigned int i;
+
+	memset(&rec, 0, sizeof(rec));
+	rec.type = esdm_ebpf_rec_event;
+	rec.cpu = UINT32_MAX;
+	rec.events = ESDM_EBPF_BATCH_EVENTS;
+	rec.reset_gen = es->reset_gen;
+	rec.health_epoch = es->health_epoch;
+	for (i = 0; i < ESDM_EBPF_BATCH_EVENTS; i++)
+		rec.delta[i] = i * 104729 + 7;
+
+	/* Room for two records' worth of credit, so no cap interferes */
+	CHECK(esdm_ebpf_events_per_block(es) > 2 * ESDM_EBPF_BATCH_EVENTS,
+	      "one output block costs too few events for this test");
+
+	es->credited_events = 0;
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	CHECK_EQ(es->credited_events, ESDM_EBPF_BATCH_EVENTS);
+
+	ebpf_pool_fail = ebpf_pool_fail_update;
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	ebpf_pool_fail = ebpf_pool_fail_none;
+	CHECK(!esdm_xdrbg_started(&es->pool),
+	      "the pool absorbed data its XOF refused");
+	CHECK_EQ(es->credited_events, 0);
+
+	/* The new instantiation is credited with what it absorbed, no more */
+	esdm_ebpf_handle_events(es, &rec, sizeof(rec));
+	CHECK(esdm_xdrbg_started(&es->pool),
+	      "an insert did not start the pool over");
+	CHECK_EQ(es->credited_events, ESDM_EBPF_BATCH_EVENTS);
+	CHECK_EQ(esdm_ebpf_collected_entropy(es),
+		 esdm_ebpf_entropy_of(es, ESDM_EBPF_BATCH_EVENTS));
+
+	es->credited_events = 0;
+}
+
 int main(void)
 {
-	struct esdm_drng *drng = esdm_drng_init_instance();
 	struct esdm_ebpf_es es = {
 		.name = "test",
 		.entropy_rate = ebpf_pool_rate,
@@ -157,14 +259,17 @@ int main(void)
 
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 
-	ebpf_pool_hash_real = drng->hash_cb;
-	ebpf_pool_hash_cb = *ebpf_pool_hash_real;
-	ebpf_pool_hash_cb.hash_init = ebpf_pool_hash_init;
-	ebpf_pool_hash_cb.hash_final = ebpf_pool_hash_final;
-	drng->hash_cb = &ebpf_pool_hash_cb;
+	ebpf_pool_xof_real = esdm_default_xof_cb;
+	ebpf_pool_xof_cb = *ebpf_pool_xof_real;
+	ebpf_pool_xof_cb.xof_init = ebpf_pool_xof_init;
+	ebpf_pool_xof_cb.xof_update = ebpf_pool_xof_update;
+	ebpf_pool_xof_cb.xof_final = ebpf_pool_xof_final;
+	esdm_default_xof_cb = &ebpf_pool_xof_cb;
 
 	CHECK_EQ(esdm_ebpf_pool_alloc(&es), 0);
-	CHECK(es.pool_initialized, "the pool was not initialized");
+	CHECK(esdm_xdrbg_started(&es.pool), "the pool was not started");
+
+	ebpf_pool_xdrbg(&es);
 
 	ebpf_pool_credit(&es);
 	CHECK(ebpf_pool_extract(&es), "a credited pool delivered no entropy");
@@ -175,7 +280,7 @@ int main(void)
 	CHECK_EQ(ebpf_pool_extract(&es), 0);
 	ebpf_pool_fail = ebpf_pool_fail_none;
 	CHECK_EQ(es.credited_events, 0);
-	CHECK(es.pool_initialized,
+	CHECK(esdm_xdrbg_started(&es.pool),
 	      "the pool was not started over after a failed extraction");
 	CHECK_EQ(esdm_ebpf_pool_insert(&es, data, sizeof(data)), 0);
 
@@ -190,7 +295,8 @@ int main(void)
 	ebpf_pool_credit(&es);
 	ebpf_pool_fail = ebpf_pool_fail_all;
 	CHECK_EQ(ebpf_pool_extract(&es), 0);
-	CHECK(!es.pool_initialized, "a pool that failed to start is in use");
+	CHECK(!esdm_xdrbg_started(&es.pool),
+	      "a pool that failed to start is in use");
 	CHECK(esdm_ebpf_pool_insert(&es, data, sizeof(data)),
 	      "a pool that cannot start took data");
 	ebpf_pool_fail = ebpf_pool_fail_none;
@@ -203,12 +309,14 @@ int main(void)
 	CHECK_EQ(ebpf_pool_extract(&es), 0);
 	ebpf_pool_fail = ebpf_pool_fail_none;
 	CHECK_EQ(esdm_ebpf_pool_insert(&es, data, sizeof(data)), 0);
-	CHECK(es.pool_initialized, "an insert did not start the pool over");
+	CHECK(esdm_xdrbg_started(&es.pool),
+	      "an insert did not start the pool over");
 
+	ebpf_pool_insert_failure(&es);
 	ebpf_pool_uncredited(&es);
 
 	esdm_ebpf_pool_dealloc(&es);
-	drng->hash_cb = ebpf_pool_hash_real;
+	esdm_default_xof_cb = ebpf_pool_xof_real;
 
 	return common_test_result("es_ebpf_pool");
 }

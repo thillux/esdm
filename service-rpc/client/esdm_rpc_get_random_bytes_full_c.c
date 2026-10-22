@@ -37,10 +37,10 @@ struct esdm_get_random_bytes_full_buf {
 	size_t buflen;
 };
 
-static void
-esdm_rpcc_get_random_bytes_full_cb(const RandValResponse *response,
-				   void *closure_data)
+static void esdm_rpcc_get_random_bytes_full_cb(const ProtobufCMessage *message,
+					       void *closure_data)
 {
+	const RandValResponse *response = (const RandValResponse *)message;
 	struct esdm_get_random_bytes_full_buf *buffer =
 		(struct esdm_get_random_bytes_full_buf *)closure_data;
 
@@ -69,7 +69,14 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_full_buf buffer;
-	size_t maxbuflen = buflen, orig_buflen = buflen;
+	/*
+	 * No more per request than the server serves: asked for more, it only
+	 * answers with its maximum, and every larger call paid a round trip
+	 * for being told what is known here already. A server serving less
+	 * still says so, and is asked for that much from then on.
+	 */
+	size_t maxbuflen = min_size(buflen, ESDM_RPC_MAX_DATA),
+	       orig_buflen = buflen;
 	ssize_t ret = 0;
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
@@ -83,7 +90,9 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 
 		unpriv_access__rpc_get_random_bytes_full(
 			&rpc_conn->service, &msg,
-			esdm_rpcc_get_random_bytes_full_cb, &buffer);
+			(RandValResponse_Closure)
+				esdm_rpcc_get_random_bytes_full_cb,
+			&buffer);
 
 		/*
 		 * The callback only runs once a response was received. When the
@@ -126,6 +135,14 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;
+
+		/*
+		 * The next part on a connection checked out anew, see
+		 * esdm_rpcc_unpriv_service_next()
+		 */
+		if (buflen)
+			CKINT(esdm_rpcc_unpriv_service_next(&rpc_conn, int_data,
+							    NULL));
 	}
 
 out:

@@ -45,7 +45,7 @@
 #include <string.h>
 
 #include "common_test.h"
-#include "es_cpu/cpu_random_x86.h"
+#include "cpu_random_x86.h"
 
 /*
  * Words drawn per instruction. Large enough for the distribution checks below

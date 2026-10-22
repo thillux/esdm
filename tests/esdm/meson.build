@@ -9,7 +9,7 @@ esdm_ipc_ns = files('../test_ipc_ns.c')
 # and needs neither a server nor an initialized DRNG.
 esdm_es_buf_test = executable(
 	'esdm_es_buf_test',
-	[ files('../../esdm/esdm_es_buf.c'), 'esdm_es_buf_test.c' ],
+	[ files('../../esdm/es/esdm_es_buf.c'), 'esdm_es_buf_test.c' ],
 	include_directories: [ include_dirs_server,
 			       include_directories('../common') ],
 	dependencies: dependencies_server,
@@ -17,6 +17,18 @@ esdm_es_buf_test = executable(
 )
 
 test('ESDM per-ES block cache', esdm_es_buf_test)
+
+# The text form of the JSON status, on documents of the test's own: the printer
+# is compiled into the test, which needs nothing of the ESDM beyond it.
+esdm_status_txt_test = executable(
+	'esdm_status_txt_test',
+	[ files('../../esdm/status/esdm_status_txt.c'), 'esdm_status_txt_test.c' ],
+	include_directories: [ include_dirs_server,
+			       include_directories('../common') ],
+	dependencies: [ json_c_dep ],
+)
+
+test('ESDM status text printer', esdm_status_txt_test)
 
 # fips.c only exists in a FIPS build. Like the block cache above it is compiled
 # into the test rather than linked from the library, so the configuration probe
@@ -28,7 +40,7 @@ if get_option('fips140')
 		[ files('../../esdm/fips.c'), 'esdm_fips_test.c' ],
 		include_directories: [ include_dirs_server,
 				       include_directories('../common') ],
-		dependencies: dependencies_server,
+		dependencies: dependencies_server + [ dl_dep ],
 		link_with: esdm_common_static_lib,
 	)
 
@@ -40,7 +52,7 @@ endif
 if get_option('crypto_backend') == 'openssl'
 	esdm_openssl_reseed_test = executable(
 		'esdm_openssl_reseed_test',
-		[ files('../../esdm/esdm_openssl.c'),
+		[ files('../../esdm/crypto/esdm_openssl.c'),
 		  'esdm_openssl_reseed_test.c' ],
 		include_directories: [ include_dirs_esdm_lib,
 				       include_directories('../common') ],
@@ -113,6 +125,22 @@ if get_option('esdm-server').enabled()
 	esdm_drng_mgr_throughput_test = executable(
 		'esdm_drng_mgr_throughput_test',
 		[ esdm_ipc_ns, 'esdm_drng_mgr_throughput_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_fork_test = executable(
+		'esdm_fork_test',
+		[ esdm_ipc_ns, 'esdm_fork_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_drng_mgr_run_dry_test = executable(
+		'esdm_drng_mgr_run_dry_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_run_dry_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -234,6 +262,20 @@ if get_option('esdm-server').enabled()
 
 		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
 
+		# Threads mapped to a node DRNG each, as the server's workers
+		# are: waits for the reseed worker to bring DRNGs back, which
+		# may take a while under a sanitizer.
+		esdm_drng_node_bind_test = executable(
+			'esdm_drng_node_bind_test',
+			[ esdm_ipc_ns, 'esdm_drng_node_bind_test.c' ],
+			include_directories: include_dirs_server,
+			link_with: esdm_static_lib,
+			dependencies: dependencies_server,
+		)
+
+		test('ESDM threads mapped to a node DRNG each',
+			esdm_drng_node_bind_test, timeout: 180)
+
 		esdm_node_alloc_seeding_test = executable(
 			'esdm_node_alloc_seeding_test',
 			[ esdm_ipc_ns, 'esdm_node_alloc_seeding_test.c' ],
@@ -289,25 +331,35 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM PR DRNG request of 4 GiB', esdm_pr_large_request_test)
 
-	esdm_aux_digestsize_test = executable(
-		'esdm_aux_digestsize_test',
-		[ esdm_ipc_ns, 'esdm_aux_digestsize_test.c' ],
+	esdm_aux_xdrbg_test = executable(
+		'esdm_aux_xdrbg_test',
+		[ esdm_ipc_ns, 'esdm_aux_xdrbg_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
 	)
 
-	test('ESDM aux pool digest size', esdm_aux_digestsize_test)
+	test('ESDM aux pool XDRBG-256', esdm_aux_xdrbg_test)
 
-	esdm_aux_hash_failure_test = executable(
-		'esdm_aux_hash_failure_test',
-		[ esdm_ipc_ns, 'esdm_aux_hash_failure_test.c' ],
+	esdm_aux_xof_failure_test = executable(
+		'esdm_aux_xof_failure_test',
+		[ esdm_ipc_ns, 'esdm_aux_xof_failure_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
 	)
 
-	test('ESDM aux pool hash failure', esdm_aux_hash_failure_test)
+	test('ESDM aux pool XOF failure', esdm_aux_xof_failure_test)
+
+	esdm_aux_add_entropy_test = executable(
+		'esdm_aux_add_entropy_test',
+		[ esdm_ipc_ns, 'esdm_aux_add_entropy_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM aux pool entropy credit', esdm_aux_add_entropy_test)
 
 	esdm_reseed_per_request_test = executable(
 		'esdm_reseed_per_request_test',
@@ -419,6 +471,20 @@ if get_option('esdm-server').enabled()
 	# suite has the machine says more about the suite than about the ESDM.
 	test('ESDM DRNG manager sustained generation', esdm_drng_mgr_throughput_test,
 		timeout: 300,
+		is_parallel: false,
+		priority: -10)
+
+	test('ESDM fork - initial DRNG', esdm_fork_test, args : [ 'initial' ])
+	if get_option('node').enabled()
+		test('ESDM fork - node DRNG', esdm_fork_test, args : [ 'node' ])
+	endif
+
+	# Serial as well: it keeps several CPUs busy generating, and the node
+	# DRNGs coming back in time is a matter of the reseed worker getting a
+	# CPU of its own.
+	test('ESDM DRNG manager node DRNGs running dry under load',
+		esdm_drng_mgr_run_dry_test,
+		timeout: 120,
 		is_parallel: false,
 		priority: -10)
 

@@ -69,6 +69,14 @@
  */
 #define TEST_SLOW_CONNS 600
 /*
+ * The descriptor limit of the test and of the server it starts: the slow
+ * connections, the client's and some to spare. The server keeps up to half of
+ * its limit for other uses than the unprivileged connections - with the soft
+ * limit of 1024 that systemd sets, it had slots for 512 of them only and
+ * closed the least recently used ones to make room for the others.
+ */
+#define TEST_NOFILE (2 * (TEST_SLOW_CONNS + 256))
+/*
  * Size of the answers. Small, so that what the server has to do per round stays
  * small next to waiting for the clients, and so that each answer takes the same
  * space in the send buffer: a large one is partly held in pages, and how many
@@ -91,10 +99,14 @@
  * How long the ordinary client may take, and the server to drop all of the
  * connections once their send buffers are full. A server that waits for each
  * of them only a few milliseconds before it drops it takes 3.3 s and more on
- * an idle machine, one that drops them at once a few hundred ms - but up to
- * 2 s on a loaded one, which is what the bound leaves room for.
+ * an idle machine, one that drops them at once a few hundred ms. On a loaded
+ * machine, or with a server built with the sanitizers and for coverage, it
+ * takes longer for everything, the dropping included - 2.5 s and more. The
+ * bound is a number of the rounds the server takes over the connections, as
+ * measured on the answers before, but no less than TEST_MAX_MS.
  */
 #define TEST_MAX_MS 2500
+#define TEST_MAX_ROUNDS 100
 /* How long the server may take to drop the connections that do not read */
 #define TEST_DROP_MS 60000
 
@@ -143,8 +155,8 @@ static int test_server_start(void)
 	}
 	test_server_pid = pid;
 
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+	test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+			       TEST_WAIT_TIMEOUT_MS);
 
 	return 0;
 }
@@ -153,7 +165,7 @@ static void test_server_stop(void)
 {
 	if (test_server_pid > 0) {
 		kill(test_server_pid, SIGTERM);
-		waitpid(test_server_pid, NULL, 0);
+		test_env_reap_daemon_or_fail(test_server_pid, "esdm-server");
 	}
 	test_server_pid = 0;
 }
@@ -217,9 +229,14 @@ static int test_connect(void)
 	return fd;
 }
 
+/* The most requests sent at once on a connection, see test_send_requests() */
+#define TEST_MAX_REQUESTS 1024
+
 /* Send @num requests for status reports of @len bytes, as far as they go */
 static void test_send_requests(int fd, unsigned int num, uint32_t len)
 {
+	static struct mmsghdr msgs[TEST_MAX_REQUESTS];
+	struct iovec iov;
 	uint8_t req[sizeof(struct esdm_rpc_proto_cs_header) + 8];
 	struct esdm_rpc_proto_cs_header cs = {
 		.method_index = TEST_METHOD_STATUS,
@@ -244,10 +261,29 @@ static void test_send_requests(int fd, unsigned int num, uint32_t len)
 	cs.message_length = (uint32_t)msglen;
 	memcpy(req, &cs, sizeof(cs));
 
+	/*
+	 * All of them in one call. Sent one call per request, the requests of
+	 * the hundreds of connections took seconds where the test is slow -
+	 * built with the sanitizers and for coverage, or with little of the
+	 * CPU -, while the server stopped below holds the connections it is
+	 * done with idle, which it reaps after its idle timeout.
+	 */
+	iov.iov_base = req;
+	iov.iov_len = sizeof(cs) + msglen;
+	if (num > TEST_MAX_REQUESTS)
+		num = TEST_MAX_REQUESTS;
+	memset(msgs, 0, num * sizeof(msgs[0]));
 	for (i = 0; i < num; i++) {
-		if (send(fd, req, sizeof(cs) + msglen,
-			 MSG_NOSIGNAL | MSG_DONTWAIT) < 0)
+		msgs[i].msg_hdr.msg_iov = &iov;
+		msgs[i].msg_hdr.msg_iovlen = 1;
+	}
+	for (i = 0; i < num;) {
+		int n = sendmmsg(fd, msgs + i, num - i,
+				 MSG_NOSIGNAL | MSG_DONTWAIT);
+
+		if (n <= 0)
 			break;
+		i += (unsigned int)n;
 	}
 }
 
@@ -377,24 +413,31 @@ int main(void)
 	uint8_t buf[32];
 	unsigned int first, rest, i, opened = 0, closed = 0, drained = 0;
 	size_t sndbuf;
-	uint64_t span = 0;
+	uint64_t span = 0, start, round_ms, max_ms = TEST_MAX_MS;
 	pthread_t caller;
 	bool caller_running = false;
 	ssize_t rc;
 	int ret;
 
-	ret = test_server_start();
-	if (ret)
-		return ret;
-
-	/* The slow connections, the client's and some to spare */
-	if (!getrlimit(RLIMIT_NOFILE, &rl) &&
-	    rl.rlim_cur < TEST_SLOW_CONNS + 256) {
-		rl.rlim_cur = TEST_SLOW_CONNS + 256;
+	/*
+	 * Before the server starts, which takes the limit over, see
+	 * TEST_NOFILE.
+	 */
+	if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_cur < TEST_NOFILE) {
+		rl.rlim_cur = TEST_NOFILE;
 		if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
 			rl.rlim_cur = rl.rlim_max;
 		setrlimit(RLIMIT_NOFILE, &rl);
 	}
+	if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur < TEST_NOFILE) {
+		printf("The descriptor limit cannot be raised to %u - skipping\n",
+		       TEST_NOFILE);
+		return 77;
+	}
+
+	ret = test_server_start();
+	if (ret)
+		return ret;
 
 	ret = esdm_rpcc_init_unpriv_service(NULL);
 	if (ret) {
@@ -435,20 +478,47 @@ int main(void)
 	 * quarter of it by their payload; with what the kernel adds, about
 	 * half. Once the server answered all of them, the connections are all
 	 * in the same state.
+	 *
+	 * Asked for while the server is stopped, as the rest below: it finds
+	 * the requests of all connections at once, and the time measured below
+	 * is the server's alone.
 	 */
 	sndbuf = test_sndbuf();
 	first = (unsigned int)(sndbuf / TEST_ANSWER_LEN / 4);
+	kill(test_server_pid, SIGSTOP);
 	for (i = 0; i < opened; i++)
 		test_send_requests(fds[i], first, TEST_ANSWER_LEN);
+	start = test_now_ms();
+	kill(test_server_pid, SIGCONT);
 	if (!test_wait_requests_read(fds, opened)) {
 		printf("FAIL: the server does not answer the requests\n");
 		ret = 1;
 		goto out_close;
 	}
 
+	/*
+	 * The bound below, on this machine as it runs the server now: as many
+	 * of the rounds the server just took for these requests as
+	 * TEST_MAX_ROUNDS, at least TEST_MAX_MS.
+	 */
+	round_ms = (test_now_ms() - start) / (first ? first : 1);
+	max_ms = TEST_MAX_ROUNDS * round_ms;
+	if (max_ms < TEST_MAX_MS)
+		max_ms = TEST_MAX_MS;
+	printf("A round over the connections took %llu ms, bound %llu ms\n",
+	       (unsigned long long)round_ms, (unsigned long long)max_ms);
+
+	/*
+	 * A connection closed now was dropped for a send buffer the first
+	 * answers filled - or reaped as idle while the server was still busy
+	 * with the others. It serves its connections in turn, those it has yet
+	 * to accept included, so none is done with its requests more than a
+	 * round before the last.
+	 */
 	for (i = 0; i < opened; i++) {
 		if (test_closed_by_server(fds[i])) {
-			printf("FAIL: the first answers filled a send buffer\n");
+			printf("FAIL: connection %u was closed after the first answers - dropped for a full send buffer, or reaped as idle\n",
+			       i);
 			ret = 1;
 			goto out_close;
 		}
@@ -496,9 +566,9 @@ int main(void)
 		printf("FAIL: an ordinary call failed: %d\n",
 		       atomic_load(&test_failed));
 		ret = 1;
-	} else if (atomic_load(&test_max_took) > TEST_MAX_MS) {
-		printf("FAIL: an ordinary call took longer than %u ms\n",
-		       TEST_MAX_MS);
+	} else if (atomic_load(&test_max_took) > max_ms) {
+		printf("FAIL: an ordinary call took longer than %llu ms\n",
+		       (unsigned long long)max_ms);
 		ret = 1;
 	}
 
@@ -510,7 +580,7 @@ int main(void)
 	} else if (drained) {
 		printf("FAIL: %u connections were reaped as idle\n", drained);
 		ret = 1;
-	} else if (span > TEST_MAX_MS) {
+	} else if (span > max_ms) {
 		/*
 		 * They all filled up in the same round, and a server that drops
 		 * them right away does so within that round - one that waits

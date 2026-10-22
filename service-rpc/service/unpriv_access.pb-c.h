@@ -193,10 +193,12 @@ struct  DrngStatusRequest
 
 /*
  **
- * @brief Request to write data into the auxiliary entropy pool and perform an
- *	  immediate reseed.
- * @param data Buffer with the data to write into the DRNG - the entropy
- *	       estimator will remain unchanged.
+ * @brief Request to write data into the auxiliary entropy pool.
+ * The data is stirred into the pool without crediting any entropy, and no DRNG
+ * is reseeded on its account - that takes RpcRndReseedCRNG of the privileged
+ * interface.
+ * @param data Buffer with the data to write into the auxiliary pool - the
+ *	       entropy estimator will remain unchanged.
  */
 struct  WriteDataRequest
 {

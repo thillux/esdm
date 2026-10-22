@@ -101,9 +101,9 @@ static int server_start(void)
 		_exit(127);
 	}
 
-	/* The server is up once it has bound its unprivileged RPC socket */
-	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-				TEST_WAIT_TIMEOUT_MS)) {
+	/* The server is up once it accepts on its unprivileged RPC socket */
+	if (!test_wait_for_listener(ESDM_RPC_UNPRIV_SOCKET, SOCK_SEQPACKET,
+				    TEST_WAIT_TIMEOUT_MS)) {
 		printf("the esdm-server did not come up\n");
 		return 1;
 	}
@@ -117,7 +117,7 @@ static void server_stop(void)
 		return;
 
 	kill(server_pid, SIGTERM);
-	waitpid(server_pid, NULL, 0);
+	test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	server_pid = 0;
 }
 
@@ -280,7 +280,18 @@ static void test_status(void)
 	struct test_run r;
 	int rc;
 
-	check_says(status, "Status --");
+	/*
+	 * The status text goes to stdout as it came, all of it: its last
+	 * section is there, which a log record of 4096 bytes cut off.
+	 */
+	announce(status);
+	rc = test_run(&r, status, NULL);
+	CHECK(rc == EXIT_SUCCESS, "-s failed with status %d (output: %.300s)",
+	      rc, test_run_said(&r));
+	CHECK(strstr(r.out, "ESDM library version") != NULL,
+	      "-s did not print the status (output: %.300s)", r.out);
+	CHECK(strstr(r.out, "Self test interval in seconds") != NULL,
+	      "-s printed the status cut short (%zu bytes)", r.outlen);
 
 	/*
 	 * The JSON document goes to stdout on its own so it can be piped into
@@ -354,8 +365,19 @@ static void test_status(void)
 		      rc);
 	}
 
-	/* Present or not, the jitterentropy status must not fail the tool */
-	check_ok(jent);
+	/*
+	 * The jitterentropy status where the Jitter RNG is there, a failure
+	 * said as such where it is not - never an empty success.
+	 */
+	announce(jent);
+	rc = test_run(&r, jent, NULL);
+	if (rc == EXIT_SUCCESS)
+		CHECK(r.outlen > 0, "-J succeeded without printing a status");
+	else
+		CHECK(rc == EXIT_FAILURE &&
+			      strstr(r.err, "jitterentropy status failed"),
+		      "-J ended with status %d (output: %.300s)", rc,
+		      test_run_said(&r));
 
 	/* The logging switches change where output goes, not whether it works */
 	check_ok(syslog);
@@ -476,64 +498,6 @@ static void test_privileged_commands(void)
 		check_ok(seed_via_os);
 	}
 #endif
-}
-
-/*
- * The PKCS#11 credentials are set through the privileged RPC interface. A
- * build without that entropy source refuses the call, and the tool has to
- * report that refusal. With the source, the outcome depends on the module and
- * the tokens the machine has, so either answer counts - what is checked is
- * that the tool passes the request on and reports the outcome.
- */
-#ifdef ESDM_ES_PKCS11
-#define PKCS11_OUTCOME_FIXED 0
-#else
-#define PKCS11_OUTCOME_FIXED 1
-#endif
-
-static void test_pkcs11_config(void)
-{
-	const char *const literal[] = { "--pkcs11-token-label", "esdm-test",
-					"--pkcs11-pin", "1234", NULL };
-	const char *const from_stdin[] = { "--pkcs11-pin", "-", NULL };
-	struct test_run r;
-	int rc;
-
-	/* Also a privileged command, and refused outright without root */
-	if (geteuid()) {
-		printf("not root - skipping the PKCS#11 configuration\n");
-		return;
-	}
-
-	announce(literal);
-	rc = test_run(&r, literal, NULL);
-
-	CHECK(rc == EXIT_SUCCESS || rc == EXIT_FAILURE,
-	      "setting the PKCS#11 configuration ended with status %d", rc);
-	CHECK(strstr(r.err, "PKCS#11 configuration updated") != NULL ||
-		      strstr(r.err, "failed to update PKCS#11 configuration") !=
-			      NULL,
-	      "setting the PKCS#11 configuration said nothing about the outcome (output: %.300s)",
-	      r.err);
-	CHECK(!PKCS11_OUTCOME_FIXED ||
-		      (rc == EXIT_FAILURE &&
-		       strstr(r.err, "failed to update PKCS#11 configuration")),
-	      "a build without the PKCS#11 source accepted its configuration (status %d, output: %.300s)",
-	      rc, r.err);
-
-	/* "-" reads the PIN instead of putting it in the process listing */
-	announce(from_stdin);
-	rc = test_run(&r, from_stdin, "1234\n");
-	CHECK(rc == EXIT_SUCCESS || rc == EXIT_FAILURE,
-	      "a PIN read from stdin ended with status %d", rc);
-	CHECK(strstr(r.err, "PKCS#11") != NULL,
-	      "a PIN read from stdin was not passed on (output: %.300s)",
-	      r.err);
-	CHECK(!PKCS11_OUTCOME_FIXED ||
-		      (rc == EXIT_FAILURE &&
-		       strstr(r.err, "failed to update PKCS#11 configuration")),
-	      "a build without the PKCS#11 source accepted a PIN from stdin (status %d, output: %.300s)",
-	      rc, r.err);
 }
 
 /*
@@ -662,7 +626,6 @@ int main(int argc, char *argv[])
 		test_stress_modes();
 		test_benchmark();
 		test_privileged_commands();
-		test_pkcs11_config();
 	}
 
 	server_stop();

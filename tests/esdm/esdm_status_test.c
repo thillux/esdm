@@ -86,6 +86,39 @@ static int esdm_status_ntg1_2024_check(const char *buf, bool json)
 	return 0;
 }
 
+/*
+ * The prediction resistance DRNG is seeded for every request, so its counters
+ * and seeding times would tell any local user about the requests of others:
+ * its section of the text report has them as not available. It is the last
+ * DRNG section, followed by the one of the reseed worker.
+ */
+static int esdm_status_pr_withheld_check(const char *buf)
+{
+	static const char *const withheld[] = {
+		"\n Seconds until reseed: N/A\n",
+		"\n Requests since fully seeded: N/A\n",
+		"\n Generated bits since fully seeded: N/A\n",
+		"\n Seed generation: N/A\n",
+		"\n Last seeding time: N/A\n",
+		"\n Seconds since last reseed: N/A\n",
+	};
+	const char *pr = strstr(buf, " Type: prediction resistance");
+	const char *end = pr ? strstr(pr, "\nReseed worker properties") : NULL;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(withheld) / sizeof(withheld[0]); i++) {
+		const char *line = pr ? strstr(pr, withheld[i]) : NULL;
+
+		if (!line || !end || line > end) {
+			printf("The prediction resistance DRNG section lacks the line:%s",
+			       withheld[i]);
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	/*
@@ -138,6 +171,28 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	/*
+	 * The text is printed from the JSON status: these are the labels and
+	 * section headers it has had all along, which readers of it look for.
+	 */
+	if (strncmp(buf, "ESDM library version: ", 22) ||
+	    !strstr(buf, "\nDRNG name: ") ||
+	    !strstr(buf, "\nESDM security strength in bits: ") ||
+	    !strstr(buf, "\nESDM fully seeded: ") ||
+	    !strstr(buf, "\nESDM entropy level: ") ||
+	    !strstr(buf, "\nEntropy Source 0 properties:\n Name: ") ||
+	    !strstr(buf, "\n Available entropy: ") ||
+	    !strstr(buf, "\nReseed worker properties:\n Running: ") ||
+	    !strstr(buf, "\nPeriodic self test properties:\n State: ") ||
+	    !strstr(buf, "\n Reseed interval in seconds: ") ||
+	    !strstr(buf, "\n Self test interval in seconds: ") ||
+	    /* The index of an entropy source is its section's */
+	    strstr(buf, " Id: ")) {
+		printf("Unexpected status labels: %s\n", buf);
+		ret = 1;
+		goto out;
+	}
+
 	if (!strstr(buf, "DRNG name") ||
 	    !strstr(buf, "ESDM security strength") ||
 	    !strstr(buf, "Number of DRNG instances") ||
@@ -155,6 +210,11 @@ int main(int argc, char *argv[])
 	    /* The ESDM only hands out a status when its self tests passed */
 	    !strstr(buf, " State: passed")) {
 		printf("Unexpected status: %s\n", buf);
+		ret = 1;
+		goto out;
+	}
+
+	if (esdm_status_pr_withheld_check(buf)) {
 		ret = 1;
 		goto out;
 	}

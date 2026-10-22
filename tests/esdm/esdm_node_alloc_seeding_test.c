@@ -45,6 +45,7 @@
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
 #include "esdm_node.h"
+#include "esdm_selftest.h"
 
 /* A seeding that finds the initial and the PR DRNG seeded */
 static void *esdm_nas_seed(void *arg)
@@ -128,6 +129,8 @@ int main(int argc, char *argv[])
 	ret = esdm_es_mgr_initialize();
 	if (ret)
 		goto out;
+	esdm_selftest_run();
+	esdm_force_fully_seeded_all_drbgs();
 
 	if (!esdm_pool_all_nodes_seeded_get()) {
 		printf("DRNGs cannot be seeded fully\n");

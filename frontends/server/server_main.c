@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,8 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
-#include "esdm_es_pkcs11.h"
+#include "esdm_es_extsock.h"
+#include "esdm_es_jent_kernel.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
 #include "helper.h"
@@ -118,7 +120,7 @@ static void usage(void)
 	fprintf(stderr,
 		"\t-m --memlock\tLock all memory from being swapped out and disable core dumps\n");
 	fprintf(stderr,
-		"\t-M --small_memory\tReduce memory consumption (1 MiB thread stacks, single DRNG node)\n");
+		"\t-M --small_memory\tReduce memory consumption (2 MiB thread stacks, single DRNG node)\n");
 	fprintf(stderr,
 		"\t   --keep_ipc\tDo not remove the RPC sockets, status SHM segment and\n");
 	fprintf(stderr,
@@ -133,40 +135,210 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
 	fprintf(stderr,
-		"\t-E --egd_socket_pr <PATH>\tThe same, but serving the prediction\n");
+		"\t   --es_ext_socket <PATH>\tRead the external entropy source\n");
 	fprintf(stderr,
-		"\t\t\tresistance generator - the EGD protocol cannot select it\n");
-	fprintf(stderr, "\t\t\tper request, so it gets a socket of its own\n");
+		"\t\t\tserved by a provider on the Unix domain socket PATH\n");
 	fprintf(stderr,
-		"\t   --pkcs11_module <PATH>\tLoad the PKCS#11 provider module PATH for\n");
+		"\t   --es_ext_socket_entropy_rate <BITS>\tCredit the provider with\n");
 	fprintf(stderr,
-		"\t\t\tthe PKCS#11 entropy source instead of the one the build\n");
-	fprintf(stderr, "\t\t\tconfigured (es_pkcs11_module_path)\n");
+		"\t\t\tat most BITS of entropy per 256 bits of data (0 to 256), or\n");
+	fprintf(stderr,
+		"\t\t\twith what it declares (auto, by default)\n");
+	fprintf(stderr,
+		"\t   --es_ext_socket_uid <USER>\tAccept a provider running as USER\n");
+	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
+	fprintf(stderr,
+		"\t\t\tThe --es_ext options may be repeated: the n-th occurrence\n");
+	fprintf(stderr,
+		"\t\t\tof one configures the n-th source, of which this build has\n");
+	fprintf(stderr, "\t\t\t%u\n", ESDM_EXT_SOCKET_NUM);
+	fprintf(stderr,
+		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
+	fprintf(stderr,
+		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
+	fprintf(stderr,
+		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
+	fprintf(stderr,
+		"\t   --dtls\tOffer DTLS on the RPC interfaces to the clients asking\n");
+	fprintf(stderr,
+		"\t\t\tfor it, where built (default: unencrypted only)\n");
+	fprintf(stderr,
+		"\t   --no_dtls\tServe the RPC interfaces unencrypted only (default)\n");
+	fprintf(stderr,
+		"\t   --no_conn_balancing\tLeave a new RPC connection with the\n");
+	fprintf(stderr,
+		"\t\t\tworker that accepted it rather than hand it to the worker\n");
+	fprintf(stderr, "\t\t\tserving the fewest connections\n");
+	fprintf(stderr,
+		"\t   --no_fixed_drng_mapping\tServe the RPC and EGD workers from\n");
+	fprintf(stderr,
+		"\t\t\tthe first free node DRNG rather than one node DRNG each\n");
 	exit(1);
 }
 
 /*
- * The PKCS#11 provider module of the PKCS#11 entropy source, in place of the
- * one the build names (es_pkcs11_module_path). It is loaded by esdm_init(),
- * while the daemon still has its privileges.
+ * An entropy rate in bits per 256 bits of data, as the meson options take it:
+ * a decimal number from 0 to 256 and nothing else.
  */
-static void set_pkcs11_module(const char *path)
+static uint32_t parse_entropy_rate(const char *opt, const char *arg)
 {
+	unsigned long val;
+	char *end;
+
+	errno = 0;
+	val = strtoul(arg, &end, 10);
+	if (errno || end == arg || *end != '\0' || arg[0] == '-' || val > 256) {
+		fprintf(stderr,
+			"%s takes an entropy rate from 0 to 256, not \"%s\"\n",
+			opt, arg);
+		exit(1);
+	}
+
+	return (uint32_t)val;
+}
+
+/*
+ * The options of the external entropy sources may be given once for each
+ * source: the n-th occurrence of an option configures the n-th source, counted
+ * per option.
+ */
+struct es_ext_option {
+	/* The option */
+	const char *name;
+	/* How often it was given so far */
+	unsigned int given;
+};
+
+static struct es_ext_option es_ext_socket_opt = { "--es_ext_socket", 0 };
+static struct es_ext_option es_ext_socket_rate_opt = {
+	"--es_ext_socket_entropy_rate", 0
+};
+static struct es_ext_option es_ext_socket_uid_opt = { "--es_ext_socket_uid",
+						      0 };
+
+/*
+ * The source the occurrence of @opt configures. One occurrence more than the
+ * build has sources is an error, as is any without external sources at all.
+ */
+static unsigned int es_ext_instance(struct es_ext_option *opt)
+{
+#ifdef ESDM_ES_EXT
+	if (opt->given < ESDM_EXT_SOCKET_NUM)
+		return opt->given++;
+
+	fprintf(stderr,
+		"%s is given more often than this build has provider socket sources, which is %u (meson option es_ext_socket_num)\n",
+		opt->name, ESDM_EXT_SOCKET_NUM);
+#else
+	fprintf(stderr,
+		"External entropy sources are not part of this build (meson option es_ext), %s is not taken\n",
+		opt->name);
+#endif
+	exit(1);
+}
+
+/*
+ * The entropy rate of an external entropy source, @opt for the source of its
+ * occurrence, set with @set - "auto" for none, the source being credited at
+ * the rate it declares itself
+ */
+static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
+			    int (*set)(unsigned int idx, uint32_t ent))
+{
+	uint32_t rate = strcmp(arg, "auto") ? parse_entropy_rate(opt->name, arg) :
+					      ESDM_ES_EXT_ENTROPY_RATE_AUTO;
+
+	if (set(es_ext_instance(opt), rate)) {
+		fprintf(stderr, "Cannot set the entropy rate of %s %s\n",
+			opt->name, arg);
+		exit(1);
+	}
+}
+
+/*
+ * A socket of the external entropy source providers, in place of the one the
+ * build names (es_ext_socket_path). It is connected to by esdm_init(), and
+ * again whenever the connection is lost.
+ */
+static void set_es_ext_socket(const char *path)
+{
+	unsigned int idx;
 	int ret;
 
 	if (path[0] == '\0') {
-		fprintf(stderr, "The PKCS#11 module path must not be empty\n");
+		fprintf(stderr,
+			"The external ES provider socket path must not be empty\n");
 		exit(1);
 	}
 
-	ret = esdm_es_pkcs11_set_module_path(path);
+	idx = es_ext_instance(&es_ext_socket_opt);
+	ret = esdm_es_ext_socket_set_path(idx, path);
+	if (ret) {
+		fprintf(stderr,
+			"Cannot set the external ES provider socket %s: %s\n",
+			path, strerror(-ret));
+		exit(1);
+	}
+}
+
+/*
+ * The kernel crypto API RNG of the kernel Jitter RNG source, in place of the
+ * one the build names (es_jent_kernel_name).
+ */
+static void set_es_jent_kernel_name(const char *name)
+{
+	int ret;
+
+	if (name[0] == '\0') {
+		fprintf(stderr,
+			"The kernel Jitter RNG name must not be empty\n");
+		exit(1);
+	}
+
+	ret = esdm_es_jent_kernel_set_name(name);
 	if (ret == -ENOENT) {
 		fprintf(stderr,
-			"The PKCS#11 entropy source is not part of this build (meson option es_pkcs11)\n");
+			"The kernel Jitter RNG entropy source is not part of this build (meson option es_jent_kernel)\n");
 		exit(1);
 	}
 	if (ret) {
-		fprintf(stderr, "Cannot set the PKCS#11 module %s: %s\n", path,
+		fprintf(stderr, "Cannot use the kernel RNG %s: %s\n", name,
+			strerror(-ret));
+		exit(1);
+	}
+}
+
+/* The user a provider may run as next to root: a uid or a user name */
+static void set_es_ext_socket_uid(const char *arg)
+{
+	unsigned long val;
+	unsigned int idx;
+	int64_t uid;
+	char *end;
+	int ret;
+
+	errno = 0;
+	val = strtoul(arg, &end, 10);
+	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
+	    val < UINT32_MAX) {
+		uid = (int64_t)val;
+	} else {
+		struct passwd *pw = getpwnam(arg);
+
+		if (!pw) {
+			fprintf(stderr,
+				"--es_ext_socket_uid takes a uid or a user name, not \"%s\"\n",
+				arg);
+			exit(1);
+		}
+		uid = (int64_t)pw->pw_uid;
+	}
+
+	idx = es_ext_instance(&es_ext_socket_uid_opt);
+	ret = esdm_es_ext_socket_set_peer_uid(idx, uid);
+
+	if (ret) {
+		fprintf(stderr, "Cannot accept the uid %s: %s\n", arg,
 			strerror(-ret));
 		exit(1);
 	}
@@ -197,11 +369,17 @@ static void parse_opts(int argc, char *argv[])
 			{ "keep_ipc", 0, 0, 0 },
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
-			{ "egd_socket_pr", 1, 0, 0 },
-			{ "pkcs11_module", 1, 0, 0 },
+			{ "es_ext_socket", 1, 0, 0 },
+			{ "es_ext_socket_entropy_rate", 1, 0, 0 },
+			{ "es_ext_socket_uid", 1, 0, 0 },
+			{ "es_jent_kernel_name", 1, 0, 0 },
+			{ "no_dtls", 0, 0, 0 },
+			{ "no_fixed_drng_mapping", 0, 0, 0 },
+			{ "no_conn_balancing", 0, 0, 0 },
+			{ "dtls", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
-		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
+		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
 				&opt_index);
 		if (-1 == c)
 			break;
@@ -289,13 +467,38 @@ static void parse_opts(int argc, char *argv[])
 					exit(1);
 				break;
 			case 17:
-				/* egd_socket_pr */
-				if (esdm_egd_server_enable_pr(optarg))
-					exit(1);
+				/* es_ext_socket */
+				set_es_ext_socket(optarg);
 				break;
 			case 18:
-				/* pkcs11_module */
-				set_pkcs11_module(optarg);
+				/* es_ext_socket_entropy_rate */
+				set_es_ext_rate(
+					&es_ext_socket_rate_opt, optarg,
+					esdm_config_es_ext_socket_entropy_rate_set);
+				break;
+			case 19:
+				/* es_ext_socket_uid */
+				set_es_ext_socket_uid(optarg);
+				break;
+			case 20:
+				/* es_jent_kernel_name */
+				set_es_jent_kernel_name(optarg);
+				break;
+			case 21:
+				/* no_dtls */
+				esdm_rpc_server_set_dtls(false);
+				break;
+			case 22:
+				/* no_fixed_drng_mapping */
+				esdm_rpc_server_set_drng_mapping(false);
+				break;
+			case 23:
+				/* no_conn_balancing */
+				esdm_rpc_server_set_conn_balancing(false);
+				break;
+			case 24:
+				/* dtls */
+				esdm_rpc_server_set_dtls(true);
 				break;
 
 			default:
@@ -354,11 +557,6 @@ static void parse_opts(int argc, char *argv[])
 			if (esdm_egd_server_enable(optarg))
 				exit(1);
 			break;
-		case 'E':
-			/* egd_socket_pr */
-			if (esdm_egd_server_enable_pr(optarg))
-				exit(1);
-			break;
 
 		default:
 			usage();
@@ -385,6 +583,13 @@ static void daemon_release(void)
 {
 	esdm_rpc_server_fini();
 	esdm_fini();
+
+	/*
+	 * Started unprivileged, the daemon owns its sockets, status SHM and
+	 * semaphores, and removes them as the PID namespace supervisor does
+	 */
+	if (geteuid())
+		esdm_rpc_server_cleanup();
 }
 
 static void daemon_raise_sched_priority(void)
@@ -491,6 +696,17 @@ static void install_term(void)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGQUIT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
+}
+
+/* SIGUSR1 is the suspend trigger, see main() */
+static void ignore_suspend(void)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, NULL);
 }
 
 /*
@@ -661,14 +877,29 @@ int main(int argc, char *argv[])
 
 	parse_opts(argc, argv);
 
-	if (geteuid()) {
+	/*
+	 * Started unprivileged, the daemon runs as that user, see
+	 * esdm_rpc_server_init() - it cannot become another one. Refused right
+	 * after the parsing, before anything is set up.
+	 */
+	if (geteuid() && (username || groupname)) {
 		esdm_logger_inc_verbosity();
-		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
-			    "Program must start as root!\n");
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_SERVER,
+			"Started unprivileged, the server cannot switch to another user or group\n");
 		return 1;
 	}
 
-	esdm_logger_set_verbosity(verbosity);
+	/*
+	 * The -v count is the verbosity level, but errors and warnings are
+	 * logged in any case: without -v, the count would be LOGGER_NONE, and
+	 * the daemon would fail without saying why. The -vvv of the shipped
+	 * unit has always meant warnings, and keeps meaning that.
+	 */
+	esdm_logger_set_verbosity(
+		verbosity > LOGGER_WARN ?
+			(enum esdm_logger_verbosity)verbosity :
+			LOGGER_WARN);
 
 	/*
 	 * Evaluate the socket activation environment while we still are the
@@ -725,6 +956,18 @@ int main(int argc, char *argv[])
 				"Cannot tune glibc allocator for small memory mode\n");
 #endif
 	}
+
+	/*
+	 * Once the PID file names this process, esdm-server-signal-helper
+	 * --suspend sends it SIGUSR1, the only signal it sends. The handler is
+	 * installed by libesdm when it publishes its status, after the entropy
+	 * sources and the self tests - until then the default action would
+	 * terminate the daemon. Ignore the signal in between: the suspend is
+	 * recorded in that status, so one before it is published cannot be
+	 * recorded anyway. Installing the handler replaces the disposition, as
+	 * does the forwarder of a PID namespace supervisor.
+	 */
+	ignore_suspend();
 
 	if (pidfile && strlen(pidfile))
 		create_pid_file(pidfile);
@@ -784,9 +1027,11 @@ int main(int argc, char *argv[])
 	 * logs EPERM noise. Disable it - in PID namespace mode the privileged
 	 * supervisor forked above, before this override, cleans up once the
 	 * daemon terminated. A --keep_ipc request is unaffected, as it turns the
-	 * cleanup off before that fork.
+	 * cleanup off before that fork. Started unprivileged, the daemon owns
+	 * what it created, and cleans up itself.
 	 */
-	esdm_config_ipc_cleanup_set(0);
+	if (!geteuid())
+		esdm_config_ipc_cleanup_set(0);
 
 	if (memlock) {
 		/*

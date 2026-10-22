@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -38,6 +39,7 @@
 #include "build_bug_on.h"
 #include "esdm.h"
 #include "esdm_config.h"
+#include "esdm_drng_mgr.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
@@ -45,6 +47,7 @@
 #include "esdm_peer_limit.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_server.h"
+#include "esdm_seed_sizes.h"
 #include "esdm_server_socket.h"
 #include "helper.h"
 #include "memset_secure.h"
@@ -73,11 +76,11 @@
 #define ESDM_EGD_READ_BUDGET (4 * ESDM_EGD_BUFSIZE)
 
 /*
- * Prediction resistant generations per connection and round. One costs several
- * reseeds - tens of milliseconds - for a two byte request, so the read budget
- * alone would let one client pipeline seconds of work into a single round and
- * hold up everybody else on the worker. The ordinary generator is cheap enough
- * for the read budget to bound it.
+ * Prediction resistant generations per connection and round, see the PR read
+ * commands. One costs several reseeds - tens of milliseconds - for a two byte
+ * request, so the read budget alone would let one client pipeline seconds of
+ * work into a single round and hold up everybody else on the worker. The
+ * ordinary generator is cheap enough for the read budget to bound it.
  *
  * This shares a round among the connections, but does not bound it: a client
  * with a request on each of a few hundred connections would still have the
@@ -86,10 +89,20 @@
 #define ESDM_EGD_PR_BUDGET 1
 
 /*
+ * Status reports per connection and round, see the status commands. A report
+ * is asked for with a single byte, but rendering one takes tens of
+ * microseconds: the read budget alone would let a client pipelining the
+ * command and draining the answers have the worker render thousands of them
+ * per round, and hold up everybody else on the worker for as long. A further
+ * one is left for the next round, as a prediction resistant generation is.
+ */
+#define ESDM_EGD_STATUS_BUDGET 1
+
+/*
  * Time a worker may spend per round of its event loop generating prediction
  * resistant bytes, over all of its connections - the same bound as
  * ESDM_RPCS_ROUND_BUDGET_NS of the RPC server, for the same reason: a worker
- * serves every client it accepted, on both sockets, and none of them is served
+ * serves every client it accepted, and none of them is served
  * while it generates. Beyond it, a command is left for the next round - a
  * deferred request stays deferred, a new one waits in the input buffer - which
  * follows at once, after the events of the other clients were collected and
@@ -98,12 +111,30 @@
  * A time rather than a number of generations, as the cost of one depends on
  * the entropy sources. The first generation of a round is always made, so even
  * one longer than this makes progress - a round runs over by the generation
- * it is in at most, which for a request of ESDM_EGD_MAX_TRANSFER bytes may
- * take several reseeds. The next round begins where this one ran out of
- * budget, see esdm_egd_handler() - otherwise the connections at the head of
- * the list would get all of it.
+ * it is in at most, which ESDM_EGD_PR_PIECE bounds to one seeding of the PR
+ * DRNG. The next round begins where this one ran out of budget, see
+ * esdm_egd_handler() - otherwise the connections at the head of the list
+ * would get all of it.
  */
 #define ESDM_EGD_ROUND_BUDGET_NS (25ULL * 1000 * 1000)
+
+/*
+ * Most prediction resistant bytes one generation asks for: one block of the
+ * PR DRNG, which is preceded by a seeding of its own - the security strength,
+ * as the RPC clients ask for in ESDM_RPC_MAX_PR_REQUEST_SIZE. A request of
+ * ESDM_EGD_MAX_TRANSFER bytes generated at once takes eight seedings, which
+ * the round budget above cannot stop half-way: the round would run over by all
+ * of them. In pieces, it is assembled over as many rounds, which follow at once
+ * - see esdm_egd_cmd_read_block() - at no cost in seedings.
+ */
+#define ESDM_EGD_PR_PIECE ESDM_DRNG_SECURITY_STRENGTH_BYTES
+
+/*
+ * Largest response of a run of reads answered together, see
+ * esdm_egd_read_run(): that of a status report, the largest response a
+ * connection holds anyway - so a connection holds no more than it did before.
+ */
+#define ESDM_EGD_RUN_MAX (4 + ESDM_EGD_MAX_STATUS)
 
 /*
  * Upper bound of concurrently served clients. EGD clients may hold their
@@ -222,7 +253,7 @@
 struct esdm_egd_conn {
 	int fd;
 
-	/* Listener this connection arrived on - it selects the generator. */
+	/* Listener this connection arrived on */
 	const struct esdm_egd_listener *listener;
 
 	/* Credentials of the peer, obtained once when the client connected. */
@@ -261,6 +292,13 @@ struct esdm_egd_conn {
 	 * - a non-blocking read: its length byte and the data.
 	 */
 	uint8_t out[1 + ESDM_EGD_MAX_TRANSFER];
+	/*
+	 * A status report does not fit into out, nor do the answers of a run
+	 * of reads, see esdm_egd_read_run(): they come in a buffer of their
+	 * own, which the connection holds instead for as long as they are on
+	 * their way out. NULL otherwise.
+	 */
+	uint8_t *out_heap;
 	size_t out_len;
 	size_t out_off;
 
@@ -276,6 +314,9 @@ struct esdm_egd_conn {
 	 */
 	uint8_t deferred;
 
+	/* The deferred request asks for prediction resistant bytes */
+	bool deferred_pr;
+
 	/*
 	 * Bytes of the deferred answer collected so far, see
 	 * esdm_egd_cmd_read_block().
@@ -284,16 +325,19 @@ struct esdm_egd_conn {
 	uint8_t answer_len;
 
 	/*
-	 * Generations left in this round of the event loop, see
-	 * ESDM_EGD_PR_BUDGET, and the round they were granted for.
+	 * Generations and status reports left in this round of the event loop,
+	 * see ESDM_EGD_PR_BUDGET and ESDM_EGD_STATUS_BUDGET, and the round they
+	 * were granted for.
 	 */
 	unsigned int pr_budget;
+	unsigned int status_budget;
 	uint64_t budget_round;
 
 	/*
 	 * A command is waiting in the input buffer for the next round's
-	 * budget. It is served by the event loop without any event of its own:
-	 * its bytes are no longer in the socket.
+	 * budget, or a deferred request is, see esdm_egd_serve_deferred(). It
+	 * is served by the event loop without any event of its own: its bytes
+	 * are no longer in the socket.
 	 */
 	bool yielded;
 
@@ -309,10 +353,9 @@ struct esdm_egd_conn {
 TAILQ_HEAD(esdm_egd_conn_list, esdm_egd_conn);
 
 /*
- * One served socket. The interface exists twice, once for the ordinary fully
- * seeded generator and once for the prediction resistance one: the EGD protocol
- * has no notion of prediction resistance, so which generator answers is a
- * property of the socket a client connects to, not of its request.
+ * The served socket. It is kept in a table of listeners, which the event loop
+ * tells apart from the connections by their address. Which generator answers
+ * is a matter of the command, see the PR read commands.
  */
 struct esdm_egd_listener {
 	/* Name under which systemd hands this socket over. */
@@ -333,26 +376,16 @@ struct esdm_egd_listener {
 	 * systemd's business then, and its path is unknown here.
 	 */
 	bool systemd_socket;
-
-	/* Serve from esdm_get_random_bytes_pr() rather than _full()? */
-	bool prediction_resistance;
 };
 
 static struct esdm_egd_listener esdm_egd_listeners[] = {
 	{
 		.systemd_name = "ESDM_EGD_SOCKET",
 		.listening_fd = -1,
-		.prediction_resistance = false,
-	},
-	{
-		.systemd_name = "ESDM_EGD_PR_SOCKET",
-		.listening_fd = -1,
-		.prediction_resistance = true,
 	},
 };
 
 #define ESDM_EGD_LISTENER_REGULAR (&esdm_egd_listeners[0])
-#define ESDM_EGD_LISTENER_PR (&esdm_egd_listeners[1])
 
 #define for_each_esdm_egd_listener(listener)                                   \
 	for (listener = &esdm_egd_listeners[0];                                \
@@ -435,11 +468,6 @@ int esdm_egd_server_enable(const char *socket_path)
 	return esdm_egd_listener_enable(ESDM_EGD_LISTENER_REGULAR, socket_path);
 }
 
-int esdm_egd_server_enable_pr(const char *socket_path)
-{
-	return esdm_egd_listener_enable(ESDM_EGD_LISTENER_PR, socket_path);
-}
-
 void esdm_egd_server_set_pid(pid_t pid)
 {
 	esdm_egd_pid = pid;
@@ -461,6 +489,14 @@ static bool esdm_egd_server_active(void)
 	}
 
 	return false;
+}
+
+/* Is each worker mapped to a node DRNG? See esdm_egd_handler() */
+static atomic_bool esdm_egd_drng_mapping = true;
+
+void esdm_egd_server_set_drng_mapping(bool enable)
+{
+	atomic_store(&esdm_egd_drng_mapping, enable);
 }
 
 bool esdm_egd_server_enabled(void)
@@ -586,11 +622,11 @@ static int esdm_egd_listener_socket_init(struct esdm_egd_listener *listener)
 	}
 
 	/*
-	 * EGD clients are ordinary applications, so both sockets - the
-	 * prediction resistant one as well - are available to everybody: like
-	 * the unprivileged RPC socket, and everything reachable through them is
-	 * equally unprivileged (data from unprivileged callers is inserted
-	 * without entropy credit, see esdm_egd_cmd_write_entropy()). The mode
+	 * EGD clients are ordinary applications, so the socket is available
+	 * to everybody, like the unprivileged RPC socket, and everything
+	 * reachable through it is equally unprivileged (data from unprivileged
+	 * callers is inserted without entropy credit, see
+	 * esdm_egd_cmd_write_entropy()). The mode
 	 * is the file's from its creation on, as this runs as root and a
 	 * chmod(2) of the path afterwards would follow whatever was swapped in
 	 * for the socket meanwhile, see esdm_server_bind_unix(). A socket
@@ -642,12 +678,24 @@ int esdm_egd_server_socket_init(void)
 	return 0;
 }
 
-/* Milliseconds on the monotonic clock. */
+/*
+ * Milliseconds on the monotonic clock.
+ *
+ * The coarse one: what is timed in milliseconds here - the idle and the write
+ * timeout, the idle scan, the pause of the listener - is timed in seconds, and
+ * the clock is read several times per request, for the activity of the
+ * connection and the age of its response. The coarse clock is the time of the
+ * last tick, which the vDSO reads from memory whatever the clocksource is,
+ * while CLOCK_MONOTONIC reads the clocksource: a system call and a trap to the
+ * hypervisor on one without a vDSO, such as acpi_pm or the HPET of a guest
+ * whose TSC is not trusted. The acpi_pm of the VMs of the NixOS tests takes
+ * 6.7 us per read, and a read of 32 bytes - 83 us - read it four times here.
+ */
 static uint64_t esdm_egd_now_ms(void)
 {
 	struct timespec ts;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
 
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
@@ -668,10 +716,18 @@ static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
 	return (conn->out_off < conn->out_len);
 }
 
+/* The buffer of the response in flight */
+static uint8_t *esdm_egd_out_buf(struct esdm_egd_conn *conn)
+{
+	return conn->out_heap ? conn->out_heap : conn->out;
+}
+
 /* Wipe the response in flight, delivered or not, and free its buffer. */
 static void esdm_egd_out_clear(struct esdm_egd_conn *conn)
 {
-	memset_secure(conn->out, 0, conn->out_len);
+	memset_secure(esdm_egd_out_buf(conn), 0, conn->out_len);
+	free(conn->out_heap);
+	conn->out_heap = NULL;
 	conn->out_len = 0;
 	conn->out_off = 0;
 }
@@ -695,6 +751,7 @@ static void esdm_egd_peer_gone(struct esdm_egd_conn *conn)
 	esdm_egd_out_clear(conn);
 
 	conn->deferred = 0;
+	conn->deferred_pr = false;
 	memset_secure(conn->answer, 0, sizeof(conn->answer));
 	conn->answer_len = 0;
 }
@@ -726,7 +783,8 @@ static int esdm_egd_flush(struct esdm_egd_conn *conn)
 		 * deliberately does not use this, as the sendto(2) it compiles
 		 * to is killed by OpenSSH's pre-authentication sandbox.
 		 */
-		ssize_t ret = send(conn->fd, conn->out + conn->out_off,
+		ssize_t ret = send(conn->fd,
+				   esdm_egd_out_buf(conn) + conn->out_off,
 				   conn->out_len - conn->out_off,
 				   MSG_NOSIGNAL);
 
@@ -791,27 +849,60 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
 }
 
 /*
- * Fill @buf with data from the generator this connection's socket selects.
+ * Hand a complete response in the allocated buffer @buf of @len bytes to the
+ * client, which the connection takes over - for the responses too large for
+ * the connection's own buffer, see out_heap.
+ *
+ * @return as esdm_egd_write()
+ */
+static int esdm_egd_write_heap(struct esdm_egd_conn *conn, uint8_t *buf,
+			       size_t len)
+{
+	if (esdm_egd_out_pending(conn)) {
+		/* As in esdm_egd_write(), a broken invariant */
+		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+			    "EGD server: response of %zu bytes cannot be queued on FD %d\n",
+			    len, conn->fd);
+		memset_secure(buf, 0, len);
+		free(buf);
+		return -EOVERFLOW;
+	}
+
+	conn->out_heap = buf;
+	conn->out_len = len;
+	conn->out_off = 0;
+	conn->out_since = esdm_egd_now_ms();
+
+	return esdm_egd_flush(conn);
+}
+
+/*
+ * Fill @buf with data from the fully seeded generator, or with @pr from the
+ * prediction resistance one.
  *
  * Exactly one non-blocking generation is attempted. A request it does not cover
  * goes back to the event loop as a deferred request (see
  * esdm_egd_cmd_read_block()) rather than being retried here, which would tie the
- * worker - it serves every client it accepted on both sockets - to a single
+ * worker - it serves every client it accepted - to a single
  * request for as long as the entropy sources need.
  *
  * @generated reports how much was produced, which matters for the prediction
  * resistance generator: it hands out no more than was just delivered, so a
  * short answer is normal, and discarding it to start over would waste entropy
- * and never converge on a large request.
+ * and never converge on a large request. It is shared with the other workers
+ * and the RPC server, which take turns at it: the generation waits for one
+ * block of each request ahead of it rather than finding it taken, and hands
+ * out one block where another request waits for its turn - see
+ * esdm_get_random_bytes_pr_noblock(). Nothing generated thus means that the
+ * entropy sources did not deliver, never that the generator was busy.
  *
  * @return 0 when @len bytes were produced, -EAGAIN when fewer were (the
  *	   caller decides whether to answer short or to come back for more),
  *	   < 0 on all other errors
  */
-static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
-			       size_t len, size_t *generated)
+static int esdm_egd_get_random(struct esdm_egd_conn *conn, bool pr,
+			       uint8_t *buf, size_t len, size_t *generated)
 {
-	bool pr = conn->listener->prediction_resistance;
 	ssize_t ret;
 
 	*generated = 0;
@@ -821,7 +912,9 @@ static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
 
 		if (conn->pr_budget)
 			conn->pr_budget--;
-		ret = esdm_get_random_bytes_pr_noblock(buf, len);
+		ret = esdm_get_random_bytes_pr_noblock(
+			buf,
+			(len < ESDM_EGD_PR_PIECE) ? len : ESDM_EGD_PR_PIECE);
 		esdm_egd_round.spent_ns += esdm_egd_now_ns() - start;
 	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
@@ -864,13 +957,14 @@ static int esdm_egd_cmd_entropy_count(struct esdm_egd_conn *conn)
 
 /*
  * Command 0x01: deliver up to the requested number of bytes without blocking.
+ * Command 0xe0 does the same from the prediction resistance generator (@pr).
  *
  * The response is prefixed with the number of delivered bytes, which allows
  * answering with zero bytes while the ESDM is not operational yet. Clients
  * treat that as "no entropy available right now" and fall back to the blocking
  * request.
  */
-static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
+static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn, bool pr,
 				      uint8_t requested)
 {
 	uint8_t resp[1 + ESDM_EGD_MAX_TRANSFER];
@@ -881,7 +975,7 @@ static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
 	if (requested) {
 		size_t generated = 0;
 
-		ret = esdm_egd_get_random(conn, resp + 1, requested,
+		ret = esdm_egd_get_random(conn, pr, resp + 1, requested,
 					  &generated);
 		if (ret == -EAGAIN) {
 			/* A short answer is what this command is for. */
@@ -903,12 +997,13 @@ static int esdm_egd_cmd_read_nonblock(struct esdm_egd_conn *conn,
 
 /*
  * Command 0x02: deliver exactly the requested number of bytes, waiting for the
- * ESDM to become operational if needed.
+ * ESDM to become operational if needed. Command 0xe1 does the same from the
+ * prediction resistance generator (@pr), waiting for its entropy as well.
  *
  * @return 0 when the request was served, -EAGAIN when it has to be retried
  *	   later, < 0 on all other errors
  */
-static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn,
+static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn, bool pr,
 				   uint8_t requested)
 {
 	size_t generated = 0;
@@ -920,11 +1015,11 @@ static int esdm_egd_cmd_read_block(struct esdm_egd_conn *conn,
 	/*
 	 * Collect into the connection rather than into a local buffer: a
 	 * request is assembled over as many rounds of the event loop as the
-	 * available entropy needs - most visibly on the prediction resistance
-	 * socket, whose generator hands out no more than its entropy sources
-	 * just delivered - and what came out so far must survive them.
+	 * available entropy needs - most visibly for the prediction resistance
+	 * generator, which hands out no more than its entropy sources just
+	 * delivered - and what came out so far must survive them.
 	 */
-	ret = esdm_egd_get_random(conn, conn->answer + conn->answer_len,
+	ret = esdm_egd_get_random(conn, pr, conn->answer + conn->answer_len,
 				  requested - conn->answer_len, &generated);
 	conn->answer_len += (uint8_t)generated;
 
@@ -1008,12 +1103,326 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 }
 
 /*
- * May the connection generate once more in this round? Within its own budget,
+ * Command 0xe2: deliver up to the requested number of bytes from the DRNG
+ * without waiting for all DRNGs to be fully seeded, the semantics of
+ * /dev/urandom. Answered as command 0x01. Before the ESDM is operational it
+ * hands out nothing at all - an empty answer then, which is no error - and
+ * otherwise only an error answers short.
+ */
+static int esdm_egd_cmd_read_unseeded(struct esdm_egd_conn *conn,
+				      uint8_t requested)
+{
+	uint8_t resp[1 + ESDM_EGD_MAX_TRANSFER];
+	ssize_t ret;
+	int rc;
+
+	resp[0] = 0;
+
+	if (requested) {
+		ret = esdm_get_random_bytes(resp + 1, requested);
+		if (ret < 0) {
+			/* Not operational yet is a state, not a failure */
+			esdm_logger(ret == -EOPNOTSUPP ? LOGGER_DEBUG :
+							 LOGGER_ERR,
+				    LOGGER_C_SERVER,
+				    "EGD server: generation of %u bytes failed: %zd\n",
+				    requested, ret);
+		} else if (ret > requested) {
+			/* Cannot happen, and is no reason to send more */
+			resp[0] = requested;
+		} else {
+			resp[0] = (uint8_t)ret;
+		}
+	}
+
+	rc = esdm_egd_write(conn, resp, 1 + (size_t)resp[0]);
+
+	memset_secure(resp, 0, sizeof(resp));
+
+	return rc;
+}
+
+/*
+ * A run of reads: the same read command - 0x01, 0x02 or 0xe2 - several times
+ * in a row at the head of the input, as a client pipelining a read beyond the
+ * 255 bytes of one transfer sends it, the esdm_cdev module and
+ * libesdm_egd_client among them. The run is answered by one response, and one
+ * generation where the DRNGs allow, see max_piece, rather than one of each per
+ * command: what a read of ESDM_EGD_MAX_TRANSFER bytes costs is mostly the
+ * send(2) of its answer and the generator's cost per call, not the bytes.
+ *
+ * The answers are ones the commands get one by one where each is served in
+ * full: the bytes asked for, preceded by their count where the command has
+ * one. Only that case is taken here, the one of an operational ESDM.
+ *
+ * A generation may fall short. When a DRNG reaches the most it may generate
+ * without a full reseed, it hands out what it had left - in a build for
+ * SP800-90C after 2^17 bits, which a long run always reaches. The reads of the
+ * run it covers in full are answered, the share of the next one is wiped, and
+ * the rest of the run stays in the input for the next pass, which a DRNG with
+ * output left serves - rather than the whole generation being wiped, which
+ * would throw away all the DRNG had left and make it reseed that much sooner.
+ * A generation that does not cover even the first read - the ESDM is not
+ * operational, which the blocking read defers and the others answer short -
+ * leaves the reads to the commands one by one, which ask the generator again,
+ * see *@fallback.
+ *
+ * Nothing changes about the bounds of a connection. The run was in the input
+ * buffer, so the work of a round stays within the read budget, as for the
+ * commands one by one; its response is held in a buffer of its own of at most
+ * ESDM_EGD_RUN_MAX bytes, as a status report is; and it is wiped once it went
+ * out, as every response.
+ *
+ * @return the number of input bytes the run took, 0 when there is none - fewer
+ *	   than two reads, or a generation that did not cover the first, see
+ *	   *@fallback -, < 0 when the connection has to be closed
+ */
+static ssize_t esdm_egd_read_run(struct esdm_egd_conn *conn, bool *fallback)
+{
+	uint8_t cmd = conn->in[0];
+	/* The non-blocking reads answer with a count byte, 0x02 without */
+	size_t counted = (cmd == ESDM_EGD_CMD_READ_BLOCK) ? 0 : 1;
+	size_t num = 0, data = 0, len = 0, generated, served, covered, off;
+	size_t pos, i;
+	/*
+	 * The DRNG is asked for all of the run at once - unless a DRNG may
+	 * generate only a bounded number of bits without a full reseed, as in
+	 * a build for SP800-90C: then for the share of one command at a time,
+	 * as before. Its reseed is triggered by the request that crosses three
+	 * quarters of that bound and has to land in the quarter left; requests
+	 * of several KiB use that quarter up at once, and the DRNGs ran dry
+	 * before their reseeds landed - measured, 1.4 MB/s with calls of one
+	 * transfer, 1.1 MB/s with calls of 4 KiB.
+	 */
+	size_t max_piece =
+		(esdm_config_drng_max_wo_reseed_bits() == UINT32_MAX) ?
+			ESDM_EGD_RUN_MAX :
+			ESDM_EGD_MAX_TRANSFER;
+	uint8_t *buf;
+	ssize_t ret;
+
+	/* Complete commands of the same read, as many as the bound allows */
+	while (2 * (num + 1) <= conn->in_len && conn->in[2 * num] == cmd) {
+		size_t requested = conn->in[2 * num + 1];
+
+		if (len + counted + requested > ESDM_EGD_RUN_MAX)
+			break;
+		len += counted + requested;
+		data += requested;
+		num++;
+	}
+
+	if (num < 2 || !data)
+		return 0;
+
+	buf = malloc(len);
+	if (!buf)
+		return 0;
+
+	/*
+	 * All of it at the tail of the buffer, from where each command's share
+	 * moves to the front behind its count byte.
+	 */
+	off = len - data;
+	for (generated = 0; generated < data;) {
+		size_t piece = data - generated;
+
+		if (piece > max_piece)
+			piece = max_piece;
+		if (cmd == ESDM_EGD_CMD_ESDM_READ_UNSEEDED)
+			ret = esdm_get_random_bytes(buf + off + generated, piece);
+		else
+			ret = esdm_get_random_bytes_full_noblock(
+				buf + off + generated, piece);
+		if (ret <= 0)
+			break;
+		if ((size_t)ret > piece)
+			ret = (ssize_t)piece;
+		generated += (size_t)ret;
+		if ((size_t)ret < piece)
+			break;
+	}
+
+	/* The reads the generation covers in full */
+	for (served = 0, covered = 0; served < num; served++) {
+		size_t requested = conn->in[2 * served + 1];
+
+		if (covered + requested > generated)
+			break;
+		covered += requested;
+	}
+
+	if (!served) {
+		memset_secure(buf, 0, len);
+		free(buf);
+		*fallback = true;
+		return 0;
+	}
+
+	if (counted) {
+		/*
+		 * The share of command i moves from off to pos, which is
+		 * ahead of it by the count bytes of the commands behind it,
+		 * so no share is overwritten before it moved.
+		 */
+		for (i = 0, pos = 0; i < served; i++) {
+			uint8_t requested = conn->in[2 * i + 1];
+
+			buf[pos] = requested;
+			memmove(buf + pos + 1, buf + off, requested);
+			pos += 1 + (size_t)requested;
+			off += requested;
+		}
+	}
+
+	/*
+	 * Behind the answers: nothing when all reads were served, otherwise
+	 * the share of the first one that was not, and what the moves above
+	 * left of the others.
+	 */
+	memset_secure(buf + served * counted + covered, 0,
+		      len - served * counted - covered);
+
+	ret = esdm_egd_write_heap(conn, buf, served * counted + covered);
+	if (ret)
+		return ret;
+
+	return (ssize_t)(2 * served);
+}
+
+/* Command 0xe3: report the state, see ESDM_EGD_STATE_* */
+static int esdm_egd_cmd_get_state(struct esdm_egd_conn *conn)
+{
+	uint8_t resp[1 + 4 * ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	unsigned int i;
+
+	BUILD_BUG_ON(sizeof(resp) > 1 + ESDM_EGD_MAX_TRANSFER);
+
+	fields[ESDM_EGD_STATE_FLAGS] =
+		(esdm_state_operational() ? ESDM_EGD_STATE_FLAG_OPERATIONAL :
+					    0) |
+		(esdm_state_fully_seeded() ? ESDM_EGD_STATE_FLAG_FULLY_SEEDED :
+					     0);
+	fields[ESDM_EGD_STATE_ENT_CNT] = esdm_avail_entropy_aux();
+	fields[ESDM_EGD_STATE_POOLSIZE] = esdm_avail_poolsize_aux();
+	fields[ESDM_EGD_STATE_WRITE_WAKEUP] = esdm_get_write_wakeup_bits();
+	fields[ESDM_EGD_STATE_MIN_RESEED_SECS] = esdm_get_reseed_max_time();
+
+	resp[0] = ESDM_EGD_STATE_NUM_FIELDS;
+	for (i = 0; i < ESDM_EGD_STATE_NUM_FIELDS; i++)
+		be32_to_ptr(resp + 1 + 4 * i, fields[i]);
+
+	return esdm_egd_write(conn, resp, sizeof(resp));
+}
+
+/*
+ * Commands 0xe4 and 0xe5 (@json): report the status as text or as JSON
+ * document, preceded by its length.
+ *
+ * A text report that does not fit is sent as far as it got, as the RPC
+ * interface does - it stays readable. A JSON document that does not fit, and
+ * any report that cannot be produced, is sent as an empty one.
+ */
+static int esdm_egd_cmd_status(struct esdm_egd_conn *conn, bool json)
+{
+	/* The length, the report and the NUL the status functions write */
+	size_t alloc = 4 + ESDM_EGD_MAX_STATUS + 1;
+	uint8_t *buf = calloc(1, alloc), *shrunk;
+	size_t len = 0;
+	int ret;
+
+	if (conn->status_budget)
+		conn->status_budget--;
+
+	/* Without memory, an empty report is all there is to say */
+	if (!buf) {
+		uint8_t empty[4] = { 0 };
+
+		return esdm_egd_write(conn, empty, sizeof(empty));
+	}
+
+	if (json)
+		ret = esdm_status_json((char *)buf + 4, alloc - 4);
+	else
+		ret = esdm_status((char *)buf + 4, alloc - 4);
+
+	if (!ret || (!json && ret == -EMSGSIZE))
+		len = strnlen((char *)buf + 4, ESDM_EGD_MAX_STATUS);
+
+	be32_to_ptr(buf, (uint32_t)len);
+
+	/* Only what goes out is held while the client takes it */
+	shrunk = realloc(buf, 4 + len);
+	if (shrunk)
+		buf = shrunk;
+
+	return esdm_egd_write_heap(conn, buf, 4 + len);
+}
+
+/*
+ * The commands changing the entropy accounting or the DRNGs, 0xe6 to 0xea,
+ * with their argument @arg - zero for those without one. Only a privileged
+ * peer has them carried out, just like the entropy claim of command 0x03; the
+ * RPC interface applies the same rule. Answered with a status.
+ *
+ * Carried out also when the peer is gone - what it sent still counts, as for
+ * an insertion - but then not answered.
+ */
+static int esdm_egd_cmd_priv(struct esdm_egd_conn *conn, uint8_t cmd,
+			     uint32_t arg)
+{
+	uint8_t resp[4];
+	int32_t ret = 0;
+
+	if (conn->peer_uid != 0) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
+			    "EGD server: refusing command 0x%02x of unprivileged UID %u\n",
+			    cmd, conn->peer_uid);
+		ret = -EPERM;
+		goto out;
+	}
+
+	switch (cmd) {
+	case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
+		/* As the RPC interface: never above the pool's digest size */
+		esdm_pool_add_entropy(arg);
+		break;
+	case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
+		esdm_pool_set_entropy(0);
+		break;
+	case ESDM_EGD_CMD_ESDM_RESEED:
+		esdm_drng_force_reseed();
+		break;
+	case ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP:
+		esdm_set_write_wakeup_bits(arg);
+		break;
+	case ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS:
+		esdm_set_reseed_max_time(arg);
+		break;
+	default:
+		/* Cannot happen - esdm_egd_process() only passes these */
+		ret = -EINVAL;
+		break;
+	}
+
+out:
+	if (conn->peer_gone)
+		return 0;
+
+	be32_to_ptr(resp, (uint32_t)ret);
+
+	return esdm_egd_write(conn, resp, sizeof(resp));
+}
+
+/*
+ * May the connection generate once more in this round? Only prediction
+ * resistant generations (@pr) are bounded: within the connection's own budget,
  * ESDM_EGD_PR_BUDGET, and within that of the worker, ESDM_EGD_ROUND_BUDGET_NS.
  */
-static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn)
+static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn, bool pr)
 {
-	if (!conn->listener->prediction_resistance)
+	if (!pr)
 		return true;
 
 	if (!conn->pr_budget)
@@ -1053,6 +1462,7 @@ static void esdm_egd_conn_round(struct esdm_egd_conn *conn, uint64_t round)
 
 	conn->budget_round = round;
 	conn->pr_budget = ESDM_EGD_PR_BUDGET;
+	conn->status_budget = ESDM_EGD_STATUS_BUDGET;
 }
 
 /* Serve a deferred blocking read request, if there is one. */
@@ -1063,15 +1473,24 @@ static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 	if (!conn->deferred)
 		return 0;
 
-	/* Still deferred - the next round continues it. */
-	if (!esdm_egd_may_generate(conn))
+	/*
+	 * Still deferred - the next round continues it. It waits for nothing
+	 * but that round's budget, as a request of more than a generation
+	 * gives does after every piece of its answer, see ESDM_EGD_PR_PIECE: the
+	 * round follows at once, not after the poll interval of a request
+	 * waiting for entropy.
+	 */
+	if (!esdm_egd_may_generate(conn, conn->deferred_pr)) {
+		conn->yielded = true;
 		return -EAGAIN;
+	}
 
-	ret = esdm_egd_cmd_read_block(conn, conn->deferred);
+	ret = esdm_egd_cmd_read_block(conn, conn->deferred_pr, conn->deferred);
 	if (ret)
 		return ret;
 
 	conn->deferred = 0;
+	conn->deferred_pr = false;
 
 	return 0;
 }
@@ -1110,28 +1529,56 @@ static void esdm_egd_conn_arm(int epfd, struct esdm_egd_conn *conn)
 	conn->armed = ev.events;
 }
 
-/* Consume @len bytes from the head of the connection's input buffer. */
+/*
+ * Consume @len bytes from the head of the connection's input buffer.
+ *
+ * The @len bytes behind what is left are wiped: client supplied entropy data
+ * must not linger in the buffer, neither of the consumed command nor of what
+ * follows it - the beginning of the next insertion, say - whose copy the move
+ * leaves at its old offset.
+ */
 static void esdm_egd_consume(struct esdm_egd_conn *conn, size_t len)
 {
 	conn->in_len -= len;
 	if (conn->in_len)
 		memmove(conn->in, conn->in + len, conn->in_len);
+	memset_secure(conn->in + conn->in_len, 0, len);
+}
+
+/* Does the command change something rather than only produce an answer? */
+static bool esdm_egd_cmd_changes(uint8_t cmd)
+{
+	switch (cmd) {
+	case ESDM_EGD_CMD_WRITE_ENTROPY:
+	case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
+	case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
+	case ESDM_EGD_CMD_ESDM_RESEED:
+	case ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP:
+	case ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS:
+		return true;
+	default:
+		return false;
+	}
 }
 
 /*
  * Get the connection as far as it can go right now: deliver what is left of the
+
  * response in flight, then process as many complete commands as the input
  * buffer holds.
  *
  * It stops at the first command whose response the client did not take right
  * away, which is what makes one response buffer enough: a client asking faster
  * than it reads is slowed down by its own socket, not buffered for. It also
- * stops at a generation the round has no budget left for (conn->yielded).
+ * stops at a generation or a status report the round has no budget left for
+ * (conn->yielded).
  *
  * @return 0 when the connection remains usable, < 0 when it has to be closed
  */
 static int esdm_egd_process(struct esdm_egd_conn *conn)
 {
+	/* A run of reads was not served in full, see esdm_egd_read_run() */
+	bool run_fallback = false;
 	int ret;
 
 	conn->yielded = false;
@@ -1159,16 +1606,33 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 
 	while (conn->in_len) {
 		size_t cmd_len;
+		bool pr;
 
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 		case ESDM_EGD_CMD_GET_PID:
 			cmd_len = 1;
 			break;
+		case ESDM_EGD_CMD_ESDM_GET_STATE:
+		case ESDM_EGD_CMD_ESDM_STATUS:
+		case ESDM_EGD_CMD_ESDM_STATUS_JSON:
+		case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
+		case ESDM_EGD_CMD_ESDM_RESEED:
+			cmd_len = 1;
+			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
 		case ESDM_EGD_CMD_READ_BLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
+		case ESDM_EGD_CMD_ESDM_READ_UNSEEDED:
 			cmd_len = 2;
 			break;
+		case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
+		case ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP:
+		case ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS:
+			cmd_len = 5;
+			break;
+
 		case ESDM_EGD_CMD_WRITE_ENTROPY:
 			if (conn->in_len < 4)
 				return 0;
@@ -1193,20 +1657,50 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		/*
 		 * Nobody is left to take an answer, so a command that does
 		 * nothing but produce one is skipped - see
-		 * esdm_egd_peer_gone().
+		 * esdm_egd_peer_gone(). Those changing something are carried
+		 * out, like an insertion.
 		 */
-		if (conn->peer_gone &&
-		    conn->in[0] != ESDM_EGD_CMD_WRITE_ENTROPY) {
+		if (conn->peer_gone && !esdm_egd_cmd_changes(conn->in[0])) {
 			ret = 0;
 			goto consume;
 		}
 
 		/* Left for the next round, see ESDM_EGD_PR_BUDGET. */
-		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
-		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK) &&
-		    conn->in[1] && !esdm_egd_may_generate(conn)) {
+		pr = (conn->in[0] == ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK ||
+		      conn->in[0] == ESDM_EGD_CMD_ESDM_PR_READ_BLOCK);
+		if (pr && conn->in[1] && !esdm_egd_may_generate(conn, pr)) {
 			conn->yielded = true;
 			return 0;
+		}
+
+		/* The same for a status report, see ESDM_EGD_STATUS_BUDGET. */
+		if ((conn->in[0] == ESDM_EGD_CMD_ESDM_STATUS ||
+		     conn->in[0] == ESDM_EGD_CMD_ESDM_STATUS_JSON) &&
+		    !conn->status_budget) {
+			conn->yielded = true;
+			return 0;
+		}
+
+		/*
+		 * Several reads in a row are answered together, see
+		 * esdm_egd_read_run(). Once a generation for them fell short,
+		 * the rest of the input is served command by command: asking
+		 * the generator for the run again at every command would
+		 * mostly come up short again.
+		 */
+		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_ESDM_READ_UNSEEDED) &&
+		    !run_fallback) {
+			ssize_t taken = esdm_egd_read_run(conn, &run_fallback);
+
+			if (taken < 0)
+				return (int)taken;
+			if (taken) {
+				cmd_len = (size_t)taken;
+				ret = 0;
+				goto consume;
+			}
 		}
 
 		switch (conn->in[0]) {
@@ -1217,10 +1711,12 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			ret = esdm_egd_cmd_get_pid(conn);
 			break;
 		case ESDM_EGD_CMD_READ_NONBLOCK:
-			ret = esdm_egd_cmd_read_nonblock(conn, conn->in[1]);
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
+			ret = esdm_egd_cmd_read_nonblock(conn, pr, conn->in[1]);
 			break;
 		case ESDM_EGD_CMD_READ_BLOCK:
-			ret = esdm_egd_cmd_read_block(conn, conn->in[1]);
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
+			ret = esdm_egd_cmd_read_block(conn, pr, conn->in[1]);
 			if (ret == -EAGAIN) {
 				/*
 				 * Remember the request and answer it once the
@@ -1228,6 +1724,7 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 				 * consumed here so it is not processed twice.
 				 */
 				conn->deferred = conn->in[1];
+				conn->deferred_pr = pr;
 				esdm_egd_consume(conn, cmd_len);
 				return 0;
 			}
@@ -1238,6 +1735,29 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 				conn, ptr_to_be16(conn->in + 1), conn->in + 4,
 				conn->in[3]);
 			break;
+		case ESDM_EGD_CMD_ESDM_READ_UNSEEDED:
+			ret = esdm_egd_cmd_read_unseeded(conn, conn->in[1]);
+			break;
+		case ESDM_EGD_CMD_ESDM_GET_STATE:
+			ret = esdm_egd_cmd_get_state(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_STATUS:
+			ret = esdm_egd_cmd_status(conn, false);
+			break;
+		case ESDM_EGD_CMD_ESDM_STATUS_JSON:
+			ret = esdm_egd_cmd_status(conn, true);
+			break;
+		case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
+		case ESDM_EGD_CMD_ESDM_RESEED:
+			ret = esdm_egd_cmd_priv(conn, conn->in[0], 0);
+			break;
+		case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
+		case ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP:
+		case ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS:
+			/* Big endian argument, see the protocol header. */
+			ret = esdm_egd_cmd_priv(conn, conn->in[0],
+						ptr_to_be32(conn->in + 1));
+			break;
 		default:
 			/* Cannot happen - the switch above filtered it out. */
 			ret = -EPROTO;
@@ -1245,8 +1765,6 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		}
 
 consume:
-		/* Do not leave client supplied entropy data in the buffer. */
-		memset_secure(conn->in, 0, cmd_len);
 		esdm_egd_consume(conn, cmd_len);
 
 		if (ret)
@@ -1269,10 +1787,10 @@ consume:
 
 #ifdef ESDM_FUZZING
 /* Documented with its declaration in esdm_egd_server.h */
-int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
-			 const uint8_t *data, size_t len)
+int esdm_egd_fuzz_stream(int out_fd, const uint8_t *data, size_t len)
 {
 	struct esdm_egd_conn conn;
+	uint64_t round = 0;
 	size_t pos = 0;
 	int ret = 0;
 
@@ -1281,8 +1799,7 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 
 	memset(&conn, 0, sizeof(conn));
 	conn.fd = out_fd;
-	conn.listener = prediction_resistance ? ESDM_EGD_LISTENER_PR :
-						ESDM_EGD_LISTENER_REGULAR;
+	conn.listener = ESDM_EGD_LISTENER_REGULAR;
 	/*
 	 * Who the client is decides whether its entropy claim is believed, so
 	 * it is the credentials of this process - the same answer the accept
@@ -1313,13 +1830,14 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 
 		/* Each record is a round, and as many follow as it needs. */
 		do {
-			conn.pr_budget = ESDM_EGD_PR_BUDGET;
+			esdm_egd_conn_round(&conn, ++round);
 			ret = esdm_egd_process(&conn);
 		} while (!ret && conn.yielded);
 		if (ret)
 			break;
 	}
 
+	esdm_egd_out_clear(&conn);
 	memset_secure(conn.in, 0, sizeof(conn.in));
 	memset_secure(conn.answer, 0, sizeof(conn.answer));
 	memset_secure(conn.out, 0, sizeof(conn.out));
@@ -1413,21 +1931,90 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 	if (conn->slot_counted)
 		atomic_fetch_sub(&esdm_egd_connections, 1);
 
+	esdm_egd_out_clear(conn);
 	memset_secure(conn->in, 0, sizeof(conn->in));
 	memset_secure(conn->out, 0, sizeof(conn->out));
 	memset_secure(conn->answer, 0, sizeof(conn->answer));
 	free(conn);
+
 }
 
 /*
- * Is something owed to the client, or is it in the middle of a command? Its
- * connection is then closed to make room only when no other one is left, see
- * esdm_egd_evict_candidate().
+ * Did the client send something the server has not read yet? It waits in the
+ * socket's receive queue, out of sight of conn->in_len, until the event loop
+ * takes it - in the next round if it came after the events of this one were
+ * collected. Nothing counts as sent if the queue cannot be told.
+ */
+static bool esdm_egd_input_queued(const struct esdm_egd_conn *conn)
+{
+	int queued = 0;
+
+	if (ioctl(conn->fd, FIONREAD, &queued) < 0)
+		return false;
+
+	return queued > 0;
+}
+
+/*
+ * Close a connection the server gives up on by itself - one idle for too long,
+ * or one closed to make room for a new one. Unlike one whose client hung up,
+ * its client may be writing to it right now: what it wrote last waits in the
+ * socket's receive queue, and closing the socket would discard it although the
+ * client's write succeeded. For an insertion, which has no answer, nothing
+ * would ever tell the client that its data never arrived.
+ *
+ * So the reading side is shut down first. Every later write of the client
+ * fails from then on, while what came before stays readable: if anything did,
+ * the connection is not closed yet but drained as one whose client is gone,
+ * see esdm_egd_peer_gone(). Its insertions are carried out, nothing is answered
+ * any more, and the event loop closes it at the end of its input, see
+ * esdm_egd_read(). Its slot and its account's count are given up right away
+ * all the same, which also keeps it from being chosen to be closed once more.
+ *
+ * @return true if the connection was closed, false if it is left to drain
+ */
+static bool esdm_egd_reclaim(int epfd, struct esdm_egd_conn_list *list,
+			     struct esdm_egd_conn *conn)
+{
+	shutdown(conn->fd, SHUT_RD);
+
+	if (!esdm_egd_input_queued(conn)) {
+		epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
+		TAILQ_REMOVE(list, conn, tailq);
+		esdm_egd_release_conn(conn);
+		return true;
+	}
+
+	esdm_logger(
+		LOGGER_DEBUG, LOGGER_C_SERVER,
+		"EGD server: taking what the client on FD %d sent before closing its connection\n",
+		conn->fd);
+
+	esdm_egd_peer_gone(conn);
+
+	if (conn->peer_counted) {
+		esdm_peer_limit_put(&esdm_egd_peer_limit, conn->peer_account);
+		conn->peer_counted = false;
+	}
+	if (conn->slot_counted) {
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+		conn->slot_counted = false;
+	}
+
+	esdm_egd_conn_arm(epfd, conn);
+
+	return false;
+}
+
+/*
+ * Is something owed to the client, or is it in the middle of a command - or
+ * did it send one the server has yet to read? Its connection is then closed to
+ * make room only when no other one is left, see esdm_egd_evict_candidate().
  */
 static bool esdm_egd_conn_busy(const struct esdm_egd_conn *conn)
 {
 	return conn->deferred || conn->yielded || conn->in_len ||
-	       esdm_egd_out_pending(conn);
+	       esdm_egd_out_pending(conn) || esdm_egd_input_queued(conn);
 }
 
 /*
@@ -1523,12 +2110,14 @@ esdm_egd_evict_candidate(struct esdm_egd_conn_list *list, uid_t newcomer,
 
 /*
  * Close a connection of this worker to make room for a new one of the account
- * @newcomer, see esdm_egd_evict_candidate(). Its slot is handed on to the new
- * connection rather than given back: another worker would otherwise be free to
- * take it in between. The events still to be handled in this round, @num of
- * @pending, are voided for the closed connection.
+ * @newcomer, see esdm_egd_evict_candidate(), once what its client sent is taken
+ * - see esdm_egd_reclaim(). Its slot is handed on to the new connection rather
+ * than given back: another worker would otherwise be free to take it in
+ * between. The events still to be handled in this round, @num of @pending, are
+ * voided for the closed connection - one left to drain is reported again in
+ * the next round.
  *
- * @return true when a connection was closed and its slot is the caller's
+ * @return true when a connection gave up its slot, which is the caller's now
  */
 static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
 			       struct epoll_event *pending, int num,
@@ -1552,10 +2141,8 @@ static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
 			pending[i].data.ptr = NULL;
 	}
 
-	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->fd, NULL);
-	TAILQ_REMOVE(list, victim, tailq);
 	victim->slot_counted = false;
-	esdm_egd_release_conn(victim);
+	esdm_egd_reclaim(epfd, list, victim);
 
 	return true;
 }
@@ -1676,8 +2263,7 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_SERVER,
-		"EGD server: new %sconnection on FD %d from UID %u (user %u)\n",
-		listener->prediction_resistance ? "prediction resistant " : "",
+		"EGD server: new connection on FD %d from UID %u (user %u)\n",
 		fd, conn->peer_uid, conn->peer_account);
 
 	return conn;
@@ -1714,8 +2300,9 @@ static bool esdm_egd_scarce(uint64_t now)
 /*
  * May the idle connection be closed? See ESDM_EGD_IDLE_TIMEOUT_MS.
  *
- * Only when nothing is owed to it, it was silent for the idle timeout, and its
- * slot or descriptor is wanted:
+ * Only when nothing is owed to it, it was silent for the idle timeout - nothing
+ * it sent waits to be read either, see esdm_egd_reclaim() - and its slot or
+ * descriptor is wanted:
  *
  *   - the server is short of them (@scarce) and the connection's account is
  *     among those holding the most connections, @top as told by
@@ -1740,17 +2327,22 @@ static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
 	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
 		return false;
 
-	if (scarce && esdm_peer_limit_count(&esdm_egd_peer_limit,
-					    conn->peer_account) >= top)
-		return true;
+	if (!(scarce && esdm_peer_limit_count(&esdm_egd_peer_limit,
+					      conn->peer_account) >= top) &&
+	    !esdm_peer_limit_exhausted(&esdm_egd_peer_limit,
+				       conn->peer_account))
+		return false;
 
-	return esdm_peer_limit_exhausted(&esdm_egd_peer_limit,
-					 conn->peer_account);
+	/*
+	 * Silent up to the events of this round - what came in after them is
+	 * taken in the next one, and a connection just used again is not idle.
+	 */
+	return !esdm_egd_input_queued(conn);
 }
 
 /*
- * Thread main of one worker serving the EGD sockets. The workers share both
- * listeners, and each serves the clients it accepted.
+ * Thread main of one worker serving the EGD socket. The workers share the
+ * listener, and each serves the clients it accepted.
  */
 static int esdm_egd_handler(void *args)
 {
@@ -1790,6 +2382,30 @@ static int esdm_egd_handler(void *args)
 	thread_set_name(egd_server, id);
 	TAILQ_INIT(&conn_list);
 
+	/*
+	 * The reads of the clients of this worker from a node DRNG of its own
+	 * rather than from whichever node DRNG it finds free, see
+	 * esdm_drng_node_bind(). From the last node downwards: the workers of
+	 * the RPC interface take theirs from the first node upwards, one per
+	 * node, the one node left over for two of them being the first. The
+	 * prediction resistant reads stay on the prediction resistance DRNG,
+	 * and an unseeded read is served by the node DRNG only while it is
+	 * fully seeded, as by any DRNG.
+	 */
+	if (atomic_load(&esdm_egd_drng_mapping)) {
+		ret = esdm_drng_node_bind(id, true);
+		if (ret < 0) {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
+				    "EGD server: worker %u is mapped to no node DRNG: %s\n",
+				    id, strerror(-ret));
+		} else {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
+				    "EGD server: worker %u is mapped to node DRNG %d\n",
+				    id, ret);
+		}
+		ret = 0;
+	}
+
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		ret = -errno;
@@ -1800,7 +2416,7 @@ static int esdm_egd_handler(void *args)
 	}
 
 	/*
-	 * Both sockets are served by every worker: a listener is identified
+	 * The socket is served by every worker: a listener is identified
 	 * by its own pointer in the epoll data, a connection by the pointer to
 	 * its own structure, and the two can never collide.
 	 */
@@ -1826,10 +2442,7 @@ static int esdm_egd_handler(void *args)
 		 * handed over by systemd carries its path in the .socket unit.
 		 */
 		esdm_logger(LOGGER_STATUS, LOGGER_C_SERVER,
-			    "EGD server: serving %s%s\n",
-			    listener->prediction_resistance ?
-				    "with prediction resistance on " :
-				    "",
+			    "EGD server: serving %s\n",
 			    listener->systemd_socket ?
 				    "the socket provided by systemd" :
 				    listener->socket_path);
@@ -2131,9 +2744,7 @@ static int esdm_egd_handler(void *args)
 					LOGGER_DEBUG, LOGGER_C_SERVER,
 					"EGD server: closing idle connection on FD %d of UID %u\n",
 					conn->fd, (unsigned int)conn->peer_uid);
-				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
-				TAILQ_REMOVE(&conn_list, conn, tailq);
-				esdm_egd_release_conn(conn);
+				esdm_egd_reclaim(epfd, &conn_list, conn);
 
 				/*
 				 * The slot may have been the one wanted, and
@@ -2170,6 +2781,8 @@ out:
 	if (epfd >= 0)
 		close(epfd);
 
+	esdm_drng_node_unbind();
+
 	atomic_fetch_sub(&esdm_egd_workers_running, 1);
 
 	return ret;
@@ -2183,7 +2796,7 @@ int esdm_egd_server_start(void)
 	/*
 	 * The interface is active exactly when esdm_egd_server_socket_init()
 	 * obtained a listening socket - either from systemd or by binding the
-	 * path requested on the command line. Every worker serves both of them.
+	 * path requested on the command line. Every worker serves it.
 	 */
 	if (!esdm_egd_server_active())
 		return 0;
@@ -2213,7 +2826,7 @@ int esdm_egd_server_start(void)
 				t);
 
 			/*
-			 * The workers started so far serve both sockets
+			 * The workers started so far serve the socket
 			 * already - carry on with them, and fail only if there
 			 * is none at all.
 			 */

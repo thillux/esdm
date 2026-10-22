@@ -29,10 +29,12 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -51,7 +53,7 @@
  */
 #define TEST_TIMEOUT_MS 30000
 
-/* How long the server is given to create its socket. */
+/* How long the server is given to accept on its socket. */
 #define TEST_SERVER_START_SEC 30
 
 /*
@@ -74,6 +76,23 @@ static pid_t server_pid;
 			ret = 1;                                               \
 		}                                                              \
 	} while (0)
+
+/* Does the server accept connections on its socket yet? */
+static int server_accepts(void)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	int ret;
+
+	if (fd < 0)
+		return 0;
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
+	ret = !connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+	close(fd);
+
+	return ret;
+}
 
 static int server_start(void)
 {
@@ -118,9 +137,12 @@ static int server_start(void)
 		_exit(1);
 	}
 
-	/* The socket appears once the server is ready to serve it. */
+	/*
+	 * The server is ready once it accepts on its socket: the file is there
+	 * from the bind(2) on, but a connection is refused until the listen(2).
+	 */
 	for (i = 0; i < TEST_SERVER_START_SEC * 5; i++) {
-		if (!stat(sockpath, &sb) && S_ISSOCK(sb.st_mode))
+		if (server_accepts())
 			return 0;
 		if (waitpid(server_pid, NULL, WNOHANG) == server_pid) {
 			printf("The esdm-server terminated during its start\n");
@@ -130,7 +152,7 @@ static int server_start(void)
 		nanosleep(&wait, NULL);
 	}
 
-	printf("The esdm-server did not create %s\n", sockpath);
+	printf("The esdm-server did not accept on %s\n", sockpath);
 
 	return 1;
 }
@@ -144,10 +166,216 @@ static void server_stop(void)
 
 	printf("Killing server PID %u\n", (unsigned int)server_pid);
 	kill(server_pid, SIGTERM);
-	waitpid(server_pid, NULL, 0);
+	test_env_reap_daemon_or_fail(server_pid, "esdm-server");
 	server_pid = 0;
 
 	nanosleep(&wait, NULL);
+}
+
+/*
+ * The ESDM's own commands have no client library calls but the prediction
+ * resistant reads: they are spoken here in raw bytes, on a connection of their
+ * own.
+ */
+static int raw_connect(void)
+{
+	struct sockaddr_un addr;
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+	if (fd < 0)
+		return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+static int raw_send(int fd, const void *buf, size_t len)
+{
+	return send(fd, buf, len, MSG_NOSIGNAL) == (ssize_t)len ? 0 : -1;
+}
+
+static int raw_recv(int fd, void *buf, size_t len)
+{
+	uint8_t *p = buf;
+	size_t got = 0;
+
+	while (got < len) {
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		ssize_t rc;
+
+		if (poll(&pfd, 1, TEST_TIMEOUT_MS) <= 0)
+			return -1;
+		rc = recv(fd, p + got, len - got, 0);
+		if (rc <= 0)
+			return -1;
+		got += (size_t)rc;
+	}
+
+	return 0;
+}
+
+static uint32_t raw_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/* Command 0xe3, the first ESDM_EGD_STATE_NUM_FIELDS fields */
+static int raw_state(int fd, uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS])
+{
+	const uint8_t cmd = ESDM_EGD_CMD_ESDM_GET_STATE;
+	uint8_t count, resp[4 * 63];
+	unsigned int i;
+
+	if (raw_send(fd, &cmd, 1) || raw_recv(fd, &count, 1) || count > 63 ||
+	    count < ESDM_EGD_STATE_NUM_FIELDS ||
+	    raw_recv(fd, resp, 4 * (size_t)count))
+		return -1;
+
+	for (i = 0; i < ESDM_EGD_STATE_NUM_FIELDS; i++)
+		fields[i] = raw_be32(resp + 4 * i);
+
+	return 0;
+}
+
+/* Commands 0xe4 and 0xe5, the report as a string to be freed */
+static char *raw_status(int fd, uint8_t cmd)
+{
+	uint8_t hdr[4];
+	uint32_t len;
+	char *report;
+
+	if (raw_send(fd, &cmd, 1) || raw_recv(fd, hdr, sizeof(hdr)))
+		return NULL;
+
+	len = raw_be32(hdr);
+	if (!len || len > ESDM_EGD_MAX_STATUS)
+		return NULL;
+
+	report = calloc(1, (size_t)len + 1);
+	if (report && raw_recv(fd, report, len)) {
+		free(report);
+		report = NULL;
+	}
+
+	return report;
+}
+
+/* Commands 0xe6 to 0xea, the status they are answered with */
+static int raw_priv(int fd, uint8_t command, uint32_t arg, int32_t *status)
+{
+	uint8_t cmd[5] = { command, (uint8_t)(arg >> 24), (uint8_t)(arg >> 16),
+			   (uint8_t)(arg >> 8), (uint8_t)arg };
+	size_t len = (command == ESDM_EGD_CMD_ESDM_CLEAR_POOL ||
+		      command == ESDM_EGD_CMD_ESDM_RESEED) ?
+			     1 :
+			     5;
+	uint8_t resp[4];
+
+	if (raw_send(fd, cmd, len) || raw_recv(fd, resp, sizeof(resp)))
+		return -1;
+
+	*status = (int32_t)raw_be32(resp);
+
+	return 0;
+}
+
+/* The ESDM's own commands against the daemon, as root and as somebody else */
+static int test_esdm_commands(void)
+{
+	uint32_t orig[ESDM_EGD_STATE_NUM_FIELDS];
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS];
+	char *report;
+	int32_t status = 1;
+	int fd, ret = 0, wstatus;
+	pid_t child;
+
+	printf("EGD server: ESDM state and status\n");
+	fd = raw_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s", sockpath);
+		return ret;
+	}
+
+	CHECK(raw_state(fd, orig) == 0, "the state was not answered");
+	CHECK(orig[ESDM_EGD_STATE_FLAGS] & ESDM_EGD_STATE_FLAG_OPERATIONAL,
+	      "the daemon does not report itself operational");
+	CHECK(orig[ESDM_EGD_STATE_POOLSIZE] > 0, "the pool size is zero");
+
+	report = raw_status(fd, ESDM_EGD_CMD_ESDM_STATUS);
+	CHECK(report && strstr(report, "DRNG name: "),
+	      "the status is no status: %.200s", report ? report : "");
+	free(report);
+
+	report = raw_status(fd, ESDM_EGD_CMD_ESDM_STATUS_JSON);
+	CHECK(report && report[0] == '{' && strstr(report, "\"drngs\""),
+	      "the JSON status is no status: %.200s", report ? report : "");
+	free(report);
+
+	printf("EGD server: ESDM privileged commands as root\n");
+	CHECK(raw_priv(fd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS,
+		       orig[ESDM_EGD_STATE_MIN_RESEED_SECS] == 99 ? 98 : 99,
+		       &status) == 0 &&
+		      status == 0,
+	      "setting the reseed seconds failed: %d", status);
+	CHECK(raw_state(fd, fields) == 0 &&
+		      fields[ESDM_EGD_STATE_MIN_RESEED_SECS] ==
+			      (orig[ESDM_EGD_STATE_MIN_RESEED_SECS] == 99 ? 98 :
+									     99),
+	      "the reseed seconds were not set");
+	CHECK(raw_priv(fd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS,
+		       orig[ESDM_EGD_STATE_MIN_RESEED_SECS], &status) == 0 &&
+		      status == 0,
+	      "restoring the reseed seconds failed: %d", status);
+	CHECK(raw_priv(fd, ESDM_EGD_CMD_ESDM_RESEED, 0, &status) == 0 &&
+		      status == 0,
+	      "the reseed failed: %d", status);
+	close(fd);
+
+	/*
+	 * The same command from somebody else, whom the daemon knows by the
+	 * credentials of the socket.
+	 */
+	printf("EGD server: ESDM privileged commands of an unprivileged user\n");
+	if (chmod(tmpdir, 0711) < 0) {
+		CHECK(0, "cannot open %s to other users", tmpdir);
+		return ret;
+	}
+	child = fork();
+	if (child < 0) {
+		CHECK(0, "cannot fork");
+		return ret;
+	}
+	if (!child) {
+		int cfd;
+
+		if (setgid(65534) < 0 || setuid(65534) < 0)
+			_exit(2);
+		cfd = raw_connect();
+		if (cfd < 0)
+			_exit(3);
+		if (raw_priv(cfd, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS, 7,
+			     &status) ||
+		    status != -EPERM)
+			_exit(4);
+		if (raw_state(cfd, fields) ||
+		    fields[ESDM_EGD_STATE_MIN_RESEED_SECS] == 7)
+			_exit(5);
+		_exit(0);
+	}
+	CHECK(waitpid(child, &wstatus, 0) == child && WIFEXITED(wstatus) &&
+		      WEXITSTATUS(wstatus) == 0,
+	      "the unprivileged user was not refused (status 0x%x)", wstatus);
+	chmod(tmpdir, 0700);
+
+	return ret;
 }
 
 int main(int argc, char *argv[])
@@ -269,6 +497,24 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
+
+	printf("EGD server: prediction resistant reads\n");
+	memset(buf, 0, sizeof(buf));
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) == 0,
+	      "the prediction resistant blocking read failed");
+	CHECK(memcmp(buf, zero, sizeof(buf)) != 0,
+	      "the prediction resistant read delivered nothing but zeroes");
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, buf, ESDM_EGD_MAX_TRANSFER, &generated) == 0,
+	      "the prediction resistant non-blocking read failed");
+	CHECK(generated <= ESDM_EGD_MAX_TRANSFER,
+	      "%zu prediction resistant bytes delivered, at most %u were asked for",
+	      generated, ESDM_EGD_MAX_TRANSFER);
+	printf("  %zu of %u prediction resistant bytes delivered right away\n",
+	       generated, ESDM_EGD_MAX_TRANSFER);
+
+	if (test_esdm_commands())
+		ret = 1;
 
 	/*
 	 * The daemon goes away underneath the client: the request must come

@@ -21,8 +21,11 @@
 #define TEST_WAIT_H
 
 #include <stdio.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
+#include <unistd.h>
 
 /*
  * Wait for a daemon the test just forked to be ready, by watching for the path
@@ -72,5 +75,54 @@ static inline int test_wait_for_type(const char *path, mode_t type,
 
 /* Generous: it only matters when something is wrong */
 #define TEST_WAIT_TIMEOUT_MS 30000
+
+/*
+ * Wait for a daemon the test just forked to accept connections on the Unix
+ * domain socket @path of @sock_type - SOCK_SEQPACKET for the RPC interfaces,
+ * SOCK_STREAM for EGD.
+ *
+ * The socket file exists from the bind(2) on, but a connect(2) is refused
+ * until the daemon listens. A test connecting at once on seeing the file -
+ * with a client of its own, or one that does not retry - therefore failed now
+ * and then on a loaded machine. Ready is a connection that succeeded; it is
+ * closed again at once, which the daemon sees as a client that went away.
+ *
+ * Returns 1 once a connection succeeded, 0 if none did within the timeout.
+ */
+static inline int test_wait_for_listener(const char *path, int sock_type,
+					 unsigned int timeout_ms)
+{
+	static const unsigned int poll_ms = 5;
+	struct timespec pause = { .tv_sec = 0,
+				  .tv_nsec = poll_ms * 1000L * 1000L };
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	unsigned int waited = 0;
+
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+
+	for (;;) {
+		int fd = socket(AF_UNIX, sock_type | SOCK_CLOEXEC, 0);
+
+		if (fd >= 0) {
+			int ret = connect(fd, (struct sockaddr *)&addr,
+					  sizeof(addr));
+
+			close(fd);
+			if (!ret)
+				return 1;
+		}
+
+		if (waited >= timeout_ms)
+			break;
+		nanosleep(&pause, NULL);
+		waited += poll_ms;
+	}
+
+	fprintf(stderr,
+		"Test environment: nothing accepted connections on %s within %u ms\n",
+		path, timeout_ms);
+
+	return 0;
+}
 
 #endif /* TEST_WAIT_H */

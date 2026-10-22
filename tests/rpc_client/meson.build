@@ -119,6 +119,8 @@ if get_option('esdm-server').enabled()
 
 	# One test over the whole client API: most of its calls are a file each
 	# and had never been executed.
+	# The static library: the reserved slot of the privileged interface is
+	# called with the generated stub, which the shared one does not export
 	rpc_api_test = executable(
 			'rpc_api_test',
 			[ esdm_tester_common, 'rpc_api_test.c' ],
@@ -126,7 +128,8 @@ if get_option('esdm-server').enabled()
 					       include_dirs_server,
 					       include_directories('../common') ],
 			dependencies: [ dependencies_client ],
-			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib.get_static_lib() ]
 		)
 
 	rpc_get_seed_test = executable(
@@ -148,6 +151,14 @@ if get_option('esdm-server').enabled()
 	rpc_ent_lvl_test = executable(
 			'rpc_ent_lvl_test',
 			[ esdm_tester_common, 'rpc_ent_lvl.c' ],
+			include_directories: include_dirs_client,
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
+		)
+
+	rpc_resume_reseed_test = executable(
+			'rpc_resume_reseed_test',
+			[ esdm_tester_common, 'rpc_resume_reseed_test.c' ],
 			include_directories: include_dirs_client,
 			dependencies: [ dependencies_client ],
 			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib ]
@@ -238,8 +249,40 @@ if get_option('esdm-server').enabled()
 	test('RPC call seed_lvl_test', rpc_seed_lvl_test,
 		env: [ tester_esdm_env ])
 
+	# The server reseeds its DRNGs on the resume the signal helper reports
+	test('RPC server reseeds on resume', rpc_resume_reseed_test,
+		env: [ tester_esdm_env,
+		       'ESDM_SIGNAL_HELPER=' +
+				esdm_server_signal_helper.full_path() ])
+
 	# Sweeps every client wrapper in one server life cycle, hence the
 	# larger timeout.
 	test('RPC call whole client API', rpc_api_test,
 		env: [ tester_esdm_env ], timeout: 300)
+
+	# Throughput of the RPC interface by the calls of its consumers, from
+	# several threads and processes - see rpc_bench.c. A benchmark, run by
+	# meson test --benchmark only; it starts an esdm-server, as root or,
+	# unprivileged, in a user namespace, and skips (77) without either. Run by hand with -x, it measures the server running already.
+	rpc_bench = executable(
+			'rpc_bench',
+			[ 'rpc_bench.c' ],
+			include_directories: [ include_dirs_client,
+					       include_dirs_egd_client ],
+			dependencies: [ dependencies_client,
+					dependency('threads'),
+					cc.find_library('dl', required: false),
+					cc.find_library('m', required: false) ],
+			link_with: [ esdm_common_static_lib, esdm_rpc_client_lib,
+				     esdm_egd_client_lib.get_static_lib() ]
+		)
+
+	rpc_bench_env = [ tester_esdm_env ]
+	if get_option('linux-getrandom').enabled()
+		rpc_bench_env += [ 'ESDM_GETRANDOM_LIB=' +
+				   esdm_getrandom_lib.full_path() ]
+	endif
+
+	benchmark('RPC throughput', rpc_bench,
+		env: rpc_bench_env, timeout: 1800, suite: 'rpc')
 endif

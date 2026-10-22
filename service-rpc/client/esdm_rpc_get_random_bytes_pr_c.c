@@ -38,16 +38,27 @@ struct esdm_get_random_bytes_pr_buf {
 	size_t buflen;
 };
 
-static void
-esdm_rpcc_get_random_bytes_pr_cb(const RandValResponse *response,
-				 void *closure_data)
+static void esdm_rpcc_get_random_bytes_pr_cb(const ProtobufCMessage *message,
+					     void *closure_data)
 {
+	const RandValResponse *response = (const RandValResponse *)message;
 	struct esdm_get_random_bytes_pr_buf *buffer =
 		(struct esdm_get_random_bytes_pr_buf *)closure_data;
 
 	esdm_rpcc_error_check(response, buffer);
 	if (response->ret < 0) {
 		buffer->ret = esdm_rpcc_randval_ret(response->ret);
+		return;
+	}
+
+	/*
+	 * No data at all is a valid answer of the PR DRNG - see
+	 * esdm_get_random_bytes_pr(): the entropy sources had nothing to give
+	 * right now. It is no failure, but what -EAGAIN says as well: asked
+	 * again after a pause, or the end of a non-blocking call.
+	 */
+	if (!response->ret) {
+		buffer->ret = -EAGAIN;
 		return;
 	}
 
@@ -95,7 +106,9 @@ static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
 
 		unpriv_access__rpc_get_random_bytes_pr(
 			&rpc_conn->service, &msg,
-			esdm_rpcc_get_random_bytes_pr_cb, &buffer);
+			(RandValResponse_Closure)
+				esdm_rpcc_get_random_bytes_pr_cb,
+			&buffer);
 
 		/*
 		 * The callback only runs once a response was received. When the
@@ -149,6 +162,21 @@ static ssize_t esdm_rpcc_get_random_bytes_pr_common(uint8_t *buf, size_t buflen,
 		esdm_test_shm_status_add_rpc_client_written((size_t)buffer.ret);
 		buflen -= (size_t)buffer.ret;
 		buf += buffer.ret;
+
+		/*
+		 * See esdm_rpcc_get_random_bytes_full_int(). Without a connection
+		 * for the next part, a call that does not wait returns what it
+		 * obtained, as it does for a busy PR DRNG.
+		 */
+		if (buflen) {
+			ret = esdm_rpcc_unpriv_service_next(&rpc_conn, int_data,
+							    NULL);
+			if (ret) {
+				if (nonblock)
+					ret = (ssize_t)(orig_buflen - buflen);
+				goto out;
+			}
+		}
 	}
 
 	ret = (ssize_t)orig_buflen;

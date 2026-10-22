@@ -59,10 +59,32 @@ enum {
 	esdm_rpcc_in_termination,
 };
 
+struct esdm_dtls;
+
 struct esdm_rpc_client_connection {
 	ProtobufCService service;
 	char socketname[FILENAME_MAX];
 	int fd;
+
+	/*
+	 * The DTLS of the connection on fd, NULL while it is unencrypted - see
+	 * ESDM_RPC_PROTO_STARTDTLS in esdm_rpc_protocol.h. Guarded by lock, as
+	 * the socket is.
+	 */
+	struct esdm_dtls *dtls;
+
+	/*
+	 * The DTLS of a connection of the parent, left behind by a fork - see
+	 * reinit_conns_after_fork(). Never used, only kept reachable.
+	 */
+	struct esdm_dtls *dtls_orphan;
+
+	/*
+	 * CLOCK_MONOTONIC time in milliseconds before which a new connection is
+	 * not to ask for DTLS: the server did not agree to it the last time.
+	 * 0 to ask. Guarded by lock.
+	 */
+	int64_t dtls_retry_ms;
 
 	/*
 	 * Caller can register function that is invoked to check whether call
@@ -117,8 +139,15 @@ struct esdm_rpc_client_connection {
 	 * Only update this, when data is received or on new connections.
 	 * Otherwise, we may update on writes without answer and keep
 	 * dead connections open for too long.
+	 *
+	 * In milliseconds of esdm_monotonic_coarse_ms(), 0 without a
+	 * connection: it is compared with half the idle timeout of the server,
+	 * a second by default. The server closes a connection only once it was
+	 * idle for the whole timeout, so the tick the coarse clock may be off
+	 * by is covered by the other half - for any idle timeout above two
+	 * ticks, 20 ms at the lowest CONFIG_HZ.
 	 */
-	struct timespec last_used;
+	int64_t last_used_ms;
 
 	/*
 	 * Outcome of the most recent esdm_client_invoke() on this connection: 0
@@ -219,6 +248,62 @@ static const struct timespec esdm_client_poll_ts = { .tv_sec = 1,
 int esdm_rpcc_unpriv_service_pause(esdm_rpc_client_connection_t **rpc_conn,
 				   void *int_data,
 				   const struct timespec *deadline);
+
+/**
+ * @brief Bound the wait of the calling thread for a connection
+ *
+ * Not API, exported for libesdm_getrandom: a getrandom(2) that must not block -
+ * GRND_NONBLOCK, GRND_INSECURE - must not wait for another thread of the process
+ * whose request holds every connection, which may take seconds for prediction
+ * resistant data. Until it is set back, every checkout of the unprivileged
+ * interface by the calling thread gives up with -EBUSY at @deadline, should it
+ * have to wait for a connection that long - a call with a deadline of its own,
+ * esdm_rpcc_get_random_bytes_full_timeout(), at the earlier of the two, with
+ * -ETIMEDOUT if it is its own. A call without a deadline of its own waits for
+ * the ESDM to become able to serve no longer either, see
+ * esdm_rpcc_unpriv_service_pause(), and gives up with -ETIMEDOUT. The requests
+ * themselves are not bounded by it: once a connection is had, the call takes as
+ * long as the ESDM needs to answer it.
+ *
+ * The deadline in place before is returned, for the caller to put back: a
+ * call that sets one may be made from within another one that did - the TLS
+ * stack of a connection asking for random numbers, which a preloaded
+ * libesdm_getrandom answers.
+ *
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time, NULL for none. It must
+ *			stay valid until it is set back.
+ *
+ * @return the checkout deadline of the thread before
+ */
+const struct timespec *
+esdm_rpcc_set_unpriv_checkout_deadline(const struct timespec *deadline);
+
+/**
+ * @brief Put the connection back between two parts of a request, and check one
+ *	  out again for the next part
+ *
+ * A request larger than one answer carries - or one of prediction resistant
+ * data, which comes in parts of ESDM_RPC_MAX_PR_REQUEST_SIZE bytes, each
+ * collected from the entropy sources - holds its connection for as many round
+ * trips as it has parts: a prediction resistant read of 64 KiB for seconds.
+ * Every other thread of the process that finds the connections busy waits for
+ * one of them meanwhile, also one that must not wait, such as a check whether
+ * the ESDM is seeded. Put back between the parts, the connection is free for
+ * a moment, and the request goes on with the one the calling thread finds
+ * free then - mostly the same, see esdm_rpcc_get_service().
+ *
+ * @param [in,out] rpc_conn The checked out connection, which is put back. Set
+ *			    to the connection checked out for the next part,
+ *			    NULL when that failed.
+ * @param [in] int_data Opaque data pointer for the interrupt function
+ * @param [in] deadline Absolute CLOCK_MONOTONIC time of the call, NULL for
+ *			none, as for esdm_rpcc_get_unpriv_service_deadline()
+ *
+ * @return 0 on success, < 0 on errors of esdm_rpcc_get_unpriv_service_deadline
+ */
+int esdm_rpcc_unpriv_service_next(esdm_rpc_client_connection_t **rpc_conn,
+				  void *int_data,
+				  const struct timespec *deadline);
 
 #ifdef __cplusplus
 }

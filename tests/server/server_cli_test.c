@@ -24,9 +24,10 @@
  * the one or two a particular test needs, so everything else the command line
  * accepts - and everything it says when given something it does not - was never
  * executed. None of that needs the daemon to come up: the options are parsed
- * before the check refusing to run as anything but root, so an unprivileged run
- * reaches all of the parsing and stops right afterwards. --help and --version
- * are their own answer, exiting before anything else happens.
+ * before an unprivileged run given a user to switch to is refused, so such a
+ * run reaches all of the parsing and stops right afterwards - see
+ * test_run_parsed(). --help and --version are their own answer, exiting
+ * before anything else happens.
  */
 
 #define _GNU_SOURCE
@@ -40,8 +41,25 @@
 
 #include "../test_run.h"
 
-/* What an unprivileged run gets to say before it stops */
-#define TEST_NOT_ROOT "must start as root"
+/* What an unprivileged run given -u gets to say before it stops */
+#define TEST_NOT_ROOT "cannot switch to another user"
+
+/*
+ * Run with @opts behind -u nobody, which an unprivileged run refuses once the
+ * options are parsed - without it, the daemon would start. Ahead of @opts, so
+ * that the limit of test_run() never drops it.
+ */
+static int test_run_parsed(struct test_run *r, const char *const opts[])
+{
+	const char *argv[TEST_RUN_ARGS_MAX + 1] = { "-u", "nobody" };
+	unsigned int i;
+
+	for (i = 0; i + 2 < TEST_RUN_ARGS_MAX && opts[i]; i++)
+		argv[i + 2] = opts[i];
+	argv[i + 2] = NULL;
+
+	return test_run(r, argv, NULL);
+}
 
 static void test_usage(void)
 {
@@ -104,6 +122,16 @@ static void test_unknown_option(void)
 {
 	const char *const unknown[] = { "--no-such-option", NULL };
 	const char *const unknown_short[] = { "-Z", NULL };
+	/*
+	 * The second EGD socket for prediction resistance is gone - the ESDM
+	 * serves that with a command on the one socket. A setup still asking
+	 * for it has to learn so rather than run without what it asked for.
+	 */
+	const char *const egd_pr[] = { "--egd_socket_pr",
+				       "/nonexistent/esdm-egd-pr.socket", NULL };
+	const char *const egd_pr_short[] = {
+		"-E", "/nonexistent/esdm-egd-pr.socket", NULL
+	};
 	struct test_run r;
 
 	/*
@@ -120,6 +148,15 @@ static void test_unknown_option(void)
 	CHECK(strstr(r.err, "Usage") != NULL,
 	      "an unknown short option was rejected without the usage (output: %.200s)",
 	      r.err);
+
+	CHECK_EQ(test_run(&r, egd_pr, NULL), 1);
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "--egd_socket_pr was not rejected with the usage (output: %.200s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, egd_pr_short, NULL), 1);
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "-E was not rejected with the usage (output: %.200s)", r.err);
 }
 
 /*
@@ -137,18 +174,20 @@ static void test_options_accepted(void)
 		"--username",    "nobody",        "--groupname",
 		"nogroup",       NULL
 	};
+	/* The switches of the RPC server, taken whatever the build */
+	static const char *const rpc_switches[] = {
+		"--dtls", "--no_dtls", "--no_fixed_drng_mapping",
+		"--no_conn_balancing", NULL
+	};
 	static const char *const short_form[] = { "-v", "-f",       "-i", "-s",
 						  "-m", "-M",       "-P", "-u",
 						  "nobody", "-g",   "nogroup",
 						  NULL };
 	static const char *const sockets[] = { "-e",
 					       "/nonexistent/esdm-egd.socket",
-					       "-E",
-					       "/nonexistent/esdm-egd-pr.socket",
 					       NULL };
 	static const char *const sockets_long[] = {
-		"--egd_socket", "/nonexistent/esdm-egd.socket",
-		"--egd_socket_pr", "/nonexistent/esdm-egd-pr.socket", NULL
+		"--egd_socket", "/nonexistent/esdm-egd.socket", NULL
 	};
 	struct test_run r;
 
@@ -158,28 +197,33 @@ static void test_options_accepted(void)
 	}
 
 	/*
-	 * Each of these gets as far as the privilege check and no further,
+	 * Each of these gets as far as the check of -u and no further,
 	 * which is what says the parser accepted everything before it. A
 	 * rejected option would have exited with the usage instead.
 	 */
-	CHECK_EQ(test_run(&r, long_form, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, long_form), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the long options were not all accepted (output: %.300s)", r.err);
 
-	CHECK_EQ(test_run(&r, short_form, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, rpc_switches), 1);
+	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+	      "the RPC server switches were not all accepted (output: %.300s)",
+	      r.err);
+
+	CHECK_EQ(test_run_parsed(&r, short_form), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the short options were not all accepted (output: %.300s)", r.err);
 
 	/*
-	 * The EGD sockets are only recorded here - they are bound once the
-	 * daemon is up, so a path that cannot exist is accepted at this point.
+	 * The EGD socket is only recorded here - it is bound once the daemon
+	 * is up, so a path that cannot exist is accepted at this point.
 	 */
-	CHECK_EQ(test_run(&r, sockets, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, sockets), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the EGD socket options were not accepted (output: %.300s)",
 	      r.err);
 
-	CHECK_EQ(test_run(&r, sockets_long, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, sockets_long), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the long EGD socket options were not accepted (output: %.300s)",
 	      r.err);
@@ -201,11 +245,11 @@ static void test_syslog(void)
 		return;
 	}
 
-	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, opts), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
 	      "--syslog left the log on stderr (output: %.300s)", r.err);
 
-	CHECK_EQ(test_run(&r, opts_short, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, opts_short), 1);
 }
 
 /*
@@ -225,50 +269,236 @@ static void test_pid_file_option(void)
 		return;
 	}
 
-	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, opts), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "--pid was not accepted (output: %.300s)", r.err);
 
-	CHECK_EQ(test_run(&r, opts_short, NULL), 1);
+	CHECK_EQ(test_run_parsed(&r, opts_short), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "-p was not accepted (output: %.300s)", r.err);
 }
 
 /*
- * The PKCS#11 provider module named on the command line. A build without the
- * PKCS#11 entropy source refuses the option rather than ignoring it, as the
- * module asked for would not be used. The module is only loaded by
- * esdm_init(), so an unprivileged run accepts any path.
+ * The daemon reports what makes it fail without being asked to be verbose: no
+ * -v used to be the level of no output at all, and the daemon then ended with
+ * nothing but its exit status. A PID file that cannot be created is the first
+ * failure past the privilege check, so this needs root, and the daemon ends
+ * there, before it set up anything.
  */
-static void test_pkcs11_module_option(void)
+static void test_errors_without_verbose(void)
+{
+	const char *const opts[] = { "-f", "--pid", "/nonexistent/esdm.pid",
+				     NULL };
+	struct test_run r;
+
+	if (geteuid()) {
+		printf("not running as root - skipping the error report check\n");
+		return;
+	}
+
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "Cannot open pid file") != NULL,
+	      "the failure was not reported without -v (output: %.300s)",
+	      r.err);
+}
+
+/*
+ * The PKCS#11 entropy source is esdm-es-pkcs11, which the ESDM reads as an
+ * external one, and which takes its module on its own command line. The
+ * option of the server that named the module is gone: a setup still giving it
+ * has to learn so - with the usage, as for any unknown option - rather than
+ * run without the token it asked for. Nor does the usage offer it.
+ */
+static void test_pkcs11_module_gone(void)
 {
 	const char *const opts[] = { "--pkcs11_module",
 				     "/nonexistent/libpkcs11-test.so", NULL };
-	const char *const empty[] = { "--pkcs11_module", "", NULL };
 	struct test_run r;
 
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
-#ifdef ESDM_ES_PKCS11
-	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-	      "--pkcs11_module was not accepted (output: %.300s)", r.err);
-#else
-	CHECK(strstr(r.err, "not part of this build") != NULL,
-	      "--pkcs11_module was not refused without the PKCS#11 ES (output: %.300s)",
+	CHECK(strstr(r.err, "Usage") != NULL,
+	      "--pkcs11_module was not rejected with the usage (output: %.300s)",
 	      r.err);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
 	      "--pkcs11_module was refused only after the parsing (output: %.300s)",
 	      r.err);
-#endif
-
-	/* A module path that names nothing is a mistake, not the default */
-	CHECK_EQ(test_run(&r, empty, NULL), 1);
-	CHECK(strstr(r.err, "must not be empty") != NULL,
-	      "an empty --pkcs11_module was not refused (output: %.300s)",
-	      r.err);
 
 	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
-	CHECK(strstr(r.err, "--pkcs11_module") != NULL,
-	      "the usage does not mention --pkcs11_module");
+	CHECK(strstr(r.err, "pkcs11") == NULL,
+	      "the usage still offers a PKCS#11 option");
+}
+
+/*
+ * External entropy sources are no longer loaded into the daemon as plugin
+ * libraries - a source is served by a provider of its own, read with
+ * --es_ext_socket. A setup still naming a plugin library has to learn so, with
+ * the usage as for any unknown option, rather than run without the source it
+ * asked for. Nor does the usage offer the options any longer.
+ */
+static void test_es_ext_lib_gone(void)
+{
+	static const char *const gone[][3] = {
+		{ "--es_ext_lib", "/nonexistent/libesdm-es-ext-test.so", NULL },
+		{ "--es_ext_lib_entropy_rate", "128", NULL },
+	};
+	struct test_run r;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) {
+		CHECK_EQ(test_run(&r, gone[i], NULL), 1);
+		CHECK(strstr(r.err, "Usage") != NULL,
+		      "%s was not rejected with the usage (output: %.300s)",
+		      gone[i][0], r.err);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
+		      "%s was refused only after the parsing (output: %.300s)",
+		      gone[i][0], r.err);
+	}
+
+	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
+	CHECK(strstr(r.err, "--es_ext_lib") == NULL &&
+		      strstr(r.err, "plugin") == NULL,
+	      "the usage still offers a plugin library");
+}
+
+/*
+ * The socket of the external entropy source provider, the cap of its credit
+ * and the user it may run as. The socket is only connected to by esdm_init(),
+ * so an unprivileged run accepts any path.
+ */
+static void test_es_ext_socket_options(void)
+{
+	const char *const opts[] = { "--es_ext_socket",
+				     "/nonexistent/esdm-es-ext.socket",
+				     "--es_ext_socket_entropy_rate", "auto",
+				     "--es_ext_socket_uid", "1234", NULL };
+	const char *const by_name[] = { "--es_ext_socket_uid", "root", NULL };
+	const char *const empty[] = { "--es_ext_socket", "", NULL };
+	const char *const no_user[] = { "--es_ext_socket_uid",
+					"no-such-user-esdm-test", NULL };
+	const char *const bad_rate[] = { "--es_ext_socket_entropy_rate", "300",
+					 NULL };
+	struct test_run r;
+
+#ifdef ESDM_ES_EXT
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run_parsed(&r, opts), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "the --es_ext_socket options were not accepted (output: %.300s)",
+		      r.err);
+
+		CHECK_EQ(test_run_parsed(&r, by_name), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
+		      r.err);
+	}
+#else
+	(void)by_name;
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "not part of this build") != NULL,
+	      "--es_ext_socket was not refused without external ES (output: %.300s)",
+	      r.err);
+#endif
+
+	CHECK_EQ(test_run(&r, empty, NULL), 1);
+	CHECK(strstr(r.err, "must not be empty") != NULL,
+	      "an empty --es_ext_socket was not refused (output: %.300s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, no_user, NULL), 1);
+	CHECK(strstr(r.err, "uid or a user name") != NULL,
+	      "an unknown user was not refused (output: %.300s)", r.err);
+
+	CHECK_EQ(test_run(&r, bad_rate, NULL), 1);
+	CHECK(strstr(r.err, "entropy rate from 0 to 256") != NULL,
+	      "--es_ext_socket_entropy_rate 300 was not refused (output: %.300s)",
+	      r.err);
+}
+
+/*
+ * The options of the external sources may be given once per source, the n-th
+ * occurrence of an option configuring the n-th source: as often as the build
+ * has sources is accepted, once more is refused - before the parsing is done,
+ * with a message that says why.
+ */
+static void test_es_ext_repeated_options(void)
+{
+#ifdef ESDM_ES_EXT
+	static const struct {
+		const char *opt;
+		const char *arg;
+	} opts[] = {
+		{ "--es_ext_socket", "/nonexistent/esdm-es-ext.socket" },
+		{ "--es_ext_socket_entropy_rate", "64" },
+		{ "--es_ext_socket_uid", "1234" },
+	};
+	/* Up to 16 sources, and one occurrence more */
+	const char *argv[2 * 17 + 1];
+	struct test_run r;
+	unsigned int i, n;
+
+	for (i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
+		for (n = 0; n <= ESDM_EXT_SOCKET_NUM; n++) {
+			argv[2 * n] = opts[i].opt;
+			argv[2 * n + 1] = opts[i].arg;
+		}
+
+		/* Once per source */
+		argv[2 * ESDM_EXT_SOCKET_NUM] = NULL;
+		if (geteuid()) {
+			CHECK_EQ(test_run_parsed(&r, argv), 1);
+			CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+			      "%s given %u times was not accepted (output: %.300s)",
+			      opts[i].opt, ESDM_EXT_SOCKET_NUM, r.err);
+		}
+
+		/* And once more */
+		argv[2 * ESDM_EXT_SOCKET_NUM] = opts[i].opt;
+		argv[2 * ESDM_EXT_SOCKET_NUM + 2] = NULL;
+		CHECK_EQ(test_run(&r, argv, NULL), 1);
+		CHECK(strstr(r.err, "is given more often than this build has") !=
+			      NULL,
+		      "%s given %u times was not refused (output: %.300s)",
+		      opts[i].opt, ESDM_EXT_SOCKET_NUM + 1, r.err);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
+		      "%s given too often was refused only after the parsing (output: %.300s)",
+		      opts[i].opt, r.err);
+	}
+
+	/* The usage tells how many sources the options configure */
+	CHECK_EQ(test_run(&r, (const char *const[]){ "-h", NULL }, NULL), 1);
+	CHECK(strstr(r.err, "n-th occurrence") != NULL,
+	      "the usage does not say the options configure one source each");
+#endif
+}
+
+/* The kernel crypto API RNG of the kernel Jitter RNG source */
+static void test_es_jent_kernel_name_option(void)
+{
+	const char *const opts[] = { "--es_jent_kernel_name",
+				     "jitterentropy_rng_test", NULL };
+	const char *const empty[] = { "--es_jent_kernel_name", "", NULL };
+	struct test_run r;
+
+#ifdef ESDM_ES_JENT_KERNEL
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run_parsed(&r, opts), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "--es_jent_kernel_name was not accepted (output: %.300s)",
+		      r.err);
+	}
+#else
+	CHECK_EQ(test_run(&r, opts, NULL), 1);
+	CHECK(strstr(r.err, "not part of this build") != NULL,
+	      "--es_jent_kernel_name was not refused without the source (output: %.300s)",
+	      r.err);
+#endif
+
+	CHECK_EQ(test_run(&r, empty, NULL), 1);
+	CHECK(strstr(r.err, "must not be empty") != NULL,
+	      "an empty --es_jent_kernel_name was not refused (output: %.300s)",
+	      r.err);
 }
 
 int main(int argc, char *argv[])
@@ -287,7 +517,12 @@ int main(int argc, char *argv[])
 	test_options_accepted();
 	test_syslog();
 	test_pid_file_option();
-	test_pkcs11_module_option();
+	test_errors_without_verbose();
+	test_pkcs11_module_gone();
+	test_es_ext_lib_gone();
+	test_es_ext_socket_options();
+	test_es_ext_repeated_options();
+	test_es_jent_kernel_name_option();
 
 	test_run_fini();
 

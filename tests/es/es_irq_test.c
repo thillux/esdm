@@ -32,11 +32,11 @@
  * patched kernel and its esdm_es module.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -44,102 +44,76 @@
 #include "esdm_definitions.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
+#include "../es_state_check.h"
 #include "esdm_es_irq.h"
+#include "es_irq_events.h"
 #include "helper.h"
 #include "test_pertubation.h"
 
 /*
- * Short sleeps arm hrtimers whose expiry raises timer interrupts and softirqs
- * on the local CPU - the same generator the eBPF interrupt test uses, and the
- * only one reachable from unprivileged user space.
+ * Reads from the disk per round, each one interrupt of the block device. A read
+ * of the initial seed size takes some 2300 events in FIPS mode: the add-on
+ * credits a third of a bit per event (256 * ESDM_ES_OSR events for 256 bits,
+ * ESDM_ES_OSR being 3), the read has to find two blocks and their oversampling
+ * available, and what is available is reduced by the oversampling twice.
  */
+#define ES_IRQ_TEST_READS 4000
+
+/* Device interrupts, which the add-on collects - see es_irq_events.h */
 static void create_irq_entropy(void)
 {
-	struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
-	unsigned int i;
+	int ret = es_irq_events(ES_IRQ_TEST_READS);
 
-	for (i = 0; i < 5000; i++)
-		nanosleep(&ts, NULL);
+	if (ret)
+		printf("ES Interrupt - info: no interrupt events created: %s\n",
+		       strerror(-ret));
 }
 
 static int es_irq_getstate(void)
 {
-	char buf[500];
+	struct json_object *obj = es_state_get(esdm_es[esdm_int_es_irq]);
+	int ret = 0;
 
-	if (!esdm_es[esdm_int_es_irq]->state) {
+	if (!obj) {
 		printf("ES Interrupt - fail: state callback missing\n");
 		return 1;
 	}
 
-	memset(buf, 0, sizeof(buf));
-
-	esdm_es[esdm_int_es_irq]->state(buf, sizeof(buf));
-
-	if (!strncmp(buf, " disabled", 9) || !strncmp(buf, "disabled", 8))
+	if (es_state_has(obj, "disabled", json_type_string)) {
+		json_object_put(obj);
 		return -ENOENT;
+	}
 
 	/*
-	 * The labels come from the kernel module (esdm_irq_es_state() of
-	 * addon/linux_esdm_es/esdm_es_irq.c), so this pins the two together.
+	 * The members come from the kernel module (esdm_irq_es_state_json()
+	 * of kernel/esdm_es/esdm_es_irq.c), so this pins the two
+	 * together - or for a module older than its JSON status, from its
+	 * status text.
 	 */
-	if (!strstr(buf, "DRBG for operating entropy pool") ||
-	    !strstr(buf, "Available entropy") ||
-	    !strstr(buf, "per-CPU interrupt collection size") ||
-	    !strstr(buf, "Standards compliance") ||
-	    !strstr(buf, "High-resolution timer")) {
+	if (!es_state_has(obj, "drbg_for_operating_entropy_pool",
+			  json_type_string) ||
+	    !es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "per_cpu_interrupt_collection_size",
+			  json_type_int) ||
+	    !es_state_has(obj, "standards_compliance", json_type_string) ||
+	    !es_state_has(obj, "high_resolution_timer", json_type_boolean)) {
 		printf("ES Interrupt - fail: state information contains unexpected content: %s\n",
-		       buf);
-		return 1;
-	}
-	printf("ES Interrupt - pass: state information found:\n%s\n", buf);
-
-	return 0;
-}
-
-/*
- * The JSON status is what the server embeds in its own status document, so a
- * malformed one is not visible until something parses it. Only the framing and
- * the member names are checked here - the values are the plain state's.
- */
-static int es_irq_getstate_json(void)
-{
-	char buf[ESDM_STATUS_JSON_BUFLEN];
-	size_t len;
-
-	if (!esdm_es[esdm_int_es_irq]->state_json) {
-		printf("ES Interrupt - fail: state_json callback missing\n");
-		return 1;
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES Interrupt - pass: state information found:\n%s\n",
+		       es_state_print(obj));
 	}
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[esdm_int_es_irq]->state_json(buf, sizeof(buf));
-
-	len = strlen(buf);
-	if (len < 2 || buf[0] != '{' || buf[len - 1] != '}') {
-		printf("ES Interrupt - fail: state_json is not a JSON object: %s\n",
-		       buf);
-		return 1;
-	}
-
-	if (!strstr(buf, "\"drbg_for_operating_entropy_pool\"") ||
-	    !strstr(buf, "\"available_entropy\"") ||
-	    !strstr(buf, "\"per_cpu_interrupt_collection_size\"") ||
-	    !strstr(buf, "\"high_resolution_timer\"")) {
-		printf("ES Interrupt - fail: state_json misses a member: %s\n",
-		       buf);
-		return 1;
-	}
-
-	printf("ES Interrupt - pass: state_json: %s\n", buf);
-
-	return 0;
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_irq_getdata(void)
 {
 	struct entropy_es eb_es;
 	uint8_t zero[ESDM_DRNG_INIT_SEED_SIZE_BYTES];
-	uint32_t loops;
+	uint32_t loops, delivered = 0;
 
 	if (!esdm_es[esdm_int_es_irq]->get_ent) {
 		printf("ES Interrupt - fail: get_ent callback missing\n");
@@ -169,8 +143,21 @@ static int es_irq_getdata(void)
 				return 1;
 			}
 			printf("ES Interrupt - pass: buffer with entropy is not zero\n");
+			delivered++;
 		}
 	}
+
+	/*
+	 * Each iteration creates device interrupts before it asks, so a source
+	 * that never delivers any entropy is broken - not merely empty.
+	 */
+	if (!delivered) {
+		printf("ES Interrupt - fail: get_ent did not deliver entropy in any of %u iterations\n",
+		       loops);
+		return 1;
+	}
+	printf("ES Interrupt - pass: get_ent delivered entropy in %u of %u iterations\n",
+	       delivered, loops);
 
 	return 0;
 }
@@ -351,7 +338,6 @@ int main(int argc, char *argv[])
 		return 77;
 	}
 
-	ret += es_irq_getstate_json();
 	ret += es_irq_name();
 	ret += es_irq_poolsize();
 	ret += es_irq_getdata();

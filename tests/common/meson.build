@@ -180,3 +180,27 @@ test('common wait queue wakeup', queue_test)
 test('common threading support', threading_support_test,
 	timeout: 120,
 	is_parallel: false)
+
+# The DTLS of the connections, by the TLS stack of the crypto backend - see
+# common/tls/esdm_dtls.h. Skips (77) in a build without DTLS.
+esdm_dtls_test = executable(
+		'esdm_dtls_test',
+		[ 'esdm_dtls_test.c' ],
+		include_directories: include_dirs_server,
+		dependencies: common_test_deps,
+		link_with: esdm_common_static_lib,
+	)
+test('DTLS of the connections', esdm_dtls_test, timeout: 60)
+
+# The same, released at the exit of the process by a handler registered before
+# the TLS stack set itself up, as OpenSSL registers its cleanup. Skips (77) in a
+# build without DTLS.
+esdm_dtls_exit_test = executable(
+		'esdm_dtls_exit_test',
+		[ 'esdm_dtls_exit_test.c' ],
+		include_directories: include_dirs_server,
+		dependencies: common_test_deps,
+		link_with: esdm_common_static_lib,
+	)
+test('DTLS of the connections released at the exit', esdm_dtls_exit_test,
+	timeout: 60)

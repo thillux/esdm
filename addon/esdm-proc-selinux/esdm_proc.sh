@@ -1,4 +1,6 @@
-#!/bin/sh -e
+#!/usr/bin/env bash
+
+set -euxo pipefail
 
 DIRNAME=`dirname $0`
 cd $DIRNAME
@@ -11,7 +13,10 @@ fi
 if [ $# -eq 1 ]; then
 	if [ "$1" = "--update" ] ; then
 		time=`ls -l --time-style="+%x %X" esdm_proc.te | awk '{ printf "%s %s", $6, $7 }'`
-		rules=`ausearch --start $time -m avc --raw -se esdm_proc`
+		# ausearch fails when it finds no matching event - that case is
+		# handled below. $time is date and time, two arguments.
+		# shellcheck disable=SC2086
+		rules=`ausearch --start $time -m avc --raw -se esdm_proc || true`
 		if [ x"$rules" != "x" ] ; then
 			echo "Found avc's to update policy with"
 			echo -e "$rules" | audit2allow -R
@@ -38,7 +43,6 @@ elif [ $# -ge 2 ] ; then
 fi
 
 echo "Building and Loading Policy"
-set -x
 make -f /usr/share/selinux/devel/Makefile esdm_proc.pp || exit
 /usr/sbin/semodule -i esdm_proc.pp
 

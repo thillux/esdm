@@ -32,6 +32,13 @@ int esdm_config_reinit(void);
  */
 uint32_t esdm_config_drng_reseed_thresh(void);
 
+/*
+ * The entropy rate configured for the external source @idx,
+ * ESDM_ES_EXT_ENTROPY_RATE_AUTO for none - the source then being credited at
+ * the rate its provider declares, or at 0
+ */
+uint32_t esdm_config_es_ext_socket_entropy_rate_configured(unsigned int idx);
+
 #ifdef ESDM_TESTMODE
 void esdm_config_drng_reseed_thresh_set(uint32_t val);
 void esdm_config_drng_max_wo_reseed_set(uint32_t val);

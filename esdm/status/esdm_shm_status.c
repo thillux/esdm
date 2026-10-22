@@ -1,0 +1,662 @@
+/*
+ * Copyright (C) 2022 - 2026, Stephan Mueller <smueller@chronox.de>
+ *
+ * License: see LICENSE file in root directory
+ *
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ALL OF
+ * WHICH ARE HEREBY DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
+ * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF NOT ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
+ */
+
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "esdm.h"
+#include "esdm_config.h"
+#include "esdm_es_mgr.h"
+#include "esdm_interface_dev_common.h"
+#include "esdm_rpc_server.h"
+#include "esdm_rpc_service.h"
+#include "esdm_shm_status.h"
+#include "helper.h"
+#include "esdm_logger.h"
+#include "ret_checkers.h"
+#include "visibility.h"
+
+/*
+ * Atomic pointer: the setters below run on RPC/monitor threads and in the
+ * suspend signal handler while esdm_shm_status_reinit()/_exit() (library API)
+ * may detach concurrently. Each accessor loads the pointer exactly once; the
+ * detach path publishes NULL before shmdt() so late readers see NULL rather
+ * than a pointer into an unmapped segment. (A reader that loaded the pointer
+ * just before the exchange can still touch the mapping during the detach
+ * window - full quiescence is not provided, this narrows the race to that
+ * in-flight dereference.)
+ */
+static struct esdm_shm_status *_Atomic esdm_shm_status = NULL;
+static int esdm_shmid = -1;
+static sem_t *esdm_semid_random = SEM_FAILED;
+static sem_t *esdm_semid_urandom = SEM_FAILED;
+
+/* Level-triggered semaphore when the ESDM needs entropy */
+static sem_t *esdm_semid_need_entropy_level = SEM_FAILED;
+
+/*
+ * in_signal_handler is set to prevent calling non-async-signal-safe
+ * functions (like esdm_logger) from signal handler context.
+ */
+static volatile sig_atomic_t in_signal_handler = 0;
+
+static void _esdm_shm_status_up(sem_t *sem)
+{
+	int semval = 0;
+
+	if (sem == SEM_FAILED)
+		return;
+
+	/*
+	 * The purpose of the semaphore is to notify clients. If one
+	 * notification is sent out, a client must answer. We do not increment
+	 * the semaphore again if the client did not "consume" the notification.
+	 * The reason is that "consuming" a notification implies that the
+	 * event is not present any more for others. Hence the semaphore shall
+	 * only toggle between 0 and 1.
+	 */
+	sem_getvalue(sem, &semval);
+	if (semval > 0)
+		return;
+
+	if (sem_post(sem)) {
+		/* esdm_logger is not async-signal-safe, skip in signal context */
+		if (!in_signal_handler)
+			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+				    "Cannot unlock semaphore\n");
+	}
+}
+
+static void esdm_shm_status_up(void)
+{
+	_esdm_shm_status_up(esdm_semid_random);
+	_esdm_shm_status_up(esdm_semid_urandom);
+}
+
+/*
+ * NOTE:
+ * This function wakes up all potential waiters on any semaphore. When adding
+ * a new semaphore or any other synchronization mechanism where the remote
+ * end will sleep on, add a wakeup call here to ensure the remote end is not
+ * blocking a sleep or a shutdown!
+ */
+static void esdm_shm_wake_all(void)
+{
+	esdm_shm_status_up();
+	_esdm_shm_status_up(esdm_semid_need_entropy_level);
+}
+
+void esdm_shm_status_set_operational(bool enabled)
+{
+	struct esdm_shm_status *status = esdm_shm_status;
+
+	if (!status)
+		return;
+
+	if (atomic_load(&status->operational) != enabled) {
+		atomic_store(&status->operational, enabled);
+		esdm_shm_status_up();
+	}
+}
+
+void esdm_shm_status_set_need_entropy(void)
+{
+	struct esdm_shm_status *status = esdm_shm_status;
+	bool new, curr;
+
+	if (!status)
+		return;
+
+	curr = atomic_load(&status->need_entropy);
+
+	new = esdm_need_entropy();
+
+	if (curr != new) {
+		atomic_store(&status->need_entropy, new);
+		esdm_shm_status_up();
+	}
+
+	/*
+	 * Implement a kind of level-triggered semaphore - i.e. it fires
+	 * as long as entropy is required.
+	 */
+	if (new)
+		_esdm_shm_status_up(esdm_semid_need_entropy_level);
+}
+
+static void esdm_shm_status_set_suspend(void)
+{
+	struct esdm_shm_status *status = esdm_shm_status;
+
+	if (!status)
+		return;
+
+	atomic_fetch_add(&status->suspend_gen, 1);
+
+	/* Wake up all waiters */
+	esdm_shm_wake_all();
+}
+
+static void esdm_shm_status_server_exit(void)
+{
+	/* The exit notification is the same as the suspend notification */
+	esdm_shm_status_set_suspend();
+}
+
+static void esdm_shm_status_signal_suspend(int sig)
+{
+	(void)sig;
+	/*
+	 * Do not call esdm_logger() here - it is not async-signal-safe
+	 * and can deadlock if the signal arrives while a lock is held.
+	 */
+	in_signal_handler = 1;
+	esdm_shm_status_set_suspend();
+	in_signal_handler = 0;
+}
+
+static void esdm_shm_status_install_signal_suspend(void)
+{
+	struct sigaction sa;
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+		    "Install suspend signal handler\n");
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = esdm_shm_status_signal_suspend;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+
+	if (sigaction(SIGUSR1, &sa, NULL) < 0)
+		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+			    "Cannot install suspend signal handler: %s\n",
+			    strerror(errno));
+}
+
+static void _esdm_shm_status_delete_sem(sem_t **sem)
+{
+	if (*sem != SEM_FAILED) {
+		sem_t *tmp = *sem;
+
+		*sem = SEM_FAILED;
+		sem_close(tmp);
+	}
+}
+
+static void esdm_shm_status_delete_sem(void)
+{
+	_esdm_shm_status_delete_sem(&esdm_semid_random);
+	_esdm_shm_status_delete_sem(&esdm_semid_urandom);
+	_esdm_shm_status_delete_sem(&esdm_semid_need_entropy_level);
+}
+
+static void esdm_shm_status_unlink_sem(const char *semname)
+{
+	if (sem_unlink(semname)) {
+		if (errno != ENOENT) {
+			esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
+				    "Cannot unlink semaphore %s: %s\n", semname,
+				    strerror(errno));
+		}
+	} else {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+			    "ESDM semaphore %s deleted\n", semname);
+	}
+}
+
+DSO_PUBLIC
+void esdm_shm_status_cleanup_ipc(void)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	int shmid = shmget(key, sizeof(struct esdm_shm_status),
+			   S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
+	if (shmid >= 0) {
+		struct shmid_ds buf;
+
+		/*
+		 * Skip the removal while other processes are still attached:
+		 * the CUSE daemons and aux clients attach to a segment created
+		 * anew only once they notice it, and are told nothing on the
+		 * orphaned mapping until then. The caller of
+		 * this cleanup is never attached itself at this point (the
+		 * server detaches first, the PID namespace supervisor never
+		 * attaches), so a non-zero count is always someone else.
+		 */
+		if (shmctl(shmid, IPC_STAT, &buf) == 0 && buf.shm_nattch > 0) {
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_ANY,
+				"ESDM shared memory segment still attached by %lu process(es) - skipping IPC cleanup\n",
+				(unsigned long)buf.shm_nattch);
+			return;
+		}
+
+		if (shmctl(shmid, IPC_RMID, NULL) < 0) {
+			esdm_logger(
+				LOGGER_VERBOSE, LOGGER_C_ANY,
+				"ESDM shared memory segment cannot be deleted: %s\n",
+				strerror(errno));
+		} else {
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+				    "ESDM shared memory segment deleted\n");
+		}
+	}
+
+	esdm_shm_status_unlink_sem(ESDM_SEM_RANDOM_NAME);
+	esdm_shm_status_unlink_sem(ESDM_SEM_URANDOM_NAME);
+	esdm_shm_status_unlink_sem(ESDM_SEM_NEED_ENTROPY_LEVEL);
+}
+
+/*
+ * Whether the named semaphore belongs to our euid: 1 if so, 0 if it belongs to
+ * another user, < 0 if that cannot be told.
+ *
+ * glibc and musl keep a named semaphore in the file /dev/shm/sem.<name>, so
+ * that file's owner is the user that created the semaphore.
+ */
+static int esdm_shm_status_sem_owned(const char *semname)
+{
+	char path[128];
+	struct stat sb;
+	int len;
+
+	while (*semname == '/')
+		semname++;
+
+	len = snprintf(path, sizeof(path), "/dev/shm/sem.%s", semname);
+	if (len < 0 || (size_t)len >= sizeof(path))
+		return -ENAMETOOLONG;
+
+	if (lstat(path, &sb) < 0)
+		return -errno;
+
+	return sb.st_uid == geteuid();
+}
+
+static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
+{
+	unsigned int tries;
+	sem_t *tmp;
+	int errsv, owned;
+
+	/*
+	 * The semaphores have well-known names as the status segment has a
+	 * well-known key, and the same holds for them: any other local user
+	 * could have created one, which then is theirs. They could take the
+	 * posts meant for the CUSE poll checker and the aux clients, or post
+	 * in our stead. So a semaphore of another user is removed and created
+	 * anew, as the segment is in esdm_shm_status_create_shm(). Ours - the
+	 * one a previous instance of this server created; the CUSE daemons and
+	 * the aux clients never create one - is kept, so their waiters keep
+	 * working.
+	 *
+	 * The directory the file is in is sticky: a file found to be ours
+	 * cannot be removed and replaced by another user before it is opened,
+	 * while one that is gone by then may have been replaced, so the
+	 * creation is tried again. Should the owner not be found at all, the
+	 * semaphore is used as it was before this check.
+	 */
+	for (tries = 0;; tries++) {
+		tmp = sem_open(semname, O_CREAT | O_EXCL, 0644, 0);
+		if (tmp != SEM_FAILED)
+			break;
+		if (errno != EEXIST || tries >= 3)
+			goto err;
+
+		owned = esdm_shm_status_sem_owned(semname);
+		if (owned == -ENOENT)
+			continue;
+
+		if (!owned) {
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_ANY,
+				"ESDM semaphore %s owned by a different uid - removing and recreating\n",
+				semname);
+			if (sem_unlink(semname) && errno != ENOENT)
+				goto err;
+			continue;
+		}
+
+		tmp = sem_open(semname, 0);
+		if (tmp == SEM_FAILED) {
+			if (errno == ENOENT)
+				continue;
+			goto err;
+		}
+
+		/* Re-synchronize */
+		sem_post(tmp);
+		break;
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "ESDM change indicator semaphore %s initialized\n",
+		    semname);
+	*sem = tmp;
+
+	return 0;
+
+err:
+	errsv = errno;
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+		    "ESDM change indicator semaphore creation failed: %s\n",
+		    strerror(errsv));
+	return -errsv;
+}
+
+static void esdm_shm_status_delete_shm(void)
+{
+	struct esdm_shm_status *status = atomic_exchange(&esdm_shm_status, NULL);
+
+	if (status)
+		shmdt(status);
+
+	esdm_shmid = -1;
+}
+
+/*
+ * Attempts at getting a segment of our own under the well-known key before
+ * giving up - see esdm_shm_status_create_shm(). One finds a segment of
+ * another uid and removes it, the next one creates ours: a few more leave room
+ * for a stale segment of the wrong size and for creations that lost a race.
+ */
+#define ESDM_SHM_STATUS_CREATE_TRIES 8
+
+/*
+ * Whether we created the segment @shmid. The creator is the owner that cannot
+ * be changed: IPC_SET lets the creator hand the segment's uid to anybody,
+ * root included, while it keeps the access of a creator.
+ */
+static bool esdm_shm_status_shm_owned(int shmid)
+{
+	struct shmid_ds buf;
+
+	return !shmctl(shmid, IPC_STAT, &buf) && buf.shm_perm.cuid == geteuid();
+}
+
+static int esdm_shm_status_create_shm(void)
+{
+	const int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+	unsigned int tries;
+	int errsv;
+	void *tmp;
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+
+	/*
+	 * The status segment uses a well-known ftok() key, so any other local
+	 * user could have pre-created it and would then own it and control the
+	 * flags the CUSE /dev/random poll path trusts. This create path runs
+	 * before the server drops privileges, so compare against our own euid
+	 * (root in the stock deployment, the service uid when the server is
+	 * started unprivileged) rather than a hardcoded 0: a segment created by
+	 * a previous instance of this server has our uid and is kept, while a
+	 * segment planted by a different uid is evicted and recreated.
+	 *
+	 * The eviction frees the key for everybody, not just for us: a user
+	 * creating the segment in a loop gets it back before our creation
+	 * runs. So the segment is only ever created with IPC_EXCL, which
+	 * leaves a segment that came into being in between as it is: that one
+	 * goes through the ownership check again, as does the semaphore in
+	 * esdm_shm_status_create_sem(). A user that wins the race every time
+	 * makes the creation fail after ESDM_SHM_STATUS_CREATE_TRIES attempts -
+	 * the server does not start rather than publish into that user's
+	 * segment.
+	 */
+	for (tries = 0;; tries++) {
+		if (tries >= ESDM_SHM_STATUS_CREATE_TRIES) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_ANY,
+				"ESDM shared memory segment creation failed: segment keeps being created by a different uid\n");
+			return -EEXIST;
+		}
+
+		esdm_shmid = shmget(key, sizeof(struct esdm_shm_status), mode);
+		if (esdm_shmid >= 0) {
+			if (esdm_shm_status_shm_owned(esdm_shmid))
+				break;
+
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_SERVER,
+				"ESDM status shared memory segment owned by a different uid - removing and recreating\n");
+			/* One we cannot remove is there to stay */
+			if (shmctl(esdm_shmid, IPC_RMID, NULL) < 0 &&
+			    errno != EINVAL && errno != EIDRM) {
+				errsv = errno;
+				goto err;
+			}
+			esdm_shmid = -1;
+			continue;
+		}
+		errsv = errno;
+
+		/* EINVAL: the memory is too small, force a deletion. */
+		if (errsv == EINVAL) {
+			/* Try to get it with smallest size possible. */
+			esdm_shmid = shmget(key, 1, mode);
+			if (esdm_shmid < 0)
+				continue;
+
+			if (shmctl(esdm_shmid, IPC_RMID, NULL) < 0) {
+				errsv = errno;
+				esdm_shmid = -1;
+				esdm_logger(
+					LOGGER_ERR, LOGGER_C_SERVER,
+					"ESDM shared memory segment cannot be deleted: %s\n",
+					strerror(errsv));
+				return -errsv;
+			}
+
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+				    "ESDM shared memory segment deleted\n");
+			esdm_shmid = -1;
+			continue;
+		}
+
+		if (errsv != ENOENT)
+			goto err;
+
+		/* Create the SHM segment. */
+		esdm_shmid = shmget(key, sizeof(struct esdm_shm_status),
+				    IPC_CREAT | IPC_EXCL | mode);
+		if (esdm_shmid >= 0)
+			break;
+
+		/* Somebody was faster - check whose segment it is */
+		errsv = errno;
+		if (errsv != EEXIST)
+			goto err;
+	}
+
+	tmp = shmat(esdm_shmid, NULL, 0);
+	if (tmp == (void *)-1) {
+		errsv = errno;
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"Attaching to ESDM shared memory segment failed: %s\n",
+			strerror(errsv));
+		esdm_shm_status_delete_shm();
+		return -errsv;
+	}
+	esdm_shm_status = tmp;
+
+	/*
+	 * The segment attached is the one checked above - an identifier names
+	 * one segment, and one removed and created anew under the key gets
+	 * another identifier. Its creator is checked once more all the same,
+	 * now that nothing can replace it any more: nothing is published into
+	 * a segment that is not ours.
+	 */
+	if (!esdm_shm_status_shm_owned(esdm_shmid)) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_ANY,
+			"ESDM shared memory segment attached is owned by a different uid\n");
+		esdm_shm_status_delete_shm();
+		return -EPERM;
+	}
+
+	/*
+	 * Mark the segment not-yet-ready until esdm_shm_status_init() has
+	 * populated info/infolen/unpriv_threads. Readers gate on
+	 * version == ESDM_SHM_STATUS_VERSION; publishing the version here, before
+	 * those fields are filled (and possibly over a stale segment left by a
+	 * previous daemon), would expose torn/stale status to readers.
+	 */
+	esdm_shm_status->version = 0;
+	atomic_thread_fence(memory_order_seq_cst);
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "ESDM shared memory segment initialized\n");
+
+	return 0;
+
+err:
+	esdm_shmid = -1;
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+		    "ESDM shared memory segment creation failed: %s\n",
+		    strerror(errsv));
+	return -errsv;
+}
+
+int esdm_shm_status_init(void)
+{
+	int ret = esdm_shm_status_create_shm();
+
+	if (ret)
+		return ret;
+
+	ret = esdm_shm_status_create_sem(ESDM_SEM_RANDOM_NAME,
+					 &esdm_semid_random);
+	if (ret) {
+		esdm_shm_status_delete_shm();
+		return ret;
+	}
+
+	ret = esdm_shm_status_create_sem(ESDM_SEM_URANDOM_NAME,
+					 &esdm_semid_urandom);
+	if (ret) {
+		esdm_shm_status_exit();
+		return ret;
+	}
+
+	ret = esdm_shm_status_create_sem(ESDM_SEM_NEED_ENTROPY_LEVEL,
+					 &esdm_semid_need_entropy_level);
+	if (ret) {
+		esdm_shm_status_exit();
+		return ret;
+	}
+
+	/*
+	 * The report is published as far as it fits into the field, which is
+	 * all a reader of the shared memory segment can be given - it is noted
+	 * here and in the report itself rather than passed off as the whole
+	 * report: a reader has nothing else to tell it by.
+	 */
+	if (esdm_status(esdm_shm_status->info, sizeof(esdm_shm_status->info)) ==
+	    -EMSGSIZE) {
+		esdm_shm_status_mark_truncated(esdm_shm_status->info,
+					       sizeof(esdm_shm_status->info));
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ANY,
+			"Status report truncated to the %zu bytes of the shared memory segment\n",
+			sizeof(esdm_shm_status->info));
+	}
+	esdm_shm_status->infolen = (uint32_t)strlen(esdm_shm_status->info);
+	esdm_shm_status->unpriv_threads = esdm_config_online_nodes();
+
+	/*
+	 * Publish the version last, after a barrier, so a reader that observes
+	 * the ready version is guaranteed to also see the populated
+	 * info/infolen/unpriv_threads written above.
+	 */
+	atomic_thread_fence(memory_order_seq_cst);
+	esdm_shm_status->version = ESDM_SHM_STATUS_VERSION;
+
+	esdm_shm_status_set_operational(esdm_state_operational());
+	esdm_shm_status_set_need_entropy();
+	/*
+	 * suspend_gen is not reset: a CUSE daemon takes the value it finds when
+	 * it attaches, to which a reset would look like a new event.
+	 */
+	esdm_shm_status_install_signal_suspend();
+
+	return 0;
+}
+
+static void esdm_shm_status_exit_common(bool cleanup_ipc)
+{
+	/* Notify the client to inform that the server exists */
+	esdm_shm_status_server_exit();
+	esdm_shm_status_delete_shm();
+	esdm_shm_status_delete_sem();
+
+	/*
+	 * The removal is configurable: clients (e.g. the CUSE daemons) monitor
+	 * the SHM segment and the semaphores, and keeping them allows the
+	 * clients to survive a server restart without being restarted too -
+	 * see esdm_config_ipc_cleanup_set(). Note that this in-process attempt
+	 * fails with EPERM once the caller permanently dropped its privileges;
+	 * the esdm-server therefore disables it and delegates the cleanup to
+	 * its privileged PID namespace supervisor - see
+	 * esdm_rpc_server_cleanup().
+	 */
+	if (cleanup_ipc && esdm_config_ipc_cleanup())
+		esdm_shm_status_cleanup_ipc();
+}
+
+void esdm_shm_status_exit(void)
+{
+	esdm_shm_status_exit_common(true);
+}
+
+int esdm_shm_status_reinit(void)
+{
+	int ret;
+
+	/*
+	 * Latent edge: esdm_shm_status_create_shm() compares the existing
+	 * segment's owner against the current geteuid(). If a reinit happens
+	 * after the server has dropped privileges, geteuid() no longer matches
+	 * the euid that created the original segment (e.g. root at first init),
+	 * so the still-valid segment is treated as foreign and evicted and
+	 * recreated under the reduced uid. This is benign - exit() already
+	 * detaches and the recreated segment is immediately republished - but
+	 * it does churn the segment and momentarily resets it to version 0.
+	 *
+	 * Never run the IPC cleanup here: reinit means the process keeps
+	 * serving, so destroying the segment/semaphores would recreate them
+	 * under the same names while already-attached clients keep their
+	 * orphaned mapping and wait on the unlinked semaphores forever.
+	 * Detach/reattach only; full cleanup belongs to the final exit.
+	 */
+	esdm_shm_status_exit_common(false);
+	CKINT(esdm_shm_status_init());
+
+out:
+	return ret;
+}

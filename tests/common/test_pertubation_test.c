@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/test_pertubation.c - the instrumentation a test mode build
+ * Tests for common/testmode/test_pertubation.c - the instrumentation a test mode build
  * carries so the test suite can observe and steer the ESDM from the outside.
  *
  * The shared memory accounting needs the attention here: several independent
@@ -41,7 +41,7 @@
 /*
  * Size of the seed_entropy recorder. The header exports the array without a
  * bound, so it is restated here - one slot per external entropy source plus the
- * aux pool, as in common/test_pertubation.c.
+ * aux pool, as in common/testmode/test_pertubation.c.
  */
 #define SEED_ENTROPY_SLOTS 7
 

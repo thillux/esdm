@@ -51,7 +51,7 @@ its noise source. Use this option to adapt the size of the buffer after
 entropy measurements with differents memory sizes. Please consult the
 source code of your jitterentropy version for a current meaning of the
 values. At the time of writing this description text e.g. 16 would allocate
-32 MB.
+32 MB. Needs jitterentropy 3.7.0 or later.
 ''')
 
 option('es_jent_hash_loop_count', type: 'integer', min: -1, max: 7, value: -1,
@@ -61,7 +61,7 @@ The jitter RNG performs SHA3-256 iterations as part of
 its noise source. Use this option to adapt the number of iterations.
 Please consult the source code of your jitterentropy version for a current
 meaning of the values. At the time of writing this description text e.g. 3
-would iterate 8 times.
+would iterate 8 times. Needs jitterentropy 3.7.0 or later.
 ''')
 
 option('es_jent_all_caches', type: 'feature', value: 'disabled',
@@ -71,7 +71,7 @@ If no max memory size is given, the jitter RNG estimates an
 adequate size of the memory buffer dependending on the cache
 size of the system. Typically only the size of the L1 is used for
 this. With this option, the sum all caches up to L3 is taken
-into account.
+into account. Needs jitterentropy 3.7.0 or later.
 ''')
 
 # Option for: ESDM_JENT_ENTROPY_BLOCKS
@@ -163,10 +163,13 @@ limit that this value must be in the range between 0 and 256.
 When configuring this value to 0, the kernel RNG entropy source will provide
 256 bits of data without being credited to contain entropy.
 
-Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, this value
-is set to 0 automatically when booting the kernel in FIPS mode (with fips=1
-kernel command line option). This is due to the fact that random.c is not
-SP800-90B compliant.
+Note: In builds with the sp80090c, fips140 or ais2031_drg3 option, the kernel
+RNG is credited with no entropy at all, on every kernel and whether it runs in
+FIPS mode or not: these builds always apply the SP800-90C oversampling, and
+random.c is not SP800-90B compliant. Other builds credit it with no entropy
+while a scheduler-based entropy source is credited, and with at most 4 bits
+per 256 bits of data while the interrupt-based entropy source of the kernel
+module is present or an eBPF one is credited.
 ''')
 
 ################################################################################
@@ -317,8 +320,9 @@ the events is where the entropy is, and it is the signal the
 SP800-90B assessment measures. A buffer is handed to a BPF ring
 buffer once it is full, or after an idle deadline when its CPU
 falls quiet before that. The ESDM server reads them from there
-when it wants entropy, conditions them with the configured hash
-into an entropy pool and stops reading once that pool is full.
+when it wants entropy, conditions them into an entropy pool - an
+XDRBG-256 over SHAKE256 like the auxiliary pool - and stops
+reading once that pool is full.
 Events collected while nobody reads are discarded.
 
 This entropy source is mutually exclusive with the es_sched
@@ -328,7 +332,10 @@ may have an entropy rate greater than zero.
 
 The BPF programs are loaded during the privileged
 initialization phase of the ESDM server (root or
-CAP_BPF + CAP_PERFMON required).
+CAP_BPF + CAP_PERFMON required). The server operates their maps
+after it dropped its privileges, which Linux before 5.19 only
+permits with kernel.unprivileged_bpf_disabled = 0: the entropy
+source checks for it and disables itself where it does not hold.
 ''')
 
 # Option for: ESDM_SCHED_EBPF_ENTROPY_RATE
@@ -338,8 +345,8 @@ option('es_sched_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF scheduler entropy source. Every context switch
-event contributes its 64 bit time stamp, so 256 bits of data are four
-events. The ESDM enforces the limit that this value must be between 0 and
+event contributes the 64 bit delta of its time stamp to the previous one, so
+256 bits of data are four events. The ESDM enforces the limit that this value must be between 0 and
 256 bits.
 
 The credited entropy is additionally capped by the oversampling rate
@@ -402,6 +409,13 @@ This entropy source is mutually exclusive with the es_sched
 and es_irq entropy sources with respect to entropy crediting:
 at most one of the scheduler/interrupt-based entropy sources
 may have an entropy rate greater than zero.
+
+The BPF programs are loaded during the privileged
+initialization phase of the ESDM server (root or
+CAP_BPF + CAP_PERFMON required). The server operates their maps
+after it dropped its privileges, which Linux before 5.19 only
+permits with kernel.unprivileged_bpf_disabled = 0: the entropy
+source checks for it and disables itself where it does not hold.
 ''')
 
 # Option for: ESDM_IRQ_EBPF_ENTROPY_RATE
@@ -411,7 +425,8 @@ option('es_irq_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF interrupt entropy source. Every interrupt event
-contributes its 64 bit time stamp, so 256 bits of data are four events. The
+contributes the 64 bit delta of its time stamp to the previous one, so 256
+bits of data are four events. The
 ESDM enforces the limit that this value must be between 0 and 256 bits.
 
 The credited entropy is additionally capped by the oversampling rate
@@ -482,13 +497,13 @@ automatically detect this and ignore the hardware.
 
 # Option for: ESDM_HWRAND_ENTROPY_RATE
 option('es_hwrand_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
-       description:'''CPU-based entropy source entropy rate.
+       description:'''/dev/hwrng-based entropy source entropy rate.
 
 The option defines the amount of entropy the ESDM applies to 256
-bits of data obtained from the CPU entropy source. The ESDM
+bits of data obtained from the /dev/hwrng entropy source. The ESDM
 enforces the limit that this value must be in the range between 0 and 256.
 
-When configuring this value to 0, the CPU entropy source will provide
+When configuring this value to 0, the /dev/hwrng entropy source will provide
 256 bits of data without being credited to contain entropy.
 ''')
 
@@ -570,64 +585,49 @@ at a different location.
 ################################################################################
 
 option('es_pkcs11', type: 'feature', value: 'disabled',
-       description: '''Enable support for a PKCS#11-based entropy source.
+       description: '''Build esdm-es-pkcs11, the PKCS#11 entropy source.
 
-The ESDM may use a PKCS#11 token (e.g. a smart card or HSM) as entropy source
-via the libp11 wrapper around the underlying PKCS#11 module. The token must
-expose a hardware random number generator (CKF_RNG / C_GenerateRandom).
+esdm-es-pkcs11 reads the random number generator of a PKCS#11 token (e.g. a
+smart card or HSM, CKF_RNG / C_GenerateRandom) through libp11 and serves it to
+the ESDM as an external entropy source on a Unix domain socket, which the ESDM
+reads through one of its provider socket sources (es_ext_socket_num,
+esdm-server --es_ext_socket) - see esdm-es-pkcs11(8). The ESDM itself does
+not load PKCS#11 modules, and neither libesdm nor esdm-server links libp11.
 
-Note, if this option is enabled and no usable PKCS#11 token is found at
-runtime, the ESDM will automatically detect this and ignore the source.
+Needs libp11 and esdm-es-ext. The options below are the defaults of the daemon,
+which its command line overrides; the PIN is never one of them - the daemon
+reads it from a file or a systemd credential.
 ''')
 
 # Option for: ESDM_PKCS11_ENTROPY_RATE
 option('es_pkcs11_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
-       description:'''PKCS#11 entropy source entropy rate.
+       description:'''Entropy rate esdm-es-pkcs11 declares.
 
-The option defines the amount of entropy the ESDM applies to 256
-bits of data obtained from the PKCS#11 entropy source. The ESDM
-enforces the limit that this value must be in the range between 0 and 256.
+The amount of entropy per 256 bits of data the PKCS#11 entropy source declares
+to the ESDM, 0 to 256: the ESDM credits it at that rate unless a rate is
+configured for its provider socket source (es_ext_socket_entropy_rate,
+esdm-server --es_ext_socket_entropy_rate). esdm-es-pkcs11 --entropy_rate
+declares another one.
 
-When configuring this value to 0, the PKCS#11 entropy source will provide
-256 bits of data without being credited to contain entropy.
-''')
-
-# Option for: ESDM_PKCS11_ENTROPY_BLOCKS
-option('es_pkcs11_entropy_blocks', type: 'integer', value: 64,
-       description:'''PKCS#11 entropy buffer size
-
-The PKCS#11 entropy source can use an asynchronous block cache that is filled
-by a separate thread. This ensures that data is readily available when needed.
-
-This option sets the size of the cache in number of blocks. It must be a power
-of two and at least 4. When set to zero, the cache is disabled and the source
-delivers data synchronously.
+When configuring this value to 0, the PKCS#11 entropy source provides data
+without it being credited to contain entropy.
 ''')
 
 option('es_pkcs11_module_path', type: 'string', value: '',
-       description: '''PKCS#11 module path used by the PKCS#11 entropy source.
+       description: '''PKCS#11 module esdm-es-pkcs11 loads by default.
 
 Path of the PKCS#11 module shared library to load (e.g.
 /usr/lib/softhsm/libsofthsm2.so or /usr/lib/pkcs11/opensc-pkcs11.so).
-
-esdm-server --pkcs11_module PATH loads another module in its place.
-
-When left empty and not given on the command line either, the PKCS#11 entropy
-source is disabled at runtime even if it was compiled in.
+esdm-es-pkcs11 --module PATH loads another module in its place; when this is
+left empty, the option is required.
 ''')
 
 option('es_pkcs11_token_label', type: 'string', value: '',
-       description: '''Optional PKCS#11 token label for the PKCS#11 entropy source.
+       description: '''PKCS#11 token label esdm-es-pkcs11 looks for by default.
 
 If set, only a token whose label matches this value will be used. Otherwise the
 first slot with a present token that exposes an RNG is selected.
-''')
-
-option('es_pkcs11_pin', type: 'string', value: '',
-       description: '''Optional PKCS#11 user PIN for the PKCS#11 entropy source.
-
-C_GenerateRandom usually does not require a login. Set this only for tokens
-that require an authenticated session before random data can be obtained.
+esdm-es-pkcs11 --token_label LABEL looks for another one.
 ''')
 
 ################################################################################
@@ -637,6 +637,16 @@ that require an authenticated session before random data can be obtained.
 option('es_jent_kernel', type: 'feature', value: 'disabled',
        description: '''Enable support for jitterentropy-based entropy source
        (in-kernel).
+''')
+
+option('es_jent_kernel_name', type: 'string', value: 'jitterentropy_rng',
+       description: '''Kernel crypto API RNG of the kernel jitterentropy source.
+
+The name, or the driver name, of the RNG of /proc/crypto the source reads
+through AF_ALG: jitterentropy_rng is the one of the kernel. A jitterentropy
+kernel module registering its RNG under another name - such as the module of
+jitterentropy 3.8.0 - is selected by its name here, or with esdm-server
+--es_jent_kernel_name NAME.
 ''')
 
 # Option for: ESDM_JENT_KERNEL_ENTROPY_RATE
@@ -667,6 +677,85 @@ This value must be a power of 2 and at least 4.
 When set to a value smaller than 4, the kernel jitter entropy buffer is not
 compiled which implies a synchronous generation of data from the kernel jitter
 entropy source.
+''')
+
+option('es_ext', type: 'feature', value: 'enabled',
+       description: '''Enable support for external entropy sources.
+
+An external entropy source is noise source code that is not part of the ESDM,
+served to it by a provider: a process of its own the ESDM reads from over a
+Unix domain socket (es_ext_socket_path, or esdm-server --es_ext_socket) - a
+program built with libesdm_es_ext, see libesdm_es_ext(3), or one speaking the
+protocol of esdm_es_ext.h itself. The ESDM loads no code of a source into its
+own process.
+
+Compiled in, an external entropy source does nothing until a provider socket
+is configured.
+
+How many sources the ESDM has is set by es_ext_socket_num. Disabled, the
+options of the sources are still checked, and ignored with a warning when they
+are set.
+''')
+
+option('es_ext_socket_num', type: 'integer', min: 1, max: 16, value: 1,
+       description: '''Number of external entropy source provider sockets.
+
+The ESDM has this many provider socket sources, each an entropy source of its
+own with its own socket, entropy rate, accepted user and connection: set with
+esdm-server --es_ext_socket, which configures the next one each time it is
+given, or with the meson options es_ext_socket_path,
+es_ext_socket_entropy_rate and es_ext_socket_peer_uid, whose i-th entry
+configures the i-th source. Each source is served by a provider of its own,
+on a socket of its own. Without any, disable es_ext.
+
+With one source, it is called ExternalSocket in the ESDM status; with several,
+they are ExternalSocket0, ExternalSocket1 and so on.
+''')
+
+option('es_ext_socket_path', type: 'array', value: [],
+       description: '''Sockets of the external entropy source providers.
+
+Paths of the Unix domain sockets provider processes serve external entropy
+sources on - with libesdm_es_ext, e.g. esdm-es-pkcs11: the i-th path is the
+socket of the i-th provider socket source, a comma separated list of up to
+es_ext_socket_num of them. The ESDM connects to it, and again whenever the
+connection is lost. esdm-server --es_ext_socket PATH names another one, the
+n-th occurrence of the option for the n-th source. A source without a path, or
+with an empty one, uses no provider unless one is given on the command line.
+''')
+
+option('es_ext_socket_entropy_rate', type: 'array', value: [],
+       description: '''Entropy rate cap of the external entropy source providers.
+
+A block of data from a provider is credited with the entropy the provider
+claims for it, but with at most what this rate allows: the amount of entropy
+per 256 bits of data, 0 to 256. esdm-server --es_ext_socket_entropy_rate
+overrides it, the n-th occurrence of the option for the n-th source.
+
+One rate applies to all provider socket sources; a comma separated list of
+es_ext_socket_num rates sets the i-th rate for the i-th source. auto - and the
+default, no rate at all - configures none: the provider is credited at the
+rate it declares itself, and at 0 if it declares none, so that its data is
+not credited to contain entropy. A provider is another process whose only
+trust anchor is the user it runs as: accepting that user
+(es_ext_socket_peer_uid) means trusting the rate the provider declares, and an
+operator who does not want that configures the rate here. 256 takes the claims
+of the provider as they are.
+''')
+
+option('es_ext_socket_peer_uid', type: 'array', value: ['-1'],
+       description: '''User the external entropy source providers may run as.
+
+The ESDM checks the credentials of the provider it connects to: whoever can
+create the socket file could otherwise feed it with data credited as entropy.
+A provider running as root is accepted, and one running as the uid set here,
+0 to 4294967294; -1 accepts root only. A provider accepted is trusted with
+the entropy rate it declares, unless es_ext_socket_entropy_rate configures
+one. esdm-server --es_ext_socket_uid
+overrides it, the n-th occurrence of the option for the n-th source.
+
+One uid applies to all provider socket sources; a comma separated list of
+es_ext_socket_num uids sets the i-th uid for the i-th source.
 ''')
 
 ################################################################################
@@ -718,7 +807,13 @@ when the jitter RNG is operated in its own NTG.1 mode
 (option 'es_jent_ntg1' together with jitterentropy 3.7.0
 or later). Such a jitter RNG is NTG.1 conformant on its
 own and therefore seeds a DRNG without a second entropy
-source; 240 bits of entropy from it are then sufficient.
+source once it delivered at least 240 bits of entropy and
+the entropy sources together the 256 bits (384 bits with
+the entropy source oversampling) the initial seeding
+requires in any case. 240 bits from the jitter RNG are
+not sufficient by themselves: unless other entropy sources
+make up the difference, it has to deliver the full 256
+bits (384 bits) itself.
 
 Compliance with German AIS 20/31 from 2011 is always
 present when using /dev/random with the flag O_SYNC or
@@ -790,7 +885,7 @@ option('es_parallel_fetch', type: 'feature', value: 'enabled',
 When enabled, the entropy source manager spawns one thread per entropy
 source to gather seed material concurrently during a reseed, joining them
 afterwards. This reduces reseed latency when slow entropy sources (e.g.
-TPM 2.0 or PKCS#11 tokens) are configured.
+a TPM 2.0, or a provider reading a PKCS#11 token) are configured.
 
 Parallel fetching is only used at runtime if more than one processor core
 is available; otherwise the sources are queried sequentially. If thread
@@ -976,15 +1071,6 @@ option('esdm-server-egd-socket-path', type: 'string', value: '/run/esdm-egd.sock
        option merely defines where the socket unit places it.
        ''')
 
-option('esdm-server-egd-pr-socket-path', type: 'string', value: '/run/esdm-egd-pr.socket',
-       description: '''Path of the optional prediction resistance EGD socket
-
-       Counterpart of esdm-server-egd-socket-path serving the prediction
-       resistance generator. The EGD protocol cannot ask for prediction
-       resistance per request, so it is a property of the socket: everything
-       arriving here is answered from esdm_get_random_bytes_pr().
-       ''')
-
 option('esdm-server-rpc-path-privileged', type: 'string', value: '/run',
        description: '''Sets the base path of ESDM's RPC sockets (default: /run)
 
@@ -1005,6 +1091,31 @@ option('esdm-aux-client', type: 'feature', value: 'enabled',
 With this option, the ESDM auxiliary client library is enabled allowing access
 to auxiliary functions offered by the ESDM. This library is a convenience
 wrapper around interfaces offered by ESDM that can be directly used.''')
+
+option('dtls', type: 'feature', value: 'disabled',
+       description: '''Encrypt the connections of the ESDM with DTLS, opportunistically.
+
+The RPC connections between the ESDM server and its clients, and the channel
+between the ESDM and an external entropy source provider, are encrypted with
+DTLS 1.2 where both ends support it: the client asks for it after connecting
+and goes on unencrypted if the server does not - a server of ESDM 1.2.3 or
+before, one built without this option, or one started without --dtls. The
+option compiles DTLS in only: the esdm-server and the external entropy source
+providers offer it when started with --dtls. A server serves a client not
+asking for it unencrypted. The DTLS is unauthenticated - the credentials of
+the peer on the Unix domain socket remain what it is trusted for - and keeps
+random numbers and seed material from being read off the connection.
+
+The key exchange is ECDHE keyed with a pre-shared key that is a constant of
+the ESDM and no secret, without certificates, on curves of 256 bits of
+security: TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 on brainpoolP512r1 with Botan,
+TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384 with Encrypt-then-MAC on secp521r1 with
+OpenSSL and GnuTLS and between them and Botan.
+
+The DTLS is provided by the TLS stack of the crypto backend: crypto_backend
+openssl, gnutls or botan. The builtin and the leancrypto backend have none.
+''')
+
 
 # WARNING: handle all of these options with care as they may lead to an increased
 # number of failed RPC replies to the client without random data or higher load

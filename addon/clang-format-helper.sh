@@ -1,24 +1,26 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 #
 # Helper script to invoke clang-format to re-format all files allowed to be
 # touched by clang-format.
 #
 
+set -euxo pipefail
+
 # Files to exclude from formatting
 # Make sure the file is provided with the exact string as the find command below
 # will report it!
 EXCLUDE="./internal/api/assembler_support.h"
-EXCLUDE="$EXCLUDE $(find ./ -name *.pb-c.c)"
-EXCLUDE="$EXCLUDE $(find ./ -name *.pb-c.h)"
+EXCLUDE="$EXCLUDE $(find ./ -name '*.pb-c.c')"
+EXCLUDE="$EXCLUDE $(find ./ -name '*.pb-c.h')"
 
 # Clang-format tool
 CLANGFORMAT="clang-format"
 CLANGCONF="./.clang-format"
 
-files="$(find ./ -name *.c)"
-files="$files $(find ./ -name *.cpp)"
-files="$files $(find ./ -name *.h)"
+files="$(find ./ -name '*.c')"
+files="$files $(find ./ -name '*.cpp')"
+files="$files $(find ./ -name '*.h')"
 
 if [ ! -f "$CLANGCONF" ]
 then

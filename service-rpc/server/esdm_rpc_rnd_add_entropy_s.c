@@ -35,10 +35,10 @@ void esdm_rpc_rnd_add_entropy(PrivAccess_Service *service,
 
 	if (request == NULL || request->randval.data == NULL) {
 		response.ret = -EFAULT;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else if (!esdm_rpc_client_is_privileged(closure_data)) {
 		response.ret = -EPERM;
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 
 	} else {
 		if (request->randval.len > ESDM_RPC_MAX_DATA) {
@@ -52,6 +52,6 @@ void esdm_rpc_rnd_add_entropy(PrivAccess_Service *service,
 				      request->randval.len);
 		}
 
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	}
 }

@@ -38,6 +38,8 @@
 #include "esdm_es_aux.h"
 #include "esdm_es_mgr.h"
 
+#include "../es_state_check.h"
+
 #define ES_IDX esdm_ext_es_jent_kernel
 #define ES_NAME "jent_kernel"
 
@@ -55,21 +57,27 @@ static int es_jent_kernel_name(void)
 
 static int es_jent_kernel_state(void)
 {
-	char buf[512];
+	struct json_object *obj;
+	int ret = 0;
 
 	/* state is optional; nothing to check if absent */
-	if (!esdm_es[ES_IDX]->state)
+	obj = es_state_get(esdm_es[ES_IDX]);
+	if (!obj)
 		return 0;
 
-	memset(buf, 0, sizeof(buf));
-	esdm_es[ES_IDX]->state(buf, sizeof(buf));
-	if (!strstr(buf, "Available entropy")) {
-		printf("ES %s - fail: state string malformed: %s\n", ES_NAME,
-		       buf);
-		return 1;
+	if (!es_state_has(obj, "available_entropy", json_type_int) ||
+	    !es_state_has(obj, "entropy_rate_per_256_data_bits",
+			  json_type_int)) {
+		printf("ES %s - fail: state malformed: %s\n", ES_NAME,
+		       es_state_print(obj));
+		ret = 1;
+	} else {
+		printf("ES %s - pass: state:\n%s\n", ES_NAME,
+		       es_state_print(obj));
 	}
-	printf("ES %s - pass: state:\n%s\n", ES_NAME, buf);
-	return 0;
+
+	json_object_put(obj);
+	return ret;
 }
 
 static int es_jent_kernel_poolsize(void)

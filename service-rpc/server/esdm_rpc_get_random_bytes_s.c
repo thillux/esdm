@@ -34,7 +34,7 @@ void esdm_rpc_get_random_bytes(UnprivAccess_Service *service,
 
 	if (request == NULL || request->len > sizeof(rndval)) {
 		response.ret = -(int32_t)sizeof(rndval);
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 	} else {
 		response.ret = (int)esdm_get_random_bytes(rndval, request->len);
 
@@ -44,7 +44,7 @@ void esdm_rpc_get_random_bytes(UnprivAccess_Service *service,
 			response.randval.data = rndval;
 			response.randval.len = (size_t)response.ret;
 		}
-		closure(&response, closure_data);
+		((ProtobufCClosure)closure)(&response.base, closure_data);
 
 		/*
 		 * Only the first request->len bytes can ever hold generated

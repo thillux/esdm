@@ -109,16 +109,23 @@ add_global_arguments(['-DMAJVERSION=' + version_array[0],
 		      '-DVERSION="' + meson.project_version() + '"'],
 		      language : 'c')
 
+# The link arguments below are given for C++ as well: a target with a C++
+# source - libesdm with the botan backend, and everything linking it - is
+# linked by the C++ driver with the C++ link arguments alone, and lost them
+# otherwise. Like the C++ arguments above, they are accepted before the botan
+# backend adds the language, and unused without it.
+
 # Dead-code-stripping support
-add_global_arguments(['-ffunction-sections', '-fdata-sections'], language : 'c')
-add_project_link_arguments('-Wl,--gc-sections', language : 'c')
+add_global_arguments(['-ffunction-sections', '-fdata-sections'],
+		     language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,--gc-sections', language : ['c', 'cpp'])
 
 # Link for full RELRO
-add_project_link_arguments('-Wl,-z,relro', language : 'c')
-add_project_link_arguments('-Wl,-z,now', language : 'c')
+add_project_link_arguments('-Wl,-z,relro', language : ['c', 'cpp'])
+add_project_link_arguments('-Wl,-z,now', language : ['c', 'cpp'])
 
 # No executable stack
-add_project_link_arguments('-Wl,-z,noexecstack', language : 'c')
+add_project_link_arguments('-Wl,-z,noexecstack', language : ['c', 'cpp'])
 
 # The client libraries export the logger so that the copy of the frontend
 # linking them interposes theirs. Clang drops that interposition under LTO and
@@ -145,17 +152,35 @@ endif
 
 dependencies = [ dependency('libprotobuf-c'), dependency('threads') ]
 
-# Rendering of the JSON status document and its parsing in the test suite
-json_c_dep = dependency('json-c', required: true)
+# Rendering of the JSON status document and its parsing in the test suite.
+# The parsing of the status of an external entropy source needs
+# json_tokener_get_parse_end(), which came with 0.14 - as did the
+# JSON_TOKENER_VALIDATE_UTF8 flag of the tokener.
+json_c_dep = dependency('json-c', version: '>= 0.14', required: true)
 
 pkgconfig = import('pkgconfig')
 
 include_user_files = [ ]
 
+# The code shared by the ESDM, its libraries and frontends is sorted into the
+# subfolders of common/ by type; its headers are included by their names.
 include_dirs_server = include_directories([ 'esdm',
+					    'esdm/crypto',
+					    'esdm/drng',
+					    'esdm/es',
+					    'esdm/es/cpu',
+					    'esdm/es/ebpf',
+					    'esdm/status',
 					    'kernel/shared',
 					    'crypto',
 					    'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
+					    'es-ext',
 					    'service-egd',
 					    'service-egd/server',
 					    'service-rpc/service',
@@ -163,15 +188,32 @@ include_dirs_server = include_directories([ 'esdm',
 dependencies_server = dependencies + [ json_c_dep ]
 
 include_dirs_client = include_directories([ 'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
 					    'service-egd',
 					    'service-egd/client',
 					    'service-rpc/service',
 					    'service-rpc/client' ])
 dependencies_client = dependencies
 
+# For the tests looking up symbols with dlsym(3) - in the C library itself
+# since glibc 2.34
+
+dl_dep = dependency('dl')
+
 # The EGD client needs nothing but the common code - keep it that way by not
 # handing it the RPC service includes.
 include_dirs_egd_client = include_directories([ 'common',
+						'common/log',
+						'common/sys',
+						'common/testmode',
+						'common/threading',
+						'common/tls',
+						'common/util',
 						'service-egd',
 						'service-egd/client' ])
 
@@ -204,7 +246,7 @@ if get_option('es_ebpf_testing').enabled()
 	   get_option('es_irq_ebpf').disabled()
 		error('es_ebpf_testing requires es_sched_ebpf or es_irq_ebpf to be enabled')
 	endif
-	subdirs += [ 'addon/es_ebpf_testing' ]
+	subdirs += [ 'tests/es_ebpf_testing' ]
 endif
 
 if get_option('esdm-server').enabled()
@@ -232,6 +274,17 @@ if get_option('crypto_backend') == 'builtin'
 	   get_option('hash_sha3_512').enabled()
 		error('Only one conditioning hash can be enabled')
 	endif
+
+	# The builtin backend has nothing else to fall back on
+	if not get_option('drng_hash_drbg').enabled() and \
+	   not get_option('drng_chacha20').enabled()
+		error('The builtin crypto backend needs a DRNG - enable drng_hash_drbg or drng_chacha20')
+	endif
+
+	if not get_option('hash_sha512').enabled() and \
+	   not get_option('hash_sha3_512').enabled()
+		error('The builtin crypto backend needs a conditioning hash - enable hash_sha512 or hash_sha3_512')
+	endif
 endif
 
 if get_option('crypto_backend') == 'gnutls'
@@ -243,7 +296,9 @@ if get_option('crypto_backend') == 'gnutls'
 	# The SP800-90A Block_Cipher_df in front of GnuTLS' CTR DRBG uses the
 	# AES-256 core directly. GnuTLS only lists nettle in Requires.private,
 	# so it has to be linked explicitly.
-	nettle_dep = dependency('nettle', required: true)
+	# The SHAKE256 of the auxiliary pool is nettle's as well, which has it
+	# since 3.6.
+	nettle_dep = dependency('nettle', version: '>= 3.6', required: true)
 
 	# The CTR DRBG this backend drives (drbg_aes_init/reseed/generate) is
 	# not part of the regular GnuTLS ABI: those three live in the
@@ -265,11 +320,33 @@ endif
 
 if get_option('crypto_backend') == 'botan'
 	add_languages('cpp', required: true)
-	botan_dep = dependency('botan-3', version: '>= 3.0', required: true)
+	# Botan::XOF, the SHAKE256 of the auxiliary pool, came with 3.2
+	botan_dep = dependency('botan-3', version: '>= 3.2', required: true)
 endif
 
 if get_option('crypto_backend') == 'openssl' or get_option('openssl-rand-provider').enabled()
 	openssl_dep = dependency('openssl', version : '>=3.0', required: true)
+endif
+
+# The DTLS of the connections is provided by the TLS stack of the crypto
+# backend - see common/tls/esdm_dtls.h. Everything speaking to another process
+# is built with dependencies_client or dependencies_server, so the stack is
+# handed to all of them; one not using it is not linked against it
+# (b_asneeded).
+if get_option('dtls').enabled()
+	if get_option('crypto_backend') == 'openssl'
+		dtls_deps = [ openssl_dep ]
+	elif get_option('crypto_backend') == 'gnutls'
+		dtls_deps = [ gnutls_dep ]
+	elif get_option('crypto_backend') == 'botan'
+		dtls_deps = [ botan_dep ]
+	else
+		error('dtls needs the TLS stack of crypto_backend openssl, gnutls or botan - the ' + get_option('crypto_backend') + ' backend has none')
+	endif
+	dependencies_client += dtls_deps
+	dependencies_server += dtls_deps
+else
+	dtls_deps = []
 endif
 
 if get_option('openssl-rand-provider').enabled()
@@ -293,7 +370,7 @@ if get_option('esdm-tool').enabled()
 endif
 
 if get_option('validation-helpers').enabled()
-	subdirs += [ 'addon/test' ]
+	subdirs += [ 'tests/validation-helpers' ]
 endif
 
 subdirs += [ 'man' ]

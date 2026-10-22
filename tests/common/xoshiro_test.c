@@ -17,7 +17,7 @@
  * DAMAGE.
  */
 
-/* Tests of the xoshiro256++ generator in common/xoshiro_prng.c. */
+/* Tests of the xoshiro256++ generator in common/util/xoshiro_prng.c. */
 
 #include <stdint.h>
 #include <stdio.h>

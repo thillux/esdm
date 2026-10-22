@@ -34,10 +34,10 @@ struct esdm_min_reseed_secs_buf {
 	unsigned int seconds;
 };
 
-static void
-esdm_rpcc_get_min_reseed_secs_cb(const ValResponse *response,
-				 void *closure_data)
+static void esdm_rpcc_get_min_reseed_secs_cb(const ProtobufCMessage *message,
+					     void *closure_data)
 {
+	const ValResponse *response = (const ValResponse *)message;
 	struct esdm_min_reseed_secs_buf *buffer =
 		(struct esdm_min_reseed_secs_buf *)closure_data;
 
@@ -65,9 +65,9 @@ int esdm_rpcc_get_min_reseed_secs_int(unsigned int *seconds, void *int_data)
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	unpriv_access__rpc_get_min_reseed_secs(&rpc_conn->service, &msg,
-					       esdm_rpcc_get_min_reseed_secs_cb,
-					       &buffer);
+	unpriv_access__rpc_get_min_reseed_secs(
+		&rpc_conn->service, &msg,
+		(ValResponse_Closure)esdm_rpcc_get_min_reseed_secs_cb, &buffer);
 
 	/*
 	 * The callback only runs once a response was received - without one

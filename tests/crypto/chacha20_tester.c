@@ -10,11 +10,11 @@
  * keystream on big-endian machines.
  *
  * The DRNG is checked against the known answers of its self test in
- * esdm/esdm_builtin_chacha20.c, seeded with the seed bytes as they are. Seed
- * data injected into the key byte by byte rather than as little-endian words
- * gives a different output on big-endian machines - which the self test used
- * to hide by byte-swapping its seed on them, while the seed of every real
- * seeding went in unswapped.
+ * esdm/crypto/esdm_builtin_chacha20.c, seeded with the seed bytes as they
+ * are. Seed data injected into the key byte by byte rather than as
+ * little-endian words gives a different output on big-endian machines - which
+ * the self test used to hide by byte-swapping its seed on them, while the seed
+ * of every real seeding went in unswapped.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -89,7 +89,10 @@ static const uint8_t rfc_enc_ct[114] = {
 	0x5e, 0x42, 0x87, 0x4d,
 };
 
-/* The known answers of the DRNG self test, see esdm/esdm_builtin_chacha20.c */
+/*
+ * The known answers of the DRNG self test, see
+ * esdm/crypto/esdm_builtin_chacha20.c
+ */
 static const uint8_t drng_seed[64] = {
 	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
 	0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,

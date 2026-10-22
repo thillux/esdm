@@ -157,9 +157,8 @@ static inline int test_ns_restore(struct test_ns_keep *keep, unsigned int n)
  * process and the daemons it forks, which is what allows the privileged tests
  * to run in parallel and keeps a failed run from poisoning the machine.
  *
- * Requires real root - CLONE_NEWNS needs CAP_SYS_ADMIN, and a user namespace is
- * no substitute, as the ESDM drops privileges with setgroups(), which is denied
- * inside one.
+ * Requires CAP_SYS_ADMIN: real root, or an unprivileged user in the user
+ * namespace of test_enter_user_namespace().
  */
 static inline int test_isolate_namespaces(void)
 {
@@ -201,6 +200,69 @@ static inline int test_isolate_namespaces(void)
 		return -errno;
 
 	return test_ns_restore(keep, nkeep);
+}
+
+/*
+ * Enter a user namespace of its own, holding the capabilities there that
+ * test_isolate_namespaces() needs. The uid and gid stay what they are, mapped
+ * onto themselves: an esdm-server exec'd in it runs unprivileged, as it would
+ * outside, rather than as a root that cannot drop its privileges.
+ */
+static inline int test_enter_user_namespace(void)
+{
+	static const char *const files[] = { "/proc/self/setgroups",
+					     "/proc/self/uid_map",
+					     "/proc/self/gid_map" };
+	char line[3][32];
+	unsigned int uid = (unsigned int)getuid(), gid = (unsigned int)getgid();
+	unsigned int i;
+
+	/* gid_map is only writable once setgroups() is denied */
+	snprintf(line[0], sizeof(line[0]), "deny");
+	snprintf(line[1], sizeof(line[1]), "%u %u 1", uid, uid);
+	snprintf(line[2], sizeof(line[2]), "%u %u 1", gid, gid);
+
+	if (unshare(CLONE_NEWUSER) < 0)
+		return -errno;
+
+	for (i = 0; i < 3; i++) {
+		size_t len = strlen(line[i]);
+		int fd = open(files[i], O_WRONLY | O_CLOEXEC);
+		ssize_t ret;
+
+		if (fd < 0)
+			return -errno;
+		ret = write(fd, line[i], len);
+		close(fd);
+		if (ret != (ssize_t)len)
+			return ret < 0 ? -errno : -EIO;
+	}
+
+	return 0;
+}
+
+/*
+ * Mount a private tmpfs over the directory of the socket @path, unless it is
+ * /tmp, which test_isolate_namespaces() made private already - the RPC sockets
+ * of a build without testmode live in /run, which only root may write to.
+ */
+static inline int test_ns_private_socket_dir(const char *path)
+{
+	char dir[256];
+	const char *slash = strrchr(path, '/');
+	size_t len = slash ? (size_t)(slash - path) : 0;
+
+	if (!len || len >= sizeof(dir))
+		return -EINVAL;
+	memcpy(dir, path, len);
+	dir[len] = '\0';
+	if (!strcmp(dir, "/tmp"))
+		return 0;
+
+	if (mount("tmpfs", dir, "tmpfs", 0, NULL) < 0)
+		return -errno;
+
+	return 0;
 }
 
 #endif /* TEST_NAMESPACE_H */

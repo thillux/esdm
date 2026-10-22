@@ -31,5 +31,5 @@ void esdm_rpc_get_ent_lvl(UnprivAccess_Service *service,
 
 	response.val = esdm_avail_entropy();
 	response.ret = 0;
-	closure(&response, closure_data);
+	((ProtobufCClosure)closure)(&response.base, closure_data);
 }

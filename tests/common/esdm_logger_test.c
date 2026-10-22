@@ -18,7 +18,7 @@
  */
 
 /*
- * Tests for common/esdm_logger.c.
+ * Tests for common/log/esdm_logger.c.
  *
  * Whether a record is emitted is decided in two separate places - the severity
  * comparison at the top of _esdm_logger() and the class lookup below it. The

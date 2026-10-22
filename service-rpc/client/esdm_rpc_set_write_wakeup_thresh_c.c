@@ -32,9 +32,11 @@ struct esdm_set_write_wakeup_thresh_buf {
 	int ret;
 };
 
-static void esdm_rpcc_set_write_wakeup_thresh_cb(
-	const RetResponse *response, void *closure_data)
+static void
+esdm_rpcc_set_write_wakeup_thresh_cb(const ProtobufCMessage *message,
+				     void *closure_data)
 {
+	const RetResponse *response = (const RetResponse *)message;
 	struct esdm_set_write_wakeup_thresh_buf *buffer =
 		(struct esdm_set_write_wakeup_thresh_buf *)closure_data;
 
@@ -57,7 +59,8 @@ int esdm_rpcc_set_write_wakeup_thresh_int(unsigned int write_wakeup_thresh,
 
 	msg.wakeup = write_wakeup_thresh;
 	priv_access__rpc_set_write_wakeup_thresh(
-		&rpc_conn->service, &msg, esdm_rpcc_set_write_wakeup_thresh_cb,
+		&rpc_conn->service, &msg,
+		(RetResponse_Closure)esdm_rpcc_set_write_wakeup_thresh_cb,
 		&buffer);
 
 	/*

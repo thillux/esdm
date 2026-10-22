@@ -19,7 +19,9 @@
 
 /*
  * Test that a reset of the interrupt or the scheduler entropy source discards
- * the blocks its cache took from the kernel before the reset.
+ * the blocks its cache took from the kernel before the reset - and that a
+ * source holding nothing in the kernel, its cache filled, is still one the ES
+ * manager credits.
  *
  * The reset of these sources has the kernel add-on throw away its pools and
  * their entropy estimate. The cache in user space holds blocks that were
@@ -48,6 +50,7 @@
 #define TEST_MUTEX sched_mutex
 #define TEST_BLOCKS ESDM_SCHED_ENTROPY_BLOCKS
 #define TEST_NAME "ES scheduler cache reset"
+#define TEST_RATE_SET esdm_config_es_sched_entropy_rate_set
 #else
 #include "esdm_es_irq.c"
 #define TEST_ES esdm_es_irq
@@ -57,6 +60,7 @@
 #define TEST_MUTEX irq_mutex
 #define TEST_BLOCKS ESDM_IRQ_ENTROPY_BLOCKS
 #define TEST_NAME "ES interrupt cache reset"
+#define TEST_RATE_SET esdm_config_es_irq_entropy_rate_set
 #endif
 
 #include "common_test.h"
@@ -166,12 +170,50 @@ static void check_init_failure_drops_fd(const char *path, int flags, int expect)
 	TEST_ES.fini();
 }
 
+/*
+ * The monitor filled the cache, which drained the kernel: the kernel holds
+ * nothing - which a descriptor of /dev/null, failing every ioctl, tells as
+ * well. The source is credited all the same, so that the ES manager collects
+ * it into the buffer credited with entropy, where the blocks of its cache
+ * count: one credited with nothing was taken for a source that is not
+ * validated, its cached blocks spent without being counted.
+ */
+static void check_drained_source_credited(void)
+{
+	int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+	CHECK(fd >= 0, "cannot open /dev/null");
+	if (fd < 0)
+		return;
+
+	CHECK_EQ(esdm_es_buf_alloc(&TEST_BUF, TEST_BLOCKS, TEST_ES.name, NULL,
+				   NULL),
+		 0);
+	TEST_BUF_ALLOCED = true;
+	fill_cache();
+
+	mutex_lock(&TEST_MUTEX);
+	TEST_FD = fd;
+	mutex_unlock(&TEST_MUTEX);
+
+	TEST_RATE_SET(ESDM_DRNG_SECURITY_STRENGTH_BITS);
+	CHECK_EQ(TEST_ES.curr_entropy(ESDM_DRNG_SECURITY_STRENGTH_BITS), 0);
+	CHECK_EQ(TEST_ES.max_entropy(), esdm_security_strength());
+
+	/* Not credited, it is not validated, whatever it holds */
+	TEST_RATE_SET(0);
+	CHECK_EQ(TEST_ES.max_entropy(), 0);
+
+	TEST_ES.fini();
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
 	(void)argv;
 
 	check_reset_discards_cache();
+	check_drained_source_credited();
 	check_init_failure_drops_fd("/", O_PATH, -EAGAIN);
 	check_init_failure_drops_fd("/dev/null", O_RDONLY, 0);
 

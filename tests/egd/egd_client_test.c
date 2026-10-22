@@ -30,6 +30,11 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +42,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "egd_peer.h"
@@ -115,6 +121,39 @@ static int test_blocking_read_chunking(void)
 
 	CHECK(egd_peer_requests(peer) == 2, "%u transfers, expected 2",
 	      egd_peer_requests(peer));
+
+	/*
+	 * A read of more transfers than the client sends at once: their
+	 * commands go out in two batches, the bytes have to come in order all
+	 * the same, behind those of the read before on the same connection.
+	 */
+	{
+		const size_t large = 70000;
+		uint8_t *big = malloc(large);
+
+		CHECK(big != NULL, "no memory for the large read");
+		if (big) {
+			CHECK(esdm_egd_client_get_random(client, big, large) ==
+				      0,
+			      "the large blocking read failed");
+			for (i = 0; i < large; i++) {
+				if (big[i] !=
+				    egd_peer_data_byte(sizeof(buf) + i)) {
+					CHECK(0,
+					      "byte %zu of the large read is 0x%02x, expected 0x%02x",
+					      i, big[i],
+					      egd_peer_data_byte(sizeof(buf) +
+								 i));
+					break;
+				}
+			}
+			free(big);
+		}
+		CHECK(egd_peer_requests(peer) == 2 + (large + 254) / 255,
+		      "%u transfers, expected %zu", egd_peer_requests(peer),
+		      2 + (large + 254) / 255);
+	}
+
 	CHECK(egd_peer_connections(peer) == 1,
 	      "%u connections, expected a single one",
 	      egd_peer_connections(peer));
@@ -190,6 +229,106 @@ static int test_nonblocking_overlong(void)
 						  &generated) == -EPROTO,
 	      "an overlong answer was not rejected with -EPROTO");
 	CHECK(generated == 0, "%zu bytes reported after the failure", generated);
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
+ * The prediction resistant reads go out as the ESDM's own commands, split into
+ * protocol transfers just like the standard ones, and are answered alike.
+ */
+static int test_pr_reads(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	uint8_t buf[300], overlong[16];
+	size_t generated = 0, i;
+	int ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("pr"), EGD_PEER_SHORT))
+		return 1;
+
+	if (esdm_egd_client_alloc(&client, test_socket("pr"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	/* Two transfers, answered in full as the blocking read is */
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) == 0,
+	      "the prediction resistant blocking read failed");
+	for (i = 0; i < sizeof(buf); i++) {
+		if (buf[i] != egd_peer_data_byte(i)) {
+			CHECK(0, "byte %zu is 0x%02x, expected 0x%02x", i,
+			      buf[i], egd_peer_data_byte(i));
+			break;
+		}
+	}
+	CHECK(egd_peer_pr_requests(peer) == 2,
+	      "%u prediction resistant transfers, expected 2",
+	      egd_peer_pr_requests(peer));
+
+	/*
+	 * Split at a multiple of what the ESDM generates per seed, so that the
+	 * read costs no more seeds than its size: 300 bytes take 10 of them,
+	 * 256 bytes another 8 - as 255 + 1 bytes, they would take 9.
+	 */
+	CHECK(egd_peer_pr_generations(peer) == 10,
+	      "the prediction resistant read of %zu bytes cost %u seeds, expected 10",
+	      sizeof(buf), egd_peer_pr_generations(peer));
+	CHECK(esdm_egd_client_get_random_pr(client, buf, 256) == 0,
+	      "the prediction resistant blocking read of 256 bytes failed");
+	CHECK(egd_peer_pr_requests(peer) == 4 &&
+		      egd_peer_pr_generations(peer) == 18,
+	      "the prediction resistant read of 256 bytes went out as %u transfers costing %u seeds, expected 2 costing 8",
+	      egd_peer_pr_requests(peer) - 2,
+	      egd_peer_pr_generations(peer) - 10);
+
+	/* One transfer, which the peer answers with half of what was asked */
+	CHECK(esdm_egd_client_get_random_pr_nonblock(client, buf, 32,
+						     &generated) == 0,
+	      "the prediction resistant non-blocking read failed");
+	CHECK(generated == 16, "%zu bytes delivered, expected 16", generated);
+	CHECK(egd_peer_pr_requests(peer) == 5,
+	      "%u prediction resistant transfers, expected 5",
+	      egd_peer_pr_requests(peer));
+
+	/* More than one transfer is refused before anything is sent */
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, buf, ESDM_EGD_MAX_TRANSFER + 1, &generated) ==
+		      -EINVAL,
+	      "a non-blocking request beyond one transfer was not refused");
+	CHECK(egd_peer_requests(peer) == 5, "%u requests, expected 5",
+	      egd_peer_requests(peer));
+
+	/* The standard reads stay what they are */
+	CHECK(esdm_egd_client_get_random(client, buf, 8) == 0,
+	      "the blocking read failed");
+	CHECK(egd_peer_pr_requests(peer) == 5,
+	      "an ordinary read went out as a prediction resistant one");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	/* An answer longer than the request is refused here as well */
+	if (egd_peer_start(&peer, test_socket("pr-overlong"),
+			   EGD_PEER_OVERLONG))
+		return 1;
+	if (esdm_egd_client_alloc(&client, test_socket("pr-overlong"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	generated = 1;
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, overlong, sizeof(overlong), &generated) == -EPROTO,
+	      "an overlong prediction resistant answer was not rejected");
+	CHECK(generated == 0, "%zu bytes reported after the failure",
+	      generated);
 
 	esdm_egd_client_free(client);
 	egd_peer_stop(peer);
@@ -500,6 +639,134 @@ static int test_failure_wipes_buffer(void)
 	      "the buffer was not cleansed after the failure");
 	CHECK(generated == 0, "%zu bytes reported after the failure",
 	      generated);
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
+ * Bound on the waits of the client under signals, and how long the signals go
+ * on for at most: long enough after the bound for a client that starts its
+ * wait over with every signal to stand out, short enough that it does not run
+ * into the watchdog then.
+ */
+#define TEST_SIGNAL_TIMEOUT_MS 300
+#define TEST_SIGNAL_INTERVAL_MS 10
+#define TEST_SIGNAL_DURATION_MS 8000
+
+struct test_signaller {
+	pthread_t target;
+	atomic_bool stop;
+	atomic_uint sent;
+};
+
+static volatile sig_atomic_t test_signals_received;
+
+static void test_signal_handler(int sig)
+{
+	(void)sig;
+	test_signals_received++;
+}
+
+/* Interrupt @target with SIGUSR1 at a short interval, as an interval timer would. */
+static void *test_signaller_thread(void *arg)
+{
+	struct test_signaller *s = arg;
+	const struct timespec interval = {
+		.tv_sec = 0,
+		.tv_nsec = TEST_SIGNAL_INTERVAL_MS * 1000L * 1000L,
+	};
+	unsigned int i;
+
+	for (i = 0;
+	     i < TEST_SIGNAL_DURATION_MS / TEST_SIGNAL_INTERVAL_MS &&
+	     !atomic_load(&s->stop);
+	     i++) {
+		nanosleep(&interval, NULL);
+		if (!pthread_kill(s->target, SIGUSR1))
+			atomic_fetch_add(&s->sent, 1);
+	}
+
+	return NULL;
+}
+
+static uint64_t test_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+/*
+ * The timeout bounds a wait for a peer that does not answer also while signals
+ * keep interrupting it. Starting the wait over with every signal, a client
+ * under a periodic one - an interval timer, a stream of SIGCHLD - never times
+ * out at all.
+ */
+static int test_timeout_under_signals(void)
+{
+	struct test_signaller signaller;
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct sigaction sa, old_sa;
+	pthread_t thread;
+	uint64_t start, elapsed;
+	uint32_t bits = 0;
+	int rc, ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("signals"), EGD_PEER_SILENT))
+		return 1;
+
+	if (esdm_egd_client_alloc(&client, test_socket("signals"),
+				  TEST_SIGNAL_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	/* A handler, so that the signal interrupts the poll rather than kill */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = test_signal_handler;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, &old_sa);
+	test_signals_received = 0;
+
+	signaller.target = pthread_self();
+	atomic_init(&signaller.stop, false);
+	atomic_init(&signaller.sent, 0);
+	if (pthread_create(&thread, NULL, test_signaller_thread, &signaller)) {
+		sigaction(SIGUSR1, &old_sa, NULL);
+		esdm_egd_client_free(client);
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	start = test_now_ms();
+	rc = esdm_egd_client_entropy_count(client, &bits);
+	elapsed = test_now_ms() - start;
+
+	atomic_store(&signaller.stop, true);
+	pthread_join(thread, NULL);
+	sigaction(SIGUSR1, &old_sa, NULL);
+
+	CHECK(rc == -ETIMEDOUT,
+	      "an unanswered request under signals returned %d, expected %d",
+	      rc, -ETIMEDOUT);
+	CHECK(test_signals_received > 0,
+	      "no signal interrupted the request, %u were sent",
+	      atomic_load(&signaller.sent));
+
+	/*
+	 * The request is tried twice, once on a new connection, and each try
+	 * waits for its answer once - with time to spare for a loaded machine,
+	 * but well below the duration of the signals.
+	 */
+	CHECK(elapsed < TEST_SIGNAL_DURATION_MS / 2,
+	      "an unanswered request under signals took %llu ms with a timeout of %u ms",
+	      (unsigned long long)elapsed, TEST_SIGNAL_TIMEOUT_MS);
 
 	esdm_egd_client_free(client);
 	egd_peer_stop(peer);
@@ -893,6 +1160,7 @@ int main(int argc, char *argv[])
 		{ "blocking read chunking", test_blocking_read_chunking },
 		{ "non-blocking read", test_nonblocking_read },
 		{ "overlong answer", test_nonblocking_overlong },
+		{ "prediction resistant reads", test_pr_reads },
 		{ "entropy count", test_entropy_count },
 		{ "PID request", test_get_pid },
 		{ "entropy insertion", test_write_entropy },
@@ -901,6 +1169,7 @@ int main(int argc, char *argv[])
 		  test_socket_path_from_env },
 		{ "reconnect after a hangup", test_reconnect },
 		{ "buffer cleansing on failure", test_failure_wipes_buffer },
+		{ "timeout under signals", test_timeout_under_signals },
 		{ "descriptor identity", test_descriptor_identity },
 		{ "release with a foreign descriptor",
 		  test_free_foreign_descriptor },
