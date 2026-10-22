@@ -18,12 +18,13 @@ ccflags-y += -DESDM_ES_OSR=$(ESDM_ES_OSR)
 
 #
 # Code shared with the ESDM: the IOCTL interface and the health test cutoffs
-# (kernel/shared) and, where the kernel provides SHAKE256, the XDRBG-256
-# (esdm/crypto, built by esdm_xdrbg_shared.c). The module's own directory
-# comes first, so that its esdm_definitions.h is the one the shared code uses.
+# (kernel/shared), the seed sizes (esdm/drng) and, where the kernel provides
+# SHAKE256, the XDRBG-256 (esdm/crypto, built by esdm_xdrbg_shared.c). The
+# module's own directory comes first, so that its esdm_definitions.h is the one
+# the shared code uses.
 #
-ccflags-y += -I$(src) -I$(src)/../shared -I$(src)/../../esdm/crypto	\
-	     -I$(src)/../../common/util
+ccflags-y += -I$(src) -I$(src)/../shared -I$(src)/../../esdm/drng	\
+	     -I$(src)/../../esdm/crypto -I$(src)/../../common/util
 
 obj-m				+= esdm_es.o
 esdm_es-y			= esdm_es_mgr.o esdm_es_timer_common.o 	\

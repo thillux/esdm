@@ -76,7 +76,7 @@ if sp80090c
 		conf_data.set('ESDM_' + osr,
 			      cc.get_define('ESDM_SP80090C_' + osr,
 					    prefix: '#include "esdm_seed_sizes.h"',
-					    include_directories: include_directories('../kernel/shared')).to_int())
+					    include_directories: include_directories('../esdm/drng')).to_int())
 	endforeach
 else
 	conf_data.set('ESDM_SEED_BUFFER_INIT_ADD_BITS', 0)

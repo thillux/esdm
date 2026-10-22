@@ -33,6 +33,7 @@ stdenv.mkDerivation rec {
       ./Makefile
       (lib.fileset.fileFilter (file: file.hasExt "c" || file.hasExt "h") ./.)
       ../shared
+      ../../esdm/drng/esdm_seed_sizes.h
       ../../esdm/crypto/esdm_xdrbg.c
       ../../esdm/crypto/esdm_xdrbg.h
       ../../esdm/crypto/esdm_xof.h
