@@ -37,7 +37,6 @@ After=systemd-modules-load.service
 
 [Service]
 @SERVICE_TYPE@
-@EBPF_UNIT_SNIPPET@
 AmbientCapabilities=CAP_SYS_ADMIN CAP_SETGID CAP_SETUID CAP_KILL CAP_SYS_RESOURCE
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETGID CAP_SETUID CAP_KILL CAP_SYS_RESOURCE
 DeviceAllow=/dev/esdm r
@@ -54,11 +53,15 @@ DevicePolicy=strict
 ExecStart=@PATH@/esdm-server -f --pid /run/esdm-server.pid --syslog --memlock --keep_ipc -vvv
 IPAddressDeny=any
 LimitMEMLOCK=infinity
-# The EGD clients hold their connection open for their entire lifetime, so the
-# server keeps one descriptor per consumer on the system, next to the RPC ones.
-# systemd's default of 1024 is below the number of EGD clients the server is
-# willing to serve, which would turn into connections that are accepted and
-# immediately dropped rather than into a clean limit.
+# The EGD clients may hold their connection open for their entire lifetime, so
+# the server keeps one descriptor per consumer on the system, next to the RPC
+# ones. systemd's default of 1024 is below the number of EGD clients the server
+# is willing to serve, which would turn into connections that are accepted and
+# immediately dropped rather than into a clean limit. No single unprivileged
+# user can claim them all: the server admits at most 256 EGD connections per UID
+# and RPC connections per UID of 16 per online CPU, at least 512 and at most
+# half of this limit (root is exempt), and closes EGD connections idle for 60s.
+# Raise this limit on hosts with more than 256 CPUs to let the RPC bound grow.
 LimitNOFILE=8192
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
@@ -69,7 +72,8 @@ PrivateMounts=no
 PrivateNetwork=yes
 PrivateTmp=yes
 PrivateUsers=no
-ProcSubset=pid
+# No ProcSubset=pid: it hides /proc/sys/crypto/fips_enabled, which a FIPS 140
+# build reads as "kernel not in FIPS mode", silently leaving FIPS mode off.
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectHome=yes
@@ -100,6 +104,10 @@ SystemCallArchitectures=native
 # privileged calls (bpf, kexec, init_module, ...).
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+# Last, as a later deny line would take back what this allows again (@debug
+# holds the perf_event_open the eBPF entropy sources need).
+@EBPF_UNIT_SNIPPET@
+@JENT_KERNEL_UNIT_SNIPPET@
 UMask=0077
 
 [Install]

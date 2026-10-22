@@ -42,7 +42,12 @@ static void esdm_rpcc_status_cb(const StatusResponse *response,
 
 	esdm_rpcc_error_check(response, buffer);
 	buffer->ret = response->ret;
-	if (response->ret < 0)
+
+	/*
+	 * A report the server could not fit into its buffer comes as far as it
+	 * got, with -EMSGSIZE - hand that part on rather than nothing at all.
+	 */
+	if (response->ret < 0 && response->ret != -EMSGSIZE)
 		return;
 	if (!response->buffer || !buffer->buflen || !buffer->buf) {
 		buffer->ret = -EFAULT;

@@ -30,6 +30,7 @@
  */
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -186,6 +187,63 @@ static int test_server_answers(void)
 	      r.err);
 
 	return rc == EXIT_SUCCESS;
+}
+
+/*
+ * The server leaves the mount, cgroup and network namespaces it was started in.
+ * unshare() moves only the calling thread, so what is checked is every thread
+ * of the server rather than the process: a thread created before the unshare,
+ * or by such a thread, stays behind in the namespaces of the host.
+ */
+static void test_server_namespaces(void)
+{
+	static const char *const nss[] = { "mnt", "cgroup", "net" };
+	char path[sizeof(((struct dirent *)0)->d_name) + 64];
+	char own[64], theirs[64];
+	unsigned int threads = 0;
+	struct dirent *de;
+	DIR *dir;
+	size_t i;
+	ssize_t len;
+
+	snprintf(path, sizeof(path), "/proc/%d/task", (int)server_pid);
+	dir = opendir(path);
+	CHECK(dir != NULL, "cannot list the threads of the esdm-server: %s",
+	      strerror(errno));
+	if (!dir)
+		return;
+
+	while ((de = readdir(dir)) != NULL) {
+		if (de->d_name[0] == '.')
+			continue;
+
+		threads++;
+
+		for (i = 0; i < sizeof(nss) / sizeof(nss[0]); i++) {
+			snprintf(path, sizeof(path), "/proc/self/ns/%s",
+				 nss[i]);
+			len = readlink(path, own, sizeof(own) - 1);
+			if (len < 0)
+				continue;
+			own[len] = '\0';
+
+			snprintf(path, sizeof(path), "/proc/%d/task/%s/ns/%s",
+				 (int)server_pid, de->d_name, nss[i]);
+			len = readlink(path, theirs, sizeof(theirs) - 1);
+			if (len < 0)
+				continue;
+			theirs[len] = '\0';
+
+			CHECK(strcmp(own, theirs) != 0,
+			      "esdm-server thread %s is still in the %s namespace it was started in",
+			      de->d_name, nss[i]);
+		}
+	}
+
+	closedir(dir);
+
+	/* The main thread alone was isolated even before every thread was */
+	CHECK(threads > 1, "the esdm-server has a single thread only");
 }
 
 /*
@@ -579,6 +637,7 @@ int main(int argc, char *argv[])
 		return 1;
 
 	if (test_server_answers() && test_wait_until_seeded()) {
+		test_server_namespaces();
 		test_status();
 		test_get_random();
 		test_entropy_reporting();

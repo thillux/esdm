@@ -8,10 +8,10 @@
 #
 #	systemctl enable --now esdm-server-egd.socket
 #
-# Note that the ESDM does not get activated by traffic on this socket: it binds
-# the socket during its own startup and the esdm-server has to be running for
-# the socket to be served. Hence the socket unit merely hands the descriptor
-# over - see Service= below.
+# The esdm-server takes the descriptor over from systemd when it starts, and
+# traffic on this socket starts a stopped esdm-server (Service= below). One
+# that is already running when this unit is started has to be restarted once
+# to serve the socket.
 
 [Unit]
 Description=ESDM EGD compatibility socket

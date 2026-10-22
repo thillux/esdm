@@ -5,9 +5,9 @@
 
 [Unit]
 Description=Entropy Source and DRNG Manager Daemon Suspend/Sleep Trigger
-After=sleep.target
-After=suspend.target
-After=hibernate.target
+# sleep.target is reached before systemd-suspend.service puts the system to
+# sleep; suspend.target and hibernate.target only after it woke up again.
+Before=sleep.target
 After=esdm-server.service
 Wants=esdm-server.service
 ConditionPathExists=/run/esdm-server.pid
@@ -61,5 +61,3 @@ UMask=0077
 
 [Install]
 WantedBy=sleep.target
-WantedBy=suspend.target
-WantedBy=hibernate.target

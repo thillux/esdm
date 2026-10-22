@@ -21,7 +21,9 @@
 #include <bits/time.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
+#include <linux/sockios.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <protobuf-c/protobuf-c.h>
@@ -33,7 +35,9 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/queue.h>
+#include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -51,12 +55,14 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_peer_limit.h"
 #include "esdm_shm_status.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
 #include "esdm_rpc_server.h"
 #include "esdm_rpc_service.h"
 #include "helper.h"
+#include "linux_support.h"
 #include "math_helper.h"
 #include "esdm_logger.h"
 #include "memset_secure.h"
@@ -77,11 +83,17 @@ struct esdm_rpcs {
 	ProtobufCService *service;
 	int server_listening_fd;
 	bool privileged;
+	/* Connections of all workers, and their slots, see esdm_rpcs_full() */
+	atomic_size_t num_connections;
+	atomic_size_t max_connections;
 };
 
 struct esdm_rpcs_connection {
 	struct esdm_rpcs *proto;
 	int child_fd;
+	/* Peer UID, accounted in esdm_rpcs_peer_limit if peer_counted */
+	uid_t peer_uid;
+	bool peer_counted;
 	uint32_t method_index;
 	uint32_t request_id;
 	struct timespec last_used;
@@ -95,6 +107,8 @@ struct esdm_rpc_thread {
 	struct esdm_rpcs *proto;
 	uint32_t id;
 	int eventfd;
+	/* Connection slots of this worker, see esdm_rpcs_worker_slots() */
+	size_t max_connections;
 };
 
 /*
@@ -128,6 +142,110 @@ static atomic_int esdm_rpc_init_state =
 static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 
 static atomic_int server_exit = 0;
+
+/*
+ * Concurrent connections of one unprivileged UID over all RPC worker threads -
+ * root is exempt. Each worker serves up to 1024 connections and all of them
+ * share one RLIMIT_NOFILE with the EGD interface; without a bound per peer a
+ * single local user could exhaust them and lock every other client out.
+ *
+ * A client process holds up to one connection per online node, and idle ones
+ * are closed after ESDM_RPC_IDLE_TIMEOUT_USEC. A fixed bound would therefore
+ * only admit a handful of busy processes of one user on a large machine. The
+ * bound scales with the online nodes instead, admitting
+ * ESDM_RPC_PROCESSES_PER_UID such processes, but never less than
+ * ESDM_RPC_MIN_CONNECTIONS_PER_UID. The descriptor limit caps both: no single
+ * UID can take more than half of RLIMIT_NOFILE, which leaves the other half to
+ * the remaining users and the EGD interface (see esdm_rpcs_peer_limit_init()).
+ */
+#define ESDM_RPC_MIN_CONNECTIONS_PER_UID 512
+#define ESDM_RPC_PROCESSES_PER_UID 16
+
+/*
+ * The per-UID bound alone does not protect the descriptors: a user can map the
+ * UIDs of its /etc/subuid range in a user namespace, connect as each of them,
+ * and keep the connections from being reaped as idle with a cheap request
+ * every second. The unprivileged connections are therefore also bounded in
+ * total, leaving ESDM_RPC_RESERVED_FDS of RLIMIT_NOFILE - but at most half of
+ * it - to the EGD interface (up to 2048 connections), the privileged interface
+ * and the server itself. The bound is split evenly over the worker threads,
+ * each holding at most ESDM_RPCS_MAX_WORKER_CONNECTIONS.
+ *
+ * A worker whose slots are all taken stops accepting while another worker has
+ * a free slot. Once all are taken, it does not turn a new connection away -
+ * whoever holds the slots would lock everybody else out - but closes one of
+ * its connections to make room: the least recently active one of the UID with
+ * the most connections in that worker. The clients reconnect transparently, so
+ * service goes on for everybody, at the price of churn under attack. Never
+ * closed are a connection with a request not read yet, and any connection of
+ * the privileged interface. One with an answer the client did not read yet is
+ * closed only when no idle one is left: the answer stays readable after the
+ * close, and sparing such connections altogether would let a client that
+ * always leaves its last answer unread hold its slots forever. The choice is
+ * made within the accepting worker, as each worker owns its connections:
+ * closing one of another worker would race with that worker serving it.
+ */
+#define ESDM_RPC_RESERVED_FDS (2048 + 512)
+#define ESDM_RPCS_MAX_WORKER_CONNECTIONS 1024
+
+static struct esdm_peer_limit esdm_rpcs_peer_limit = ESDM_PEER_LIMIT_INIT(
+	"RPC server", ESDM_RPC_MIN_CONNECTIONS_PER_UID);
+
+/*
+ * Size the per-UID bound of the RPC interface. To be called before the first
+ * RPC worker thread starts.
+ */
+static void esdm_rpcs_peer_limit_init(void)
+{
+	uint64_t max = max_uint64((uint64_t)esdm_online_nodes() *
+					  ESDM_RPC_PROCESSES_PER_UID,
+				  ESDM_RPC_MIN_CONNECTIONS_PER_UID);
+	struct rlimit rl;
+
+	/*
+	 * The cap comes last: it is what keeps a single UID from taking the
+	 * descriptors of everybody else, and the minimum must not lift it.
+	 */
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+		max = min_uint64(max, rl.rlim_cur / 2);
+
+	esdm_rpcs_peer_limit.max_per_uid = (unsigned int)min_uint64(max,
+								  UINT_MAX);
+
+	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
+		    "Admitting at most %u RPC connections per unprivileged UID\n",
+		    esdm_rpcs_peer_limit.max_per_uid);
+}
+
+/* Connection slots of each of @num_threads workers serving @proto */
+static size_t esdm_rpcs_worker_slots(const struct esdm_rpcs *proto,
+				     size_t num_threads)
+{
+	uint64_t total;
+	struct rlimit rl;
+
+	if (proto->privileged || getrlimit(RLIMIT_NOFILE, &rl) ||
+	    rl.rlim_cur == RLIM_INFINITY)
+		return ESDM_RPCS_MAX_WORKER_CONNECTIONS;
+
+	total = rl.rlim_cur -
+		min_uint64(rl.rlim_cur / 2, ESDM_RPC_RESERVED_FDS);
+
+	return (size_t)max_uint64(min_uint64(total / num_threads,
+					     ESDM_RPCS_MAX_WORKER_CONNECTIONS),
+				  1);
+}
+
+/*
+ * Set while the thread serving the unprivileged interface runs. A master that
+ * gives up during the initialization waits for it before it returns: the
+ * teardown that follows takes the thread pool down, and a thread still busy
+ * starting its workers then waits for a free slot forever.
+ */
+static atomic_bool esdm_rpc_unpriv_running = false;
+
+/* The error the thread serving the unprivileged interface gave up with. */
+static atomic_int esdm_rpc_unpriv_ret = 0;
 
 /* Remove a potentially left-over old Unix Domain socket. */
 void esdm_server_remove_stale_socket(const char *path, int socktype)
@@ -192,65 +310,70 @@ void esdm_server_remove_stale_socket(const char *path, int socktype)
 	unlink(path);
 }
 
-/* Write data into an RPC connection. */
+/*
+ * Write data into an RPC connection.
+ *
+ * A write that cannot be completed closes the connection: the client would
+ * otherwise wait for an answer that never comes. This includes a send buffer
+ * that stays full - which with one request in flight at a time, as the clients
+ * do it, only happens to a client that sends requests without reading the
+ * answers. Waiting for such a client on every request would stall all other
+ * connections served by the same worker thread.
+ */
 static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 				const uint8_t *data, size_t len)
 {
 	const int TIMEOUT_MS = 5;
 	unsigned int retries = 0;
 	ssize_t ret;
+	int errsv;
 
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
 
-	do {
-		retries++;
+	for (;;) {
 		ret = write(rpc_conn->child_fd, data, len);
+		if (ret >= 0)
+			break;
+
+		errsv = errno;
+
 		/* we use non-blocking sockets */
-		if (ret < 0 && errno == EAGAIN) {
+		if (errsv == EAGAIN && retries++ < ESDM_MAX_RX_TX_RETRIES) {
 			/* Wait a short moment for writeability, but not forever */
 			struct pollfd pfd = { .fd = rpc_conn->child_fd,
 					      .events = POLLOUT };
 			int poll_ret = poll(&pfd, 1, TIMEOUT_MS);
 
 			/* early check for writeable */
-			if (poll_ret > 0 && pfd.revents & POLLOUT) {
+			if (poll_ret > 0 && pfd.revents & POLLOUT)
 				continue;
-			}
 
 			/* signal? */
-			if (poll_ret < 0 && errno == EINTR) {
+			if (poll_ret < 0 && errno == EINTR)
 				continue;
+
+			if (poll_ret > 0) {
+				/* connection lost - POLLERR or POLLHUP */
+				errsv = EPIPE;
+			} else if (poll_ret == 0) {
+				/* the client does not read its answers */
+				errsv = ETIMEDOUT;
+			} else {
+				errsv = errno;
 			}
-
-			/* connection lost? */
-			if (poll_ret > 0 && pfd.revents & (POLLERR | POLLHUP)) {
-				ret = -EPIPE;
-				break;
-			}
-
-			/* timeout or error: fall through */
-			if (poll_ret <= 0) {
-				ret = (poll_ret == 0) ? -ETIMEDOUT : -errno;
-			}
-		};
-
-		if (ret < 0) {
-			int errsv = errno;
-
-			esdm_logger(
-				LOGGER_VERBOSE, LOGGER_C_RPC,
-				"Writing of data to file descriptor %d failed: %s\n",
-				rpc_conn->child_fd, strerror(errsv));
-
-			if (errsv == EPIPE) {
-				close(rpc_conn->child_fd);
-				rpc_conn->child_fd = -1;
-			}
-
-			return -errsv;
 		}
-	} while (ret < 0 && retries <= ESDM_MAX_RX_TX_RETRIES);
+
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Writing of data to file descriptor %d failed: %s\n",
+			rpc_conn->child_fd, strerror(errsv));
+
+		close(rpc_conn->child_fd);
+		rpc_conn->child_fd = -1;
+
+		return -errsv;
+	}
 
 	/*
 	 * SOCK_SEQPACKET guarantees atomic messages - a short write is a
@@ -267,6 +390,25 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 	esdm_logger(LOGGER_DEBUG2, LOGGER_C_ANY, "%zu bytes written\n", len);
 
 	return 0;
+}
+
+/*
+ * Answer the request with a header-only failure status. A response that cannot
+ * be sent leaves the client without any answer - it would wait for its receive
+ * timeout and then send the request again, only to run into the same failure.
+ */
+static int esdm_rpcs_send_failure(struct esdm_rpcs_connection *rpc_conn)
+{
+	struct esdm_rpc_proto_sc_header sc_header;
+
+	sc_header.status_code =
+		le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SERVICE_FAILED);
+	sc_header.method_index = le_bswap32(rpc_conn->method_index);
+	sc_header.message_length = 0;
+	sc_header.request_id = le_bswap32(rpc_conn->request_id);
+
+	return esdm_rpcs_write_data(rpc_conn, (uint8_t *)&sc_header,
+				    sizeof(sc_header));
 }
 
 /*
@@ -312,7 +454,7 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 			esdm_logger(
 				LOGGER_ERR, LOGGER_C_RPC,
 				"Message too large for connection buffer\n");
-			return ret;
+			goto out_failure;
 		}
 	} else {
 		struct esdm_rpc_write_data_buf tmp = {
@@ -328,7 +470,8 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 				    "Unexpected message length: %zu > %zu\n",
 				    message_length,
 				    ESDM_RPC_MAX_INTERNAL_MSG_SIZE);
-			return -EFAULT;
+			ret = -EFAULT;
+			goto out_failure;
 		}
 
 		if (message_length > payload_max) {
@@ -337,7 +480,8 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 				"Message too large for connection buffer: %zu > %zu\n",
 				message_length + ESDM_RPCS_BUF_WRITE_HEADER_SZ,
 				sizeof(esdm_rpcs_reqbuf));
-			return -EOVERFLOW;
+			ret = -EOVERFLOW;
+			goto out_failure;
 		}
 
 		tmp.dst_buf = payload_buf;
@@ -346,8 +490,9 @@ static int esdm_rpcs_pack_internal(const ProtobufCMessage *message,
 		    message_length) {
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
 				    "Short write of data to file descriptor\n");
+			memset_secure(payload_buf, 0, tmp.dst_written);
 			ret = -EFAULT;
-			goto out;
+			goto out_failure;
 		}
 	}
 
@@ -386,23 +531,19 @@ out:
 		      ESDM_RPCS_BUF_WRITE_HEADER_SZ + message_length);
 
 	return ret;
+
+out_failure:
+	/* Nothing was written yet - tell the client the call failed */
+	esdm_rpcs_send_failure(rpc_conn);
+	return ret;
 }
 
 /* Pack the message into a ProtobufC structure and write it to the receiver. */
 static int esdm_rpcs_pack(const ProtobufCMessage *message,
 			  struct esdm_rpcs_connection *rpc_conn)
 {
-	struct esdm_rpc_proto_sc_header sc_header;
-
-	if (!protobuf_c_message_check(message)) {
-		sc_header.status_code =
-			le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SERVICE_FAILED);
-		sc_header.method_index = le_bswap32(rpc_conn->method_index);
-		sc_header.message_length = 0;
-		sc_header.request_id = le_bswap32(rpc_conn->request_id);
-		return esdm_rpcs_write_data(rpc_conn, (uint8_t *)&sc_header,
-					    sizeof(sc_header));
-	}
+	if (!protobuf_c_message_check(message))
+		return esdm_rpcs_send_failure(rpc_conn);
 
 	return esdm_rpcs_pack_internal(message, rpc_conn);
 }
@@ -569,6 +710,7 @@ out:
 static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 {
 	ssize_t received;
+	int ret;
 
 	if (rpc_conn->child_fd < 0)
 		return -EINVAL;
@@ -582,11 +724,19 @@ static int esdm_rpcs_read(struct esdm_rpcs_connection *rpc_conn)
 	if (received < 0)
 		return -errno;
 
-	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
-
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY, "Read %zd bytes\n", received);
 
-	return esdm_rpcs_process(rpc_conn, received);
+	ret = esdm_rpcs_process(rpc_conn, received);
+
+	/*
+	 * Idle from the answer on, not from the request: a call that takes
+	 * longer than the idle timeout - a privileged one such as the self
+	 * test - would otherwise have its connection reaped right after its
+	 * answer, failing the next request the client sends on it.
+	 */
+	clock_gettime(CLOCK_MONOTONIC, &rpc_conn->last_used);
+
+	return ret;
 }
 
 #ifdef ESDM_FUZZING
@@ -596,6 +746,7 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 {
 	struct esdm_rpcs proto;
 	struct esdm_rpcs_connection rpc_conn;
+	int ret;
 
 	if (!service || (len && !data))
 		return -EINVAL;
@@ -611,11 +762,24 @@ int esdm_rpcs_fuzz_request(ProtobufCService *service, bool privileged,
 
 	memset(&rpc_conn, 0, sizeof(rpc_conn));
 	rpc_conn.proto = &proto;
-	rpc_conn.child_fd = out_fd;
+
+	/*
+	 * A failed write closes the connection's descriptor. Hand over a
+	 * duplicate, so that the caller's one stays usable for the next
+	 * request whatever becomes of this one.
+	 */
+	rpc_conn.child_fd = fcntl(out_fd, F_DUPFD_CLOEXEC, 0);
+	if (rpc_conn.child_fd < 0)
+		return -errno;
 
 	memcpy(esdm_rpcs_reqbuf, data, len);
 
-	return esdm_rpcs_process(&rpc_conn, (ssize_t)len);
+	ret = esdm_rpcs_process(&rpc_conn, (ssize_t)len);
+
+	if (rpc_conn.child_fd >= 0)
+		close(rpc_conn.child_fd);
+
+	return ret;
 }
 #endif /* ESDM_FUZZING */
 
@@ -628,6 +792,8 @@ static void esdm_rpcs_release_conn(struct esdm_rpcs_connection *rpc_conn)
 		close(rpc_conn->child_fd);
 		rpc_conn->child_fd = -1;
 	}
+	if (rpc_conn->peer_counted)
+		esdm_peer_limit_put(&esdm_rpcs_peer_limit, rpc_conn->peer_uid);
 	/*
 	 * No per-connection request buffer to wipe here anymore - the shared
 	 * per-worker esdm_rpcs_reqbuf is zeroized after every request in
@@ -649,6 +815,155 @@ static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 	return false;
 }
 
+/* Where the client of a connection is in a call, see esdm_rpcs_conn_state() */
+enum esdm_rpcs_conn_state {
+	esdm_rpcs_conn_idle,
+	/* An answer the client did not read yet - it can after a close */
+	esdm_rpcs_conn_answered,
+	/* A request not read yet - a close would lose it */
+	esdm_rpcs_conn_requested,
+};
+
+static enum esdm_rpcs_conn_state
+esdm_rpcs_conn_state(const struct esdm_rpcs_connection *rpc_conn)
+{
+	int inq = 0, outq = 0;
+
+	/* In doubt, the client is further into the call */
+	if (ioctl(rpc_conn->child_fd, SIOCINQ, &inq) || inq > 0)
+		return esdm_rpcs_conn_requested;
+	if (ioctl(rpc_conn->child_fd, SIOCOUTQ, &outq) || outq > 0)
+		return esdm_rpcs_conn_answered;
+
+	return esdm_rpcs_conn_idle;
+}
+
+static int esdm_rpcs_uid_cmp(const void *a, const void *b)
+{
+	uid_t x = *(const uid_t *)a, y = *(const uid_t *)b;
+
+	return (x > y) - (x < y);
+}
+
+/*
+ * The connection of a full worker to close for a new one, see
+ * ESDM_RPC_RESERVED_FDS. @list is in the order of the last activity, the least
+ * recent first. NULL if every connection has a request not read yet.
+ */
+static struct esdm_rpcs_connection *
+esdm_rpcs_evict_candidate(struct esdm_rpcs_connection_list *list)
+{
+	uid_t uids[ESDM_RPCS_MAX_WORKER_CONNECTIONS];
+	/* The first one found, per state and whether of the preferred UID */
+	struct esdm_rpcs_connection *rpc_conn,
+		*cand[esdm_rpcs_conn_requested][2] = { { NULL } };
+	size_t i, n = 0, run = 0, best_run = 0;
+	uid_t best = 0;
+
+	TAILQ_FOREACH(rpc_conn, list, tailq)
+	{
+		if (n == ARRAY_SIZE(uids))
+			break;
+		uids[n++] = rpc_conn->peer_uid;
+	}
+
+	/* The UID with the most connections */
+	qsort(uids, n, sizeof(uids[0]), esdm_rpcs_uid_cmp);
+	for (i = 0; i < n; i++) {
+		run = (i && uids[i] == uids[i - 1]) ? run + 1 : 1;
+		if (run > best_run) {
+			best_run = run;
+			best = uids[i];
+		}
+	}
+
+	/*
+	 * The least recent idle one of that UID, else of any UID - which is
+	 * also the choice when no UID holds more than one. Only without an idle
+	 * one, one with an unread answer, chosen the same way.
+	 */
+	TAILQ_FOREACH(rpc_conn, list, tailq)
+	{
+		bool preferred = (best_run > 1 && rpc_conn->peer_uid == best);
+		enum esdm_rpcs_conn_state state;
+
+		if (!preferred && cand[esdm_rpcs_conn_idle][0])
+			continue;
+
+		state = esdm_rpcs_conn_state(rpc_conn);
+		if (state == esdm_rpcs_conn_requested)
+			continue;
+		if (state == esdm_rpcs_conn_idle && preferred)
+			return rpc_conn;
+		if (!cand[state][preferred])
+			cand[state][preferred] = rpc_conn;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(cand); i++) {
+		if (cand[i][1])
+			return cand[i][1];
+		if (cand[i][0])
+			return cand[i][0];
+	}
+
+	return NULL;
+}
+
+/* An event of a connection closed before the event was handled */
+#define ESDM_RPCS_EVENT_STALE 3
+
+/*
+ * Close a connection of the full worker owning @list for a new one. The
+ * events still to be handled in this round, @num of @pending, are voided for
+ * it. Returns false if every connection has a request not read yet.
+ */
+static bool esdm_rpcs_make_room(int epfd,
+				struct esdm_rpcs_connection_list *list,
+				struct epoll_event *pending, int num)
+{
+	struct esdm_rpcs_connection *victim = esdm_rpcs_evict_candidate(list);
+	int i;
+
+	if (!victim)
+		return false;
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
+		    "Closing client FD %d of UID %u to make room\n",
+		    victim->child_fd, (unsigned int)victim->peer_uid);
+
+	for (i = 0; i < num; i++) {
+		if (pending[i].data.ptr == victim)
+			pending[i].data.u64 = ESDM_RPCS_EVENT_STALE;
+	}
+
+	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->child_fd, NULL);
+	TAILQ_REMOVE(list, victim, tailq);
+	esdm_rpcs_release_conn(victim);
+
+	return true;
+}
+
+/* Are the slots of all workers serving @proto taken? */
+static bool esdm_rpcs_full(struct esdm_rpcs *proto)
+{
+	return atomic_load(&proto->num_connections) >=
+	       atomic_load(&proto->max_connections);
+}
+
+/* Account a connection @thread takes up, in @num of its own */
+static void esdm_rpcs_conn_get(struct esdm_rpc_thread *thread, size_t *num)
+{
+	++*num;
+	atomic_fetch_add(&thread->proto->num_connections, 1);
+}
+
+/* Account a connection @thread gives up */
+static void esdm_rpcs_conn_put(struct esdm_rpc_thread *thread, size_t *num)
+{
+	--*num;
+	atomic_fetch_sub(&thread->proto->num_connections, 1);
+}
+
 /* Thread main for receiving new connections and processing them. */
 static int esdm_rpcs_handler(void *args)
 {
@@ -658,8 +973,12 @@ static int esdm_rpcs_handler(void *args)
 	struct esdm_rpcs_connection *tmp2;
 #define ESDM_RPCS_MAX_EVENTS 512
 	struct epoll_event events[ESDM_RPCS_MAX_EVENTS];
-	const size_t max_connections = 1024;
-	size_t num_connections = 0;
+	size_t max_connections = 0, num_connections = 0;
+	/*
+	 * Close a connection for a new one once all workers are full, see
+	 * ESDM_RPC_RESERVED_FDS
+	 */
+	bool evict = false;
 	/*
 	 * The listening socket is level-triggered: while it is armed and a
 	 * connection is pending, epoll_wait keeps reporting it readable. Once the
@@ -667,27 +986,38 @@ static int esdm_rpcs_handler(void *args)
 	 * accepting, so leaving it armed would spin the worker at 100% CPU. Track
 	 * the arm state and disarm/re-arm the listening FD as the cap is
 	 * crossed, which also gives real backpressure (pending clients stay
-	 * queued in the listen backlog instead of being dropped).
+	 * queued in the listen backlog instead of being dropped) and leaves the
+	 * connection to a worker with a free slot. Once all are full, a worker
+	 * that makes room by closing a connection keeps accepting instead.
 	 */
 	bool listen_armed = true;
+	/* accept() ran out of resources - see the accept path below */
+	bool accept_paused = false;
 	int epfd = -1;
 	int tfd = -1;
 	int ret = 0;
+
+	/* Initialized first - the cleanup at out: walks the list. */
+	TAILQ_INIT(&rpc_conn_list);
 
 	if (thread == NULL) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	TAILQ_INIT(&rpc_conn_list);
-
 	thread_set_name(thread->proto->privileged ? rpc_handler_priv :
 						    rpc_handler_unpriv,
 			thread->id);
 
+	max_connections = thread->max_connections;
+	evict = !thread->proto->privileged;
+
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to create epoll instance: %s\n",
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -697,10 +1027,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.ptr = NULL,
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add server FD %d to epoll\n",
-			    thread->proto->server_listening_fd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add server FD %d to epoll: %s\n",
+			    thread->proto->server_listening_fd, strerror(-ret));
 		goto out;
 	}
 
@@ -717,10 +1047,10 @@ static int esdm_rpcs_handler(void *args)
 		},
 	};
 	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to arm cleanup timer: %s\n",
-			    strerror(errno));
-		ret = -errno;
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -730,9 +1060,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 1 /* no ptr will have this value */
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add timer FD %d to epoll\n", tfd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add timer FD %d to epoll: %s\n", tfd,
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -742,10 +1073,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 2 /* no ptr will have this value */
 		      }) < 0) {
-		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-			    "Unable to add event FD %d to epoll\n",
-			    thread->eventfd);
 		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to add event FD %d to epoll: %s\n",
+			    thread->eventfd, strerror(-ret));
 		goto out;
 	}
 
@@ -758,7 +1089,10 @@ static int esdm_rpcs_handler(void *args)
 		 * pending connection cannot busy-spin epoll_wait; re-arm once a
 		 * slot frees up so new connections are served again.
 		 */
-		bool want_armed = (num_connections < max_connections);
+		bool want_armed =
+			(num_connections < max_connections ||
+			 (evict && esdm_rpcs_full(thread->proto))) &&
+			!accept_paused;
 		if (want_armed != listen_armed) {
 			struct epoll_event lev = {
 				.events = want_armed ? EPOLLIN : 0,
@@ -779,9 +1113,9 @@ static int esdm_rpcs_handler(void *args)
 		}
 
 		if (nfds < 0) {
-			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-				    "epoll_wait failed\n");
 			ret = -errno;
+			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+				    "epoll_wait failed: %s\n", strerror(-ret));
 			goto out;
 		}
 
@@ -792,12 +1126,16 @@ static int esdm_rpcs_handler(void *args)
 			bool has_error = false;
 			struct esdm_rpcs_connection *rpc_conn = NULL;
 
+			if (events[i].data.u64 == ESDM_RPCS_EVENT_STALE)
+				continue;
+
 			/* timer fired */
 			if (events[i].data.u64 == 1) {
 				uint64_t expirations;
 				ssize_t v = read(tfd, &expirations,
 						 sizeof(expirations));
 				do_cleanup = true;
+				accept_paused = false;
 				(void)v;
 				continue;
 			}
@@ -817,12 +1155,32 @@ static int esdm_rpcs_handler(void *args)
 
 			/* new connection? */
 			if (events[i].events & EPOLLIN && rpc_conn == NULL &&
-			    num_connections < max_connections) {
+			    (num_connections < max_connections ||
+			     (evict && esdm_rpcs_full(thread->proto)))) {
 				accepted_fd = accept4(
 					thread->proto->server_listening_fd,
 					NULL, NULL,
 					SOCK_NONBLOCK | SOCK_CLOEXEC);
 				if (accepted_fd < 0) {
+					/*
+					 * Out of file descriptors or memory: the
+					 * connection stays queued and the level
+					 * triggered listener would wake us again
+					 * right away. Stop listening until a
+					 * connection closes or the idle timer
+					 * fires instead of spinning.
+					 */
+					if (errno == EMFILE || errno == ENFILE ||
+					    errno == ENOBUFS ||
+					    errno == ENOMEM) {
+						if (!accept_paused)
+							esdm_logger(
+								LOGGER_WARN,
+								LOGGER_C_RPC,
+								"Cannot accept connections: %s\n",
+								strerror(errno));
+						accept_paused = true;
+					}
 					continue;
 				}
 				rpc_conn = calloc(
@@ -840,6 +1198,59 @@ static int esdm_rpcs_handler(void *args)
 				}
 				rpc_conn->child_fd = accepted_fd;
 				rpc_conn->proto = thread->proto;
+
+				/*
+				 * Refuse a peer at its connection limit right
+				 * away rather than leave it queued, which would
+				 * block the backlog for everybody else.
+				 */
+				{
+					struct ucred cred;
+					socklen_t cred_len = sizeof(cred);
+
+					if (getsockopt(accepted_fd, SOL_SOCKET,
+						       SO_PEERCRED, &cred,
+						       &cred_len) < 0 ||
+					    !esdm_peer_limit_get(
+						    &esdm_rpcs_peer_limit,
+						    cred.uid)) {
+						esdm_logger(
+							LOGGER_DEBUG,
+							LOGGER_C_RPC,
+							"Refusing client FD %d\n",
+							accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
+						continue;
+					}
+					rpc_conn->peer_uid = cred.uid;
+					rpc_conn->peer_counted = true;
+				}
+
+				if (num_connections >= max_connections) {
+					if (!esdm_rpcs_make_room(
+						    epfd, &rpc_conn_list,
+						    events + i + 1,
+						    nfds - i - 1)) {
+						esdm_logger(
+							LOGGER_DEBUG,
+							LOGGER_C_RPC,
+							"Refusing client FD %d, every connection has a request pending\n",
+							accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
+						continue;
+					}
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
+				}
+				/*
+				 * Idle since now, not since the epoch - or the
+				 * idle reaper could close the connection before
+				 * its first request is read.
+				 */
+				clock_gettime(CLOCK_MONOTONIC,
+					      &rpc_conn->last_used);
 				struct epoll_event ev = {
 					.events = EPOLLIN | EPOLLRDHUP,
 					.data.ptr = rpc_conn
@@ -856,26 +1267,28 @@ static int esdm_rpcs_handler(void *args)
 							"Unable to add client FD %d to epoll: %s\n",
 							accepted_fd,
 							strerror(errno));
-						free(rpc_conn);
-						close(accepted_fd);
+						esdm_rpcs_release_conn(
+							rpc_conn);
 						continue;
 					default:
+						/*
+						 * Capture errno before the logger
+						 * and the cleanup clobber it. This
+						 * conn was never inserted into
+						 * rpc_conn_list, so the out: cleanup
+						 * loop cannot reach it - free/close
+						 * here to avoid leaking the conn and
+						 * its fd.
+						 */
+						ret = -errno;
 						esdm_logger(
 							LOGGER_ERR,
 							LOGGER_C_RPC,
-							"Unable to add client FD %d to epoll, exiting worker\n",
-							accepted_fd);
-						/*
-						 * Capture errno before the cleanup
-						 * calls clobber it. This conn was
-						 * never inserted into rpc_conn_list,
-						 * so the out: cleanup loop cannot
-						 * reach it - free/close here to
-						 * avoid leaking the conn and its fd.
-						 */
-						ret = -errno;
-						free(rpc_conn);
-						close(accepted_fd);
+							"Unable to add client FD %d to epoll, exiting worker: %s\n",
+							accepted_fd,
+							strerror(-ret));
+						esdm_rpcs_release_conn(
+							rpc_conn);
 						goto out;
 					}
 				}
@@ -885,7 +1298,8 @@ static int esdm_rpcs_handler(void *args)
 					LOGGER_DEBUG, LOGGER_C_RPC,
 					"Processing new incoming connection for FD %d\n",
 					rpc_conn->child_fd);
-				++num_connections;
+				esdm_rpcs_conn_get(thread,
+						   &num_connections);
 				esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 					    "num connections: %lu\n",
 					    num_connections);
@@ -907,14 +1321,16 @@ static int esdm_rpcs_handler(void *args)
 						     tailq);
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
 					continue;
 				}
 
-				ret = esdm_rpcs_read(rpc_conn);
+				int read_ret = esdm_rpcs_read(rpc_conn);
 				/*
 				 * Decide on the returned code, not the global
 				 * errno: intermediate logger/handler calls may
@@ -924,7 +1340,13 @@ static int esdm_rpcs_handler(void *args)
 				 * closed on the EPIPE path) linger in the list
 				 * until the idle timeout reaps it.
 				 */
-				if (ret && ret != -EAGAIN) {
+				if (!read_ret) {
+					/* Keep the list in the order of use */
+					TAILQ_REMOVE(&rpc_conn_list, rpc_conn,
+						     tailq);
+					TAILQ_INSERT_TAIL(&rpc_conn_list,
+							  rpc_conn, tailq);
+				} else if (read_ret != -EAGAIN) {
 					esdm_logger(
 						LOGGER_DEBUG, LOGGER_C_RPC,
 						"Closing incoming connection for FD %d\n",
@@ -935,7 +1357,9 @@ static int esdm_rpcs_handler(void *args)
 						     tailq);
 					esdm_rpcs_release_conn(rpc_conn);
 					rpc_conn = NULL;
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
@@ -946,8 +1370,21 @@ static int esdm_rpcs_handler(void *args)
 		if (do_cleanup) {
 			struct timespec timeout_threshold;
 			clock_gettime(CLOCK_MONOTONIC, &timeout_threshold);
+			/*
+			 * Subtract the whole timeout, including the part below
+			 * one second - dropping it would keep a connection for
+			 * up to a second longer than configured, or reap it
+			 * not at all with a timeout below one second.
+			 */
 			timeout_threshold.tv_sec -=
 				ESDM_RPC_IDLE_TIMEOUT_USEC / 1000000;
+			timeout_threshold.tv_nsec -=
+				(long)(ESDM_RPC_IDLE_TIMEOUT_USEC % 1000000) *
+				1000;
+			if (timeout_threshold.tv_nsec < 0) {
+				timeout_threshold.tv_nsec += 1000000000L;
+				timeout_threshold.tv_sec--;
+			}
 
 			TAILQ_FOREACH_SAFE(tmp1, &rpc_conn_list, tailq, tmp2)
 			{
@@ -962,7 +1399,9 @@ static int esdm_rpcs_handler(void *args)
 					epoll_ctl(epfd, EPOLL_CTL_DEL,
 						  tmp1->child_fd, NULL);
 					esdm_rpcs_release_conn(tmp1);
-					--num_connections;
+					esdm_rpcs_conn_put(thread,
+							   &num_connections);
+					accept_paused = false;
 					esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 						    "num connections: %lu\n",
 						    num_connections);
@@ -982,6 +1421,7 @@ out:
 			    tmp1->child_fd);
 		epoll_ctl(epfd, EPOLL_CTL_DEL, tmp1->child_fd, NULL);
 		esdm_rpcs_release_conn(tmp1);
+		esdm_rpcs_conn_put(thread, &num_connections);
 	}
 
 	if (tfd >= 0) {
@@ -991,14 +1431,29 @@ out:
 		close(epfd);
 	}
 
-	return 0;
+	/*
+	 * A worker that gives up leaves its share of the clients unserved, and
+	 * the last one to go leaves the interface dead while the server looks
+	 * alive. Take the server down with an error instead, so that a service
+	 * manager notices and restarts it - the error reaches the exit status
+	 * through thread_wait() in esdm_rpcs_workerloop().
+	 */
+	if (ret) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_RPC,
+			"RPC worker thread failed, terminating server: %s\n",
+			strerror(-ret));
+		esdm_rpc_server_signal_exit();
+	}
+
+	return ret;
 }
 
 /* The ESDM RPC server main worker loop. */
 static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 {
 	struct esdm_rpc_thread *threads = NULL;
-	size_t num_threads = 0;
+	size_t num_threads = 0, max_connections;
 	int ret = 0;
 	uint32_t t;
 
@@ -1022,9 +1477,14 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		goto out;
 	}
 
+	max_connections = esdm_rpcs_worker_slots(proto, num_threads);
+	atomic_store(&proto->num_connections, 0);
+	atomic_store(&proto->max_connections, max_connections * num_threads);
+
 	esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-		    "Using %zu %sprivileged RPC worker threads\n", num_threads,
-		    proto->privileged ? "" : "un");
+		    "Using %zu %sprivileged RPC worker threads, %zu connections each\n",
+		    num_threads, proto->privileged ? "" : "un",
+		    max_connections);
 
 	for (t = 0; t < num_threads; ++t) {
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
@@ -1032,12 +1492,38 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 			    proto->privileged ? "" : "un", t);
 		threads[t].proto = proto;
 		threads[t].id = t;
+		threads[t].max_connections = max_connections;
 		threads[t].eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 		if (threads[t].eventfd < 0) {
 			ret = -errno;
-			goto out;
+		} else {
+			ret = thread_start(esdm_rpcs_handler, &threads[t], 0,
+					   NULL);
+			if (ret) {
+				close(threads[t].eventfd);
+				threads[t].eventfd = -1;
+			}
 		}
-		thread_start(esdm_rpcs_handler, &threads[t], 0, NULL);
+
+		/*
+		 * The workers started so far already use their slots of
+		 * threads[] and all serve the same listening socket. Carry on
+		 * with them, and give up only if there is none at all.
+		 */
+		if (ret) {
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_RPC,
+				"Starting %sprivileged RPC worker thread %u failed: %s\n",
+				proto->privileged ? "" : "un", t,
+				strerror(-ret));
+			if (!t)
+				goto out;
+			num_threads = t;
+			atomic_store(&proto->max_connections,
+				     max_connections * num_threads);
+			break;
+		}
+
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
 			    "Started %sprivileged RPC worker thread %u\n",
 			    proto->privileged ? "" : "un", t);
@@ -1324,6 +1810,11 @@ static int esdm_rpcs_unpriv_init(void *args)
 			  (atomic_load(&esdm_rpc_init_state) ==
 			   esdm_rpcs_state_perm_dropped) ||
 				  (atomic_load(&server_exit) != 0));
+
+	/* The privilege drop failed, or the server goes down meanwhile. */
+	if (atomic_load(&server_exit) != 0)
+		goto out;
+
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
 		    "Unprivileged server thread for %s available\n",
 		    ESDM_RPC_UNPRIV_SOCKET);
@@ -1331,10 +1822,22 @@ static int esdm_rpcs_unpriv_init(void *args)
 	/* Server handing unprivileged interface in current thread */
 	CKINT(esdm_rpcs_workerloop(&unpriv_proto));
 
-	return 0;
-
 out:
 	eesdm_rpcs_stop(&unpriv_proto);
+
+	/*
+	 * Without this interface the server is of no use to most of its
+	 * clients. Hand the error to the master and take the server down - the
+	 * master may well still be waiting for the notification above, which
+	 * is not going to come.
+	 */
+	if (ret) {
+		atomic_store(&esdm_rpc_unpriv_ret, ret);
+		esdm_rpc_server_signal_exit();
+	}
+
+	atomic_store(&esdm_rpc_unpriv_running, false);
+	thread_wake_all(&esdm_rpc_thread_init_wait);
 
 	return ret;
 }
@@ -1423,9 +1926,15 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	CKINT(esdm_egd_server_socket_init());
 
 	/* Spawn the thread handling the unprivileged interface */
-	CKINT_LOG(thread_start(esdm_rpcs_unpriv_init, NULL,
-			       ESDM_THREAD_RPC_UNPRIV_GROUP, NULL),
-		  "Starting server thread failed\n");
+	atomic_store(&esdm_rpc_unpriv_running, true);
+	ret = thread_start(esdm_rpcs_unpriv_init, NULL,
+			   ESDM_THREAD_RPC_UNPRIV_GROUP, NULL);
+	if (ret) {
+		atomic_store(&esdm_rpc_unpriv_running, false);
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Starting server thread failed\n");
+		goto out;
+	}
 
 	if (atomic_load(&server_exit) != 0) {
 		goto out;
@@ -1436,6 +1945,10 @@ static int esdm_rpcs_interfaces_init(const char *username,
 			  (atomic_load(&esdm_rpc_init_state) ==
 			   esdm_rpcs_state_unpriv_init) ||
 				  (atomic_load(&server_exit) != 0));
+
+	/* The unprivileged thread failed, or the server goes down meanwhile. */
+	if (atomic_load(&server_exit) != 0)
+		goto out;
 
 	/* Permanently drop all privileges */
 	CKINT(drop_privileges_permanent(username ? username : "nobody",
@@ -1459,12 +1972,25 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	systemd_notify_status("Running");
 
 	/* Server handing privileged interface in current thread */
-	CKINT(esdm_rpcs_workerloop(&priv_proto));
-
-	return 0;
+	ret = esdm_rpcs_workerloop(&priv_proto);
 
 out:
 	eesdm_rpcs_stop(&priv_proto);
+
+	/*
+	 * Take the threads started so far down with us - the unprivileged one
+	 * may still wait for the privilege drop that is not going to happen -
+	 * and let it finish before the caller tears everything down.
+	 */
+	if (ret)
+		esdm_rpc_server_signal_exit();
+	thread_wait_event(&esdm_rpc_thread_init_wait,
+			  !atomic_load(&esdm_rpc_unpriv_running));
+
+	/* A failure of the unprivileged interface is a failure of the server. */
+	if (!ret)
+		ret = atomic_load(&esdm_rpc_unpriv_ret);
+
 	return ret;
 }
 
@@ -1493,8 +2019,26 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 
 	pthread_setname_np(pthread_self(), "ESDM master");
 
+	/*
+	 * Leave the mount, cgroup and network namespaces before the first
+	 * thread is created. unshare() only moves the calling thread, and a
+	 * thread inherits the namespaces of the thread creating it. Doing this
+	 * later - e.g. as part of the privilege drop - leaves every thread
+	 * created up to then, including the one spawning the unprivileged RPC
+	 * workers, in the namespaces of the host.
+	 *
+	 * Nothing set up below needs the namespaces left here: the RPC and EGD
+	 * sockets are bound to file system paths, which the copied mount table
+	 * resolves to the same inodes as the host does, and a path bound
+	 * AF_UNIX socket is reachable across network namespaces. Sockets passed
+	 * in by systemd are file descriptors already and unaffected.
+	 */
+	CKINT(linux_isolate_namespace());
+
 	/* Main ESDM Init DRNG state, ES', ... */
 	CKINT(esdm_init());
+
+	esdm_rpcs_peer_limit_init();
 
 	/* Initialize test pertubation support */
 	CKINT(esdm_test_shm_status_init());
@@ -1530,8 +2074,12 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 
 	esdm_logger(LOGGER_WARN, LOGGER_C_RPC, "RPC server started\n");
 
-	/* start the RPC server threads */
-	esdm_rpcs_interfaces_init(username, groupname);
+	/*
+	 * Start the RPC server threads. A failure must reach the exit status:
+	 * a daemon that cannot serve its interfaces and still exits with 0 is
+	 * not restarted by a service manager watching for failures.
+	 */
+	ret = esdm_rpcs_interfaces_init(username, groupname);
 
 out:
 	return ret;
@@ -1617,10 +2165,11 @@ void esdm_rpc_server_cleanup(void)
 	}
 
 	/*
-	 * The EGD socket is always created by the server itself - there is no
-	 * socket activation for it - so it is not subject to the systemd check
-	 * above. The --keep_ipc request is still honored: it is evaluated for
-	 * all IPC objects at the top of this function.
+	 * The EGD sockets may be socket activated as well, but whether one
+	 * belongs to systemd is decided per listener - esdm_egd_server_cleanup()
+	 * applies the systemd check itself rather than the one above. The
+	 * --keep_ipc request is honored for them too: it is evaluated for all
+	 * IPC objects at the top of this function.
 	 */
 	esdm_egd_server_cleanup();
 
