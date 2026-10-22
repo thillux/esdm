@@ -27,8 +27,9 @@
  * CPU other than the first) - and from the prediction resistance DRNG, a few
  * times each, and every answer of the child must differ from the parent's
  * answer to the same request. The child must not depend on the threads of the
- * parent either, the reseed worker among them, which a fork() does not copy:
- * its requests are to be answered within the watchdog's time.
+ * parent either, the ES monitor among them, which a fork() does not copy: it
+ * must not take the monitor for running, and its requests are to be answered
+ * within the watchdog's time.
  */
 
 #define _GNU_SOURCE
@@ -51,6 +52,7 @@
 #include "esdm_node.h"
 #include "ret_checkers.h"
 #include "threading_support.h"
+#include "test_monitor.h"
 #include "wait_seeded.h"
 
 /*
@@ -80,6 +82,7 @@ struct test_answers {
 	uint8_t pr[TEST_ROUNDS][TEST_LEN];
 	ssize_t regular_rc[TEST_ROUNDS];
 	ssize_t pr_rc[TEST_ROUNDS];
+	bool monitor_active;
 };
 
 static void test_ask(struct test_answers *a)
@@ -87,6 +90,7 @@ static void test_ask(struct test_answers *a)
 	unsigned int i;
 
 	memset(a, 0, sizeof(*a));
+	a->monitor_active = esdm_es_mgr_monitor_active();
 	for (i = 0; i < TEST_ROUNDS; i++) {
 		a->regular_rc[i] =
 			esdm_get_random_bytes_full(a->regular[i], TEST_LEN);
@@ -127,9 +131,9 @@ static int esdm_fork_test(void)
 
 	CKINT(esdm_init());
 
-	/* A reseed worker in the parent, which the child has to do without */
-	if (thread_init(1) || !esdm_drng_mgr_reseed_worker_start()) {
-		printf("The reseed worker is not on duty\n");
+	/* An ES monitor in the parent, which the child has to do without */
+	if (test_monitor_start()) {
+		printf("The ES monitor did not start\n");
 		goto err;
 	}
 
@@ -207,6 +211,12 @@ static int esdm_fork_test(void)
 		goto err;
 	}
 
+	/* Else the child leaves its DRNGs to a monitor it does not have */
+	if (child.monitor_active) {
+		printf("FAIL: the child takes the parent's ES monitor for its own\n");
+		ret = 1;
+	}
+
 	for (i = 0; i < TEST_ROUNDS; i++) {
 		ret |= test_compare("regular", parent.regular[i],
 				    parent.regular_rc[i], child.regular[i],
@@ -224,7 +234,6 @@ out:
 		close(pipefd[0]);
 	if (pipefd[1] >= 0)
 		close(pipefd[1]);
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_fini();
 	return ret;
 err:

@@ -75,15 +75,9 @@ extern "C" {
  * there - and none at all on a machine whose RPC workers fill it already.
  */
 #define ESDM_THREAD_EGD_SLOTS 4
-/*
- * The asynchronous reseed of the per-node DRNGs. One slot is all this needs:
- * every reseed serializes on the entropy pool lock anyway, so a second worker
- * would only wait for the first.
- */
-#define ESDM_THREAD_DRNG_RESEED ((uint32_t)-5)
 /* The periodic self tests of the hash and the DRNG implementation. */
-#define ESDM_THREAD_PERIODIC_SELFTEST ((uint32_t)-6)
-#define ESDM_THREAD_MAX_SPECIAL_GROUPS 6
+#define ESDM_THREAD_PERIODIC_SELFTEST ((uint32_t)-5)
+#define ESDM_THREAD_MAX_SPECIAL_GROUPS 5
 /* Slots of all special groups together */
 #define ESDM_THREAD_SPECIAL_SLOTS                                              \
 	(ESDM_THREAD_MAX_SPECIAL_GROUPS - 1 + ESDM_THREAD_EGD_SLOTS)
@@ -97,7 +91,6 @@ enum esdm_request_type {
 	rpc_handler_priv,
 	cuse_poll,
 	egd_server,
-	drng_reseed,
 	periodic_selftest,
 };
 

@@ -726,9 +726,6 @@ int thread_set_name(enum esdm_request_type type, uint32_t id)
 	case egd_server:
 		snprintf(name, sizeof(name), "ESDM egd_srv%03u", id);
 		break;
-	case drng_reseed:
-		snprintf(name, sizeof(name), "ESDM drng_rsd");
-		break;
 	case periodic_selftest:
 		snprintf(name, sizeof(name), "ESDM selftest");
 		break;

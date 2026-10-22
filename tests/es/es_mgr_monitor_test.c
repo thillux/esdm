@@ -37,9 +37,9 @@
  *
  * NOT covered: that no pass is *in flight* while a pause is held - observing
  * that needs instrumentation of the per-ES callbacks, while the mutual
- * exclusion checked here is externally visible. If no active source provides a
- * monitor_es callback the monitor returns right away; the test detects that and
- * keeps checking whatever still applies.
+ * exclusion checked here is externally visible. The monitor runs its rounds
+ * whether or not an active source provides a monitor_es callback: it also
+ * brings up the DRNGs that are not fully seeded.
  */
 
 #include <errno.h>
@@ -398,10 +398,11 @@ int main(int argc, char *argv[])
 
 	ret = es_mgr_monitor_startup();
 
-	if (atomic_load(&monitor_returned)) {
-		printf("ES monitor - info: no active entropy source provides a monitor callback, the monitor loop is not exercised\n");
+	if (atomic_load(&monitor_returned) || !esdm_es_mgr_monitor_active()) {
+		printf("ES monitor - fail: the monitor loop is not running\n");
+		ret += 1;
 	} else {
-		printf("ES monitor - info: monitor loop is running\n");
+		printf("ES monitor - pass: monitor loop is running\n");
 	}
 
 	es_mgr_enter("wakeup");

@@ -689,19 +689,51 @@ static void test_try_get_skips_busy_slot(void)
 
 	/*
 	 * The consumer does not wait for it and does not steal it either: it
-	 * reports a miss for this round and asks for a refill.
+	 * is served the first filled slot after it instead.
 	 */
-	CHECK(!esdm_es_buf_try_get(&buf, &out, BLOCK_BITS, true),
-	      "a slot owned by the monitor was consumed");
-	CHECK_EQ(atomic_load(&buf.states[0]), esdm_es_buf_filling);
-	CHECK_EQ(stub_wakeups, 1);
-
-	/* The next round moves on to the following slot, which is available */
 	CHECK(esdm_es_buf_try_get(&buf, &out, BLOCK_BITS, true),
-	      "the following slot was not served");
+	      "the following filled slot was not served");
+	CHECK_EQ(atomic_load(&buf.states[0]), esdm_es_buf_filling);
 	CHECK_EQ(atomic_load(&buf.states[1]), esdm_es_buf_empty);
+	CHECK_EQ(out.e[0], 2);
+	CHECK_EQ(stub_wakeups, 0);
 
 	atomic_store(&buf.states[0], esdm_es_buf_empty);
+	esdm_es_buf_free(&buf);
+}
+
+/*
+ * The waiting variant waits only for a slot that is being filled, and no
+ * longer than twice what a fill took: an empty cache, or a fill that did not
+ * land within that time, is a miss at once.
+ */
+static void test_try_get_wait(void)
+{
+	struct esdm_es_buf buf;
+	struct fill_record rec = { 0, 0, NULL, 1 };
+	struct entropy_es out;
+
+	stubs_reset();
+	CHECK_EQ(esdm_es_buf_alloc(&buf, 4, "test", NULL, NULL), 0);
+	CHECK_EQ(esdm_es_buf_monitor(&buf, BLOCK_BITS, fill_cb, &rec), 0);
+
+	/* Nothing filled, nothing in the making */
+	CHECK(!esdm_es_buf_try_get_wait(&buf, &out, BLOCK_BITS, true),
+	      "an empty cache handed out a block");
+
+	/* A fill in the making that does not land in time */
+	atomic_store(&buf.states[1], esdm_es_buf_filling);
+	atomic_store(&buf.fill_ns, 1000000);
+	CHECK(!esdm_es_buf_try_get_wait(&buf, &out, BLOCK_BITS, true),
+	      "a slot still being filled was handed out");
+	CHECK_EQ(atomic_load(&buf.states[1]), esdm_es_buf_filling);
+	atomic_store(&buf.states[1], esdm_es_buf_empty);
+
+	/* A filled one is served as without waiting */
+	CHECK_EQ(esdm_es_buf_monitor(&buf, BLOCK_BITS, fill_cb, &rec), 0);
+	CHECK(esdm_es_buf_try_get_wait(&buf, &out, BLOCK_BITS, true),
+	      "a filled block was withheld");
+
 	esdm_es_buf_free(&buf);
 }
 
@@ -922,19 +954,19 @@ static void test_reset_during_fill(void)
 	CHECK_EQ(esdm_es_buf_monitor(&buf, BLOCK_BITS, fill_cb_resetting,
 				     &rrec),
 		 0);
-	CHECK_EQ(rrec.rec.calls, buf.num_blocks);
-
 	/*
 	 * The reset swept slots 0 and 1, and slot 2 - in the middle of its fill
 	 * at the time - must not be published either: what it holds was
-	 * collected before the reset. The slots filled after it are.
+	 * collected before the reset. The slots filled after it are, and the
+	 * round goes on until none is empty: slots 0 to 2 are filled anew, with
+	 * the blocks of the fills 9 to 11.
 	 */
-	CHECK_EQ(atomic_load(&buf.states[0]), esdm_es_buf_empty);
-	CHECK_EQ(atomic_load(&buf.states[1]), esdm_es_buf_empty);
-	CHECK_EQ(atomic_load(&buf.states[2]), esdm_es_buf_empty);
-	CHECK(block_is_zero(&buf.blocks[2]),
-	      "the block filled across the reset was not scrubbed");
-	CHECK_EQ(count_state(&buf, esdm_es_buf_filled), buf.num_blocks - 3);
+	CHECK_EQ(rrec.rec.calls, buf.num_blocks + 3);
+	CHECK_EQ(count_state(&buf, esdm_es_buf_filled), buf.num_blocks);
+	CHECK_EQ(buf.blocks[0].e[0], 9);
+	CHECK_EQ(buf.blocks[1].e[0], 10);
+	CHECK(buf.blocks[2].e[0] == 11,
+	      "the block filled across the reset was published");
 
 	esdm_es_buf_free(&buf);
 }
@@ -1209,6 +1241,7 @@ int main(int argc, char *argv[])
 	test_try_get_round_robin();
 	test_try_get_wakeup_heuristic();
 	test_try_get_skips_busy_slot();
+	test_try_get_wait();
 	test_failed_fill_is_a_miss();
 	test_uncredited_hit_has_no_entropy();
 	test_lowered_rate_caps_credit();

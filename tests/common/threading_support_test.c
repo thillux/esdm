@@ -273,7 +273,7 @@ static void test_special_groups(void)
 	static const uint32_t special[] = {
 		ESDM_THREAD_CUSE_POLL_GROUP,  ESDM_THREAD_ES_MONITOR,
 		ESDM_THREAD_RPC_UNPRIV_GROUP, ESDM_THREAD_EGD_GROUP,
-		ESDM_THREAD_DRNG_RESEED,      ESDM_THREAD_PERIODIC_SELFTEST
+		ESDM_THREAD_PERIODIC_SELFTEST
 	};
 	const unsigned int num =
 		(unsigned int)(sizeof(special) / sizeof(special[0]));
@@ -318,13 +318,11 @@ static void test_egd_slots(void)
 	      "only %u of %u EGD workers started",
 	      atomic_load(&blocked_workers), ESDM_THREAD_EGD_SLOTS);
 
-	CHECK_EQ(thread_start(job_count, NULL, ESDM_THREAD_DRNG_RESEED, NULL),
-		 0);
 	CHECK_EQ(thread_start(job_count, NULL, ESDM_THREAD_PERIODIC_SELFTEST,
 			      NULL),
 		 0);
-	CHECK(wait_until_uint(&jobs_run, 2),
-	      "the special groups behind the EGD slots did not get theirs");
+	CHECK(wait_until_uint(&jobs_run, 1),
+	      "the special group behind the EGD slots did not get its slot");
 
 	atomic_store(&release_workers, true);
 
@@ -556,7 +554,6 @@ static void test_thread_names(void)
 	check_thread_name(rpc_handler_priv, 7, "ESDM rpc_p007");
 	check_thread_name(cuse_poll, 0, "ESDM cuse_poll");
 	check_thread_name(egd_server, 3, "ESDM egd_srv003");
-	check_thread_name(drng_reseed, 0, "ESDM drng_rsd");
 	check_thread_name(periodic_selftest, 0, "ESDM selftest");
 
 	/* A buffer too small for the name is reported rather than truncated */

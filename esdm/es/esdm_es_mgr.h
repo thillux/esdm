@@ -37,11 +37,11 @@ extern _Atomic uint32_t esdm_write_wakeup_bits;
 void esdm_set_entropy_thresh(uint32_t new);
 void esdm_reset_state(void);
 
-int esdm_pool_trylock(void);
 void esdm_pool_lock(void);
 void esdm_pool_unlock(void);
 void esdm_pool_all_nodes_seeded(bool set);
 bool esdm_pool_all_nodes_seeded_get(void);
+unsigned int esdm_pool_seeded_gen(void);
 
 bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
 		       struct entropy_buf *eb);
@@ -71,6 +71,34 @@ void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
 			   struct entropy_buf *addtl, uint32_t requested_bits,
 			   bool force, bool allow_cached);
 
+/*
+ * As esdm_get_seed_buffers() with cached blocks allowed, for the reseed of a
+ * DRNG: a source with a cache that has no block ready is left out if the other
+ * sources deliver @requested_bits - see struct esdm_es_cb.get_cached. Neither
+ * for the initial seeding, whose policy may ask for more than one source, nor
+ * for the PR DRNG.
+ */
+void esdm_get_reseed_buffers(struct entropy_buf *seedbuf,
+			     struct entropy_buf *addtl, uint32_t requested_bits,
+			     bool force);
+
+/*
+ * Take a reseed of @requested_bits from the seed stash into @seedbuf and
+ * @addtl - see esdm_es_mgr.c.
+ *
+ * @return true if a stashed seed was handed out, false if the caller has to
+ *	   collect one itself
+ */
+bool esdm_seed_stash_get(struct entropy_buf *seedbuf, struct entropy_buf *addtl,
+			 uint32_t requested_bits);
+
+/* Discard the stashed seeds: a reseed asked for after this gets fresh ones */
+void esdm_seed_stash_flush(void);
+
+/* Stashed seeds and their number at most, for the status */
+unsigned int esdm_seed_stash_filled(void);
+unsigned int esdm_seed_stash_slots(void);
+
 int esdm_es_mgr_reinitialize(void);
 int esdm_es_mgr_initialize(void);
 int esdm_es_mgr_monitor_initialize(void (*priv_init_completion)(void));
@@ -81,6 +109,15 @@ void esdm_es_mgr_monitor_wakeup(void);
 void esdm_es_mgr_monitor_pause(void);
 void esdm_es_mgr_monitor_resume(void);
 bool esdm_es_mgr_running(void);
+
+/*
+ * Is the ES monitor running its rounds? Only then are the DRNGs that are not
+ * fully seeded brought up between the requests, see esdm_drng_bring_up().
+ */
+bool esdm_es_mgr_monitor_active(void);
+
+/* The fork handler of the ES manager, called by the DRNG manager's */
+void esdm_es_mgr_atfork_child(void);
 void esdm_es_mgr_finalize(void);
 
 #endif /* _ESDM_ES_MGR_H */

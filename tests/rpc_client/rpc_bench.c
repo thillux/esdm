@@ -887,7 +887,7 @@ static bool bench_json_seeded(const char *json)
 
 /*
  * Wait until the DRNG of every node is fully seeded, at most @max_ms. The
- * reseed worker brings them up one per pass after the start, and what is
+ * ES monitor brings them up in its rounds after the start, and what is
  * measured before that is a server serving every request from the few that
  * are there yet - and collecting from the entropy sources for the others
  * meanwhile. Returns the milliseconds it took, or -1 if they were not seeded

@@ -2,7 +2,7 @@
  * Test that esdm_reset() is not undone by a seeding in progress
  *
  * A seeding looks at the DRNGs and, if it finds them all seeded, declares so -
- * all under the pool lock. A reset that slips in between clears that state,
+ * under the pool lock. A reset that slips in between clears that state,
  * only for the seeding to set it again on the strength of what it saw before:
  * the ESDM then believes all DRNGs seeded while none is, and the next initial
  * seeding takes the reseed rules instead of the initial seeding policy.

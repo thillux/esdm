@@ -160,6 +160,9 @@ if get_option('es_buf_max_age') == 1
 	error('es_buf_max_age must be 0 or at least 2')
 endif
 conf_data.set('ESDM_ES_BUF_MAX_AGE', get_option('es_buf_max_age'))
+# The seed stash serves pre-collected seed material as the es_buf does
+conf_data.set('ESDM_SEED_STASH_SLOTS',
+	      disable_es_buf ? 0 : get_option('seed_stash_slots'))
 conf_data.set('ESDM_JENT_INSTANCES', get_option('es_jent_instances'))
 
 # esdm_es_buf_alloc() refuses any other block count at runtime, which silently
@@ -423,24 +426,12 @@ if not get_option('ais2031_drg3') and (sp80090c_mode or get_option('ais2031_drg4
 		max_reseed = 131072
 	endif
 
-	# Where inside that limit the reseed is triggered decides two things
-	# that pull against each other: how often the entropy sources are
-	# walked, and how much output a DRNG has left to cover the walk with.
-	# The reseed of a node DRNG is handed to a worker, and everything the
-	# DRNG may still produce before the limit above is the budget that
-	# worker has to finish in.
-	#
-	# Three quarters, measured rather than picked: reseeding is expensive
-	# enough that the frequency dominates. Moving the trigger from a half to
-	# three quarters gains 13-16% throughput, and the remaining quarter -
-	# 32768 bits of output - is what the asynchronous reseed gets to land
-	# in. Going further flattens out (87% and 100% add a few percent more)
-	# and at the limit itself the headroom is gone: every node DRNG then
-	# reaches the maximum at the moment it asks to be reseeded and drops out
-	# of the fully seeded state until the worker catches up, which only a
-	# machine with several nodes can absorb.
-	if reseed_thresh > (max_reseed / 4) * 3
-		reseed_thresh = (max_reseed / 4) * 3
+	# The reseed is triggered at the limit itself: every reseed costs a
+	# seed's worth of entropy, which bounds the throughput when the Jitter
+	# RNG is the only source, and a reseed is performed in the request that
+	# runs into it, which needs no headroom below the limit to land in.
+	if reseed_thresh > max_reseed
+		reseed_thresh = max_reseed
 	endif
 
 	conf_data.set('ESDM_DRNG_RESEED_THRESH_BITS', reseed_thresh)

@@ -129,6 +129,18 @@ least: it is counted in whole seconds and has to outlive the ES monitor
 interval of about half a second.
 ''')
 
+# Option for: ESDM_SEED_STASH_SLOTS
+option('seed_stash_slots', type: 'integer', min: 0, max: 64, value: 4,
+       description:'''Seeds the ESDM collects ahead of the DRNG reseeds
+
+While the DRNGs reseed at a high rate - as many reseeds within 10 to 20 seconds
+as the stash holds - the ES monitor collects seeds ahead of them, so a reseed
+does not collect its seed in the request that runs into it. A seed is kept for
+es_buf_max_age seconds at most. Only reseeds take from it, neither the initial
+seeding of a DRNG nor the prediction resistance DRNG. 0 disables it, and it is
+compiled out with the async entropy source buffer, see es_buf_force.
+''')
+
 ################################################################################
 # CPU-based Entropy Source configuration options
 ################################################################################

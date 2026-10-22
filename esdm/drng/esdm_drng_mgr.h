@@ -89,16 +89,6 @@ struct esdm_drng {
 	atomic_bool initiated; /* Was DRNG initiated once? (used for pr drng) */
 
 	/*
-	 * A reseed is due and has been handed to the asynchronous reseed
-	 * worker. Set by the generate path instead of collecting entropy
-	 * inline, cleared by the worker once it has taken the DRNG on. It also
-	 * serves as the "already queued" guard: the generate path keeps seeing
-	 * the reseed condition on every iteration until the worker lands, and
-	 * only the thread that flips this flag wakes the worker.
-	 */
-	atomic_bool reseed_pending;
-
-	/*
 	 * The fork generation of the process the state was last made unique
 	 * to, see esdm_drng_fork_stir_nolock(). Written under the lock below.
 	 */
@@ -113,8 +103,7 @@ struct esdm_drng {
 	.requests = ESDM_DRNG_RESEED_THRESH, .requests_since_fully_seeded = 0, \
 	.request_bits_since_fully_seeded = 0, .seed_generation = 0,            \
 	.last_seeded_time = 0, .last_seeded_wtime = 0, .fully_seeded = false,  \
-	.force_reseed = true, .initiated = false, .reseed_pending = false,     \
-	.fork_gen = 0
+	.force_reseed = true, .initiated = false, .fork_gen = 0
 
 /*
  * Statistics of one DRNG instance, as handed to the callback of
@@ -135,7 +124,6 @@ struct esdm_drng_stats {
 	const char *drng_name;
 	bool fully_seeded;
 	bool force_reseed;
-	bool reseed_pending;
 	bool initiated;
 	/* Generate requests left before a reseed is due, may be negative */
 	int requests_until_reseed;
@@ -243,39 +231,6 @@ void esdm_drng_mgr_finalize(void);
  */
 bool esdm_drng_mgr_terminating(void);
 
-/**
- * @brief Put the asynchronous reseed worker on duty
- *
- * A reseed interval of zero seconds keeps one off duty - the requests reseed
- * themselves then, see esdm_set_reseed_max_time().
- *
- * @return true if a worker is on duty afterwards
- */
-bool esdm_drng_mgr_reseed_worker_start(void);
-
-/**
- * @brief Is the asynchronous reseed worker on duty?
- */
-bool esdm_drng_mgr_reseed_worker_running(void);
-
-/**
- * @brief Number of passes the asynchronous reseed worker completed
- */
-uint64_t esdm_drng_mgr_reseed_worker_passes(void);
-
-/**
- * @brief Seconds until the asynchronous reseed worker looks at the DRNGs again
- * @param [out] secs Seconds until the next pass, zero if it is due now, only
- * 	set when a pass is scheduled
- * @return true if a pass is scheduled, false if none is - the worker is not on
- * 	duty or has not finished its first pass yet
- */
-bool esdm_drng_mgr_reseed_worker_next_pass(uint64_t *secs);
-
-/**
- * @brief Stop the asynchronous reseed worker
- */
-void esdm_drng_mgr_reseed_worker_stop(void);
 bool esdm_get_available(void);
 void esdm_drng_reset(struct esdm_drng *drng);
 
@@ -293,10 +248,15 @@ void esdm_force_fully_seeded_all_drbgs(void);
  * 	data from them
  *
  * Seeds in the caller's thread only while the ESDM is not operational, or if
- * there is no reseed worker and the entropy sources report enough for a seed.
- * Otherwise the reseed worker is told and does it.
+ * the ES monitor is not running and the entropy sources report enough for a
+ * seed. Otherwise the monitor does it, see esdm_drng_bring_up().
  */
 void esdm_drng_bring_up_for_request(void);
+
+/**
+ * @brief Bring up every DRNG that is not fully seeded - the ES monitor's round
+ */
+void esdm_drng_bring_up(void);
 
 static inline uint32_t esdm_compress_osr(void)
 {

@@ -90,7 +90,7 @@ static int esdm_status_ntg1_2024_check(const char *buf, bool json)
  * The prediction resistance DRNG is seeded for every request, so its counters
  * and seeding times would tell any local user about the requests of others:
  * its section of the text report has them as not available. It is the last
- * DRNG section, followed by the one of the reseed worker.
+ * DRNG section, followed by the one of the reseeding.
  */
 static int esdm_status_pr_withheld_check(const char *buf)
 {
@@ -103,7 +103,7 @@ static int esdm_status_pr_withheld_check(const char *buf)
 		"\n Seconds since last reseed: N/A\n",
 	};
 	const char *pr = strstr(buf, " Type: prediction resistance");
-	const char *end = pr ? strstr(pr, "\nReseed worker properties") : NULL;
+	const char *end = pr ? strstr(pr, "\nReseed properties") : NULL;
 	unsigned int i;
 
 	for (i = 0; i < sizeof(withheld) / sizeof(withheld[0]); i++) {
@@ -182,9 +182,10 @@ int main(int argc, char *argv[])
 	    !strstr(buf, "\nESDM entropy level: ") ||
 	    !strstr(buf, "\nEntropy Source 0 properties:\n Name: ") ||
 	    !strstr(buf, "\n Available entropy: ") ||
-	    !strstr(buf, "\nReseed worker properties:\n Running: ") ||
+	    !strstr(buf, "\nReseed properties:\n Reseed interval in seconds: ") ||
+	    !strstr(buf, "\n Seed stash slots: ") ||
+	    !strstr(buf, "\n Stashed seeds: ") ||
 	    !strstr(buf, "\nPeriodic self test properties:\n State: ") ||
-	    !strstr(buf, "\n Reseed interval in seconds: ") ||
 	    !strstr(buf, "\n Self test interval in seconds: ") ||
 	    /* The index of an entropy source is its section's */
 	    strstr(buf, " Id: ")) {
@@ -204,7 +205,7 @@ int main(int argc, char *argv[])
 	    !strstr(buf, "Requests until reseed") ||
 	    !strstr(buf, "Seed generation") ||
 	    !strstr(buf, "Last seeding time") ||
-	    !strstr(buf, "Reseed worker properties") ||
+	    !strstr(buf, "Reseed properties") ||
 	    !strstr(buf, "Periodic self test properties") ||
 	    !strstr(buf, "Entropy sources tested") ||
 	    /* The ESDM only hands out a status when its self tests passed */

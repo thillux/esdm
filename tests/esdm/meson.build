@@ -122,9 +122,9 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
-	esdm_drng_mgr_no_worker_reseed_test = executable(
-		'esdm_drng_mgr_no_worker_reseed_test',
-		[ esdm_ipc_ns, 'esdm_drng_mgr_no_worker_reseed_test.c' ],
+	esdm_drng_mgr_node_reseed_test = executable(
+		'esdm_drng_mgr_node_reseed_test',
+		[ esdm_ipc_ns, 'esdm_drng_mgr_node_reseed_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -210,9 +210,25 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
-	esdm_reseed_worker_test = executable(
-		'esdm_reseed_worker_test',
-		[ esdm_ipc_ns, 'esdm_reseed_worker_test.c' ],
+	esdm_drng_bring_up_test = executable(
+		'esdm_drng_bring_up_test',
+		[ esdm_ipc_ns, 'esdm_drng_bring_up_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_seed_stash_test = executable(
+		'esdm_seed_stash_test',
+		[ esdm_ipc_ns, 'esdm_seed_stash_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	esdm_reseed_cached_test = executable(
+		'esdm_reseed_cached_test',
+		[ esdm_ipc_ns, 'esdm_reseed_cached_test.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_static_lib,
 		dependencies: dependencies_server,
@@ -271,7 +287,7 @@ if get_option('esdm-server').enabled()
 		test('ESDM per-node DRNG array bound', esdm_node_bound_test)
 
 		# Threads mapped to a node DRNG each, as the server's workers
-		# are: waits for the reseed worker to bring DRNGs back, which
+		# are: waits for the ES monitor to bring the DRNGs up, which
 		# may take a while under a sanitizer.
 		esdm_drng_node_bind_test = executable(
 			'esdm_drng_node_bind_test',
@@ -458,8 +474,10 @@ if get_option('esdm-server').enabled()
 			args : [ '2' ])
 	endif
 
-	test('ESDM DRNG manager node reseed without worker',
-		esdm_drng_mgr_no_worker_reseed_test)
+	test('ESDM DRNG manager node reseed in the request',
+		esdm_drng_mgr_node_reseed_test)
+	test('ESDM DRNG manager node reseed in the request - ES monitor',
+		esdm_drng_mgr_node_reseed_test, args : [ 'monitor' ])
 
 	test('ESDM DRNG manager max w/o reseed bits - 1 DRNG', esdm_drng_mgr_max_wo_reseed_bits_test,
 		args : [ '1' ])
@@ -489,7 +507,7 @@ if get_option('esdm-server').enabled()
 	endif
 
 	# Serial as well: it keeps several CPUs busy generating, and the node
-	# DRNGs coming back in time is a matter of the reseed worker getting a
+	# DRNGs coming back in time is a matter of the ES monitor getting a
 	# CPU of its own.
 	test('ESDM DRNG manager node DRNGs running dry under load',
 		esdm_drng_mgr_run_dry_test,
@@ -535,7 +553,7 @@ if get_option('esdm-server').enabled()
 	test('ESDM get seed - all ES, FIPS', esdm_get_seed_test,
 		args : [ '1' ],
 		timeout: 300)
-	test('ESDM get seed - non-blocking leaves the bring-up to the worker',
+	test('ESDM get seed - non-blocking leaves the bring-up to the monitor',
 		esdm_get_seed_nonblock_test)
 
 	test('ESDM NTG.1 seeding strategy', esdm_ntg1_seeding_test)
@@ -551,8 +569,10 @@ if get_option('esdm-server').enabled()
 
 	test('ESDM security - self tests', esdm_selftest_security_test)
 
-	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
+	test('ESDM DRNG bring-up by the ES monitor', esdm_drng_bring_up_test,
 		timeout: 120)
+	test('ESDM seed stash', esdm_seed_stash_test, timeout: 60)
+	test('ESDM reseed leaves out an empty cache', esdm_reseed_cached_test)
 
 	# Waits up to 90 seconds for the Jitter RNG to seed the ESDM before it
 	# counts that as a failure, which a slow sanitizer build may need.

@@ -285,9 +285,9 @@ static atomic_bool esdm_selftest_worker_active = false;
 static DECLARE_WAIT_QUEUE(esdm_selftest_wait);
 
 /*
- * Shutdown request for the worker, separate from the DRNG manager terminating
- * for the same reason as the reseed worker's: it has to be gone before the
- * threads are joined, which happens while the DRNGs are still operating.
+ * Shutdown request for the worker, separate from the DRNG manager terminating:
+ * it has to be gone before the threads are joined, which happens while the
+ * DRNGs are still operating.
  */
 static atomic_bool esdm_selftest_worker_terminate = false;
 

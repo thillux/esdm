@@ -346,6 +346,19 @@ static int esdm_jent_async_monitor(void)
 	return ret;
 }
 
+/*
+ * A block of the cache only, see struct esdm_es_cb.get_cached: one in the
+ * making is not waited for, as the reseed asking goes on without it should the
+ * other sources cover it.
+ */
+static bool esdm_jent_get_cached(struct entropy_es *eb_es,
+				 uint32_t requested_bits)
+{
+	return esdm_config_es_jent_async_enabled() &&
+	       esdm_es_buf_try_get(&esdm_jent_buf, eb_es, requested_bits,
+				   !!esdm_jent_entropylevel(requested_bits));
+}
+
 static void esdm_jent_get_check(struct entropy_es *eb_es,
 				uint32_t requested_bits, bool allow_cached)
 {
@@ -360,12 +373,29 @@ static void esdm_jent_get_check(struct entropy_es *eb_es,
 	 * answer tests failed - and counts as a miss as well: the synchronous
 	 * collector may well be serving.
 	 */
-	if (allow_cached && esdm_config_es_jent_async_enabled() &&
-	    esdm_es_buf_try_get(&esdm_jent_buf, eb_es, requested_bits,
-				!!esdm_jent_entropylevel(requested_bits)))
-		return;
+	if (allow_cached && esdm_config_es_jent_async_enabled()) {
+		bool credited = !!esdm_jent_entropylevel(requested_bits);
+
+		if (esdm_es_buf_try_get(&esdm_jent_buf, eb_es, requested_bits,
+					credited))
+			return;
+
+		/*
+		 * A miss: the synchronous collector, if it is free, is one
+		 * more collector beside the instances. Only while it serves
+		 * another reseed is a block in the making waited for, which
+		 * arrives sooner than that collector would be free and done.
+		 */
+		if (!mutex_w_trylock(&esdm_jent_lock))
+			goto sync;
+
+		if (esdm_es_buf_try_get_wait(&esdm_jent_buf, eb_es,
+					     requested_bits, credited))
+			return;
+	}
 
 	mutex_w_lock(&esdm_jent_lock);
+sync:
 	esdm_jent_get(&esdm_jent_state, eb_es, requested_bits);
 	mutex_w_unlock(&esdm_jent_lock);
 }
@@ -883,6 +913,9 @@ struct esdm_es_cb esdm_es_jent = {
 	.monitor_es = NULL,
 #endif
 	.get_ent = esdm_jent_get_check,
+#if (ESDM_JENT_ENTROPY_BLOCKS != 0)
+	.get_cached = esdm_jent_get_cached,
+#endif
 	.curr_entropy = esdm_jent_entropylevel,
 	.max_entropy = esdm_jent_poolsize,
 	.state = esdm_jent_es_state,

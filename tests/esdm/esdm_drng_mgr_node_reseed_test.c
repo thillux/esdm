@@ -18,12 +18,12 @@
  */
 
 /*
- * A node DRNG must be reseeded even when there is no reseed worker.
+ * A node DRNG due for a reseed is reseeded by the request that runs into it.
  *
- * Node DRNGs hand their reseeds to the reseed worker. A library user that sets
- * the ESDM up with esdm_init() alone has none, and the request was dropped
- * without anything taking its place: a node DRNG then generated forever on its
- * first seed. Without a worker the request itself has to reseed the DRNG.
+ * Nothing else reseeds a fully seeded DRNG: a reseed handed to anybody else
+ * that is not there - a library user sets the ESDM up with esdm_init() alone,
+ * without the ES monitor - leaves the node DRNG generating forever on its
+ * first seed. Checked without the monitor, and with it (argument "monitor").
  */
 
 #define _GNU_SOURCE
@@ -36,14 +36,17 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_logger.h"
 #include "esdm_node.h"
+#include "test_monitor.h"
 
-int main(void)
+int main(int argc, char *argv[])
 {
 	struct esdm_drng *drng;
 	cpu_set_t set;
 	uint8_t buf[32];
 	long long gen;
 	int ret = 0;
+
+	(void)argv;
 
 	if (sysconf(_SC_NPROCESSORS_ONLN) < 2) {
 		printf("Two CPUs are needed for a node DRNG\n");
@@ -61,18 +64,17 @@ int main(void)
 	esdm_logger_set_verbosity(LOGGER_DEBUG);
 	esdm_config_max_nodes_set(2);
 
-	/* No esdm_init_monitor(), so no reseed worker */
 	if (esdm_init())
 		return 1;
 
-	if (esdm_drng_mgr_reseed_worker_running()) {
-		printf("A reseed worker is running, nothing to test\n");
-		ret = 77;
+	if (argc > 1 && test_monitor_start()) {
+		printf("The ES monitor did not start\n");
+		ret = 1;
 		goto out;
 	}
 
 	/*
-	 * The first request allocates the node DRNG. Bring it up as the worker
+	 * The first request allocates the node DRNG. Bring it up as the monitor
 	 * would: without one, a request seeds it only once the entropy sources
 	 * report enough for a seed at once, which under the NTG.1 seeding
 	 * strategy they never do - its two sources of 240 bits each are
@@ -114,7 +116,7 @@ int main(void)
 		       gen);
 		ret = 1;
 	} else {
-		printf("PASS: the node DRNG was reseeded without a worker\n");
+		printf("PASS: the request reseeded the node DRNG\n");
 	}
 
 out:

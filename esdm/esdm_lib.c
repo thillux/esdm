@@ -86,7 +86,6 @@ fini:
 	 * status segment, which was not created: esdm_fini() would remove the
 	 * IPC objects by name, and those may belong to another ESDM.
 	 */
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_selftest_periodic_stop();
 	esdm_es_mgr_finalize();
 	esdm_drng_mgr_finalize();
@@ -150,16 +149,10 @@ void esdm_fini(void)
 	esdm_shm_status_exit();
 
 	/*
-	 * Stop the asynchronous reseed worker before the entropy source manager
-	 * joins the threads: the worker waits between its passes and only this
-	 * request gets it out of that wait, so joining it without asking first
-	 * would never return.
-	 */
-	esdm_drng_mgr_reseed_worker_stop();
-
-	/*
-	 * Same for the periodic self test worker: it waits between its runs and
-	 * has to be asked to leave before the threads are joined.
+	 * Stop the periodic self test worker before the entropy source manager
+	 * joins the threads: it waits between its runs and only this request
+	 * gets it out of that wait, so joining it without asking first would
+	 * never return.
 	 */
 	esdm_selftest_periodic_stop();
 
@@ -177,22 +170,19 @@ DSO_PUBLIC
 int esdm_init_monitor(void (*priv_init_completion)(void))
 {
 	/*
-	 * The ESDM runs workers of its own - the reseed worker below, the per-
-	 * ES monitors further down - and there is no pool to take them from
+	 * The ESDM runs workers of its own - the periodic self tests below, the
+	 * per-ES monitors further down - and there is no pool to take them from
 	 * unless somebody set one up.
 	 */
 	if (!thread_available() && thread_init(1)) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ANY,
-			"Threading support unavailable - the DRNGs are only reseeded when a request runs into their reseed condition\n");
+			"Threading support unavailable - no periodic self tests, and the entropy sources are monitored in this thread\n");
 	}
 
-	/* The ESDM is up and it may use threads. */
-	esdm_drng_mgr_reseed_worker_start();
-
 	/*
-	 * The same holds for the self tests: the pass that ran when the ESDM
-	 * came up is repeated on its interval from here on.
+	 * The pass of the self tests that ran when the ESDM came up is
+	 * repeated on its interval from here on.
 	 */
 	esdm_selftest_periodic_start();
 

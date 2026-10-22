@@ -89,8 +89,8 @@ extern "C" {
  * Size of the rendered status report kept in the shared memory segment, and
  * of the status file of esdm-proc.
  *
- * esdm_status() prints the entropy sources first and the DRNG, reseed worker
- * and self test sections last, so a report cut short loses those. A build
+ * esdm_status() prints the entropy sources first and the DRNG, reseed and
+ * self test sections last, so a report cut short loses those. A build
  * with every source the ESDM has renders about 2700 bytes without the
  * entropy sources of the kernel, each of which adds about 160, and each
  * external entropy source about 200 and up to its ESDM_ES_EXT_STATUS_MAX

@@ -182,7 +182,7 @@ static inline int esdm_status_drng_json_check(const char *doc)
 static inline int esdm_status_json_check(const char *doc)
 {
 	struct json_object *root, *sources, *source, *name;
-	struct json_object *drngs, *drng, *worker, *selftest;
+	struct json_object *drngs, *drng, *reseed, *selftest;
 	struct json_object *state;
 	size_t i, n;
 	int ret = 1;
@@ -212,14 +212,18 @@ static inline int esdm_status_json_check(const char *doc)
 				    json_type_int) ||
 	    esdm_status_json_member(root, "entropy_sources", json_type_array) ||
 	    esdm_status_json_member(root, "drngs", json_type_array) ||
-	    esdm_status_json_member(root, "reseed_worker", json_type_object) ||
+	    esdm_status_json_member(root, "reseed", json_type_object) ||
 	    esdm_status_json_member(root, "periodic_self_test",
 				    json_type_object))
 		goto out;
 
-	json_object_object_get_ex(root, "reseed_worker", &worker);
-	if (esdm_status_json_member(worker, "running", json_type_boolean) ||
-	    esdm_status_json_member(worker, "reseed_interval_seconds",
+	json_object_object_get_ex(root, "reseed", &reseed);
+	if (esdm_status_json_member(reseed, "reseed_interval_seconds",
+				    json_type_int) ||
+	    esdm_status_json_member(reseed, "seed_stash_slots",
+				    json_type_int) ||
+	    esdm_status_json_member(reseed, "stashed_seeds", json_type_int) ||
+	    esdm_status_json_member(reseed, "stashed_seed_max_age_seconds",
 				    json_type_int))
 		goto out;
 

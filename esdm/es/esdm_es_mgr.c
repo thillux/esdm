@@ -73,6 +73,8 @@ struct esdm_state {
 	atomic_bool esdm_operational; /* Is DRNG operational? */
 	atomic_bool esdm_fully_seeded; /* Is DRNG fully seeded? */
 	atomic_bool all_online_nodes_seeded; /* All DRNGs nodes seeded? */
+	/* Bumped whenever the above is cleared, see esdm_pool_seeded_gen() */
+	atomic_uint seeded_gen;
 
 	/*
 	 * To ensure that external entropy providers cannot dominate the
@@ -84,15 +86,16 @@ struct esdm_state {
 	 */
 
 	atomic_int boot_entropy_thresh; /* Reseed threshold */
-	mutex_w_t reseed_in_progress; /* Flag for on executing reseed */
+	mutex_w_t state_lock; /* See esdm_pool_lock() */
 };
 
 static struct esdm_state esdm_state = {
 	.esdm_operational = false,
 	.esdm_fully_seeded = false,
 	.all_online_nodes_seeded = false,
+	.seeded_gen = 0,
 	.boot_entropy_thresh = ESDM_FULL_SEED_ENTROPY_BITS,
-	.reseed_in_progress = MUTEX_W_UNLOCKED,
+	.state_lock = MUTEX_W_UNLOCKED,
 };
 
 /*
@@ -118,6 +121,20 @@ static DEFINE_MUTEX_W_UNLOCKED(esdm_es_mgr_monitor_lock);
 
 /* Wait queue to wait until the ESDM is not initialized. */
 static DECLARE_WAIT_QUEUE(esdm_monitor_wait);
+
+/* Is the ES monitor running its rounds? See esdm_es_mgr_monitor_active() */
+static atomic_bool esdm_es_mgr_monitor_on = false;
+
+/*
+ * A wakeup for the monitor that must not be lost: one that arrives during a
+ * round - a cache drained while it refills another - has it start the next
+ * round at once instead of after its interval.
+ */
+static atomic_bool esdm_es_mgr_monitor_pending = false;
+
+/* The seed stash, defined at the end */
+static void esdm_seed_stash_clear(void);
+static void esdm_seed_stash_monitor(void);
 
 /* The external sources, one entry per instance */
 #define ESDM_ES_MGR_EXTSOCK(i) &esdm_es_extsock[i],
@@ -263,10 +280,35 @@ bool esdm_es_mgr_running(void)
 	return atomic_load(&esdm_es_mgr_terminate) == 0;
 }
 
-/* Restart the ES monitor if it is sleeping */
+bool esdm_es_mgr_monitor_active(void)
+{
+	return atomic_load(&esdm_es_mgr_monitor_on);
+}
+
+/*
+ * In the child of fork() neither the monitor lives on nor may the stashed
+ * seeds, which the parent hands out as well. Atomic stores only.
+ */
+void esdm_es_mgr_atfork_child(void)
+{
+	atomic_store(&esdm_es_mgr_monitor_on, false);
+	esdm_seed_stash_flush();
+}
+
+/* Restart the ES monitor if it is sleeping, or right after its round */
 void esdm_es_mgr_monitor_wakeup(void)
 {
-	thread_wake_all(&esdm_monitor_wait);
+	/* Before the signal, sent under the lock of the queue - see below */
+	atomic_store(&esdm_es_mgr_monitor_pending, true);
+	thread_wake_all_locked(&esdm_monitor_wait);
+}
+
+static bool esdm_es_mgr_monitor_due(void *unused)
+{
+	(void)unused;
+
+	return atomic_load(&esdm_es_mgr_monitor_pending) ||
+	       atomic_load(&esdm_es_mgr_terminate);
 }
 
 /*
@@ -323,35 +365,26 @@ static void *esdm_es_get_ent_thread(void *data)
 /* ES monitor worker loop */
 int esdm_es_mgr_monitor_initialize(void (*priv_init_completion)(void))
 {
-	struct timespec ts = { .tv_sec = 0,
-			       .tv_nsec = ESDM_ES_MONITOR_INTERVAL_NS };
 	struct esdm_es_monitor_thread_arg args[esdm_ext_es_last];
-	unsigned int i, avail = 0;
 	bool priv_init_completed = false;
 
-	for_each_esdm_es (i) {
-		if (esdm_es[i]->active())
-			avail += !!esdm_es[i]->monitor_es;
-	}
-
-	if (!avail) {
-		esdm_logger(
-			LOGGER_DEBUG, LOGGER_C_ES,
-			"Full entropy monitor not started as no slow entropy sources present\n");
-		if (priv_init_completion)
-			priv_init_completion();
-
-		return 0;
-	}
-
+	/*
+	 * Started even without a slow entropy source: the monitor also brings
+	 * up the DRNGs that are not fully seeded and fills the seed stash.
+	 */
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "Full entropy monitor started\n");
+	atomic_store(&esdm_es_mgr_monitor_on, true);
 
 	while (!atomic_load(&esdm_es_mgr_terminate)) {
+		struct timespec deadline;
 		unsigned int j;
 		int ret = 0;
 		bool priv_init_complete = true;
 		bool spawned = false;
+
+		/* Taken down before the round, so one raised during it is kept */
+		atomic_store(&esdm_es_mgr_monitor_pending, false);
 
 		/*
 		 * Hold the monitor lock across the active pass (spawning the
@@ -424,24 +457,37 @@ int esdm_es_mgr_monitor_initialize(void (*priv_init_completion)(void))
 			priv_init_completed = true;
 		}
 
+		/*
+		 * The DRNGs between the requests: those not fully seeded are
+		 * brought up, and the reseeds to come get their seeds.
+		 */
+		esdm_drng_bring_up();
+		esdm_seed_stash_monitor();
+
 		mutex_w_unlock(&esdm_es_mgr_monitor_lock);
 
 		/*
-		 * Bounded, interruptible wait regardless of the current seeding
-		 * state: a wakeup (entropy need via esdm_es_mgr_monitor_wakeup,
-		 * or termination) delivered between the checks above and this
-		 * wait would otherwise be lost, hanging the monitor. The wait is
-		 * a plain condvar wait with no persistent flag, so it only
-		 * returns early on a genuine broadcast and does not busy-loop; on
-		 * timeout the enclosing loop re-checks esdm_es_mgr_terminate and
-		 * the seeded state, so a missed wakeup costs at most one interval.
-		 * Previously the not-fully-seeded branch used an uninterruptible
-		 * nanosleep(), which delayed clean shutdown and ignored entropy
-		 * wakeups for up to a full interval precisely when entropy was
-		 * most needed.
+		 * Bounded wait on a wakeup that was raised before its signal: one
+		 * delivered during the round above ends it at once, and one
+		 * raised on the way into the wait is seen by the check under
+		 * the lock of the queue - see thread_wait_queue_wait_pred().
+		 * The loop covers a spurious wakeup.
 		 */
-		thread_timedwait_no_event(&esdm_monitor_wait, &ts);
+		clock_gettime(CLOCK_MONOTONIC, &deadline);
+		deadline.tv_nsec += ESDM_ES_MONITOR_INTERVAL_NS;
+		if (deadline.tv_nsec >= 1000000000L) {
+			deadline.tv_sec++;
+			deadline.tv_nsec -= 1000000000L;
+		}
+		do {
+			ret = thread_wait_queue_wait_pred(&esdm_monitor_wait,
+							  &deadline,
+							  esdm_es_mgr_monitor_due,
+							  NULL);
+		} while (!ret && !esdm_es_mgr_monitor_due(NULL));
 	}
+
+	atomic_store(&esdm_es_mgr_monitor_on, false);
 
 	if (!priv_init_completed && priv_init_completion)
 		priv_init_completion();
@@ -659,24 +705,20 @@ err:
 /********************************** Helper ***********************************/
 
 /*
- * Reading of the ESDM pool is only allowed by one caller. The reading is
- * only performed to (re)seed DRNGs. Thus, if this "lock" is already taken,
- * the reseeding operation is in progress. The caller is not intended to wait
- * but continue with its other operation.
+ * The lock over the seeding state of the ESDM: whether it is operational and
+ * whether all DRNGs are seeded, as the seedings, esdm_reset() and the DRNGs
+ * given up on change it. The entropy is collected outside of it - every
+ * source serializes its own collections - so it is held for the state
+ * transitions alone, under the lock of the DRNG they concern.
  */
-int esdm_pool_trylock(void)
-{
-	return mutex_w_trylock(&esdm_state.reseed_in_progress) == 0;
-}
-
 void esdm_pool_lock(void)
 {
-	mutex_w_lock(&esdm_state.reseed_in_progress);
+	mutex_w_lock(&esdm_state.state_lock);
 }
 
 void esdm_pool_unlock(void)
 {
-	mutex_w_unlock(&esdm_state.reseed_in_progress);
+	mutex_w_unlock(&esdm_state.state_lock);
 }
 
 /* Set new entropy threshold for reseeding during boot */
@@ -701,21 +743,34 @@ void esdm_reset_state(void)
 		if (esdm_es[i]->reset)
 			esdm_es[i]->reset();
 	}
+	esdm_seed_stash_clear();
 	atomic_store(&esdm_state.esdm_operational, false);
 	atomic_store(&esdm_state.esdm_fully_seeded, false);
-	atomic_store(&esdm_state.all_online_nodes_seeded, false);
+	esdm_pool_all_nodes_seeded(false);
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES, "reset ESDM\n");
 
 	/* Start the entropy monitor */
 	esdm_es_mgr_monitor_wakeup();
 }
 
-/* Set flag that all DRNGs are fully seeded */
+/*
+ * Set flag that all DRNGs are fully seeded - under the pool lock. Clearing it
+ * moves the seeded generation on: a bring-up declares the DRNGs all seeded
+ * only if none of them was given up on, reset or added since it started, see
+ * __esdm_drng_seed_work().
+ */
 void esdm_pool_all_nodes_seeded(bool set)
 {
+	if (!set)
+		atomic_fetch_add(&esdm_state.seeded_gen, 1);
 	atomic_store(&esdm_state.all_online_nodes_seeded, set);
 	if (set)
 		thread_wake_all(&esdm_init_wait);
+}
+
+unsigned int esdm_pool_seeded_gen(void)
+{
+	return atomic_load(&esdm_state.seeded_gen);
 }
 
 bool esdm_pool_all_nodes_seeded_get(void)
@@ -837,7 +892,7 @@ bool esdm_fully_seeded(bool do_full_init, uint32_t collected_entropy,
  * asks for: any one of them in general, but for the NTG.1 initial seeding two,
  * or the NTG.1 conformant jitter RNG itself. Any other single source keeps
  * delivering entropy that never meets the two-source rule, and the loop,
- * holding the pool and DRNG locks, would never end.
+ * holding the DRNG lock, would never end.
  */
 bool esdm_fully_seeded_reachable(bool do_full_init, struct entropy_buf *eb)
 {
@@ -871,38 +926,40 @@ uint32_t esdm_entropy_rate_eb(struct entropy_buf *eb)
 }
 
 /*
- * Mark one DRNG as not fully seeded - if @spent, called under the pool lock,
+ * Mark one DRNG as not fully seeded - if @spent, called under the DRNG lock,
  * says it still is to be, or unconditionally without @spent. Returns whether
  * the DRNG was marked.
  *
- * The decision and the change of state are taken under the pool lock, which
- * every seeding holds: a seeding can neither be half-way through the DRNG
- * meanwhile - and take it for one to be instantiated anew - nor bring it back
- * between the two. A caller that found the DRNG spent while a seeding of it
- * kept the pool lock, the reseed worker's say, otherwise took the ESDM out of
+ * The decision and the change of state are taken under the DRNG lock, which
+ * every seeding of it holds: a seeding can neither be half-way through the
+ * DRNG meanwhile - and take it for one to be instantiated anew - nor bring it
+ * back between the two. A caller that found the DRNG spent while a seeding of
+ * it was under way, the ES monitor's say, otherwise took the ESDM out of
  * operation after that seeding was done: its initial DRNG fully seeded, and
  * nothing left to make the ESDM operational again but the next seeding of that
  * DRNG, every request refused with -EOPNOTSUPP until then.
  *
- * Clearing all_online_nodes_seeded under the pool lock also keeps it ordered
- * with the pool-lock-guarded set-to-true in __esdm_drng_seed_work() and with
- * the readers in esdm_get_seed() that evaluate this flag under the same lock.
+ * The state of the ESDM is changed under the pool lock taken below it, the
+ * lock that a bring-up declares all DRNGs seeded under, see
+ * esdm_pool_all_nodes_seeded().
  */
 bool esdm_unset_fully_seeded_if(struct esdm_drng *drng,
 				bool (*spent)(struct esdm_drng *drng))
 {
 	/*
-	 * The lock is scoped narrowly here because the bring-up below may
-	 * acquire the pool lock itself.
+	 * The locks are scoped narrowly here because the bring-up below takes
+	 * them itself.
 	 */
-	esdm_pool_lock();
+	mutex_w_lock(&drng->lock);
 
 	if (spent && !spent(drng)) {
-		esdm_pool_unlock();
+		mutex_w_unlock(&drng->lock);
 		return false;
 	}
 
 	atomic_store(&drng->fully_seeded, false);
+
+	esdm_pool_lock();
 	esdm_pool_all_nodes_seeded(false);
 
 	/*
@@ -921,14 +978,15 @@ bool esdm_unset_fully_seeded_if(struct esdm_drng *drng,
 	}
 
 	esdm_pool_unlock();
+	mutex_w_unlock(&drng->lock);
 
 	/*
 	 * Bring the DRNGs up again - but not with a forced seeding right here
 	 * unless the ESDM is out of operation now: this runs in the thread of
 	 * the request that found the DRNG spent, which may be a non-blocking
 	 * one or the EGD server serving all its clients. While the ESDM is
-	 * operational, the request is served by another DRNG and the reseed
-	 * worker brings this one back.
+	 * operational, the request is served by another DRNG and the ES
+	 * monitor brings this one back.
 	 */
 	esdm_drng_bring_up_for_request();
 	esdm_es_mgr_monitor_wakeup();
@@ -1095,6 +1153,9 @@ int esdm_es_mgr_reinitialize(void)
 
 	esdm_set_entropy_thresh(esdm_init_entropy_level(false));
 
+	/* Collected from sources that may be gone or set up differently now */
+	esdm_seed_stash_flush();
+
 	/* Initialize the entropy sources */
 	for_each_esdm_es (i) {
 		if (esdm_es[i]->init) {
@@ -1223,6 +1284,8 @@ void esdm_es_mgr_finalize(void)
 	/* wait for monitor thread */
 	thread_wait_all(true);
 
+	esdm_seed_stash_clear();
+
 	for_each_esdm_es (i) {
 		if (esdm_es[i]->fini)
 			esdm_es[i]->fini();
@@ -1337,14 +1400,103 @@ static struct entropy_es *esdm_es_seed_slot(struct entropy_buf *seedbuf,
 	return slot;
 }
 
-void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
-			   struct entropy_buf *addtl, uint32_t requested_bits,
-			   bool force, bool allow_cached)
+/* Fetch the sources marked in @fetch, each into its slot */
+static void esdm_es_fetch(struct entropy_buf *seedbuf,
+			  struct entropy_buf *addtl, uint32_t requested_bits,
+			  bool allow_cached, const bool *fetch)
 {
-	struct esdm_state *state = &esdm_state;
 #ifdef ESDM_ES_PARALLEL_FETCH
 	struct esdm_es_get_ent_thread_arg args[esdm_ext_es_last];
+	uint32_t n = 0;
 #endif
+	uint32_t i;
+
+#ifdef ESDM_ES_PARALLEL_FETCH
+	/*
+	 * The slots are cleared here before the threads fetching into them
+	 * are started. One join for both buffers: the wait is for the slowest
+	 * source there is rather than for the slowest of each buffer. Only the
+	 * sources to fetch get a thread - a reseed served from the caches
+	 * fetches few, or one, which runs in this thread.
+	 */
+	for_each_esdm_es (i) {
+		struct entropy_es *eb_es;
+
+		if (!fetch[i])
+			continue;
+		eb_es = esdm_es_seed_slot(seedbuf, addtl, i);
+		if (!eb_es)
+			continue;
+
+		args[n].es_idx = i;
+		args[n].eb_es = eb_es;
+		args[n].requested_bits = requested_bits;
+		args[n].allow_cached = allow_cached;
+		n++;
+	}
+	thread_fork_join(esdm_es_get_ent_thread, args, sizeof(args[0]), n);
+#else
+	/* Concatenate the output of the entropy sources. */
+	for_each_esdm_es (i) {
+		struct entropy_es *eb_es;
+
+		if (!fetch[i])
+			continue;
+		eb_es = esdm_es_seed_slot(seedbuf, addtl, i);
+		if (!eb_es)
+			continue;
+
+		esdm_es[i]->get_ent(eb_es, requested_bits, allow_cached);
+	}
+#endif
+}
+
+/*
+ * A reseed takes what the sources with a cache have ready, see struct
+ * esdm_es_cb.get_cached, and the others as always. A source whose cache is
+ * empty is only asked to collect if the rest fall short of @requested_bits:
+ * under load, a slow source such as a TPM otherwise holds up every reseed
+ * once its cache is drained, while the sources served from their caches
+ * deliver the entropy of the reseed by themselves.
+ */
+static void esdm_es_fetch_reseed(struct entropy_buf *seedbuf,
+				 struct entropy_buf *addtl,
+				 uint32_t requested_bits, bool *fetch)
+{
+	bool missed[esdm_ext_es_last];
+	uint32_t i, credited = 0;
+
+	for_each_esdm_es (i) {
+		struct entropy_es *eb_es;
+
+		missed[i] = false;
+		if (!esdm_es[i]->get_cached)
+			continue;
+
+		fetch[i] = false;
+		eb_es = esdm_es_seed_slot(seedbuf, addtl, i);
+		if (eb_es && !esdm_es[i]->get_cached(eb_es, requested_bits))
+			missed[i] = true;
+	}
+
+	esdm_es_fetch(seedbuf, addtl, requested_bits, true, fetch);
+
+	/* An uncredited source writes no entropy into @seedbuf */
+	for_each_esdm_es (i)
+		credited += seedbuf->entropy_es[i].e_bits;
+	if (credited >= requested_bits)
+		return;
+
+	esdm_es_fetch(seedbuf, addtl, requested_bits, true, missed);
+}
+
+static void esdm_get_seed_buffers_common(struct entropy_buf *seedbuf,
+					 struct entropy_buf *addtl,
+					 uint32_t requested_bits, bool force,
+					 bool allow_cached, bool reseed)
+{
+	struct esdm_state *state = &esdm_state;
+	bool fetch[esdm_ext_es_last];
 	uint32_t i, req_ent = esdm_es_oversampling() ?
 				      esdm_security_strength() :
 				      ESDM_FULL_SEED_ENTROPY_BITS;
@@ -1387,35 +1539,313 @@ void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
 		goto wakeup;
 	}
 
-#ifdef ESDM_ES_PARALLEL_FETCH
-	for_each_esdm_es (i) {
-		args[i].es_idx = i;
-		args[i].eb_es = esdm_es_seed_slot(seedbuf, addtl, i);
-		args[i].requested_bits = requested_bits;
-		args[i].allow_cached = allow_cached;
-	}
-	/*
-	 * One join for both buffers. Split over two calls the wait was for the
-	 * slowest approved source and then for the slowest of the rest; taken
-	 * together it is the slowest source there is, and a machine whose
-	 * jitter RNG and whose TPM each cost milliseconds pays for one of them
-	 * rather than for both. A NULL slot is a source to skip, which is what
-	 * esdm_es_get_ent_thread() does with it.
-	 */
-	thread_fork_join(esdm_es_get_ent_thread, args, sizeof(args[0]),
-			 esdm_ext_es_last);
-#else
-	/* Concatenate the output of the entropy sources. */
-	for_each_esdm_es (i) {
-		struct entropy_es *eb_es = esdm_es_seed_slot(seedbuf, addtl, i);
+	for_each_esdm_es (i)
+		fetch[i] = true;
 
-		if (!eb_es)
-			continue;
-
-		esdm_es[i]->get_ent(eb_es, requested_bits, allow_cached);
-	}
-#endif
+	if (reseed)
+		esdm_es_fetch_reseed(seedbuf, addtl, requested_bits, fetch);
+	else
+		esdm_es_fetch(seedbuf, addtl, requested_bits, allow_cached,
+			      fetch);
 
 wakeup:
 	esdm_writer_wakeup();
+}
+
+void esdm_get_seed_buffers(struct entropy_buf *seedbuf,
+			   struct entropy_buf *addtl, uint32_t requested_bits,
+			   bool force, bool allow_cached)
+{
+	esdm_get_seed_buffers_common(seedbuf, addtl, requested_bits, force,
+				     allow_cached, false);
+}
+
+void esdm_get_reseed_buffers(struct entropy_buf *seedbuf,
+			     struct entropy_buf *addtl, uint32_t requested_bits,
+			     bool force)
+{
+	esdm_get_seed_buffers_common(seedbuf, addtl, requested_bits, force,
+				     true, true);
+}
+
+/********************************* Seed stash *********************************/
+
+/*
+ * Seeds collected ahead of the reseeds that take them: without one, a reseed
+ * collects its seed in the request that runs into it, which takes milliseconds
+ * with a Jitter RNG or a TPM among the sources. The ES monitor fills the stash
+ * while the reseeds come at a high rate, see esdm_seed_stash_wanted(), and
+ * leaves it to run dry otherwise. A seed is kept for ESDM_ES_BUF_MAX_AGE
+ * seconds at most, as a block of an es_buf is.
+ *
+ * Only reseeds take from it, see esdm_drng_seed_es_nolock(): neither the
+ * instantiation of a DRNG, which goes by the initial seeding policy, nor the
+ * PR DRNG, whose entropy is collected for its request. Compiled out with the
+ * es_buf, under the SP800-90C oversampling.
+ *
+ * The slots, the reseed count and the window are guarded by the stash lock,
+ * which is taken last - under a DRNG lock and under the pool lock.
+ */
+#if (ESDM_SEED_STASH_SLOTS > 0)
+
+/* Seconds one window of the reseed count covers */
+#define ESDM_SEED_STASH_WINDOW 10
+
+struct esdm_seed_stash_slot {
+	struct entropy_buf seedbuf __aligned(ESDM_KCAPI_ALIGN);
+	struct entropy_buf addtl __aligned(ESDM_KCAPI_ALIGN);
+	/* The bits the seed was collected for */
+	uint32_t bits;
+	/* When its collection began, esdm_monotonic_now() seconds */
+	long long created;
+	/* The flush generation it was collected in */
+	unsigned int gen;
+	bool filled;
+};
+
+static struct esdm_seed_stash_slot esdm_seed_stash[ESDM_SEED_STASH_SLOTS];
+static DEFINE_MUTEX_W_UNLOCKED(esdm_seed_stash_lock);
+
+/* Seeds in the stash - atomic for the status, which takes no lock */
+static atomic_uint esdm_seed_stash_num = 0;
+
+/*
+ * Bumped by esdm_seed_stash_flush(): a seed collected in an older generation
+ * is discarded rather than served. Atomic, as the fork handler bumps it.
+ */
+static atomic_uint esdm_seed_stash_gen = 0;
+
+/* Reseeds asking the stash in the current window and in the one before */
+static long long esdm_seed_stash_window = 0;
+static unsigned int esdm_seed_stash_curr = 0;
+static unsigned int esdm_seed_stash_prev = 0;
+
+static void esdm_seed_stash_rotate(long long now)
+{
+	long long window = now / ESDM_SEED_STASH_WINDOW;
+
+	if (window == esdm_seed_stash_window)
+		return;
+
+	esdm_seed_stash_prev = (window == esdm_seed_stash_window + 1) ?
+				       esdm_seed_stash_curr :
+				       0;
+	esdm_seed_stash_curr = 0;
+	esdm_seed_stash_window = window;
+}
+
+/*
+ * Is the seeding rate high? It is once the current and the previous window saw
+ * as many reseeds as the stash holds: a full stash would have been taken within
+ * 10 to 20 seconds. A lower rate leaves a stashed seed to age out unused.
+ */
+static bool esdm_seed_stash_wanted(long long now)
+{
+	esdm_seed_stash_rotate(now);
+
+	return esdm_seed_stash_prev + esdm_seed_stash_curr >=
+	       ESDM_SEED_STASH_SLOTS;
+}
+
+static bool esdm_seed_stash_stale(struct esdm_seed_stash_slot *slot,
+				  long long now)
+{
+	return slot->gen != atomic_load(&esdm_seed_stash_gen) ||
+	       (ESDM_ES_BUF_MAX_AGE &&
+		now - slot->created >= (long long)ESDM_ES_BUF_MAX_AGE);
+}
+
+static void esdm_seed_stash_scrub(struct esdm_seed_stash_slot *slot)
+{
+	if (slot->filled)
+		atomic_fetch_sub(&esdm_seed_stash_num, 1);
+	memset_secure(slot, 0, sizeof(*slot));
+}
+
+bool esdm_seed_stash_get(struct entropy_buf *seedbuf, struct entropy_buf *addtl,
+			 uint32_t requested_bits)
+{
+	long long now = esdm_monotonic_now();
+	bool found = false, wanted;
+	unsigned int i, j;
+
+	mutex_w_lock(&esdm_seed_stash_lock);
+	esdm_seed_stash_rotate(now);
+	esdm_seed_stash_curr++;
+
+	for (i = 0; i < ESDM_SEED_STASH_SLOTS && !found; i++) {
+		struct esdm_seed_stash_slot *slot = &esdm_seed_stash[i];
+
+		if (!slot->filled)
+			continue;
+		if (esdm_seed_stash_stale(slot, now)) {
+			esdm_seed_stash_scrub(slot);
+			continue;
+		}
+		if (slot->bits < requested_bits)
+			continue;
+
+		memcpy(seedbuf, &slot->seedbuf, sizeof(*seedbuf));
+		memcpy(addtl, &slot->addtl, sizeof(*addtl));
+
+		/*
+		 * Credited at most with what the source is assessed to deliver
+		 * now: its rate may have been lowered, or the source disabled,
+		 * since the seed was collected.
+		 */
+		for_each_esdm_es (j) {
+			seedbuf->entropy_es[j].e_bits =
+				min_uint32(seedbuf->entropy_es[j].e_bits,
+					   esdm_es[j]->max_entropy());
+		}
+
+		/* The time of the reseed, as a collected seed carries it */
+		clock_gettime(CLOCK_MONOTONIC, &seedbuf->now);
+		addtl->now = seedbuf->now;
+
+		esdm_seed_stash_scrub(slot);
+		found = true;
+	}
+
+	wanted = esdm_seed_stash_wanted(now);
+	mutex_w_unlock(&esdm_seed_stash_lock);
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES, "seed stash %s, %u seeds left\n",
+		    found ? "hit" : "miss", atomic_load(&esdm_seed_stash_num));
+
+	/* Topped up by the next round of the monitor, or sooner if half gone */
+	if (wanted &&
+	    atomic_load(&esdm_seed_stash_num) <= ESDM_SEED_STASH_SLOTS / 2)
+		esdm_es_mgr_monitor_wakeup();
+
+	return found;
+}
+
+void esdm_seed_stash_flush(void)
+{
+	atomic_fetch_add(&esdm_seed_stash_gen, 1);
+}
+
+/* Wipe every slot */
+static void esdm_seed_stash_clear(void)
+{
+	unsigned int i;
+
+	mutex_w_lock(&esdm_seed_stash_lock);
+	esdm_seed_stash_flush();
+	for (i = 0; i < ESDM_SEED_STASH_SLOTS; i++)
+		esdm_seed_stash_scrub(&esdm_seed_stash[i]);
+	mutex_w_unlock(&esdm_seed_stash_lock);
+}
+
+/*
+ * Retire the seeds kept too long, and top the stash up while the seeding rate
+ * is high. A seed is collected outside the pool lock, so the reseeds go on
+ * meanwhile: every source serializes its own state with a lock of its own,
+ * as its synchronous path runs beside the fills of its es_buf anyway, and the
+ * monitor is the only thread filling the stash. The flush generation the seed
+ * was collected in is checked when it is put in, so a flush or reset during
+ * the collection discards it.
+ *
+ * The sources are asked for what they deliver now rather than for blocks they
+ * cached: the age of a seed is the age of its entropy.
+ */
+static void esdm_seed_stash_monitor(void)
+{
+	struct entropy_buf seedbuf __aligned(ESDM_KCAPI_ALIGN),
+		addtl __aligned(ESDM_KCAPI_ALIGN);
+	unsigned int i;
+
+	for (i = 0; i < ESDM_SEED_STASH_SLOTS && esdm_es_mgr_running(); i++) {
+		struct esdm_seed_stash_slot *slot = &esdm_seed_stash[i];
+		uint32_t bits, credited = 0, j;
+		unsigned int gen;
+		long long now;
+
+		mutex_w_lock(&esdm_seed_stash_lock);
+
+		now = esdm_monotonic_now();
+		if (slot->filled && esdm_seed_stash_stale(slot, now))
+			esdm_seed_stash_scrub(slot);
+
+		/* Nothing to collect for DRNGs still to be brought up */
+		if (slot->filled || !esdm_seed_stash_wanted(now) ||
+		    !esdm_state_operational() ||
+		    !atomic_load(&esdm_state.all_online_nodes_seeded)) {
+			mutex_w_unlock(&esdm_seed_stash_lock);
+			continue;
+		}
+
+		mutex_w_unlock(&esdm_seed_stash_lock);
+
+		bits = esdm_get_seed_entropy_osr(false, false);
+		gen = atomic_load(&esdm_seed_stash_gen);
+		esdm_get_seed_buffers(&seedbuf, &addtl, bits, false, false);
+
+		for_each_esdm_es (j)
+			credited += seedbuf.entropy_es[j].e_bits;
+
+		/* Not a reseed's worth: the sources have not got it now */
+		if (credited < bits)
+			break;
+
+		mutex_w_lock(&esdm_seed_stash_lock);
+		if (!slot->filled && gen == atomic_load(&esdm_seed_stash_gen)) {
+			memcpy(&slot->seedbuf, &seedbuf, sizeof(seedbuf));
+			memcpy(&slot->addtl, &addtl, sizeof(addtl));
+			slot->bits = bits;
+			slot->gen = gen;
+			slot->created = now;
+			slot->filled = true;
+			atomic_fetch_add(&esdm_seed_stash_num, 1);
+
+			esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
+				    "seed stash: filled slot %u with %u bits\n",
+				    i, credited);
+		}
+		mutex_w_unlock(&esdm_seed_stash_lock);
+	}
+
+	memset_secure(&seedbuf, 0, sizeof(seedbuf));
+	memset_secure(&addtl, 0, sizeof(addtl));
+}
+
+unsigned int esdm_seed_stash_filled(void)
+{
+	return atomic_load(&esdm_seed_stash_num);
+}
+
+#else /* ESDM_SEED_STASH_SLOTS */
+
+bool esdm_seed_stash_get(struct entropy_buf *seedbuf, struct entropy_buf *addtl,
+			 uint32_t requested_bits)
+{
+	(void)seedbuf;
+	(void)addtl;
+	(void)requested_bits;
+	return false;
+}
+
+void esdm_seed_stash_flush(void)
+{
+}
+
+static void esdm_seed_stash_clear(void)
+{
+}
+
+static void esdm_seed_stash_monitor(void)
+{
+}
+
+unsigned int esdm_seed_stash_filled(void)
+{
+	return 0;
+}
+
+#endif /* ESDM_SEED_STASH_SLOTS */
+
+unsigned int esdm_seed_stash_slots(void)
+{
+	return ESDM_SEED_STASH_SLOTS;
 }

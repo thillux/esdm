@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "config.h"
 #include "esdm_es_aux.h"
@@ -61,6 +62,14 @@ static void esdm_es_buf_scrub(struct esdm_es_buf *buf, unsigned int slot)
 	memset_secure(&buf->blocks[slot], 0, sizeof(buf->blocks[slot]));
 	atomic_thread_fence(memory_order_seq_cst);
 	atomic_store(&buf->states[slot], esdm_es_buf_empty);
+}
+
+static uint64_t esdm_es_buf_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static uint32_t esdm_es_buf_rate(struct esdm_es_buf *buf)
@@ -112,6 +121,7 @@ int esdm_es_buf_alloc(struct esdm_es_buf *buf, unsigned int num_blocks,
 	/* The generation the zeroed fill records of a new cache belong to */
 	atomic_store(&buf->gen, 0);
 	atomic_store(&buf->monitor_initialized, false);
+	atomic_store(&buf->fill_ns, 0);
 	atomic_store_explicit(&buf->ready, true, memory_order_release);
 
 	return 0;
@@ -201,6 +211,7 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 {
 	uint32_t rate;
 	unsigned int i;
+	bool filled_any;
 
 	if (!buf || !esdm_es_buf_published(buf) || !fill)
 		return -EINVAL;
@@ -239,9 +250,17 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 		}
 	}
 
+	/*
+	 * Pass after pass until one finds no empty slot: the slots consumed
+	 * behind a pass are refilled in this round rather than in the next, so
+	 * a fill keeps up with a drain for as long as it lasts.
+	 */
+again:
+	filled_any = false;
 	for (i = 0; i < buf->num_blocks && esdm_es_mgr_running(); i++) {
 		enum esdm_es_buf_state expected = esdm_es_buf_empty;
 		unsigned int gen;
+		uint64_t start;
 
 		if (!atomic_compare_exchange_strong(&buf->states[i], &expected,
 						    esdm_es_buf_filling))
@@ -250,13 +269,16 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 		/* Asked for empty slots only, as it may cost a kernel call */
 		if (ready && !ready(ctx)) {
 			atomic_store(&buf->states[i], esdm_es_buf_empty);
-			break;
+			goto out;
 		}
+		filled_any = true;
 
 		gen = atomic_load(&buf->gen);
 		rate = esdm_es_buf_rate(buf);
 		buf->fills[i].created = esdm_monotonic_now();
+		start = esdm_es_buf_now_ns();
 		fill(&buf->blocks[i], requested_bits, ctx);
+		atomic_store(&buf->fill_ns, esdm_es_buf_now_ns() - start);
 
 		atomic_thread_fence(memory_order_seq_cst);
 
@@ -317,6 +339,10 @@ int esdm_es_buf_monitor_ready(struct esdm_es_buf *buf, uint32_t requested_bits,
 			buf->name, i, requested_bits);
 	}
 
+	if (filled_any)
+		goto again;
+
+out:
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
 		    "%s ES block filling completed\n", buf->name);
 
@@ -356,7 +382,7 @@ static uint32_t esdm_es_buf_credit(struct esdm_es_buf *buf, unsigned int slot)
 bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
 			 uint32_t requested_bits, bool credited)
 {
-	unsigned int slot;
+	unsigned int slot, probe;
 
 	if (!buf || !esdm_es_buf_published(buf) || !eb_es)
 		return false;
@@ -390,16 +416,28 @@ bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
 		slot = (unsigned int)new_idx;
 	}
 
-	enum esdm_es_buf_state expected = esdm_es_buf_filled;
+	/*
+	 * The first filled slot from there on: the monitor refills the slots
+	 * in its own order, possibly with several instances side by side, so
+	 * the one in turn may still be empty while others are filled - and a
+	 * miss sends the reseed to the synchronous collection.
+	 */
+	for (probe = 0; probe < buf->num_blocks; probe++) {
+		enum esdm_es_buf_state expected = esdm_es_buf_filled;
 
-	if (!atomic_compare_exchange_strong(&buf->states[slot], &expected,
-					    esdm_es_buf_reading)) {
+		if (atomic_compare_exchange_strong(
+			    &buf->states[(slot + probe) & buf->mask], &expected,
+			    esdm_es_buf_reading))
+			break;
+	}
+
+	if (probe == buf->num_blocks) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ES,
-			    "%s ES monitor: buffer slot %u exhausted\n",
-			    buf->name, slot);
+			    "%s ES monitor: buffer exhausted\n", buf->name);
 		esdm_es_mgr_monitor_wakeup();
 		return false;
 	}
+	slot = (slot + probe) & buf->mask;
 
 	/*
 	 * A block filled before a reset that announced itself in the meantime:
@@ -474,4 +512,50 @@ bool esdm_es_buf_try_get(struct esdm_es_buf *buf, struct entropy_es *eb_es,
 		esdm_es_mgr_monitor_wakeup();
 
 	return true;
+}
+
+/* Is any slot of @buf in @state? */
+static bool esdm_es_buf_any(struct esdm_es_buf *buf,
+			    enum esdm_es_buf_state state)
+{
+	unsigned int i;
+
+	for (i = 0; i < buf->num_blocks; i++) {
+		if (atomic_load(&buf->states[i]) == state)
+			return true;
+	}
+
+	return false;
+}
+
+/* Poll interval while waiting for a fill */
+#define ESDM_ES_BUF_WAIT_POLL_NS 50000
+
+bool esdm_es_buf_try_get_wait(struct esdm_es_buf *buf,
+			      struct entropy_es *eb_es,
+			      uint32_t requested_bits, bool credited)
+{
+	struct timespec poll = { .tv_sec = 0,
+				 .tv_nsec = ESDM_ES_BUF_WAIT_POLL_NS };
+	uint64_t deadline;
+
+	if (esdm_es_buf_try_get(buf, eb_es, requested_bits, credited))
+		return true;
+
+	/* No block serves it, see esdm_es_buf_try_get() */
+	if (!buf || !esdm_es_buf_published(buf) || !eb_es ||
+	    requested_bits > esdm_get_seed_entropy_osr(false, true))
+		return false;
+
+	deadline = esdm_es_buf_now_ns() + 2 * atomic_load(&buf->fill_ns);
+
+	while (esdm_es_mgr_running() && esdm_es_buf_any(buf, esdm_es_buf_filling) &&
+	       esdm_es_buf_now_ns() < deadline) {
+		nanosleep(&poll, NULL);
+		if (esdm_es_buf_any(buf, esdm_es_buf_filled) &&
+		    esdm_es_buf_try_get(buf, eb_es, requested_bits, credited))
+			return true;
+	}
+
+	return false;
 }

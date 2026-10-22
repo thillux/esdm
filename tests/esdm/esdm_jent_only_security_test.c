@@ -25,8 +25,8 @@
  * is checked against: the spent generate operations are added up when a
  * reseed comes back without full entropy, and the reseeds are forced here
  * rather than waited for. The reseed interval is left as configured, far
- * longer than this test runs, so the reseed worker has no reseed of its own to
- * interleave.
+ * longer than this test runs, so no request runs into a reseed falling due by
+ * it in between.
  *
  * The NTG.1 seeding strategy does not let a single entropy source seed the
  * ESDM initially, unless that source is a Jitter RNG in its own NTG.1 mode.

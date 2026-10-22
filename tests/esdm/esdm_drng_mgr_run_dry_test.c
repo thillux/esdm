@@ -21,19 +21,19 @@
  * Node DRNGs running dry under sustained load.
  *
  * Under SP800-90C, FIPS 140 and AIS 20/31 DRG.4 a DRNG hands out at most 2^17
- * bits from one seed. Its reseed is asked for a quarter before, and the DRNG of
- * a node leaves it to the reseed worker - but that quarter is 4 KiB, which
- * sustained load spends in microseconds, while the reseed takes milliseconds of
- * entropy collection. So the node DRNGs run into the limit all the time, and
- * what matters is how they come back:
+ * bits from one seed, 16 KiB - which sustained load spends in microseconds,
+ * while a reseed takes milliseconds of entropy collection. So the node DRNGs
+ * run into the limit all the time, and the request that does reseeds the DRNG
+ * right there, under the lock of that DRNG alone. What matters is that this
+ * keeps them in service:
  *
  *   - the ESDM stays operational and esdm_get_seed() keeps serving: a node DRNG
  *     at its limit is one in need of a reseed, not one that was never seeded,
  *     and takes neither the state that all DRNGs are seeded nor anything that
  *     goes by it along,
- *   - every node DRNG that ran dry is reseeded, not only the first few: once
- *     the load stops, all of them are back in service right away, without a
- *     request asking for any of them,
+ *   - every node DRNG under load is reseeded, and one that dropped out of the
+ *     fully seeded state all the same is brought back by the ES monitor once
+ *     the load stops, without a request asking for it,
  *   - every blocking request is answered in full: running dry is the normal
  *     case here, and no reason for esdm_get_random_bytes_full() to give up -
  *     nor for esdm_get_random_bytes_full_noblock(), which the RPC server
@@ -65,6 +65,7 @@
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "ret_checkers.h"
+#include "test_monitor.h"
 #include "threading_support.h"
 #include "wait_seeded.h"
 
@@ -81,7 +82,7 @@
 
 /*
  * How long the node DRNGs may take to all be back in service once the load
- * stopped. A pass of the worker reseeds every one of them, one entropy
+ * stopped. A round of the ES monitor brings up every one of them, one entropy
  * collection each - a fraction of this even for all nodes of a large machine,
  * and under a sanitizer.
  */
@@ -96,8 +97,8 @@
 
 /*
  * Samples between two calls of esdm_get_seed(). Each of them collects from
- * the entropy sources under the pool lock, as a reseed does, and asked on
- * every sample it would compete with the reseeds it is to observe.
+ * the entropy sources, as a reseed does, and asked on every sample it would
+ * compete with the reseeds it is to observe.
  */
 #define TEST_SEED_EVERY 25
 
@@ -224,7 +225,7 @@ static int esdm_drng_mgr_run_dry_test(void)
 	pthread_t threads[TEST_MAX_THREADS];
 	unsigned long samples = 0, all_seeded = 0, nonop = 0;
 	unsigned long seed_calls = 0, seed_ok = 0;
-	unsigned long dried = 0, reseeded = 0;
+	unsigned long used = 0, reseeded = 0, dropped = 0;
 	unsigned int nodes, num_threads, i, unseeded;
 	double start, elapsed, recovered;
 	uint8_t buf[32];
@@ -238,14 +239,9 @@ static int esdm_drng_mgr_run_dry_test(void)
 
 	CKINT(esdm_init());
 
-	/* The reseed worker is taken from the thread pool */
-	if (thread_init(1)) {
-		printf("Cannot initialize threading support\n");
-		goto err;
-	}
-
-	if (!esdm_drng_mgr_reseed_worker_start()) {
-		printf("The reseed worker is not on duty\n");
+	/* What brings a node DRNG back that dropped out all the same */
+	if (test_monitor_start()) {
+		printf("The ES monitor did not start\n");
 		goto err;
 	}
 
@@ -330,13 +326,16 @@ static int esdm_drng_mgr_run_dry_test(void)
 	recovered = test_now() - start;
 
 	for (i = 0; i < TEST_MAX_NODES; i++) {
-		if (!test_nodes[i].drops)
+		long long gens =
+			test_nodes[i].gen_end - test_nodes[i].gen_start;
+
+		if (!test_nodes[i].seen || (!gens && !test_nodes[i].drops))
 			continue;
-		dried++;
-		reseeded += (test_nodes[i].gen_end > test_nodes[i].gen_start);
-		printf("node %3u: ran dry %lu times, seeded %lld times\n", i,
-		       test_nodes[i].drops,
-		       test_nodes[i].gen_end - test_nodes[i].gen_start);
+		used++;
+		reseeded += (gens > 0);
+		dropped += !!test_nodes[i].drops;
+		printf("node %3u: seeded %lld times, dropped out %lu times\n", i,
+		       gens, test_nodes[i].drops);
 	}
 
 	printf("%.3f MB/s, %llu requests failed (first %lld), %llu answered short\n",
@@ -345,8 +344,8 @@ static int esdm_drng_mgr_run_dry_test(void)
 	       atomic_load(&test_short));
 	printf("%lu samples: all DRNGs seeded in %lu, ESDM not operational in %lu; esdm_get_seed() served %lu of %lu calls\n",
 	       samples, all_seeded, nonop, seed_ok, seed_calls);
-	printf("%lu node DRNGs ran dry, %lu of them reseeded under load, %u not back in service %.3f s after the load stopped\n",
-	       dried, reseeded, unseeded, recovered);
+	printf("%lu node DRNGs reseeded under load, %lu dropped out of the fully seeded state, %u not back in service %.3f s after the load stopped\n",
+	       reseeded, dropped, unseeded, recovered);
 
 	if (atomic_load(&test_failed) || atomic_load(&test_short)) {
 		printf("FAIL: %llu blocking requests failed, %llu were answered short\n",
@@ -362,7 +361,7 @@ static int esdm_drng_mgr_run_dry_test(void)
 		ret = 1;
 	}
 
-	if (!dried) {
+	if (!used) {
 		printf("No node DRNG ran dry - nothing more to check here\n");
 		goto out;
 	}
@@ -390,8 +389,8 @@ static int esdm_drng_mgr_run_dry_test(void)
 	}
 
 	/*
-	 * One node DRNG per pass of the worker, a second apart, and the others
-	 * waiting for their turn - or never getting one.
+	 * A node DRNG left to the requests, which go to the DRNGs that are
+	 * seeded, never comes back - it is the monitor's to bring up.
 	 */
 	if (unseeded) {
 		printf("FAIL: %u node DRNGs not back in service %.1f s after the load stopped\n",
@@ -403,7 +402,6 @@ static int esdm_drng_mgr_run_dry_test(void)
 		printf("Node DRNGs come back from running dry\n");
 
 out:
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_fini();
 	return ret;
 err:

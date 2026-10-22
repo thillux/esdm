@@ -140,8 +140,8 @@ Set the maximum interval between two reseeds of the DRNGs to
 .I SECS
 seconds. A DRNG that has not been reseeded for that long is reseeded on its
 next request. Zero seconds asks for a reseed before every request instead: the
-reseed is then part of the request that runs into it and is neither performed
-ahead of it by the reseed worker nor deferred past it. The ESDM caps the value
+reseed is then part of the request that runs into it and is not deferred past
+it for a busy entropy pool. The ESDM caps the value
 at its own upper bound; the value that ended up in effect is printed. Requires
 root.
 .TP

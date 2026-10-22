@@ -3,10 +3,10 @@
  * generate requests served from one seed
  *
  * The seed generation of the DRNG serving ordinary requests is followed through
- * both: once the reseed interval elapses the reseed worker reseeds it without a
- * request, and the generate requests reseed it once their threshold is
- * reached. The threshold is lowered to 2^10 requests for the whole test, so
- * that it is reached in a fraction of a second.
+ * both: once the reseed interval elapses, the next request reseeds it - nothing
+ * does without one, the ES monitor included -, and the generate requests
+ * reseed it once their threshold is reached. The threshold is lowered to 2^10
+ * requests for the whole test, so that it is reached in a fraction of a second.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -39,6 +39,7 @@
 #include "esdm_drng_mgr.h"
 #include "esdm_logger.h"
 #include "ret_checkers.h"
+#include "test_monitor.h"
 #include "threading_support.h"
 #include "../test_plan.h"
 
@@ -52,9 +53,9 @@
 
 /*
  * Bytes per request. The output of a seed is limited as well: under SP800-90C
- * the DRNG reseeds after ESDM_DRNG_RESEED_THRESH_BITS, three quarters of 2^17
- * bits. All requests together stay below that, so that the request threshold
- * is the only reason for a reseed.
+ * the DRNG reseeds after ESDM_DRNG_RESEED_THRESH_BITS, 2^17 bits at most. All
+ * requests together stay below that, so that the request threshold is the
+ * only reason for a reseed.
  */
 #define ESDM_RSEC_REQSIZE 1
 
@@ -63,20 +64,31 @@
 #endif
 
 /*
- * Reseed interval the worker is given, and how much longer than that a reseed
- * it owes may take to show up - generous, as it has to collect the seed from
- * the entropy sources first.
+ * Reseed interval, and how much longer than that a reseed may take to show up
+ * - generous, as the request has to collect the seed from the entropy sources
+ * first.
  */
 #define ESDM_RSEC_INTERVAL 5
 #define ESDM_RSEC_SLACK 25
 
-/* The seed generation is polled in slices of this many milliseconds */
-#define ESDM_RSEC_POLL_MS 20
+/*
+ * A request is made in slices of this many milliseconds while the interval
+ * runs - few enough for the request threshold to stay out of reach.
+ */
+#define ESDM_RSEC_POLL_MS 50
+
+#if ((ESDM_RSEC_INTERVAL + ESDM_RSEC_SLACK) * 1000 / ESDM_RSEC_POLL_MS >=     \
+     ESDM_RSEC_THRESH)
+#error "the requests made while the interval runs reach the request threshold"
+#endif
+
+/* Seconds without a request past the interval */
+#define ESDM_RSEC_IDLE (ESDM_RSEC_INTERVAL + 2)
 
 /*
  * How much earlier than the interval the second reseed may be seen: the first
- * one is seen up to a poll slice, and whatever the scheduler adds to it, after
- * it happened.
+ * one is seen once its request returned, and whatever the scheduler adds to
+ * that, after it happened.
  */
 #define ESDM_RSEC_TOLERANCE_MS 500
 
@@ -155,21 +167,30 @@ static long long esdm_rsec_now_ms(void)
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / (1000 * 1000);
 }
 
+/* One request of @len bytes, returns whether it was served in full */
+static bool esdm_rsec_request(uint8_t *buf, size_t len)
+{
+	return esdm_get_random_bytes_full_noblock(buf, len) == (ssize_t)len;
+}
+
 /*
- * Poll the seed generation of the DRNG until it moves past @from, for at most
- * @max_ms milliseconds. Returns the generation it found and, in @seen_ms, when
- * it was found - one poll slice after the seeding at the latest.
+ * Make a request every poll slice until the seed generation of the DRNG moves
+ * past @from, for at most @max_ms milliseconds. Returns the generation it found
+ * and, in @seen_ms, when it was found.
  */
-static long long esdm_rsec_wait_next(long long from, long long max_ms,
-				     long long *seen_ms)
+static long long esdm_rsec_request_until_next(long long from, long long max_ms,
+					      long long *seen_ms)
 {
 	long long start = esdm_rsec_now_ms();
+	uint8_t buf[ESDM_RSEC_REQSIZE];
 	long long gen;
 
 	TEST_RUNUNTIL(
-		"poll the seed generation every %d ms until it moves past %lld, for at most %lld ms",
-		ESDM_RSEC_POLL_MS, from, max_ms);
+		"request %zu bytes every %d ms until the seed generation moves past %lld, for at most %lld ms",
+		sizeof(buf), ESDM_RSEC_POLL_MS, from, max_ms);
 	for (;;) {
+		if (!esdm_rsec_request(buf, sizeof(buf)))
+			return from;
 		gen = esdm_rsec_drng_get().seed_generation;
 		*seen_ms = esdm_rsec_now_ms();
 		if (gen != from || *seen_ms - start > max_ms)
@@ -178,29 +199,10 @@ static long long esdm_rsec_wait_next(long long from, long long max_ms,
 	}
 }
 
-/*
- * The reseed worker reseeds the DRNG at generation @from once more, within
- * the interval and the slack, and returns when that was seen in @seen_ms.
- */
-static int esdm_rsec_interval_reseed(long long from, long long *seen_ms)
-{
-	long long gen = esdm_rsec_wait_next(
-		from, (ESDM_RSEC_INTERVAL + ESDM_RSEC_SLACK) * 1000, seen_ms);
-
-	TEST_REQUIRE("the reseed worker reseeds the DRNG within %d seconds",
-		     ESDM_RSEC_INTERVAL + ESDM_RSEC_SLACK);
-	if (!TEST_CHECK(gen != from, "%lld", gen)) {
-		printf("the DRNG is still at seed generation %lld\n", gen);
-		return 1;
-	}
-
-	return esdm_rsec_generation_check(from + 1);
-}
-
 static int esdm_reseed_security_test(void)
 {
 	uint8_t buf[ESDM_RSEC_REQSIZE];
-	long long first_ms, second_ms;
+	long long first_ms, second_ms = 0, gen;
 	unsigned int i;
 	ssize_t rc = 0;
 	int ret;
@@ -243,42 +245,53 @@ static int esdm_reseed_security_test(void)
 	if (esdm_rsec_generation_check(1))
 		goto err;
 
-	/* The worker reseeding on the interval is taken from the thread pool */
-	TEST_STEP("initialize threading support");
-	TEST_REQUIRE("threading support initializes");
-	ret = thread_init(1);
-	if (!TEST_CHECK(ret == 0, "%d", ret))
-		goto err;
-
-	TEST_STEP("start the reseed worker");
-	esdm_drng_mgr_reseed_worker_start();
-	TEST_REQUIRE("the reseed worker is on duty");
-	if (!TEST_CHECK(esdm_drng_mgr_reseed_worker_running(), "%d",
-			esdm_drng_mgr_reseed_worker_running())) {
-		printf("the reseed worker is not on duty\n");
+	/* The monitor, which looks after the DRNGs between the requests */
+	TEST_STEP("start the ES monitor");
+	TEST_REQUIRE("the ES monitor runs");
+	if (!TEST_CHECK(!test_monitor_start(), "%d",
+			esdm_es_mgr_monitor_active())) {
+		printf("the ES monitor did not start\n");
 		goto err;
 	}
 
 	/*
-	 * Nothing is requested meanwhile - the interval alone reseeds. The
-	 * initial seeding may already lie further back than the interval, so
-	 * the first reseed can come at once and only marks the start: the
-	 * second one is measured against it.
+	 * Nothing is requested meanwhile, so nothing reseeds: a reseed falling
+	 * due by the interval is the next request's.
 	 */
 	TEST_STEP("set the reseed interval to %d seconds", ESDM_RSEC_INTERVAL);
 	esdm_set_reseed_max_time(ESDM_RSEC_INTERVAL);
-
-	if (esdm_rsec_interval_reseed(1, &first_ms))
+	TEST_STEP("wait %d seconds without a request", ESDM_RSEC_IDLE);
+	esdm_rsec_sleep(ESDM_RSEC_IDLE, 0);
+	if (esdm_rsec_generation_check(1))
 		goto err;
 
-	if (esdm_rsec_interval_reseed(2, &second_ms))
+	TEST_STEP("request %zu bytes from esdm_get_random_bytes_full_noblock",
+		  sizeof(buf));
+	TEST_REQUIRE("the request returns %zu bytes", sizeof(buf));
+	if (!TEST_CHECK(esdm_rsec_request(buf, sizeof(buf)), "short")) {
+		printf("the request was not served\n");
+		goto err;
+	}
+	first_ms = esdm_rsec_now_ms();
+	if (esdm_rsec_generation_check(2))
+		goto err;
+
+	/* The requests within the interval are served from that seed */
+	TEST_REQUIRE("a request reseeds the DRNG within %d seconds",
+		     ESDM_RSEC_INTERVAL + ESDM_RSEC_SLACK);
+	gen = esdm_rsec_request_until_next(
+		2, (ESDM_RSEC_INTERVAL + ESDM_RSEC_SLACK) * 1000, &second_ms);
+	if (!TEST_CHECK(gen != 2, "%lld", gen)) {
+		printf("the DRNG is still at seed generation %lld\n", gen);
+		goto err;
+	}
+	if (esdm_rsec_generation_check(3))
 		goto err;
 
 	/*
 	 * The seed time is kept in whole seconds and a reseed is due once a
 	 * full second past the interval has begun, so the reseeds are more
-	 * than the interval apart. The first is seen late by up to the
-	 * tolerance, which is all the measurement may fall short by.
+	 * than the interval apart. The tolerance covers the scheduler.
 	 */
 	TEST_REQUIRE("the DRNG is not reseeded before the interval of %d seconds elapsed",
 		     ESDM_RSEC_INTERVAL);
@@ -291,8 +304,8 @@ static int esdm_reseed_security_test(void)
 	}
 
 	/*
-	 * The worker stays out of the way of what follows: the next interval
-	 * elapses only well after the requests are done.
+	 * The interval stays out of the way of what follows: it elapses only
+	 * well after the requests are done.
 	 */
 	TEST_STEP("set the reseed interval to 3600 seconds");
 	esdm_set_reseed_max_time(3600);
@@ -312,13 +325,17 @@ static int esdm_reseed_security_test(void)
 		goto err;
 	}
 
-	if (esdm_rsec_generation_check(4))
+	/*
+	 * A seed serves the threshold of requests, the one it was made for
+	 * included: seed 3 has one served already, so the requests take seed
+	 * 4 and, with the last one, seed 5.
+	 */
+	if (esdm_rsec_generation_check(5))
 		goto err;
 
 	ret = 0;
 
 out:
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_fini();
 	return ret;
 err:

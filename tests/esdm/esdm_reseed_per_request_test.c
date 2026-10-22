@@ -4,8 +4,9 @@
  * Every request is reseeded then, and once is enough: a request the initial
  * DRNG serves must not be preceded by two seedings in a row.
  *
- * Nor may the reseed be skipped because somebody else holds the pool lock: the
- * request waits for it. With a node DRNG next to the initial one - the
+ * Nor may the reseed be skipped because somebody else holds the pool lock: a
+ * node DRNG is reseeded without it, the initial DRNG waits for it to change
+ * the operational state. With a node DRNG next to the initial one - the
  * argument is the number of DRNG instances asked for - that covers the
  * generate loop, which the initial DRNG skips for its first block.
  *
@@ -109,7 +110,7 @@ static int esdm_rpr_busy_pool(void)
 		return 1;
 	}
 
-	printf("Request with a busy pool waited for it and was reseeded\n");
+	printf("Request with a busy pool was reseeded\n");
 
 	return 0;
 }

@@ -29,12 +29,11 @@
  *     the requests of the thread are served by the other DRNGs rather than
  *     waiting,
  *   - once its node DRNG reached its maximum output without full reseed, the
- *     requests of the thread are served by the other node DRNGs, and the
- *     reseed worker reseeds it,
+ *     request of the thread reseeds it in place and is served by it still,
  *   - the child of a fork() of a mapped thread is not served the bytes of its
  *     parent,
  *   - after a reset, the requests of a mapped thread are served, and by its
- *     node DRNG again once that is seeded anew,
+ *     node DRNG again once the ES monitor seeded that anew,
  *   - esdm_fini() returns once the threads unbound.
  */
 
@@ -61,6 +60,7 @@
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "ret_checkers.h"
+#include "test_monitor.h"
 #include "threading_support.h"
 #include "wait_seeded.h"
 
@@ -77,7 +77,7 @@
  */
 #define TEST_BUSY_REQUESTS 16
 #define TEST_REQUEST_BYTES 32
-/* Wait at most this many 100 ms slices for the reseed worker */
+/* Wait at most this many 100 ms slices for the ES monitor */
 #define TEST_SLICES 600
 /*
  * The maximum output without full reseed a node DRNG is spent with: that of
@@ -197,7 +197,7 @@ static int test_requests(struct test_thread *t, unsigned int n)
 
 /*
  * Generate past the maximum output without full reseed of the node DRNG: every
- * request is served, by the node DRNG or, once it is spent, by the others.
+ * request is served without blocking, the one that runs into it included.
  */
 static int test_spend(struct test_thread *t)
 {
@@ -373,19 +373,15 @@ static int esdm_drng_node_bind_test(void)
 	struct esdm_drng **drngs;
 	uint8_t rnd[TEST_REQUEST_BYTES];
 	uint32_t max_wo_reseed_bits;
-	unsigned int i, j, slice, started = 0;
+	unsigned int i, j, started = 0;
 	long long others;
 	int ret;
 
 	esdm_config_max_nodes_set(TEST_NODES);
 
 	CKINT(esdm_init());
-	if (thread_init(1)) {
-		printf("cannot initialize threading support\n");
-		goto err;
-	}
-	if (!esdm_drng_mgr_reseed_worker_start()) {
-		printf("the reseed worker is not on duty\n");
+	if (test_monitor_start()) {
+		printf("the ES monitor did not start\n");
 		goto err;
 	}
 
@@ -484,10 +480,9 @@ static int esdm_drng_node_bind_test(void)
 	printf("with its node DRNG busy, the thread was served by the others\n");
 
 	/*
-	 * Spent: the requests go to the other node DRNGs, not to the initial
-	 * one, and the reseed worker reseeds it. No seeding is let in while it
-	 * is spent - the pool is held -, or the reseed the node DRNG asks for at
-	 * its reseed threshold could land in time.
+	 * Spent: the request running into the maximum output reseeds the node
+	 * DRNG in place, under its lock, so neither the initial nor another
+	 * node DRNG generates for the thread, and all stay seeded.
 	 */
 	before = test_state_get();
 	max_wo_reseed_bits = esdm_config_drng_max_wo_reseed_bits();
@@ -496,36 +491,26 @@ static int esdm_drng_node_bind_test(void)
 						before.bits[1]) /
 					       (TEST_REQUEST_BYTES * 8)) +
 				TEST_SPENT_REQUESTS;
-	esdm_pool_lock();
 	ret = test_command(0, 1, TEST_CMD_SPEND);
 	after = test_state_get();
-	esdm_pool_unlock();
-	if (ret) {
-		esdm_config_drng_max_wo_reseed_bits_set(max_wo_reseed_bits);
-		goto err;
-	}
-	for (i = 2, others = 0; i < TEST_NODES; i++)
-		others += after.bits[i] - before.bits[i];
-	if (after.bits[0] != before.bits[0] ||
-	    others != TEST_SPENT_REQUESTS * TEST_REQUEST_BYTES * 8) {
-		printf("the requests past the spent node DRNG went to the initial DRNG (%lld bits) and the other node DRNGs (%lld bits)\n",
-		       after.bits[0] - before.bits[0], others);
-		esdm_config_drng_max_wo_reseed_bits_set(max_wo_reseed_bits);
-		goto err;
-	}
-	for (slice = 0; slice < TEST_SLICES; slice++) {
-		after = test_state_get();
-		if (after.gen[1] > before.gen[1] &&
-		    after.seeded == TEST_NODES)
-			break;
-		test_sleep_slice();
-	}
 	esdm_config_drng_max_wo_reseed_bits_set(max_wo_reseed_bits);
-	if (slice == TEST_SLICES) {
-		printf("the spent node DRNG was not reseeded\n");
+	if (ret)
+		goto err;
+	for (i = 0, others = 0; i < TEST_NODES; i++) {
+		if (i != 1)
+			others += after.bits[i] - before.bits[i];
+	}
+	if (others) {
+		printf("past the maximum output, the other DRNGs generated %lld bits for the thread\n",
+		       others);
 		goto err;
 	}
-	printf("the requests past the spent node DRNG went to the other node DRNGs, and it was reseeded\n");
+	if (after.gen[1] <= before.gen[1] || after.seeded != TEST_NODES) {
+		printf("the spent node DRNG was not reseeded in place (generation %lld to %lld, %u of %u DRNGs seeded)\n",
+		       before.gen[1], after.gen[1], after.seeded, TEST_NODES);
+		goto err;
+	}
+	printf("past the maximum output, the node DRNG was reseeded in place and served the thread still\n");
 
 	/* Not the bytes of the parent in the child of a fork */
 	if (test_command(1, 2, TEST_CMD_FORK))

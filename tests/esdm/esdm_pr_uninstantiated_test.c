@@ -80,7 +80,7 @@ static int esdm_pru_test(void)
 	/* The initial DRNG and the PR DRNG are all there is to seed */
 	esdm_config_max_nodes_set(1);
 
-	/* No esdm_init_monitor(): no reseed worker seeds behind our back */
+	/* No esdm_init_monitor(): no ES monitor seeds behind our back */
 	ret = esdm_init();
 	if (ret)
 		return ret;
@@ -109,18 +109,17 @@ static int esdm_pru_test(void)
 
 	/*
 	 * From here on, the aux pool is the only source, and holds too little.
-	 * Under the pool lock: each of these calls tries a seeding, which
-	 * would instantiate the PR DRNG from the sources still credited. The
-	 * DRNG instances first, as every seeding takes them before the pool
-	 * lock - the other order is a lock order inversion.
+	 * Each of these calls tries a seeding in this thread, which would
+	 * instantiate the PR DRNG from the sources still credited. Entropy
+	 * arriving seeds the DRNGs only once the sources report the boot
+	 * threshold: raised out of reach, the calls seed nothing. Nothing else
+	 * seeds without an ES monitor, and the PR request below does not go
+	 * by the threshold.
 	 */
-	esdm_drng_get_instances();
-	esdm_pool_lock();
+	esdm_set_entropy_thresh(UINT32_MAX);
 	esdm_test_es_rates_zero();
 	esdm_pool_set_entropy(0);
 	esdm_pool_insert_aux(data, sizeof(data), ESDM_PRU_SHORT_BITS);
-	esdm_pool_unlock();
-	esdm_drng_put_instances();
 
 	if (esdm_pru_pr_initiated()) {
 		printf("PR DRNG instantiated along with the initial DRNG\n");

@@ -44,11 +44,15 @@ addon/es_ebpf_testing
 
 * SP800-90C compliance: all ES with zero entropy are inserted into DRBG as "additional info" or "personalization string" (compliance to section 2.6)
 
-* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at three quarters of that limit (drng_reseed_threshold_bits capped at 98304 bits instead of 2^16) - reseeding dominates the throughput, so this gains 13-16% while leaving 32768 bits of output for the asynchronous reseed of a node DRNG to complete in
+* SP800-90C / AIS 20/31 DRG.4.10: with sp80090c, ais2031_drg4 or fips140 (unless combined with ais2031_drg3) the bits a DRNG may produce without a full reseed are capped at 2^17 (drng_max_reseed_bits), and the reseed is triggered at that limit (drng_reseed_threshold_bits capped at 2^17 instead of 2^16) - every reseed costs a seed, which bounds the throughput when the Jitter RNG is the only source
 
 * fix: esdm_get_seed() hands back the output of all entropy sources again, the zero-entropy ones collected as additional data included, without clearing the entropy estimates of the creditable sources; the returned entropy count covers the creditable sources only
 
-* Reseed the DRNGs proactively: an asynchronous worker reseeds a DRNG whose interval elapsed whether or not data was ever requested from it, brings up instances that never reached the fully seeded level, spreads the seed times over a random offset and sleeps until the next reseed falls due; the status reports the worker, its passes and the time left before each reseed
+* Seed stash: while the DRNGs reseed at a high rate, the ES monitor collects seeds ahead of the reseeds (seed_stash_slots, default 4, each kept es_buf_max_age seconds at most, compiled out with the entropy source caches); the ES monitor brings up the DRNGs that are not fully seeded, and the seed times of the node DRNGs are spread over a random offset; the status reports the reseed interval, the stash and the time left before each reseed
+
+* Seeding: a seeding holds only the lock of its DRNG while it collects - each entropy source serializes its own collections, and the pool lock covers the seeding state alone - so the DRNGs reseed side by side; a reseed takes what the sources with a cache have ready and asks a source whose cache is empty only when the others fall short of the entropy of the reseed, so a slow source such as a TPM no longer holds up every reseed once its cache is drained
+
+* Jitter RNG cache: a reseed finding it empty waits for a block an instance is filling instead of collecting one itself under the pool lock, the instances refill until no slot is empty, a consumer takes any filled slot, and a wakeup of the ES monitor during its round is no longer lost - with ais2031_drg4 and the Jitter RNG as the only source, 9 instances (es_jent_instances) deliver about 20 MB/s on a 10-core laptop, up from 14 MB/s
 
 * fix: An RPC client decoded a response whose header it had just rejected, handing the caller a payload reaching past the receive buffer - for the random calls, data generated for an earlier request (found by the new fuzz harnesses)
 
@@ -123,8 +127,6 @@ addon/es_ebpf_testing
 * fix: OpenSSL backend: the additional data from the uncredited entropy sources was dropped on every reseed instead of entering the DRBG as additional input
 
 * fix: Jitter RNG ES: a failed startup health test went unnoticed, and the Jitter RNG was credited regardless; when its collector could not be set up either, the initialization of the whole ESDM failed instead of continuing without the Jitter RNG
-
-* fix: without a reseed worker (esdm_init() without esdm_init_monitor()), node DRNGs were never reseeded; a request now reseeds them itself
 
 * fix: RPC server: a new connection could be closed as idle before its first request was read; the client now also retries an unprivileged request once on a fresh connection when the server closes it without an answer
 
@@ -224,7 +226,7 @@ addon/es_ebpf_testing
 
 * fix: esdm_rpcc_get_random_bytes() sends a request again that the ESDM answered with -EAGAIN - the DRNG serving it reached its maximum output without full reseed - at once and, should that be answered the same way, after the poll interval, as esdm_rpcc_get_random_bytes_full() does; a blocking read of /dev/urandom no longer fails with EAGAIN
 
-* fix: a request no longer seeds a node DRNG that is not fully seeded in the caller's thread while the ESDM is operational - it is served by another node or the initial DRNG, and the reseed worker brings the node up; before, every request did, under the pool lock, for as long as a spent node DRNG could not be fully reseeded, which stalled the EGD server and serialized the RPC workers
+* fix: a request no longer seeds a node DRNG that is not fully seeded in the caller's thread while the ESDM is operational - it is served by another node or the initial DRNG, and the ES monitor brings the node up; before, every request did, under the pool lock, for as long as a spent node DRNG could not be fully reseeded, which stalled the EGD server and serialized the RPC workers
 
 * fix: esdm-server and the CUSE daemons keep a non-dumpable state across their privilege changes - changing the IDs reset it to fs.suid_dumpable, which silently re-enabled core dumps of a server started with --memlock under systemd's default of 2; in sanitizer builds the root-only dumpable state is turned into the non-dumpable one, so LeakSanitizer can check the daemons at exit instead of aborting
 

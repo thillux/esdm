@@ -170,7 +170,7 @@ int main(int argc, char *argv[])
 
 	/*
 	 * get_seed only returns data after all DRNGs are seeded. There is no
-	 * reseed worker here, and a non-blocking call leaves the bring-up to
+	 * ES monitor here, and a non-blocking call leaves the bring-up to
 	 * one - it seeds a DRNG itself only once the entropy sources report
 	 * enough for a seed at once, which under the NTG.1 seeding strategy
 	 * they never do. A blocking call brings them up.

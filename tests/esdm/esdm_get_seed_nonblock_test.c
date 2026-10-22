@@ -1,15 +1,16 @@
 /*
- * Test that a non-blocking esdm_get_seed() leaves the bring-up to the worker
+ * Test that a non-blocking esdm_get_seed() leaves the bring-up to the monitor
  *
  * esdm_get_seed() hands out seed material only once all DRNGs are seeded. A
  * caller asking without blocking - the unprivileged RPC interface does - used
- * to seed every DRNG that was not right there, in its own thread, under the
- * pool lock and with the emergency reseeding. With a reseed worker on duty
- * that is the worker's job: the caller is told to come back, at once.
+ * to seed every DRNG that was not right there, in its own thread, with the
+ * emergency reseeding. With the ES monitor running that is the monitor's job:
+ * the caller is told to come back, at once.
  *
  * A node DRNG is taken out of the fully seeded state with no entropy around to
- * bring it back, and this test holds the pool lock while the request is made:
- * a request that went collecting entropy itself would wait for that lock.
+ * bring it back, and this test holds the lock of that DRNG while the request
+ * is made: a request seeding it itself would wait for that lock, or for the
+ * bring-up lock of the monitor waiting for it.
  *
  * Copyright (C) 2026, Markus Theil <theil.markus@gmail.com>
  *
@@ -47,6 +48,7 @@
 #include "esdm_logger.h"
 #include "esdm_node.h"
 #include "es_rates.h"
+#include "test_monitor.h"
 #include "threading_support.h"
 
 #if defined(ESDM_TESTMODE) && defined(ESDM_NODE)
@@ -113,14 +115,8 @@ static int esdm_gsn_test(void)
 		goto out;
 	}
 
-	if (thread_init(1)) {
-		printf("cannot initialize threading support\n");
-		ret = 1;
-		goto out;
-	}
-
-	if (!esdm_drng_mgr_reseed_worker_start()) {
-		printf("the reseed worker is not on duty\n");
+	if (test_monitor_start()) {
+		printf("the ES monitor did not start\n");
 		ret = 1;
 		goto out;
 	}
@@ -147,10 +143,10 @@ static int esdm_gsn_test(void)
 		goto out;
 	}
 
-	esdm_pool_lock();
+	mutex_w_lock(&node_drng->lock);
 
 	if (pthread_create(&thread, NULL, esdm_gsn_get_seed, &req)) {
-		esdm_pool_unlock();
+		mutex_w_unlock(&node_drng->lock);
 		ret = 1;
 		goto out;
 	}
@@ -159,11 +155,11 @@ static int esdm_gsn_test(void)
 	deadline.tv_sec += ESDM_GSN_TIMEOUT;
 	ret = pthread_timedjoin_np(thread, NULL, &deadline);
 
-	esdm_pool_unlock();
+	mutex_w_unlock(&node_drng->lock);
 
 	if (ret) {
 		pthread_join(thread, NULL);
-		printf("the non-blocking esdm_get_seed() waited for the pool lock - it brought the DRNGs up itself\n");
+		printf("the non-blocking esdm_get_seed() waited for the node DRNG - it brought the DRNGs up itself\n");
 		ret = 1;
 		goto out;
 	}
@@ -175,11 +171,10 @@ static int esdm_gsn_test(void)
 		goto out;
 	}
 
-	printf("the non-blocking esdm_get_seed() returned -EAGAIN at once and left the bring-up to the worker\n");
+	printf("the non-blocking esdm_get_seed() returned -EAGAIN at once and left the bring-up to the monitor\n");
 	ret = 0;
 
 out:
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_fini();
 	free(req.buf);
 	return ret;

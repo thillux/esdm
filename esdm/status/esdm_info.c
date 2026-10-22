@@ -122,8 +122,6 @@ esdm_drng_status_obj(const struct esdm_drng_stats *stats)
 			       json_object_new_boolean(stats->initiated));
 	json_object_object_add(obj, "force_reseed",
 			       json_object_new_boolean(stats->force_reseed));
-	json_object_object_add(obj, "reseed_pending",
-			       json_object_new_boolean(stats->reseed_pending));
 	json_object_object_add(
 		obj, "requests_until_reseed",
 		json_object_new_int64(stats->requests_until_reseed));
@@ -263,7 +261,7 @@ int esdm_status_drng_pr_json(char *buf, size_t buflen)
 static struct json_object *esdm_status_obj(void)
 {
 	struct esdm_drng *drng = esdm_drng_init_instance();
-	struct json_object *root, *compliance, *sources, *drngs, *worker,
+	struct json_object *root, *compliance, *sources, *drngs, *reseed,
 		*selftest;
 	uint32_t i;
 
@@ -271,9 +269,9 @@ static struct json_object *esdm_status_obj(void)
 	compliance = json_object_new_array();
 	sources = json_object_new_array();
 	drngs = json_object_new_array();
-	worker = json_object_new_object();
+	reseed = json_object_new_object();
 	selftest = json_object_new_object();
-	if (!root || !compliance || !sources || !drngs || !worker ||
+	if (!root || !compliance || !sources || !drngs || !reseed ||
 	    !selftest) {
 		json_object_put(root);
 		root = NULL;
@@ -358,17 +356,20 @@ static struct json_object *esdm_status_obj(void)
 	drngs = NULL;
 
 	/*
-	 * The thread that reseeds the DRNGs before a request runs into their
-	 * reseed condition.
+	 * The reseeding of the DRNGs, and the seeds stashed ahead of it while
+	 * they reseed at a high rate.
 	 */
 	json_object_object_add(
-		worker, "running",
-		json_object_new_boolean(esdm_drng_mgr_reseed_worker_running()));
-	json_object_object_add(
-		worker, "reseed_interval_seconds",
+		reseed, "reseed_interval_seconds",
 		json_object_new_int64(esdm_get_reseed_max_time()));
-	json_object_object_add(root, "reseed_worker", worker);
-	worker = NULL;
+	json_object_object_add(reseed, "seed_stash_slots",
+			       json_object_new_int64(esdm_seed_stash_slots()));
+	json_object_object_add(reseed, "stashed_seeds",
+			       json_object_new_int64(esdm_seed_stash_filled()));
+	json_object_object_add(reseed, "stashed_seed_max_age_seconds",
+			       json_object_new_int64(ESDM_ES_BUF_MAX_AGE));
+	json_object_object_add(root, "reseed", reseed);
+	reseed = NULL;
 
 	/*
 	 * The self tests of the hash and the DRNG implementation and of the
@@ -401,7 +402,7 @@ out:
 	json_object_put(compliance);
 	json_object_put(sources);
 	json_object_put(drngs);
-	json_object_put(worker);
+	json_object_put(reseed);
 	json_object_put(selftest);
 
 	return root;
@@ -422,7 +423,7 @@ static const struct esdm_status_txt_label esdm_status_labels[] = {
 	{ "", "drngs", "DRNG instance" },
 	/* The index of the section says it already */
 	{ "entropy_sources", "id", NULL },
-	{ "reseed_worker", "reseed_interval_seconds",
+	{ "reseed", "reseed_interval_seconds",
 	  "Reseed interval in seconds" },
 	{ "periodic_self_test", "self_test_interval_seconds",
 	  "Self test interval in seconds" },

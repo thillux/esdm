@@ -172,7 +172,6 @@ int main(int argc, char *argv[])
 	ret = esdm_nas_check();
 
 out:
-	esdm_drng_mgr_reseed_worker_stop();
 	esdm_es_mgr_finalize();
 	esdm_drng_mgr_finalize();
 	esdm_node_fini();
