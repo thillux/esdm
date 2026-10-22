@@ -155,6 +155,11 @@ conf_data.set('ESDM_JENT_ALL_CACHES',
 # compiles out of all ES sources. The es_buf_force option
 # overrides this and keeps the per-ES counts honored.
 disable_es_buf = sp80090c and not get_option('es_buf_force')
+# Counted in whole seconds, it has to outlive the ES monitor interval of 2^29 ns
+if get_option('es_buf_max_age') == 1
+	error('es_buf_max_age must be 0 or at least 2')
+endif
+conf_data.set('ESDM_ES_BUF_MAX_AGE', get_option('es_buf_max_age'))
 
 # esdm_es_buf_alloc() refuses any other block count at runtime, which silently
 # leaves the ES without its cache. A power of two up to 2^31 is what divides
