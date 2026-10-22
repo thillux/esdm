@@ -197,7 +197,7 @@ endif
 
 # Several sources, compiled into the test - see the file header. Only a build
 # with two at least has them.
-if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es_ext_socket_num >= 2
+if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled() and es_ext_num >= 2
 	es_ext_multi_test = executable('es_ext_multi_test',
 		[ esdm_ipc_ns, 'es_ext_multi_test.c' ],
 		dependencies: dependencies_server,

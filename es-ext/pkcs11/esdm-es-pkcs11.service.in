@@ -7,7 +7,7 @@
 # /etc/systemd/system/esdm-server.service.d/pkcs11.conf:
 #
 #	[Service]
-#	Environment="ESDM_SERVER_OPTIONS=--es_ext_socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket --es_ext_socket_uid esdm-es-pkcs11"
+#	Environment="ESDM_SERVER_OPTIONS=--es_ext /run/esdm-es-pkcs11/esdm-es-pkcs11.socket --es_ext_uid esdm-es-pkcs11"
 #
 # and tell this daemon about the module and the token with one of its own,
 # /etc/systemd/system/esdm-es-pkcs11.service.d/token.conf:

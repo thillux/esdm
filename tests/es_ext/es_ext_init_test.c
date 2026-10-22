@@ -86,10 +86,10 @@ int main(void)
 	}
 
 	esdm_test_es_rates_zero();
-	esdm_config_es_ext_socket_entropy_rate_set(0, 256);
-	CHECK_EQ(esdm_es_ext_socket_set_path(0, socket), 0);
+	esdm_config_es_ext_entropy_rate_set(0, 256);
+	CHECK_EQ(esdm_es_ext_set_path(0, socket), 0);
 	/* The provider runs as the user of the test */
-	CHECK_EQ(esdm_es_ext_socket_set_peer_uid(0, getuid()), 0);
+	CHECK_EQ(esdm_es_ext_set_peer_uid(0, getuid()), 0);
 
 	ret = esdm_init();
 	CHECK_EQ(ret, 0);

@@ -305,18 +305,18 @@ uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
  * @brief External ES provider configuration: set the entropy rate
  *
  * The rate caps the entropy the provider of the external entropy source
- * socket @idx (esdm-server --es_ext_socket, meson option es_ext_socket_path)
+ * socket @idx (esdm-server --es_ext, meson option es_ext_path)
  * is credited with: a block is credited with what the provider claims for it,
  * but with no more than this rate allows. See libesdm_es_ext(3).
  *
  * A rate set here takes precedence over the one the provider declares;
  * ESDM_ES_EXT_ENTROPY_RATE_AUTO sets none, so that the provider is credited
  * at the rate it declares, at 0 if it declares none. Before a rate is set,
- * the one of the meson option es_ext_socket_entropy_rate applies, none by
+ * the one of the meson option es_ext_entropy_rate applies, none by
  * default.
  *
  * The ESDM has as many provider socket sources as the build configured (meson
- * option es_ext_socket_num), numbered from 0, each with a rate of its own.
+ * option es_ext_num), numbered from 0, each with a rate of its own.
  *
  * NOTE: The ESDM ensures that the entropy rate cannot be set to a value larger
  *	 than the security strength of the the applied DRNG.
@@ -326,7 +326,7 @@ uint32_t esdm_config_es_jent_kernel_entropy_rate(void);
  *
  * @return 0 on success, -EINVAL if there is no source @idx
  */
-int esdm_config_es_ext_socket_entropy_rate_set(unsigned int idx, uint32_t ent);
+int esdm_config_es_ext_entropy_rate_set(unsigned int idx, uint32_t ent);
 
 /**
  * @brief External ES provider configuration: get the entropy rate
@@ -337,7 +337,7 @@ int esdm_config_es_ext_socket_entropy_rate_set(unsigned int idx, uint32_t ent);
  *	   one its provider declared on its last connection, else 0; 0 if there
  *	   is no source @idx
  */
-uint32_t esdm_config_es_ext_socket_entropy_rate(unsigned int idx);
+uint32_t esdm_config_es_ext_entropy_rate(unsigned int idx);
 
 /**
  * @brief DRNG Manager configuration: get maximum value without successful

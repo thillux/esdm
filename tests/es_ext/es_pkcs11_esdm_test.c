@@ -20,8 +20,8 @@
 /*
  * The PKCS#11 entropy source reaching the ESDM: esdm-es-pkcs11 serving a
  * SoftHSM token, read by an ExternalSocket source of the ESDM configured for
- * its socket and its user, as esdm-server --es_ext_socket and
- * --es_ext_socket_uid configure it - the ESDM needs nothing that knows of
+ * its socket and its user, as esdm-server --es_ext and
+ * --es_ext_uid configure it - the ESDM needs nothing that knows of
  * PKCS#11.
  *
  * - The source passes its self test and delivers data of the token, credited
@@ -40,7 +40,7 @@
 
 #include "config.h"
 
-#define ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC 1
+#define ESDM_EXT_RETRY_INTERVAL_SEC 1
 
 /* The unit under test */
 #include "esdm_es_extsock.c"
@@ -100,8 +100,8 @@ static void test_credited(void)
 	uint8_t second[ESDM_DRNG_SECURITY_STRENGTH_BYTES];
 	struct json_object *state, *plugin;
 
-	/* Configured as esdm-server --es_ext_socket does */
-	CHECK_EQ(esdm_es_ext_socket_set_path(0, pk.socket), 0);
+	/* Configured as esdm-server --es_ext does */
+	CHECK_EQ(esdm_es_ext_set_path(0, pk.socket), 0);
 	CHECK_EQ(ES->init(), 0);
 	CHECK(ES->active(), "the source is not active");
 	CHECK_EQ(ES->selftest(), 0);
@@ -114,9 +114,9 @@ static void test_credited(void)
 	CHECK_EQ(ES->curr_entropy(bits), level);
 
 	/* A rate configured for the source takes precedence */
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(0, 64), 0);
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(0, 64), 0);
 	CHECK_EQ(test_get(bits, NULL), test_level(64, bits));
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(
 			 0, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
 		 0);
 
@@ -196,9 +196,9 @@ int main(int argc, char *argv[])
 
 	/*
 	 * The daemon runs as the test user, accepted as esdm-server
-	 * --es_ext_socket_uid accepts it
+	 * --es_ext_uid accepts it
 	 */
-	CHECK_EQ(esdm_es_ext_socket_set_peer_uid(0, (int64_t)getuid()), 0);
+	CHECK_EQ(esdm_es_ext_set_peer_uid(0, (int64_t)getuid()), 0);
 
 	test_credited();
 	test_restarted();

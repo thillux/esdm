@@ -331,7 +331,7 @@ static void test_pkcs11_module_gone(void)
 /*
  * External entropy sources are no longer loaded into the daemon as plugin
  * libraries - a source is served by a provider of its own, read with
- * --es_ext_socket. A setup still naming a plugin library has to learn so, with
+ * --es_ext. A setup still naming a plugin library has to learn so, with
  * the usage as for any unknown option, rather than run without the source it
  * asked for. Nor does the usage offer the options any longer.
  */
@@ -365,17 +365,17 @@ static void test_es_ext_lib_gone(void)
  * and the user it may run as. The socket is only connected to by esdm_init(),
  * so an unprivileged run accepts any path.
  */
-static void test_es_ext_socket_options(void)
+static void test_es_ext_options(void)
 {
-	const char *const opts[] = { "--es_ext_socket",
+	const char *const opts[] = { "--es_ext",
 				     "/nonexistent/esdm-es-ext.socket",
-				     "--es_ext_socket_entropy_rate", "auto",
-				     "--es_ext_socket_uid", "1234", NULL };
-	const char *const by_name[] = { "--es_ext_socket_uid", "root", NULL };
-	const char *const empty[] = { "--es_ext_socket", "", NULL };
-	const char *const no_user[] = { "--es_ext_socket_uid",
+				     "--es_ext_entropy_rate", "auto",
+				     "--es_ext_uid", "1234", NULL };
+	const char *const by_name[] = { "--es_ext_uid", "root", NULL };
+	const char *const empty[] = { "--es_ext", "", NULL };
+	const char *const no_user[] = { "--es_ext_uid",
 					"no-such-user-esdm-test", NULL };
-	const char *const bad_rate[] = { "--es_ext_socket_entropy_rate", "300",
+	const char *const bad_rate[] = { "--es_ext_entropy_rate", "300",
 					 NULL };
 	struct test_run r;
 
@@ -384,25 +384,25 @@ static void test_es_ext_socket_options(void)
 	if (geteuid()) {
 		CHECK_EQ(test_run_parsed(&r, opts), 1);
 		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-		      "the --es_ext_socket options were not accepted (output: %.300s)",
+		      "the --es_ext options were not accepted (output: %.300s)",
 		      r.err);
 
 		CHECK_EQ(test_run_parsed(&r, by_name), 1);
 		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
-		      "a user name for --es_ext_socket_uid was not accepted (output: %.300s)",
+		      "a user name for --es_ext_uid was not accepted (output: %.300s)",
 		      r.err);
 	}
 #else
 	(void)by_name;
 	CHECK_EQ(test_run(&r, opts, NULL), 1);
 	CHECK(strstr(r.err, "not part of this build") != NULL,
-	      "--es_ext_socket was not refused without external ES (output: %.300s)",
+	      "--es_ext was not refused without external ES (output: %.300s)",
 	      r.err);
 #endif
 
 	CHECK_EQ(test_run(&r, empty, NULL), 1);
 	CHECK(strstr(r.err, "must not be empty") != NULL,
-	      "an empty --es_ext_socket was not refused (output: %.300s)",
+	      "an empty --es_ext was not refused (output: %.300s)",
 	      r.err);
 
 	CHECK_EQ(test_run(&r, no_user, NULL), 1);
@@ -411,7 +411,7 @@ static void test_es_ext_socket_options(void)
 
 	CHECK_EQ(test_run(&r, bad_rate, NULL), 1);
 	CHECK(strstr(r.err, "entropy rate from 0 to 256") != NULL,
-	      "--es_ext_socket_entropy_rate 300 was not refused (output: %.300s)",
+	      "--es_ext_entropy_rate 300 was not refused (output: %.300s)",
 	      r.err);
 }
 
@@ -428,9 +428,9 @@ static void test_es_ext_repeated_options(void)
 		const char *opt;
 		const char *arg;
 	} opts[] = {
-		{ "--es_ext_socket", "/nonexistent/esdm-es-ext.socket" },
-		{ "--es_ext_socket_entropy_rate", "64" },
-		{ "--es_ext_socket_uid", "1234" },
+		{ "--es_ext", "/nonexistent/esdm-es-ext.socket" },
+		{ "--es_ext_entropy_rate", "64" },
+		{ "--es_ext_uid", "1234" },
 	};
 	/* Up to 16 sources, and one occurrence more */
 	const char *argv[2 * 17 + 1];
@@ -438,28 +438,28 @@ static void test_es_ext_repeated_options(void)
 	unsigned int i, n;
 
 	for (i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
-		for (n = 0; n <= ESDM_EXT_SOCKET_NUM; n++) {
+		for (n = 0; n <= ESDM_EXT_NUM; n++) {
 			argv[2 * n] = opts[i].opt;
 			argv[2 * n + 1] = opts[i].arg;
 		}
 
 		/* Once per source */
-		argv[2 * ESDM_EXT_SOCKET_NUM] = NULL;
+		argv[2 * ESDM_EXT_NUM] = NULL;
 		if (geteuid()) {
 			CHECK_EQ(test_run_parsed(&r, argv), 1);
 			CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 			      "%s given %u times was not accepted (output: %.300s)",
-			      opts[i].opt, ESDM_EXT_SOCKET_NUM, r.err);
+			      opts[i].opt, ESDM_EXT_NUM, r.err);
 		}
 
 		/* And once more */
-		argv[2 * ESDM_EXT_SOCKET_NUM] = opts[i].opt;
-		argv[2 * ESDM_EXT_SOCKET_NUM + 2] = NULL;
+		argv[2 * ESDM_EXT_NUM] = opts[i].opt;
+		argv[2 * ESDM_EXT_NUM + 2] = NULL;
 		CHECK_EQ(test_run(&r, argv, NULL), 1);
 		CHECK(strstr(r.err, "is given more often than this build has") !=
 			      NULL,
 		      "%s given %u times was not refused (output: %.300s)",
-		      opts[i].opt, ESDM_EXT_SOCKET_NUM + 1, r.err);
+		      opts[i].opt, ESDM_EXT_NUM + 1, r.err);
 		CHECK(strstr(r.err, TEST_NOT_ROOT) == NULL,
 		      "%s given too often was refused only after the parsing (output: %.300s)",
 		      opts[i].opt, r.err);
@@ -520,7 +520,7 @@ int main(int argc, char *argv[])
 	test_errors_without_verbose();
 	test_pkcs11_module_gone();
 	test_es_ext_lib_gone();
-	test_es_ext_socket_options();
+	test_es_ext_options();
 	test_es_ext_repeated_options();
 	test_es_jent_kernel_name_option();
 

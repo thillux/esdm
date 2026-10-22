@@ -135,23 +135,23 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
 	fprintf(stderr,
-		"\t   --es_ext_socket <PATH>\tRead the external entropy source\n");
+		"\t   --es_ext <PATH>\tRead the external entropy source\n");
 	fprintf(stderr,
 		"\t\t\tserved by a provider on the Unix domain socket PATH\n");
 	fprintf(stderr,
-		"\t   --es_ext_socket_entropy_rate <BITS>\tCredit the provider with\n");
+		"\t   --es_ext_entropy_rate <BITS>\tCredit the provider with\n");
 	fprintf(stderr,
 		"\t\t\tat most BITS of entropy per 256 bits of data (0 to 256), or\n");
 	fprintf(stderr,
 		"\t\t\twith what it declares (auto, by default)\n");
 	fprintf(stderr,
-		"\t   --es_ext_socket_uid <USER>\tAccept a provider running as USER\n");
+		"\t   --es_ext_uid <USER>\tAccept a provider running as USER\n");
 	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
 	fprintf(stderr,
 		"\t\t\tThe --es_ext options may be repeated: the n-th occurrence\n");
 	fprintf(stderr,
 		"\t\t\tof one configures the n-th source, of which this build has\n");
-	fprintf(stderr, "\t\t\t%u\n", ESDM_EXT_SOCKET_NUM);
+	fprintf(stderr, "\t\t\t%u\n", ESDM_EXT_NUM);
 	fprintf(stderr,
 		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
 	fprintf(stderr,
@@ -214,11 +214,11 @@ struct es_ext_option {
 	unsigned int given;
 };
 
-static struct es_ext_option es_ext_socket_opt = { "--es_ext_socket", 0 };
-static struct es_ext_option es_ext_socket_rate_opt = {
-	"--es_ext_socket_entropy_rate", 0
+static struct es_ext_option es_ext_opt = { "--es_ext", 0 };
+static struct es_ext_option es_ext_rate_opt = {
+	"--es_ext_entropy_rate", 0
 };
-static struct es_ext_option es_ext_socket_uid_opt = { "--es_ext_socket_uid",
+static struct es_ext_option es_ext_uid_opt = { "--es_ext_uid",
 						      0 };
 
 /*
@@ -228,12 +228,12 @@ static struct es_ext_option es_ext_socket_uid_opt = { "--es_ext_socket_uid",
 static unsigned int es_ext_instance(struct es_ext_option *opt)
 {
 #ifdef ESDM_ES_EXT
-	if (opt->given < ESDM_EXT_SOCKET_NUM)
+	if (opt->given < ESDM_EXT_NUM)
 		return opt->given++;
 
 	fprintf(stderr,
-		"%s is given more often than this build has provider socket sources, which is %u (meson option es_ext_socket_num)\n",
-		opt->name, ESDM_EXT_SOCKET_NUM);
+		"%s is given more often than this build has provider socket sources, which is %u (meson option es_ext_num)\n",
+		opt->name, ESDM_EXT_NUM);
 #else
 	fprintf(stderr,
 		"External entropy sources are not part of this build (meson option es_ext), %s is not taken\n",
@@ -262,10 +262,10 @@ static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
 
 /*
  * A socket of the external entropy source providers, in place of the one the
- * build names (es_ext_socket_path). It is connected to by esdm_init(), and
+ * build names (es_ext_path). It is connected to by esdm_init(), and
  * again whenever the connection is lost.
  */
-static void set_es_ext_socket(const char *path)
+static void set_es_ext(const char *path)
 {
 	unsigned int idx;
 	int ret;
@@ -276,8 +276,8 @@ static void set_es_ext_socket(const char *path)
 		exit(1);
 	}
 
-	idx = es_ext_instance(&es_ext_socket_opt);
-	ret = esdm_es_ext_socket_set_path(idx, path);
+	idx = es_ext_instance(&es_ext_opt);
+	ret = esdm_es_ext_set_path(idx, path);
 	if (ret) {
 		fprintf(stderr,
 			"Cannot set the external ES provider socket %s: %s\n",
@@ -314,7 +314,7 @@ static void set_es_jent_kernel_name(const char *name)
 }
 
 /* The user a provider may run as next to root: a uid or a user name */
-static void set_es_ext_socket_uid(const char *arg)
+static void set_es_ext_uid(const char *arg)
 {
 	unsigned long val;
 	unsigned int idx;
@@ -332,15 +332,15 @@ static void set_es_ext_socket_uid(const char *arg)
 
 		if (!pw) {
 			fprintf(stderr,
-				"--es_ext_socket_uid takes a uid or a user name, not \"%s\"\n",
+				"--es_ext_uid takes a uid or a user name, not \"%s\"\n",
 				arg);
 			exit(1);
 		}
 		uid = (int64_t)pw->pw_uid;
 	}
 
-	idx = es_ext_instance(&es_ext_socket_uid_opt);
-	ret = esdm_es_ext_socket_set_peer_uid(idx, uid);
+	idx = es_ext_instance(&es_ext_uid_opt);
+	ret = esdm_es_ext_set_peer_uid(idx, uid);
 
 	if (ret) {
 		fprintf(stderr, "Cannot accept the uid %s: %s\n", arg,
@@ -374,9 +374,9 @@ static void parse_opts(int argc, char *argv[])
 			{ "keep_ipc", 0, 0, 0 },
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
-			{ "es_ext_socket", 1, 0, 0 },
-			{ "es_ext_socket_entropy_rate", 1, 0, 0 },
-			{ "es_ext_socket_uid", 1, 0, 0 },
+			{ "es_ext", 1, 0, 0 },
+			{ "es_ext_entropy_rate", 1, 0, 0 },
+			{ "es_ext_uid", 1, 0, 0 },
 			{ "es_jent_kernel_name", 1, 0, 0 },
 			{ "no_dtls", 0, 0, 0 },
 			{ "no_fixed_drng_mapping", 0, 0, 0 },
@@ -473,18 +473,18 @@ static void parse_opts(int argc, char *argv[])
 					exit(1);
 				break;
 			case 17:
-				/* es_ext_socket */
-				set_es_ext_socket(optarg);
+				/* es_ext */
+				set_es_ext(optarg);
 				break;
 			case 18:
-				/* es_ext_socket_entropy_rate */
+				/* es_ext_entropy_rate */
 				set_es_ext_rate(
-					&es_ext_socket_rate_opt, optarg,
-					esdm_config_es_ext_socket_entropy_rate_set);
+					&es_ext_rate_opt, optarg,
+					esdm_config_es_ext_entropy_rate_set);
 				break;
 			case 19:
-				/* es_ext_socket_uid */
-				set_es_ext_socket_uid(optarg);
+				/* es_ext_uid */
+				set_es_ext_uid(optarg);
 				break;
 			case 20:
 				/* es_jent_kernel_name */

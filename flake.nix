@@ -1030,7 +1030,7 @@
 
                 # The ESDM reads the daemon through its provider socket source
                 systemd.services.esdm-server.environment.ESDM_SERVER_OPTIONS =
-                  "--es_ext_socket ${socket} --es_ext_socket_uid esdm-es-pkcs11";
+                  "--es_ext ${socket} --es_ext_uid esdm-es-pkcs11";
 
                 environment.systemPackages = [
                   esdm

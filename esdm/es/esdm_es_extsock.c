@@ -28,14 +28,14 @@
  * connection - an error, a provider that does not answer in time, an answer
  * breaking the protocol - closes it: an answer arriving late would otherwise
  * be taken for the one to the next request. A new connection is made on
- * demand, at most every ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC seconds after a
+ * demand, at most every ESDM_EXT_RETRY_INTERVAL_SEC seconds after a
  * failed attempt or a connection given up on. What the ESDM asks of the source
  * while a request may be in progress - the entropy available, its state in the
  * ESDM status - is taken from what the source publishes whenever it releases
  * its mutex, not waited for.
  *
  * But for the status of the provider, which the ESDM status asks for: it is
- * waited for ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS at the most, a seeding waiting
+ * waited for ESDM_EXT_STATUS_TIMEOUT_MS at the most, a seeding waiting
  * for the source meanwhile, and a provider not answering by then keeps its
  * connection. Its answer comes before the one to the next request - a provider
  * answers one request after the other - and is taken off the connection, as
@@ -54,7 +54,7 @@
  * checked on every connection: root, or the one uid configured in addition.
  *
  * A block is credited with what the provider claims for it, at most with what
- * the rate of the source allows (esdm_config_es_ext_socket_entropy_rate()):
+ * the rate of the source allows (esdm_config_es_ext_entropy_rate()):
  * the one configured, else the one the provider declares in its answer to
  * INFO, else 0 - see esdm_es_extsock_rate(). A
  * provider that fails is credited with nothing until it delivers again, on a
@@ -125,7 +125,7 @@ struct esdm_es_extsock {
 
 	/*
 	 * The compile-time default of the socket path, the entry of the source
-	 * in the meson option es_ext_socket_path - and its override, as given
+	 * in the meson option es_ext_path - and its override, as given
 	 * on the command line of the server, NULL for none. Configuration like
 	 * the entropy rates: it outlives esdm_fini().
 	 */
@@ -205,7 +205,7 @@ struct esdm_es_extsock {
 	bool status_warned;
 
 	/*
-	 * A STATUS was not answered within ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS:
+	 * A STATUS was not answered within ESDM_EXT_STATUS_TIMEOUT_MS:
 	 * its answer is still to come on the connection, before the one to the
 	 * next request
 	 */
@@ -219,7 +219,7 @@ struct esdm_es_extsock {
 
 	/*
 	 * What is read of the source without the mutex, which a request holds
-	 * for up to ESDM_EXT_SOCKET_TIMEOUT_MS: the ESDM status, and the
+	 * for up to ESDM_EXT_TIMEOUT_MS: the ESDM status, and the
 	 * entropy available, are not to wait for that - see esdm_es_mgr_cb.h.
 	 * Published by esdm_es_extsock_unlock() whenever the write lock is
 	 * released; the state and the status of the provider under
@@ -236,7 +236,7 @@ struct esdm_es_extsock {
 	struct esdm_es_ext_status_cache status;
 };
 
-#if ESDM_EXT_SOCKET_NUM > 1
+#if ESDM_EXT_NUM > 1
 #define ESDM_ES_EXTSOCK_TAG(i) " " ESDM_ES_EXTSOCK_NAME(i)
 #else
 #define ESDM_ES_EXTSOCK_TAG(i) ""
@@ -248,19 +248,19 @@ struct esdm_es_extsock {
 		.tag = ESDM_ES_EXTSOCK_TAG(i),                                 \
 		.who = "provider" ESDM_ES_EXTSOCK_TAG(i),                      \
 		.mutex = MUTEX_UNLOCKED,                                       \
-		.default_path = ESDM_EXT_SOCKET_PATH_##i,                      \
+		.default_path = ESDM_EXT_PATH_##i,                      \
 		.rate = ESDM_ES_EXT_PROTO_RATE_NONE,                           \
 		.published_rate = ESDM_ES_EXT_PROTO_RATE_NONE,                 \
-		.peer_uid = ESDM_EXT_SOCKET_PEER_UID_##i,                      \
+		.peer_uid = ESDM_EXT_PEER_UID_##i,                      \
 		.fd = -1,                                                      \
 		.state_mutex = MUTEX_UNLOCKED,                                 \
 		.state_status = "not connected",                               \
-		.state_peer_uid = ESDM_EXT_SOCKET_PEER_UID_##i,                \
+		.state_peer_uid = ESDM_EXT_PEER_UID_##i,                \
 	},
 
-/* The provider socket sources, ESDM_EXT_SOCKET_NUM of them */
-static struct esdm_es_extsock extsock[ESDM_EXT_SOCKET_NUM] = {
-	ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_EXTSOCK_INSTANCE)
+/* The provider socket sources, ESDM_EXT_NUM of them */
+static struct esdm_es_extsock extsock[ESDM_EXT_NUM] = {
+	ESDM_EXT_INSTANCES(ESDM_ES_EXTSOCK_INSTANCE)
 };
 
 /* Caller must hold the mutex of @sock. */
@@ -344,9 +344,9 @@ esdm_es_extsock_label_locked(const struct esdm_es_extsock *sock, char *buf,
 
 /*
  * The rate @sock is credited at, its provider declaring @declared: the rate
- * configured for it takes precedence - the n-th --es_ext_socket_entropy_rate
- * of the server, esdm_config_es_ext_socket_entropy_rate_set(), or the meson
- * option es_ext_socket_entropy_rate - then the one the provider declares,
+ * configured for it takes precedence - the n-th --es_ext_entropy_rate
+ * of the server, esdm_config_es_ext_entropy_rate_set(), or the meson
+ * option es_ext_entropy_rate - then the one the provider declares,
  * then 0. *@source, if not NULL, tells which it is.
  *
  * A provider is another process, trusted for the user it runs as: accepting
@@ -357,7 +357,7 @@ static uint32_t esdm_es_extsock_rate(const struct esdm_es_extsock *sock,
 				     uint32_t declared, const char **source)
 {
 	uint32_t rate =
-		esdm_config_es_ext_socket_entropy_rate_configured(sock->idx);
+		esdm_config_es_ext_entropy_rate_configured(sock->idx);
 	const char *from = "config";
 
 	if (rate == ESDM_ES_EXT_ENTROPY_RATE_AUTO) {
@@ -439,7 +439,7 @@ static void esdm_es_extsock_drop_locked(struct esdm_es_extsock *sock)
 {
 	esdm_es_extsock_disconnect_locked(sock);
 	sock->retry_at =
-		esdm_es_extsock_after(ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
+		esdm_es_extsock_after(ESDM_EXT_RETRY_INTERVAL_SEC);
 }
 
 /* Log @msg unless it was the last thing logged about the connection */
@@ -588,8 +588,8 @@ static int esdm_es_extsock_startdtls_locked(struct esdm_es_extsock *sock)
 
 	/* The handshake is bound by the same time a request is */
 	clock_gettime(CLOCK_MONOTONIC, &deadline);
-	deadline.tv_sec += ESDM_EXT_SOCKET_TIMEOUT_MS / 1000;
-	deadline.tv_nsec += (ESDM_EXT_SOCKET_TIMEOUT_MS % 1000) * 1000000L;
+	deadline.tv_sec += ESDM_EXT_TIMEOUT_MS / 1000;
+	deadline.tv_nsec += (ESDM_EXT_TIMEOUT_MS % 1000) * 1000000L;
 	if (deadline.tv_nsec >= 1000000000L) {
 		deadline.tv_sec++;
 		deadline.tv_nsec -= 1000000000L;
@@ -1033,7 +1033,7 @@ static bool esdm_es_extsock_ensure_locked(struct esdm_es_extsock *sock)
 	/* The retry interval counts from the end of the attempt */
 	if (esdm_es_extsock_connect_locked(sock)) {
 		sock->retry_at = esdm_es_extsock_after(
-			ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
+			ESDM_EXT_RETRY_INTERVAL_SEC);
 		return false;
 	}
 
@@ -1120,7 +1120,7 @@ err:
 
 /*
  * As above, for a caller that does not care whether the request went out,
- * waiting for the answer ESDM_EXT_SOCKET_TIMEOUT_MS at the most
+ * waiting for the answer ESDM_EXT_TIMEOUT_MS at the most
  */
 static ssize_t esdm_es_extsock_transact_locked(struct esdm_es_extsock *sock,
 					       uint16_t type, uint32_t length,
@@ -1129,7 +1129,7 @@ static ssize_t esdm_es_extsock_transact_locked(struct esdm_es_extsock *sock,
 	bool sent;
 
 	return esdm_es_extsock_request_locked(
-		sock, type, length, ESDM_EXT_SOCKET_TIMEOUT_MS, rsp, &sent);
+		sock, type, length, ESDM_EXT_TIMEOUT_MS, rsp, &sent);
 }
 
 /*
@@ -1320,7 +1320,7 @@ static int esdm_es_extsock_monitor(struct esdm_es_extsock *sock)
 	if (esdm_es_extsock_now() < sock->probe_at)
 		goto out;
 	sock->probe_at =
-		esdm_es_extsock_after(ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC);
+		esdm_es_extsock_after(ESDM_EXT_RETRY_INTERVAL_SEC);
 
 	n = esdm_es_extsock_transact_locked(sock, ESDM_ES_EXT_PROTO_GET_ENTROPY,
 					    ESDM_DRNG_SECURITY_STRENGTH_BYTES,
@@ -1355,7 +1355,7 @@ out:
  * The status of a provider connected to only: the ESDM status connects to no
  * provider, which is left to the next seeding or to the monitor, nor does it
  * hold the source - which a seeding waits for - for longer than
- * ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS. What a request that fails tells:
+ * ESDM_EXT_STATUS_TIMEOUT_MS. What a request that fails tells:
  *
  * - The request did not go out, the connection was gone before - the
  *   provider was restarted, say: no status, and the next request connects
@@ -1363,12 +1363,12 @@ out:
  * - The provider closed the connection on the request, as one older than
  *   STATUS does on a request it does not know: the same, but the provider is
  *   not asked on the connection made next.
- * - No answer within ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS: not waited for any
+ * - No answer within ESDM_EXT_STATUS_TIMEOUT_MS: not waited for any
  *   longer, the connection kept. Its answer is taken off the connection by
  *   whoever uses it next - the next request, the check of a connection that
  *   was idle, or the next ESDM status - and kept as the status of the
  *   provider. Nor is the provider asked for its status again for
- *   ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC: a status that slow would hold up a
+ *   ESDM_EXT_STATUS_BACKOFF_SEC: a status that slow would hold up a
  *   seeding whenever the ESDM status is asked for.
  */
 static struct json_object *
@@ -1399,7 +1399,7 @@ esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 
 	n = esdm_es_extsock_request_locked(sock, ESDM_ES_EXT_PROTO_STATUS,
 					   ESDM_ES_EXT_PROTO_STATUS_MAX,
-					   ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS,
+					   ESDM_EXT_STATUS_TIMEOUT_MS,
 					   rsp, &sent);
 	if (n < 0 && !sent) {
 		esdm_logger(
@@ -1420,12 +1420,12 @@ esdm_es_extsock_status_locked(struct esdm_es_extsock *sock)
 	}
 	if (n == -ETIMEDOUT) {
 		sock->status_backoff_until = esdm_es_extsock_after(
-			ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
+			ESDM_EXT_STATUS_BACKOFF_SEC);
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_ES,
 			"External ES provider%s: no answer to STATUS within %u ms, not waited for any longer - not asked for its status for %u seconds\n",
-			sock->tag, ESDM_EXT_SOCKET_STATUS_TIMEOUT_MS,
-			ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC);
+			sock->tag, ESDM_EXT_STATUS_TIMEOUT_MS,
+			ESDM_EXT_STATUS_BACKOFF_SEC);
 		goto out;
 	}
 	/* An answer larger than any: disconnected as for any other request */
@@ -1610,13 +1610,13 @@ out:
 }
 
 DSO_PUBLIC
-int esdm_es_ext_socket_set_path(unsigned int idx, const char *path)
+int esdm_es_ext_set_path(unsigned int idx, const char *path)
 {
 	struct esdm_es_extsock *sock;
 	char *new_copy = NULL;
 	char *old;
 
-	if (idx >= ESDM_EXT_SOCKET_NUM || !path ||
+	if (idx >= ESDM_EXT_NUM || !path ||
 	    strlen(path) >= ESDM_ES_EXTSOCK_PATH_SIZE)
 		return -EINVAL;
 	sock = &extsock[idx];
@@ -1642,12 +1642,12 @@ int esdm_es_ext_socket_set_path(unsigned int idx, const char *path)
 }
 
 DSO_PUBLIC
-int esdm_es_ext_socket_set_peer_uid(unsigned int idx, int64_t uid)
+int esdm_es_ext_set_peer_uid(unsigned int idx, int64_t uid)
 {
 	struct esdm_es_extsock *sock;
 
 	/* (uid_t)-1 is no uid, see setreuid(2) */
-	if (idx >= ESDM_EXT_SOCKET_NUM || uid < -1 ||
+	if (idx >= ESDM_EXT_NUM || uid < -1 ||
 	    (uid >= 0 && (uint64_t)uid >= UINT32_MAX))
 		return -EINVAL;
 	sock = &extsock[idx];
@@ -1703,7 +1703,7 @@ int esdm_es_ext_socket_set_peer_uid(unsigned int idx, int64_t uid)
 		return esdm_es_extsock_selftest(&extsock[i]);                  \
 	}
 
-ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_EXTSOCK_CB)
+ESDM_EXT_INSTANCES(ESDM_ES_EXTSOCK_CB)
 
 #define ESDM_ES_EXTSOCK_CB_ENTRY(i)                                            \
 	[i] = {                                                                \
@@ -1720,7 +1720,7 @@ ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_EXTSOCK_CB)
 		.selftest = esdm_es_extsock_selftest_##i,                      \
 	},
 
-struct esdm_es_cb esdm_es_extsock[ESDM_EXT_SOCKET_NUM] = {
+struct esdm_es_cb esdm_es_extsock[ESDM_EXT_NUM] = {
 	/* The callbacks of the instances, see ESDM_ES_EXTSOCK_CB */
-	ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_EXTSOCK_CB_ENTRY)
+	ESDM_EXT_INSTANCES(ESDM_ES_EXTSOCK_CB_ENTRY)
 };

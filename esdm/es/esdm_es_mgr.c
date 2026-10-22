@@ -156,7 +156,7 @@ struct esdm_es_cb *esdm_es[] = {
 	&esdm_es_jent_kernel,
 #endif
 #ifdef ESDM_ES_EXT
-	ESDM_EXT_SOCKET_INSTANCES(ESDM_ES_MGR_EXTSOCK)
+	ESDM_EXT_INSTANCES(ESDM_ES_MGR_EXTSOCK)
 #endif
 	&esdm_es_aux
 };

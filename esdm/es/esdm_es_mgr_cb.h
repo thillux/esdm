@@ -72,12 +72,12 @@ enum esdm_external_es {
 #endif
 #ifdef ESDM_ES_EXT
 	/*
-	 * External ES: ESDM_EXT_SOCKET_NUM provider sockets, a range of entries
+	 * External ES: ESDM_EXT_NUM provider sockets, a range of entries
 	 * from the first to the last
 	 */
 	esdm_ext_es_extsock_first,
 	esdm_ext_es_extsock_last =
-		esdm_ext_es_extsock_first + ESDM_EXT_SOCKET_NUM - 1,
+		esdm_ext_es_extsock_first + ESDM_EXT_NUM - 1,
 #endif
 	esdm_ext_es_aux, /* MUST BE LAST ES! */
 	esdm_ext_es_last /* MUST be the last entry */

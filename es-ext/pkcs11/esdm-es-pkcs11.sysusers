@@ -1,4 +1,4 @@
 # The user esdm-es-pkcs11(8) runs as - see esdm-es-pkcs11.service. The ESDM
 # accepts the daemon as a provider by this user: esdm-server
-# --es_ext_socket_uid esdm-es-pkcs11.
+# --es_ext_uid esdm-es-pkcs11.
 u esdm-es-pkcs11 - "ESDM PKCS#11 entropy source" - -

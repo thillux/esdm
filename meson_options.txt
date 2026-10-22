@@ -621,8 +621,8 @@ option('es_pkcs11', type: 'feature', value: 'disabled',
 esdm-es-pkcs11 reads the random number generator of a PKCS#11 token (e.g. a
 smart card or HSM, CKF_RNG / C_GenerateRandom) through libp11 and serves it to
 the ESDM as an external entropy source on a Unix domain socket, which the ESDM
-reads through one of its provider socket sources (es_ext_socket_num,
-esdm-server --es_ext_socket) - see esdm-es-pkcs11(8). The ESDM itself does
+reads through one of its provider socket sources (es_ext_num,
+esdm-server --es_ext) - see esdm-es-pkcs11(8). The ESDM itself does
 not load PKCS#11 modules, and neither libesdm nor esdm-server links libp11.
 
 Needs libp11 and esdm-es-ext. The options below are the defaults of the daemon,
@@ -636,8 +636,8 @@ option('es_pkcs11_entropy_rate', type: 'integer', min: 0, max: 256, value: 128,
 
 The amount of entropy per 256 bits of data the PKCS#11 entropy source declares
 to the ESDM, 0 to 256: the ESDM credits it at that rate unless a rate is
-configured for its provider socket source (es_ext_socket_entropy_rate,
-esdm-server --es_ext_socket_entropy_rate). esdm-es-pkcs11 --entropy_rate
+configured for its provider socket source (es_ext_entropy_rate,
+esdm-server --es_ext_entropy_rate). esdm-es-pkcs11 --entropy_rate
 declares another one.
 
 When configuring this value to 0, the PKCS#11 entropy source provides data
@@ -715,7 +715,7 @@ option('es_ext', type: 'feature', value: 'enabled',
 
 An external entropy source is noise source code that is not part of the ESDM,
 served to it by a provider: a process of its own the ESDM reads from over a
-Unix domain socket (es_ext_socket_path, or esdm-server --es_ext_socket) - a
+Unix domain socket (es_ext_path, or esdm-server --es_ext) - a
 program built with libesdm_es_ext, see libesdm_es_ext(3), or one speaking the
 protocol of esdm_es_ext.h itself. The ESDM loads no code of a source into its
 own process.
@@ -723,19 +723,19 @@ own process.
 Compiled in, an external entropy source does nothing until a provider socket
 is configured.
 
-How many sources the ESDM has is set by es_ext_socket_num. Disabled, the
+How many sources the ESDM has is set by es_ext_num. Disabled, the
 options of the sources are still checked, and ignored with a warning when they
 are set.
 ''')
 
-option('es_ext_socket_num', type: 'integer', min: 1, max: 16, value: 1,
+option('es_ext_num', type: 'integer', min: 1, max: 16, value: 1,
        description: '''Number of external entropy source provider sockets.
 
 The ESDM has this many provider socket sources, each an entropy source of its
 own with its own socket, entropy rate, accepted user and connection: set with
-esdm-server --es_ext_socket, which configures the next one each time it is
-given, or with the meson options es_ext_socket_path,
-es_ext_socket_entropy_rate and es_ext_socket_peer_uid, whose i-th entry
+esdm-server --es_ext, which configures the next one each time it is
+given, or with the meson options es_ext_path,
+es_ext_entropy_rate and es_ext_peer_uid, whose i-th entry
 configures the i-th source. Each source is served by a provider of its own,
 on a socket of its own. Without any, disable es_ext.
 
@@ -743,50 +743,50 @@ With one source, it is called ExternalSocket in the ESDM status; with several,
 they are ExternalSocket0, ExternalSocket1 and so on.
 ''')
 
-option('es_ext_socket_path', type: 'array', value: [],
+option('es_ext_path', type: 'array', value: [],
        description: '''Sockets of the external entropy source providers.
 
 Paths of the Unix domain sockets provider processes serve external entropy
 sources on - with libesdm_es_ext, e.g. esdm-es-pkcs11: the i-th path is the
 socket of the i-th provider socket source, a comma separated list of up to
-es_ext_socket_num of them. The ESDM connects to it, and again whenever the
-connection is lost. esdm-server --es_ext_socket PATH names another one, the
+es_ext_num of them. The ESDM connects to it, and again whenever the
+connection is lost. esdm-server --es_ext PATH names another one, the
 n-th occurrence of the option for the n-th source. A source without a path, or
 with an empty one, uses no provider unless one is given on the command line.
 ''')
 
-option('es_ext_socket_entropy_rate', type: 'array', value: [],
+option('es_ext_entropy_rate', type: 'array', value: [],
        description: '''Entropy rate cap of the external entropy source providers.
 
 A block of data from a provider is credited with the entropy the provider
 claims for it, but with at most what this rate allows: the amount of entropy
-per 256 bits of data, 0 to 256. esdm-server --es_ext_socket_entropy_rate
+per 256 bits of data, 0 to 256. esdm-server --es_ext_entropy_rate
 overrides it, the n-th occurrence of the option for the n-th source.
 
 One rate applies to all provider socket sources; a comma separated list of
-es_ext_socket_num rates sets the i-th rate for the i-th source. auto - and the
+es_ext_num rates sets the i-th rate for the i-th source. auto - and the
 default, no rate at all - configures none: the provider is credited at the
 rate it declares itself, and at 0 if it declares none, so that its data is
 not credited to contain entropy. A provider is another process whose only
 trust anchor is the user it runs as: accepting that user
-(es_ext_socket_peer_uid) means trusting the rate the provider declares, and an
+(es_ext_peer_uid) means trusting the rate the provider declares, and an
 operator who does not want that configures the rate here. 256 takes the claims
 of the provider as they are.
 ''')
 
-option('es_ext_socket_peer_uid', type: 'array', value: ['-1'],
+option('es_ext_peer_uid', type: 'array', value: ['-1'],
        description: '''User the external entropy source providers may run as.
 
 The ESDM checks the credentials of the provider it connects to: whoever can
 create the socket file could otherwise feed it with data credited as entropy.
 A provider running as root is accepted, and one running as the uid set here,
 0 to 4294967294; -1 accepts root only. A provider accepted is trusted with
-the entropy rate it declares, unless es_ext_socket_entropy_rate configures
-one. esdm-server --es_ext_socket_uid
+the entropy rate it declares, unless es_ext_entropy_rate configures
+one. esdm-server --es_ext_uid
 overrides it, the n-th occurrence of the option for the n-th source.
 
 One uid applies to all provider socket sources; a comma separated list of
-es_ext_socket_num uids sets the i-th uid for the i-th source.
+es_ext_num uids sets the i-th uid for the i-th source.
 ''')
 
 ################################################################################

@@ -21,7 +21,7 @@
  * The external entropy sources of the esdm-server, as configured on its
  * command line.
  *
- * - --es_ext_socket connects to a provider - a provider program of the test
+ * - --es_ext connects to a provider - a provider program of the test
  *   source. Once the provider was restarted, the daemon - its privileges
  *   dropped by then - connects to it again on demand.
  * - In a build with several sources, the options given several times
@@ -59,7 +59,7 @@
 #include "esdm_rpc_client.h"
 
 /* The name of the first source, see esdm_es_extsock.h */
-#if ESDM_EXT_SOCKET_NUM > 1
+#if ESDM_EXT_NUM > 1
 #define TEST_EXTSOCK "ExternalSocket0"
 #else
 #define TEST_EXTSOCK "ExternalSocket"
@@ -149,7 +149,7 @@ static void test_socket_provider(const char *server, const char *serve)
 {
 	char *const serve_argv[] = { (char *)serve, "--socket", test_socket,
 				     NULL };
-	char *const server_argv[] = { (char *)server, "-f", "--es_ext_socket",
+	char *const server_argv[] = { (char *)server, "-f", "--es_ext",
 				      test_socket, NULL };
 	static char status[65536];
 	const char *es;
@@ -218,7 +218,7 @@ out:
 	test_terminate(provider);
 }
 
-#if ESDM_EXT_SOCKET_NUM >= 2
+#if ESDM_EXT_NUM >= 2
 
 /* The integer member @key of the JSON object @obj, -1 if there is none */
 static int64_t test_json_int(struct json_object *obj, const char *key)
@@ -260,7 +260,7 @@ static void test_several(const char *server, const char *serve,
 {
 	const char *const serve0[] = { "--entropy_rate", "200", NULL };
 	const char *const serve1[] = { "--name", "es-ext-test", NULL };
-	unsigned int n = ESDM_EXT_SOCKET_NUM >= 3 ? 3 : 2;
+	unsigned int n = ESDM_EXT_NUM >= 3 ? 3 : 2;
 	char socket[3][sizeof(test_dir) + 32];
 	static const char *const rates[] = { "auto", "192", "auto" };
 	char *server_argv[2 + 4 * 3 + 1];
@@ -275,9 +275,9 @@ static void test_several(const char *server, const char *serve,
 	for (i = 0; i < n; i++) {
 		snprintf(socket[i], sizeof(socket[i]), "%s/provider%u.socket",
 			 test_dir, i);
-		server_argv[args++] = "--es_ext_socket";
+		server_argv[args++] = "--es_ext";
 		server_argv[args++] = socket[i];
-		server_argv[args++] = "--es_ext_socket_entropy_rate";
+		server_argv[args++] = "--es_ext_entropy_rate";
 		server_argv[args++] = (char *)rates[i];
 	}
 	server_argv[args] = NULL;
@@ -425,7 +425,7 @@ int main(int argc, char *argv[])
 	}
 
 	test_socket_provider(argv[1], argv[2]);
-#if ESDM_EXT_SOCKET_NUM >= 2
+#if ESDM_EXT_NUM >= 2
 	test_several(argv[1], argv[2], argv[3]);
 #endif
 

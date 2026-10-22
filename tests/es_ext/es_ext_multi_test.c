@@ -19,7 +19,7 @@
 
 /*
  * Several external entropy sources, in a build with at least two provider
- * socket sources (es_ext_socket_num).
+ * socket sources (es_ext_num).
  *
  * - Each source is an entry of the ES table of its own, named with its index.
  * - The sources are independent: each has its own provider, entropy rate,
@@ -52,9 +52,9 @@
 #define _GNU_SOURCE
 #include "config.h"
 
-#define ESDM_EXT_SOCKET_RETRY_INTERVAL_SEC 1
-#define ESDM_EXT_SOCKET_TIMEOUT_MS 500
-#define ESDM_EXT_SOCKET_STATUS_BACKOFF_SEC 3
+#define ESDM_EXT_RETRY_INTERVAL_SEC 1
+#define ESDM_EXT_TIMEOUT_MS 500
+#define ESDM_EXT_STATUS_BACKOFF_SEC 3
 
 /* The unit under test */
 #include "esdm_es_extsock.c"
@@ -68,7 +68,7 @@
 #include "es_ext_test_plugin.h"
 #include "es_ext_test_util.h"
 
-#if ESDM_EXT_SOCKET_NUM < 2
+#if ESDM_EXT_NUM < 2
 #error "The test needs two sources at least"
 #endif
 
@@ -76,7 +76,7 @@ static const char *test_provider_bin;
 static const char *test_provider_bare_bin;
 
 static char test_dir[] = "/tmp/esdm-es-ext-multi-test-XXXXXX";
-static char test_socket[ESDM_EXT_SOCKET_NUM][sizeof(test_dir) + 32];
+static char test_socket[ESDM_EXT_NUM][sizeof(test_dir) + 32];
 
 #define SOCK(i) (&esdm_es_extsock[i])
 
@@ -128,10 +128,10 @@ static void test_table(void)
 	unsigned int i, j;
 
 	CHECK_EQ(esdm_ext_es_extsock_last - esdm_ext_es_extsock_first + 1,
-		 ESDM_EXT_SOCKET_NUM);
+		 ESDM_EXT_NUM);
 	CHECK_EQ(esdm_ext_es_extsock_last + 1, esdm_ext_es_aux);
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
+	for (i = 0; i < ESDM_EXT_NUM; i++) {
 		snprintf(name, sizeof(name), "ExternalSocket%u", i);
 		CHECK(esdm_es[esdm_ext_es_extsock_first + i] == SOCK(i),
 		      "provider socket source %u is not its entry", i);
@@ -164,15 +164,15 @@ static void test_providers(void)
 	      "the providers did not come up");
 
 	for (i = 0; i < 2; i++) {
-		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_es_ext_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(i, getuid()), 0);
 	}
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(0, 256), 0);
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(1, 128), 0);
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(0, 256), 0);
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(1, 128), 0);
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		CHECK_EQ(SOCK(i)->init(), 0);
-	for (i = 2; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 2; i < ESDM_EXT_NUM; i++)
 		CHECK(!SOCK(i)->active(), "%s is active without a provider",
 		      SOCK(i)->name);
 
@@ -194,8 +194,8 @@ static void test_providers(void)
 
 	/* A uid accepted by one source only: the other refuses the provider */
 	if (getuid()) {
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(0, -1), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_path(0, test_socket[0]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(0, -1), 0);
+		CHECK_EQ(esdm_es_ext_set_path(0, test_socket[0]), 0);
 		CHECK_EQ(test_get(SOCK(0), bits), 0);
 		CHECK(test_state_has(SOCK(0), "status", "not connected"),
 		      "a provider of a uid not accepted is connected");
@@ -219,13 +219,13 @@ static void test_providers(void)
 				     "failing its self test"),
 		      "the first source changed with the second");
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		SOCK(i)->fini();
 	for (i = 0; i < 2; i++) {
 		es_ext_test_terminate(provider[i]);
-		esdm_es_ext_socket_set_path(i, "");
-		esdm_es_ext_socket_set_peer_uid(i, -1);
-		esdm_config_es_ext_socket_entropy_rate_set(i, 0);
+		esdm_es_ext_set_path(i, "");
+		esdm_es_ext_set_peer_uid(i, -1);
+		esdm_config_es_ext_entropy_rate_set(i, 0);
 	}
 }
 
@@ -311,10 +311,10 @@ static void test_provider_names(void)
 	CHECK(provider[0] > 0 && provider[1] > 0,
 	      "the providers did not come up");
 	for (i = 0; i < 2; i++) {
-		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_es_ext_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(i, getuid()), 0);
 	}
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		CHECK_EQ(SOCK(i)->init(), 0);
 
 	/* The same name for both, apart by their instances */
@@ -328,7 +328,7 @@ static void test_provider_names(void)
 			      SOCK(i)->name),
 		      "%s is the instance %s", SOCK(i)->name, name);
 	}
-	for (i = 2; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 2; i < ESDM_EXT_NUM; i++)
 		CHECK(!strcmp(test_state_str(SOCK(i), "name", name,
 					     sizeof(name)),
 			      SOCK(i)->name),
@@ -364,12 +364,12 @@ static void test_provider_names(void)
 		      "Quelle A"),
 	      "the second source changed with the first: %s", name);
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		SOCK(i)->fini();
 	for (i = 0; i < 2; i++) {
 		es_ext_test_terminate(provider[i]);
-		esdm_es_ext_socket_set_path(i, "");
-		esdm_es_ext_socket_set_peer_uid(i, -1);
+		esdm_es_ext_set_path(i, "");
+		esdm_es_ext_set_peer_uid(i, -1);
 	}
 }
 
@@ -406,7 +406,7 @@ static void test_provider_rates(void)
 	static const uint32_t expected[] = { 48, 96, 0, 256 };
 	static const char *const sources[] = { "provider", "provider",
 					       "default", "provider" };
-	unsigned int i, n = ESDM_EXT_SOCKET_NUM < 4 ? ESDM_EXT_SOCKET_NUM : 4;
+	unsigned int i, n = ESDM_EXT_NUM < 4 ? ESDM_EXT_NUM : 4;
 	pid_t provider[4] = { -1, -1, -1, -1 };
 
 	for (i = 0; i < n; i++) {
@@ -425,13 +425,13 @@ static void test_provider_rates(void)
 							  NULL,
 						 settings[i]);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
-		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
-		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+		CHECK_EQ(esdm_es_ext_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_config_es_ext_entropy_rate_set(
 				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
 			 0);
 	}
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		CHECK_EQ(SOCK(i)->init(), 0);
 
 	for (i = 0; i < n; i++) {
@@ -442,34 +442,34 @@ static void test_provider_rates(void)
 				     i == 3 ? "unencrypted" : "DTLS"),
 		      "%s does not run the connection it should", SOCK(i)->name);
 #endif
-		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate(i),
+		CHECK_EQ(esdm_config_es_ext_entropy_rate(i),
 			 expected[i]);
 		CHECK_EQ(test_get(SOCK(i), bits),
 			 test_level(expected[i], bits));
 	}
 
 	/* Configured for one source only */
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(1, 12), 0);
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(1, 12), 0);
 	for (i = 0; i < n; i++)
 		CHECK(test_rate_is(SOCK(i), i == 1 ? 12 : expected[i],
 				   i == 1 ? "config" : sources[i]),
 		      "%s changed with another source", SOCK(i)->name);
 	CHECK_EQ(test_get(SOCK(1), bits), test_level(12, bits));
-	CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+	CHECK_EQ(esdm_config_es_ext_entropy_rate_set(
 			 1, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
 		 0);
 
 	/* Configured for all, overriding every provider, and taken back */
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
-		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(i, 16), 0);
+	for (i = 0; i < ESDM_EXT_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_entropy_rate_set(i, 16), 0);
 	for (i = 0; i < n; i++) {
 		CHECK(test_rate_is(SOCK(i), 16, "config"),
 		      "%s is not credited at the rate configured",
 		      SOCK(i)->name);
 		CHECK_EQ(test_get(SOCK(i), bits), test_level(16, bits));
 	}
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
-		CHECK_EQ(esdm_config_es_ext_socket_entropy_rate_set(
+	for (i = 0; i < ESDM_EXT_NUM; i++)
+		CHECK_EQ(esdm_config_es_ext_entropy_rate_set(
 				 i, ESDM_ES_EXT_ENTROPY_RATE_AUTO),
 			 0);
 	for (i = 0; i < n; i++)
@@ -492,13 +492,13 @@ static void test_provider_rates(void)
 		CHECK(test_rate_is(SOCK(i), expected[i], sources[i]),
 		      "%s changed with the first source", SOCK(i)->name);
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		SOCK(i)->fini();
 	for (i = 0; i < n; i++) {
 		es_ext_test_terminate(provider[i]);
-		esdm_es_ext_socket_set_path(i, "");
-		esdm_es_ext_socket_set_peer_uid(i, -1);
-		esdm_config_es_ext_socket_entropy_rate_set(i, 0);
+		esdm_es_ext_set_path(i, "");
+		esdm_es_ext_set_peer_uid(i, -1);
+		esdm_config_es_ext_entropy_rate_set(i, 0);
 	}
 }
 
@@ -513,7 +513,7 @@ static struct json_object *test_provider_of(const struct esdm_es_cb *es,
 	unsigned int i;
 
 	if (fresh) {
-		for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
+		for (i = 0; i < ESDM_EXT_NUM; i++) {
 			if (es == SOCK(i)) {
 				mutex_lock(&extsock[i].state_mutex);
 				extsock[i].status.at = 0;
@@ -574,7 +574,7 @@ static void test_provider_status(void)
 		"selftest_ret=-19;name=S2;status={\"plugin\":\"zwei\"}",
 		"name=S3"
 	};
-	unsigned int i, n = ESDM_EXT_SOCKET_NUM < 4 ? ESDM_EXT_SOCKET_NUM : 4;
+	unsigned int i, n = ESDM_EXT_NUM < 4 ? ESDM_EXT_NUM : 4;
 	pid_t provider_pid[4] = { -1, -1, -1, -1 };
 	struct json_object *state, *provider, *val;
 	int64_t requests0, requests1;
@@ -585,10 +585,10 @@ static void test_provider_status(void)
 		provider_pid[i] = test_serve(
 			i, i == 0 ? opts0 : i == 1 ? opts1 : NULL, settings[i]);
 		CHECK(provider_pid[i] > 0, "provider %u did not come up", i);
-		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_es_ext_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(i, getuid()), 0);
 	}
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		CHECK_EQ(SOCK(i)->init(), 0);
 
 	/* Each with the fields of its own server and its own plugin part */
@@ -672,7 +672,7 @@ static void test_provider_status(void)
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	ms = (end.tv_sec - start.tv_sec) * 1000 +
 	     (end.tv_nsec - start.tv_nsec) / 1000000;
-	CHECK(provider != NULL && ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
+	CHECK(provider != NULL && ms < ESDM_EXT_TIMEOUT_MS,
 	      "the status of the first source took %ld ms", ms);
 	json_object_put(state);
 	provider = test_provider_of(SOCK(1), true, &state);
@@ -683,7 +683,7 @@ static void test_provider_status(void)
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	ms = (end.tv_sec - start.tv_sec) * 1000 +
 	     (end.tv_nsec - start.tv_nsec) / 1000000;
-	CHECK(!provider && ms < ESDM_EXT_SOCKET_TIMEOUT_MS,
+	CHECK(!provider && ms < ESDM_EXT_TIMEOUT_MS,
 	      "the slow provider was asked again within its backoff (%ld ms)",
 	      ms);
 	json_object_put(state);
@@ -707,12 +707,12 @@ static void test_provider_status(void)
 		json_object_put(state);
 	}
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		SOCK(i)->fini();
 	for (i = 0; i < n; i++) {
 		es_ext_test_terminate(provider_pid[i]);
-		esdm_es_ext_socket_set_path(i, "");
-		esdm_es_ext_socket_set_peer_uid(i, -1);
+		esdm_es_ext_set_path(i, "");
+		esdm_es_ext_set_peer_uid(i, -1);
 	}
 }
 
@@ -737,8 +737,8 @@ static void test_status(void)
 	for (i = 0; i < 2; i++) {
 		provider[i] = test_serve(i, opts[i], NULL);
 		CHECK(provider[i] > 0, "provider %u did not come up", i);
-		CHECK_EQ(esdm_es_ext_socket_set_path(i, test_socket[i]), 0);
-		CHECK_EQ(esdm_es_ext_socket_set_peer_uid(i, getuid()), 0);
+		CHECK_EQ(esdm_es_ext_set_path(i, test_socket[i]), 0);
+		CHECK_EQ(esdm_es_ext_set_peer_uid(i, getuid()), 0);
 	}
 
 	ret = esdm_init();
@@ -752,7 +752,7 @@ static void test_status(void)
 	if (!root)
 		goto fini;
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++) {
+	for (i = 0; i < ESDM_EXT_NUM; i++) {
 		snprintf(name, sizeof(name), "ExternalSocket%u", i);
 		es = es_ext_test_status_es(root, name);
 		CHECK(es != NULL, "the status lists no %s", name);
@@ -803,7 +803,7 @@ fini:
 out:
 	for (i = 0; i < 2; i++) {
 		es_ext_test_terminate(provider[i]);
-		esdm_es_ext_socket_set_path(i, "");
+		esdm_es_ext_set_path(i, "");
 	}
 }
 
@@ -826,7 +826,7 @@ int main(int argc, char *argv[])
 		printf("cannot create a directory - skipping\n");
 		return 77;
 	}
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		snprintf(test_socket[i], sizeof(test_socket[i]),
 			 "%s/provider%u.socket", test_dir, i);
 
@@ -837,7 +837,7 @@ int main(int argc, char *argv[])
 	test_provider_status();
 	test_status();
 
-	for (i = 0; i < ESDM_EXT_SOCKET_NUM; i++)
+	for (i = 0; i < ESDM_EXT_NUM; i++)
 		unlink(test_socket[i]);
 	rmdir(test_dir);
 

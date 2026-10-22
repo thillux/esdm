@@ -22,8 +22,8 @@
  *
  * An external entropy source is noise source code that is not part of the
  * ESDM. It is served to the ESDM by a provider: a process of its own, which the
- * ESDM reads from over a Unix domain socket (esdm-server --es_ext_socket PATH,
- * meson option es_ext_socket_path). The ESDM loads no code of a source into
+ * ESDM reads from over a Unix domain socket (esdm-server --es_ext PATH,
+ * meson option es_ext_path). The ESDM loads no code of a source into
  * its own process.
  *
  * A provider is written against struct esdm_es_ext_plugin below - the

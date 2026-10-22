@@ -45,7 +45,7 @@
  * ESDM is told to accept:
  *
  *	esdm-es-ext-example --socket /run/esdm-es-ext-example.socket
- *	esdm-server --es_ext_socket /run/esdm-es-ext-example.socket
+ *	esdm-server --es_ext /run/esdm-es-ext-example.socket
  */
 
 #include <errno.h>

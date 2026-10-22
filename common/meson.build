@@ -261,31 +261,30 @@ conf_data.set_quoted('ESDM_PKCS11_TOKEN_LABEL',
 conf_data.set('ESDM_ES_EXT', get_option('es_ext').enabled())
 
 # The external entropy sources: their number, and the X-macro
-# ESDM_EXT_SOCKET_INSTANCES(X) expanding X(i) for each of their indices i, from
+# ESDM_EXT_INSTANCES(X) expanding X(i) for each of their indices i, from
 # which the code generates what each instance needs - see esdm_es_extsock.c
-es_ext_socket_num = 0
+es_ext_num = 0
 if get_option('es_ext').enabled()
-	es_ext_socket_num = get_option('es_ext_socket_num')
+	es_ext_num = get_option('es_ext_num')
 endif
 es_ext_instances = []
-foreach i : range(es_ext_socket_num)
+foreach i : range(es_ext_num)
 	es_ext_instances += 'X(@0@)'.format(i)
 endforeach
-conf_data.set('ESDM_EXT_SOCKET_NUM', es_ext_socket_num)
-conf_data.set('ESDM_EXT_SOCKET_INSTANCES(X)', ' '.join(es_ext_instances))
+conf_data.set('ESDM_EXT_NUM', es_ext_num)
+conf_data.set('ESDM_EXT_INSTANCES(X)', ' '.join(es_ext_instances))
 
 
 # The configuration of the external sources: the i-th entry of a list sets
-# ESDM_EXT_SOCKET_*_<i> for the i-th source. A path for each source, or for
+# ESDM_EXT_*_<i> for the i-th source. A path for each source, or for
 # fewer, the others getting none; a rate or a uid for each source, or one for
 # all of them.
 foreach es_ext_opt : [
-		[ 'es_ext_socket_path', 'ESDM_EXT_SOCKET_PATH_' ],
-		[ 'es_ext_socket_entropy_rate',
-		  'ESDM_EXT_SOCKET_ENTROPY_RATE_' ],
-		[ 'es_ext_socket_peer_uid', 'ESDM_EXT_SOCKET_PEER_UID_' ] ]
+		[ 'es_ext_path', 'ESDM_EXT_PATH_' ],
+		[ 'es_ext_entropy_rate',
+		  'ESDM_EXT_ENTROPY_RATE_' ],
+		[ 'es_ext_peer_uid', 'ESDM_EXT_PEER_UID_' ] ]
 	es_ext_name = es_ext_opt[0]
-	es_ext_num = es_ext_socket_num
 	es_ext_is_path = es_ext_name.endswith('_path')
 	es_ext_is_uid = es_ext_name.endswith('_uid')
 

@@ -85,7 +85,7 @@ jobs:
               name: openssl-several-ext-sources
               opts: >-
                 -Dcrypto_backend=openssl
-                -Des_ext_socket_num=4
+                -Des_ext_num=4
           - runner: ubuntu-26.04
             backend: *several-ext-sources
           # The opportunistic DTLS, by the TLS stacks of OpenSSL and GnuTLS,
