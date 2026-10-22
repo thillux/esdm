@@ -1,12 +1,18 @@
+# The logger and the thread pool keep process-wide state. The ESDM server must
+# share it with libesdm, so it takes them from the library instead of linking
+# copies of its own - see esdm_server_common_static_lib.
+common_state_src = files([
+	'esdm_logger.c',
+	'threading_support.c',
+])
+
 # for i in $(ls *.c | sort); do echo "'$i',"; done
 common_src = files([
 	'binhexbin.c',
 	'buffer.c',
-	'esdm_logger.c',
 	'helper.c',
 	'linux_support.c',
 	'os_random.c',
-	'threading_support.c',
 	'xoshiro_prng.c',
 ])
 
@@ -22,6 +28,9 @@ if get_option('fips140')
 	common_src += files(['fips_integrity.c'])
 endif
 
+common_stateless_src = common_src
+common_src += common_state_src
+
 conf_data = configuration_data()
 
 conf_data.set('ESDM_SYSTEMD_SUPPORT', get_option('systemd').enabled())
@@ -30,19 +39,23 @@ if get_option('ais2031_drg3') and get_option('ais2031_drg4')
 	error('ais2031_drg3 and ais2031_drg4 are mutually exclusive - the one option skips the reseeding limits that the other configures.')
 endif
 
+# FIPS 140 implies the SP800-90C compliance mode - the runtime forces it on
+# whenever the oversampling is compiled in - so a fips140 build is configured
+# exactly as if sp80090c were set alongside it.
+sp80090c_mode = get_option('sp80090c') or get_option('fips140')
+
 # DRG.3 is the way to ask for the entropy source oversampling without the
 # request size based reseeding limits that the sp80090c option brings with it.
 # Everything keyed on the oversampling below therefore reads this variable
-# rather than the option; the thresholds further down are left to the option, so
-# that a DRG.3 build does not pick them up.
-sp80090c = get_option('sp80090c') or get_option('ais2031_drg3')
+# rather than sp80090c_mode; the thresholds further down are left to
+# sp80090c_mode, so that a DRG.3 build does not pick them up.
+sp80090c = sp80090c_mode or get_option('ais2031_drg3')
 
-conf_data.set('ESDM_OVERSAMPLE_ENTROPY_SOURCES',
-	      sp80090c or get_option('fips140'))
+conf_data.set('ESDM_OVERSAMPLE_ENTROPY_SOURCES', sp80090c)
 conf_data.set('ESDM_AIS2031_NTG1_SEEDING_STRATEGY', get_option('ais2031_ntg1'))
 conf_data.set('ESDM_AIS2031_DRG3', get_option('ais2031_drg3'))
 conf_data.set('ESDM_AIS2031_DRG4', get_option('ais2031_drg4'))
-if sp80090c or get_option('fips140')
+if sp80090c
 	conf_data.set('ESDM_SEED_BUFFER_INIT_ADD_BITS', 128)
 	conf_data.set('ESDM_OVERSAMPLE_ES_BITS', 64)
 else
@@ -117,10 +130,24 @@ conf_data.set('ESDM_JENT_ALL_CACHES',
 	      get_option('es_jent_all_caches').enabled())
 
 # Async per-ES buffering (es_buf) is incompatible with SP800-90C oversampled
-# seeding by default. When sp80090c is set, zero out every ESDM_*_ENTROPY_BLOCKS
-# count so esdm_es_buf compiles out of all ES sources. The es_buf_force option
+# seeding by default. When the oversampling is compiled in (sp80090c, fips140 or
+# ais2031_drg3), zero out every ESDM_*_ENTROPY_BLOCKS count so esdm_es_buf
+# compiles out of all ES sources. The es_buf_force option
 # overrides this and keeps the per-ES counts honored.
 disable_es_buf = sp80090c and not get_option('es_buf_force')
+
+# esdm_es_buf_alloc() refuses any other block count at runtime, which silently
+# leaves the ES without its cache. A power of two up to 2^31 is what divides
+# 2^31, meson having no bitwise operators.
+foreach es_blocks_opt : ['es_jent_entropy_blocks', 'es_irq_entropy_blocks',
+			 'es_sched_entropy_blocks', 'es_hwrand_entropy_blocks',
+			 'es_tpm2_entropy_blocks', 'es_pkcs11_entropy_blocks',
+			 'es_jent_kernel_entropy_blocks']
+	es_blocks = get_option(es_blocks_opt)
+	if es_blocks != 0 and (es_blocks < 4 or 2147483648 % es_blocks != 0)
+		error(es_blocks_opt + ' must be 0 or a power of two of at least 4')
+	endif
+endforeach
 
 # In esdm_es_jent.c the ESDM_JENT_ENTROPY_BLOCKS are divided by 4 and yet
 # need to result in a value larger than zero
@@ -255,11 +282,11 @@ conf_data.set('ESDM_GETRANDOM_NUM_NODES', get_option('linux-getrandom-num-nodes'
 conf_data.set('ESDM_LINUX_RESEED_INTERVAL_SEC', get_option('linux-reseed-interval'))
 conf_data.set('ESDM_LINUX_RESEED_ENTROPY_COUNT', get_option('linux-reseed-entropy-count'))
 
-# The option rather than the sp80090c variable above, and DRG.3 excluded
+# sp80090c_mode rather than the sp80090c variable above, and DRG.3 excluded
 # outright: these caps are the DRG.4 reseeding limits, and skipping them is the
 # whole point of the DRG.3 option. A build asking for it keeps whatever
-# thresholds it configured, even where sp80090c is set alongside.
-if not get_option('ais2031_drg3') and (get_option('sp80090c') or get_option('ais2031_drg4'))
+# thresholds it configured, even where sp80090c or fips140 is set alongside.
+if not get_option('ais2031_drg3') and (sp80090c_mode or get_option('ais2031_drg4'))
 	reseed_thresh = get_option('drng_reseed_threshold_bits')
 	max_reseed = get_option('drng_max_reseed_bits')
 

@@ -48,19 +48,21 @@ add_global_arguments([ '-fstack-protector-strong',
                        ],
 		       language : 'c')
 
-# More hardening
-if cc.has_argument('-fzero-call-used-regs=used-gpr')
-	add_global_arguments([ '-fzero-call-used-regs=used-gpr' ],
-			     language: 'c')
-endif
-
-# Control-flow and stack-clash protection (architecture dependent, so probe
-# for support instead of assuming it).
-foreach hardening_arg : [ '-fstack-clash-protection', '-fcf-protection=full' ]
+# Code generation hardening (architecture and compiler dependent, so probe for
+# support instead of assuming it): zero all call-clobbered registers a function
+# used on return, so no key material or random bytes linger in them, plus
+# control-flow and stack-clash protection. They are passed to the link as well:
+# with LTO, the code is generated there, and GCC drops at least
+# -fzero-call-used-regs that only the compile step saw.
+codegen_hardening = []
+foreach hardening_arg : [ '-fzero-call-used-regs=used',
+			  '-fstack-clash-protection', '-fcf-protection=full' ]
 	if cc.has_argument(hardening_arg)
-		add_global_arguments([ hardening_arg ], language: 'c')
+		codegen_hardening += hardening_arg
 	endif
 endforeach
+add_global_arguments(codegen_hardening, language: 'c')
+add_global_link_arguments(codegen_hardening, language: 'c')
 
 if cc.has_argument('-ffat-lto-objects')
 	add_global_arguments([ '-ffat-lto-objects' ],
@@ -93,13 +95,10 @@ if get_option('crypto_backend') == 'botan'
 	if get_option('optimization') != '0'
 		cpp_hardening += [ '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3' ]
 	endif
-	foreach hardening_arg : [ '-fzero-call-used-regs=used-gpr',
-				 '-fstack-clash-protection', '-fcf-protection=full' ]
-		if cc.has_argument(hardening_arg)
-			cpp_hardening += hardening_arg
-		endif
-	endforeach
+	cpp_hardening += codegen_hardening
 	add_global_arguments(cpp_hardening, language: 'cpp')
+	# libesdm links botan and therefore with the C++ driver.
+	add_global_link_arguments(codegen_hardening, language: 'cpp')
 endif
 
 # Versioning information
@@ -120,6 +119,13 @@ add_project_link_arguments('-Wl,-z,now', language : 'c')
 
 # No executable stack
 add_project_link_arguments('-Wl,-z,noexecstack', language : 'c')
+
+# The client libraries export the logger so that the copy of the frontend
+# linking them interposes theirs. Clang drops that interposition under LTO and
+# binds the library's own calls to its own copy unless told otherwise (GCC's
+# default already keeps it).
+add_project_arguments(cc.get_supported_arguments('-fsemantic-interposition'),
+		      language : 'c')
 
 # Prepare distribution
 dist_script = find_program('addon/sanity_checks.sh', required: true)

@@ -16,7 +16,7 @@ BuildRequires:  gcc
 BuildRequires:  fuse3
 BuildRequires:  fuse3-devel
 BuildRequires:  leancrypto-devel
-BuildRequires:  libjitterentropy3
+BuildRequires:  jitterentropy-devel
 BuildRequires:  libjson-c-devel
 BuildRequires:  libprotobuf-c-devel
 BuildRequires:  pkgconfig
@@ -35,9 +35,9 @@ processing is designed to maintain this strength.
 
 %package %{name}
 Summary:        Entropy Source and DRNG Manager
-Requires:       libjitterentropy
+Requires:       libjitterentropy3
 Requires:       libleancrypto1
-Requires:       libprotobuf
+Requires:       libprotobuf-c1
 Requires:       systemd
 
 %description %{name}
@@ -209,6 +209,7 @@ This subpackage holds the OpenSSL 3 RAND provider
 %license LICENSE LICENSE.bsd LICENSE.gplv2
 %doc README.md README.usage.md
 %{_libdir}/lib%{name}_aux*.so*
+%{_libdir}/lib%{name}_egd_client*.so*
 %{_libdir}/lib%{name}-getrandom*.so*
 %{_libdir}/lib%{name}_rpc_client*.so*
 %{_libdir}/lib%{name}.so*
@@ -238,6 +239,7 @@ This subpackage holds the OpenSSL 3 RAND provider
 %files -n %{name}-openssl
 %{_libdir}/lib%{name}-rng-provider*.so*
 %{_libdir}/lib%{name}-seed-src-provider*.so*
+%{_libdir}/lib%{name}-egd-provider*.so*
 %{_mandir}/man7/esdm-openssl-provider.7*
 
 %files devel
@@ -246,5 +248,6 @@ This subpackage holds the OpenSSL 3 RAND provider
 
 %files devel-static
 %{_libdir}/lib%{name}_aux_client.a
+%{_libdir}/lib%{name}_egd_client.a
 %{_libdir}/lib%{name}-getrandom.a
 %{_libdir}/lib%{name}_rpc_client.a

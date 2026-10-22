@@ -446,6 +446,7 @@ esdm_logger_get_verbosity(const enum esdm_logger_class class)
 	return esdm_logger_verbosity_level;
 }
 
+DSO_PUBLIC
 void esdm_logger_inc_verbosity(void)
 {
 	if (esdm_logger_verbosity_level >= LOGGER_MAX_LEVEL - 1)

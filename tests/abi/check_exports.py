@@ -11,10 +11,10 @@
 #    by one of the headers - a function exported by accident becomes ABI with
 #    the first program linking it.
 #
-# --private-header names a header of the static library the ESDM server links
-# next to libesdm, whose state must exist only once in the process: every
-# function it declares is exported, from whichever node, so that the server's
-# copy interposes all of them - see the threading section of esdm/version.lds.
+# --private-header names a header of the static library whose state must exist
+# only once in the process: every function it declares is exported, from
+# whichever node, as the ESDM server links no copy of its own and uses the
+# library's - see the threading section of esdm/version.lds.
 #
 # Without --header, --exactly names the complete list of exported functions,
 # for a module such as an OpenSSL provider that has no header of its own.

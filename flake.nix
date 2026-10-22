@@ -103,11 +103,15 @@
                 {
                   lib,
                   config,
+                  modulesPath,
                   ...
                 }:
                 {
+                  # modulesPath rather than "${pkgs.path}/...": interpolating
+                  # the path copies nixpkgs into the store once more, which
+                  # nix flake check --no-build does not do and then fails on.
                   imports = [
-                    "${pkgs.path}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+                    (modulesPath + "/installer/cd-dvd/installation-cd-minimal.nix")
                   ];
                   isoImage = {
                     isoName = "esdm-live.iso";
@@ -120,8 +124,12 @@
 
         addEsdmToKernel = lpself: lpsuper: {
           kernel = lpsuper.kernel.override {
+            # Keep nixpkgs' own patches (bridge-stp-helper, request-key-helper
+            # and fixes such as 6.1's c23-compat-libbpf), override replaces the
+            # list rather than appending to it.
             kernelPatches =
-              lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
+              lpsuper.kernel.kernelPatches
+              ++ lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
               ++ lib.optionals kernelFips (
                 lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
@@ -131,45 +139,48 @@
           esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
         };
 
-        # 6.6 is the first kernel version supported by ESDM.
+        # 6.1 is the first kernel version supported by ESDM.
         minKernel = {
           major = 6;
-          minor = 6;
+          minor = 1;
         };
 
-        # All `linuxPackages_<major>_<minor>` sets nixpkgs currently exposes,
-        # restricted to the versions ESDM supports (>= minKernel). Discovered
-        # automatically so newly packaged kernels are picked up without editing
-        # this file. Keyed by the suffix used for the generated outputs, e.g.
-        # "6_6" -> live_6_6 / esdm_es_6_6. The rolling "latest" alias is added
-        # on top for convenience.
-        # Stock (unpatched) `linuxPackages_<major>_<minor>` sets nixpkgs
-        # currently exposes, restricted to the versions ESDM supports
-        # (>= minKernel). Keyed by the suffix used for the generated outputs.
+        # The stock (unpatched) kernel package sets of nixpkgs, enumerated like
+        # jitterentropy-library does: the numbered linuxKernel.packages sets
+        # plus linux_testing, the flavored variants (hardened, zen, ...) are of
+        # no interest. tryEval guards the sets that do not evaluate on the
+        # current system and the end-of-life aliases that throw. Restricted to
+        # the versions ESDM supports (>= minKernel), linux_testing always
+        # included. Keyed by the suffix used for the generated outputs, e.g.
+        # linux_6_18 -> "6_18" -> live_6_18-<system> / esdm_es_6_18,
+        # linux_testing -> "testing". The rolling "latest" alias is added on top.
         stockKernels =
           let
-            versioned = builtins.listToAttrs (
-              builtins.concatMap (
-                name:
-                let
-                  m = builtins.match "linuxPackages_([0-9]+)_([0-9]+)" name;
-                in
-                if m == null then
-                  [ ]
-                else
-                  let
-                    major = lib.toInt (builtins.elemAt m 0);
-                    minor = lib.toInt (builtins.elemAt m 1);
-                    supported = major > minKernel.major || (major == minKernel.major && minor >= minKernel.minor);
-                  in
-                  lib.optional supported {
-                    name = "${toString major}_${toString minor}";
-                    value = pkgs.${name};
-                  }
-              ) (builtins.attrNames pkgs)
-            );
+            usable =
+              ps:
+              let
+                r = builtins.tryEval (lib.isAttrs ps && ps ? kernel && lib.isDerivation ps.kernel);
+              in
+              r.success && r.value;
+
+            supported =
+              name:
+              let
+                m = builtins.match "linux_([0-9]+)_([0-9]+)" name;
+                major = lib.toInt (builtins.elemAt m 0);
+                minor = lib.toInt (builtins.elemAt m 1);
+              in
+              name == "linux_testing"
+              || (
+                m != null && (major > minKernel.major || (major == minKernel.major && minor >= minKernel.minor))
+              );
+
+            sets = lib.filterAttrs (name: ps: supported name && usable ps) pkgs.linuxKernel.packages;
           in
-          versioned // { latest = pkgs.linuxPackages_latest; };
+          lib.mapAttrs' (name: ps: lib.nameValuePair (lib.removePrefix "linux_" name) ps) sets
+          // {
+            latest = pkgs.linuxPackages_latest;
+          };
 
         # The same kernels with the esdm_es patches applied.
         kernels = lib.mapAttrs (name: lp: lp.extend addEsdmToKernel) stockKernels;
@@ -425,8 +436,30 @@
             '';
           };
 
+        # The esdm package credits the interrupt and scheduler ES with nothing,
+        # so it seeds fully whatever esdm_es delivers. These credit one of
+        # them each (only one may be), for mkCheck to show the module's
+        # entropy is credited.
+        esdmCreditingKernelEs =
+          source:
+          self.packages.${system}.esdm.overrideAttrs (prev: {
+            pname = "esdm-credit-${source}";
+            mesonFlags =
+              (builtins.filter (
+                x: !(lib.hasInfix "es_irq_entropy_rate" x || lib.hasInfix "es_sched_entropy_rate" x)
+              ) prev.mesonFlags)
+              ++ [
+                "-Des_irq_entropy_rate=${if source == "irq" then "256" else "0"}"
+                "-Des_sched_entropy_rate=${if source == "sched" then "256" else "0"}"
+              ];
+          });
+
         mkCheck =
           kernel:
+          let
+            esdm-irq = esdmCreditingKernelEs "irq";
+            esdm-sched = esdmCreditingKernelEs "sched";
+          in
           pkgs.testers.nixosTest {
             name = "basic test with esdm-tool";
 
@@ -453,7 +486,10 @@
                       # Make the startup-hang regression harness (and a Python
                       # to run it) available inside the VM so the check can
                       # execute it instead of letting it rot.
-                      environment.systemPackages = [ pkgs.python3 ];
+                      environment.systemPackages = [
+                        pkgs.python3
+                        pkgs.jq
+                      ];
                       environment.etc."esdm-startup-loop.py".source = ./tests/startup/esdm_startup_loop.py;
 
                       boot.kernelParams = [
@@ -506,6 +542,36 @@
 
               # A clean shutdown must not deadlock or leak (kmemleak is on).
               machine.succeed("systemctl stop esdm-server.service")
+
+              # The service credits the kernel ES with nothing, so it seeds
+              # whether esdm_es delivers or not. A server crediting one of
+              # them in turn has to see that source report credited entropy.
+              # 128 bits net of the FIPS oversampling are some 800 events at
+              # the module's OSR of 3, after the 1024 of its startup health
+              # test - little even for an idle VM, so the timeout is only
+              # generous. The socket units go too, so the server binds the
+              # paths itself.
+              machine.succeed(
+                  "systemctl stop esdm-server-priv.socket esdm-server-unpriv.socket"
+              )
+              for source, esdm in [
+                  ("Interrupt", "${esdm-irq}"),
+                  ("Scheduler", "${esdm-sched}"),
+              ]:
+                  machine.succeed(
+                      f"{esdm}/bin/esdm-server -f >/tmp/esdm-{source}.log 2>&1 "
+                      f"& echo $! >/tmp/esdm-{source}.pid"
+                  )
+                  machine.wait_until_succeeds(
+                      f"{esdm}/bin/esdm-tool --status-json | jq -e "
+                      f"'.entropy_sources[] | select(.name == \"{source}\") "
+                      "| .available_entropy >= 128'",
+                      timeout=600,
+                  )
+                  machine.succeed(f"kill $(cat /tmp/esdm-{source}.pid)")
+                  machine.wait_until_fails(
+                      f"kill -0 $(cat /tmp/esdm-{source}.pid)", timeout=30
+                  )
 
               # Now exercise the dedicated startup-hang regression harness
               # against the same binary. It repeatedly starts esdm-server in the
@@ -873,10 +939,53 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # The test suite in a build without fips140 - see esdm-plain.
+            plain = self.packages.${system}.esdm-plain;
+          }
+          # The test suite on a 32-bit system - see esdm-i686.
+          // lib.optionalAttrs (system == "x86_64-linux") {
+            i686 = self.packages.${system}.esdm-i686;
+            i686-openssl = self.packages.${system}.esdm-i686-openssl;
           };
 
         packages =
           let
+            # The FIPS integrity self test (esdm/fips.c) attests every ESDM
+            # executable, libesdm and the libraries of the module that are
+            # loaded - the jitter RNG and the crypto backend - against a
+            # reference HMAC in .<name>.hmac next to each file, which whoever
+            # builds and installs the module provides. The key and format are
+            # those of common/fips_integrity.c (fipscheck).
+            #
+            # A file is checked under the name it was loaded by, so a library
+            # symlink needs a reference value of its own.
+            fipsHmac = pkgs.writeShellScript "esdm-fips-hmac" ''
+              for f in "$@"; do
+                [ -f "$f" ] || continue
+                hmac="$(${pkgs.openssl}/bin/openssl dgst -sha256 \
+                  -hmac orboDeJITITejsirpADONivirpUkvarP -r "$f")"
+                printf '%s\n' "''${hmac%% *}" \
+                  >"$(dirname "$f")/.$(basename "$f").hmac"
+              done
+            '';
+
+            # A dependency carrying reference values for its shared objects.
+            # postFixup, as stripping and patchelf change the files before.
+            withFipsHmac =
+              pkg:
+              pkg.overrideAttrs (prev: {
+                postFixup = (prev.postFixup or "") + ''
+                  # getAllOutputNames, as $outputs is no list of names
+                  # with __structuredAttrs (botan3)
+                  for o in $(getAllOutputNames); do
+                    find "''${!o}" \( -type f -o -type l \) \
+                      \( -name '*.so' -o -name '*.so.*' \) ! -name '*.hmac' \
+                      -exec ${fipsHmac} {} +
+                  done
+                '';
+              });
+
             # gcov occasionally emits a negative branch count for the Botan C++
             # backend (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68080).
             # gcovr treats that as fatal and produces no report at all, so warn
@@ -954,7 +1063,7 @@
               # softhsm supplies the module it loads plus the softhsm2-util
               # the test initializes the token with. ea_non_iid assesses the
               # output's min-entropy.
-              buildInputs = prev.buildInputs ++ [ pkgs.libkcapi ];
+              buildInputs = prev.buildInputs ++ [ self.packages.${system}.libkcapi ];
               nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [
                 pkgs.softhsm
                 pkgs.sp800-90b-entropyassessment
@@ -1204,6 +1313,16 @@
                     ${lib.escapeShellArgs cov.mesonFlags}
                   ninja -C "$work/build"
 
+                  # The VM boots with fips=1, so every program of the suite
+                  # runs the FIPS integrity self test - against reference
+                  # values for the build tree, as fipsHmac provides them for
+                  # an installation.
+                  find "$work/build" ! -name '*.hmac' \( \
+                    \( -type f -perm -u+x \) -o \
+                    \( \( -type f -o -type l \) \
+                       \( -name '*.so' -o -name '*.so.*' \) \) \
+                    \) -exec ${fipsHmac} {} +
+
                   # Every ESDM this suite starts loads the SoftHSM module the
                   # PKCS#11 source was built against, and SoftHSM logs three
                   # errors per start when it finds no configuration - nixpkgs
@@ -1295,6 +1414,8 @@
             #   nix build .#esdm-coverage-vm
             #   xdg-open result/coverage/index.html
             #
+            # That build fails when a test failed - see coverageVmResultOf.
+            #
             # As root the run binds fixed socket paths, creates CUSE device
             # files, writes to the kernel entropy interfaces and leaves daemons
             # behind on failure - in a VM all of that is free of consequence.
@@ -1385,12 +1506,12 @@
                   )
 
                   # A failed suite is recorded in the report rather than
-                  # asserted on. The report is what this package exists to
-                  # produce, and a failing run is the one whose numbers and test
+                  # asserted on. A failing run is the one whose numbers and test
                   # log are wanted most - asserting here would fail the
                   # derivation, and nix discards $out of a failed build, so
-                  # exactly those runs would come back empty. Which tests failed
-                  # is in coverage/testlog.txt.
+                  # exactly those runs would come back empty. coverageVmResultOf
+                  # turns the recorded status into the result instead. Which
+                  # tests failed is in coverage/testlog.txt.
                   machine.succeed(f"echo {status} >/var/coverage/status")
                   machine.copy_from_machine("/var/coverage")
 
@@ -1402,21 +1523,55 @@
                       )
                 '';
               };
+
+            # The VM run above succeeds whatever the suite did, so that the
+            # report of a failed suite is kept. This makes its status the
+            # result: it fails when the suite failed - naming the failed tests
+            # and the report of that run, which stays in the store - and links
+            # the report otherwise. The run itself, failed or not, is
+            #
+            #   nix build .#esdm-coverage-vm.run
+            coverageVmResultOf =
+              run:
+              pkgs.runCommand "${run.name}-result" { passthru = { inherit run; }; } ''
+                status="$(cat ${run}/coverage/status)"
+                if [ "$status" != 0 ]; then
+                  echo "The coverage run as root failed (exit $status) - failed tests:"
+                  grep -E '^ *[0-9]+/[0-9]+ .* (FAIL|TIMEOUT|ERROR) ' \
+                    ${run}/coverage/coverage-run.log || true
+                  echo "Report and test log of the run: ${run}/coverage"
+                  exit 1
+                fi
+                mkdir -p $out
+                ln -s ${run}/coverage $out/coverage
+              '';
           in
           {
           jitterentropy = pkgs.jitterentropy.overrideAttrs (_: {
-            version = "3.7.1";
+            version = "3.8.0-pre";
             src = pkgs.fetchFromGitHub {
               owner = "smuellerDD";
               repo = "jitterentropy-library";
-              rev = "8760e08ac3268946aedfcc6fc047dbadb02986ea";
-              hash = "sha256-3N1yz+mBSYUIdtAMxKrUV56lE5q2SMfcyRmULfYwcqY=";
+              rev = "4b90f5bfaa6cdb60617a22089f09e12d082cc69c";
+              hash = "sha256-evEeuo0ZigYh+IivbR+xNGPJHvPcGYdhzWoFnRtSUAs=";
             };
             patches = [ ];
             cmakeFlags = [
               "-DINTERNAL_TIMER=OFF"
               "-DBUILD_SHARED_LIBS=ON"
             ];
+          });
+
+          # libkcapi master: its RNG tests are adjusted to kernels 7.2+, after
+          # the 1.5.1 that nixpkgs ships
+          libkcapi = pkgs.libkcapi.overrideAttrs (_: {
+            version = "1.5.1-unstable-2026-09-19";
+            src = pkgs.fetchFromGitHub {
+              owner = "smuellerDD";
+              repo = "libkcapi";
+              rev = "6af53720de505aef4a104d2ce80d1aee5beab3e6";
+              hash = "sha256-CQzXxvYo/eb5onIliNxkJQOFiiWszkXP/myhh19T65w=";
+            };
           });
 
           # this currently defaults to the botan crypto backend
@@ -1434,7 +1589,8 @@
               esKernel = false;
               fips140 = true;
               # remove later, for testing with NTG.1 capable jitterentropy
-              inherit (self.packages.${system}) jitterentropy;
+              jitterentropy = withFipsHmac self.packages.${system}.jitterentropy;
+              botan3 = withFipsHmac pkgs.botan3;
             }).overrideAttrs
               (prev: {
                 buildInputs = prev.buildInputs ++ [
@@ -1445,11 +1601,14 @@
                   # nixpkgs still knows the combined 'ais2031' option, which
                   # this tree split into 'ais2031_ntg1' and 'ais2031_drg4';
                   # drop the flag it passes and set the successors below.
+                  # Its es_jent_osr default is replaced below as well, so
+                  # that only one value reaches meson.
                   (builtins.filter (
                     x:
                     (!lib.hasInfix "max_threads" x)
                     && (!lib.hasInfix "term-on-signal" x)
                     && (!lib.hasInfix "ais2031" x)
+                    && (!lib.hasInfix "es_jent_osr" x)
                   ) prev.mesonFlags)
                   ++ lib.optionals debugEsdm [
                     "-Db_sanitize=address,undefined"
@@ -1477,6 +1636,15 @@
                   in
                   builtins.head (builtins.head matches);
                 dontStrip = debugEsdm;
+                # Every program and library, not only esdm-server as nixpkgs
+                # signs it - see fipsHmac.
+                postFixup = ''
+                  find $out/bin \( -type f -o -type l \) ! -name '*.hmac' \
+                    -exec ${fipsHmac} {} +
+                  find $out/lib -maxdepth 1 \( -type f -o -type l \) \
+                    \( -name '*.so' -o -name '*.so.*' \) ! -name '*.hmac' \
+                    -exec ${fipsHmac} {} +
+                '';
               });
 
           # ESDM with the eBPF-based scheduler and interrupt entropy sources
@@ -1517,8 +1685,8 @@
           # coverage build's -Des_jent_kernel=enabled - its kernel counterpart
           # as the two that qualify at 256 bits. Should that ever stop being
           # enough, es_jent_ntg1 makes a 3.7.0+ jitter RNG NTG.1 conformant on
-          # its own (the jitterentropy pinned above is 3.7.1) and one source
-          # then suffices.
+          # its own (the jitterentropy pinned above is a 3.8.0 prerelease)
+          # and one source then suffices.
           esdm-ais2031 = self.packages.${system}.esdm.overrideAttrs (prev: {
             mesonFlags =
               (builtins.filter (x: !lib.hasInfix "ais2031" x) prev.mesonFlags)
@@ -1526,6 +1694,34 @@
                 "-Dais2031_ntg1=true"
                 "-Dais2031_drg4=true"
               ];
+          });
+
+
+          # The ESDM without fips140 and sp80090c, running the meson test suite
+          # as its check phase. The package above sets fips140, which implies
+          # the full SP800-90C configuration - reseeding caps and oversampling
+          # on, the entropy source buffers compiled out - as does every variant
+          # built from it. This is the one that compiles and runs what a build
+          # without those options does instead.
+          esdm-plain = self.packages.${system}.esdm.overrideAttrs (prev: {
+            pname = "esdm-plain";
+
+            mesonFlags =
+              (builtins.filter (
+                x: (!lib.hasInfix "fips140" x) && (!lib.hasInfix "sp80090c" x)
+              ) prev.mesonFlags)
+              ++ [
+                "-Dfips140=false"
+                "-Dsp80090c=false"
+                # Compiles in the test hooks the suite needs.
+                "-Dtestmode=enabled"
+              ];
+
+            doCheck = true;
+
+            meta = prev.meta // {
+              description = "ESDM built without fips140 and sp80090c, running the meson test suite";
+            };
           });
 
 
@@ -1644,27 +1840,27 @@
           # Tracking the rolling kernel for the same reason liveIso does: a
           # specific versioned attribute is one nixpkgs bump away from being
           # dropped.
-          esdm-coverage-vm = coverageVmOf {
+          esdm-coverage-vm = coverageVmResultOf (coverageVmOf {
             name = "esdm coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-root;
             kernel = kernels.latest;
-          };
+          });
 
           # The AIS 20/31 build on the patched kernel: NTG.1 counts entropy
           # sources, so it wants the kernel ones present rather than disabling
           # themselves for want of /dev/esdm_es.
-          esdm-coverage-vm-ais2031 = coverageVmOf {
+          esdm-coverage-vm-ais2031 = coverageVmResultOf (coverageVmOf {
             name = "esdm AIS 20/31 coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-ais2031-root;
             kernel = kernels.latest;
-          };
+          });
 
           # Unlike the ebpf_* checks - where running on a stock kernel is the
           # point, as needing no kernel patches is what the eBPF sources are
           # for - this one takes the patched kernel as well. The eBPF sources
           # are only part of what it covers, and es_kernel next to them needs
           # the module like it does in the run above.
-          esdm-coverage-vm-ebpf = coverageVmOf {
+          esdm-coverage-vm-ebpf = coverageVmResultOf (coverageVmOf {
             name = "esdm eBPF coverage run as root in a VM";
             runner = self.packages.${system}.esdm-coverage-ebpf-root;
             kernel = kernels.latest;
@@ -1677,7 +1873,7 @@
                 # leaving the code this variant exists to cover unexecuted.
                 boot.kernelParams = lib.mkAfter [ "clocksource=tsc" ];
               };
-          };
+          });
 
           openssl-config =
             let
@@ -1746,10 +1942,80 @@
               inherit (kernel) kernel;
             }
           )
-        ) kernels;
+        ) kernels
+        # The ESDM on a 32-bit system, running the meson test suite as its
+        # check phase: size_t and long are 32 bits wide there, which none of
+        # the packages above sees. The builtin backend, as the Hash DRBG and
+        # the other builtin primitives are where the tree computes limits and
+        # alignments itself.
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          esdm-i686 =
+            let
+              p32 = pkgs.pkgsi686Linux;
+              jitterentropy = p32.jitterentropy.overrideAttrs (_: {
+                inherit (self.packages.${system}.jitterentropy)
+                  version
+                  src
+                  patches
+                  cmakeFlags
+                  ;
+              });
+            in
+            (p32.esdm.override {
+              inherit jitterentropy;
+              selinux = false;
+              openSSLRandProvider = false;
+              ais2031 = false;
+              sp80090c = false;
+            }).overrideAttrs
+              (prev: {
+                pname = "esdm-i686";
+                inherit (self.packages.${system}.esdm) src version;
+                # botan3 is the backend nixpkgs builds with, not needed here
+                buildInputs = [
+                  jitterentropy
+                  p32.fuse3
+                  p32.json_c
+                ];
+                mesonFlags =
+                  (builtins.filter (
+                    x:
+                    (!lib.hasInfix "crypto_backend" x)
+                    && (!lib.hasInfix "max_threads" x)
+                    && (!lib.hasInfix "term-on-signal" x)
+                    && (!lib.hasInfix "ais2031" x)
+                  ) prev.mesonFlags)
+                  ++ [
+                    "-Dcrypto_backend=builtin"
+                    "-Dais2031_ntg1=false"
+                    "-Dais2031_drg4=false"
+                    # Compiles in the test hooks the suite needs.
+                    "-Dtestmode=enabled"
+                  ];
+                doCheck = true;
+                meta = prev.meta // {
+                  description = "ESDM built for i686, running the meson test suite";
+                };
+              });
 
-        # One live system per defined kernel version, e.g. live_6_18.
-        nixosConfigurations = lib.mapAttrs' (
+          # The same with the OpenSSL backend, whose DRBG self test depends on
+          # the nonce length it hands to OpenSSL.
+          esdm-i686-openssl = self.packages.${system}.esdm-i686.overrideAttrs (prev: {
+            pname = "esdm-i686-openssl";
+            buildInputs = prev.buildInputs ++ [ pkgs.pkgsi686Linux.openssl ];
+            mesonFlags =
+              (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
+              ++ [ "-Dcrypto_backend=openssl" ];
+            meta = prev.meta // {
+              description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
+            };
+          });
+        };
+
+        # One live system per defined kernel version, e.g. live_6_18. Only
+        # collected here: nixosConfigurations is not a per system output, see
+        # the end of this file.
+        legacyPackages.liveSystems = lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "live_${name}" (mkLiveSystem {
             inherit (self.packages.${system}) esdm;
@@ -1767,11 +2033,11 @@
               gnutls
               json_c
               libbpf
-              libkcapi
               libselinux
               openssl
               protobufc
               self.packages.${system}.jitterentropy
+              self.packages.${system}.libkcapi
             ];
             nativeBuildInputs = with pkgs; [
               bpftools
@@ -1792,7 +2058,18 @@
 
         # shortcut for development - track the rolling "latest" kernel so this
         # does not break when nixpkgs drops a specific versioned attribute.
-        liveIso = self.nixosConfigurations.${system}.live_latest.config.system.build.isoImage;
+        liveIso = self.nixosConfigurations."live_latest-${system}".config.system.build.isoImage;
       }
-    );
+    )
+    // {
+      # nix expects nixosConfigurations.<name>, without a system level in
+      # between, so the live systems of every system share one attribute set
+      # with the system in the name, e.g. live_6_18-x86_64-linux.
+      nixosConfigurations = nixpkgs.lib.concatMapAttrs (
+        system: legacyPackages:
+        nixpkgs.lib.mapAttrs' (
+          name: nixpkgs.lib.nameValuePair "${name}-${system}"
+        ) legacyPackages.liveSystems
+      ) self.legacyPackages;
+    };
 }

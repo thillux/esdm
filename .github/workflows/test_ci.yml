@@ -268,23 +268,109 @@ jobs:
     - name: Meson compile
       run: meson compile -C build
 
-# TODO: invoke meson test with real root privileges to enable all CUSE tests
     - name: Meson test
       run: meson test -v -C build
 
     - name: Meson test (privileged)
       run: |
-        # The esdm-server refuses to run unprivileged, so the EGD server test
-        # only reports "must be started as root" and skips in the run above.
-        # Re-run it as root, where it starts a server on an EGD socket of its
-        # own and drives the protocol through it - the one place both sides of
-        # that protocol meet, as the client tests answer themselves.
+        # A good part of the suite needs root: the esdm-server refuses to run
+        # unprivileged, and so does everything that starts one - the RPC and
+        # EGD server tests, the CUSE, getrandom and OpenSSL provider tests - as
+        # well as the kernel seeder, which feeds the kernel's entropy pool.
+        # Those report themselves as skipped (exit 77) in the run above. Re-run
+        # exactly the skipped ones as root; a test that still lacks something
+        # it needs, such as a TPM, skips again.
+        #
+        # The names come from meson's test log, mapped back to the names meson
+        # test takes by a script: the log holds the decorated name meson
+        # prints, which meson test does not accept. The command substitution
+        # rather than a process substitution, so that a failing script fails
+        # the step.
+        #
+        # --no-rebuild, as a rebuild here would leave root owned objects in the
+        # build tree.
         #
         # "sudo env VAR=..." rather than "sudo -E": the source built backends
         # live in prefixes of their own, and whether the server finds them must
         # not depend on the sudoers policy.
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
+        if [ "${#skipped[@]}" -eq 0 ]; then
+          echo "::error::no test skipped unprivileged - is this run privileged already?"
+          exit 1
+        fi
+        printf 'skipped unprivileged, now run as root: %s\n' "${skipped[@]}"
         sudo env LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
-             meson test -v -C build 'EGD server interface'
+             meson test -v -C build --no-rebuild "${skipped[@]}"
+
+  # The plain default configuration: no option but the test hooks. Every
+  # other job builds with fips140, which implies the full SP800-90C
+  # configuration - reseeding caps and oversampling on, the entropy source
+  # buffers compiled out. What a build without those options does, the
+  # unbounded reseeding and the asynchronously filled es_buf caches, is only
+  # compiled and run here. SELinux stays at its default as well, so
+  # libselinux is needed.
+  default:
+    name: ${{ matrix.runner }} / default options
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y meson ninja-build pkg-config \
+                                libprotobuf-c-dev libfuse3-dev \
+                                libjson-c-dev libselinux1-dev
+
+    - name: Install Jitter RNG
+      run: |
+        wget -O jent.tar.gz https://github.com/smuellerDD/jitterentropy-library/archive/refs/tags/v${JITTERENTROPY_VERSION}.tar.gz
+        tar xfz jent.tar.gz
+        make -C jitterentropy-library-${JITTERENTROPY_VERSION}
+        sudo make -C jitterentropy-library-${JITTERENTROPY_VERSION} install
+        sudo ldconfig
+
+    - name: Meson setup
+      run: meson setup build -Dtestmode=enabled
+
+    - name: Check the configuration is the plain one
+      run: |
+        # Guard against a changed option default quietly turning this job
+        # into another copy of the fips140 ones above.
+        meson introspect --buildoptions build | python3 -c '
+        import json, sys
+        opts = {o["name"]: o["value"] for o in json.load(sys.stdin)}
+        on = [n for n in ("fips140", "sp80090c") if opts[n]]
+        if on:
+            sys.exit("::error::enabled in this build: " + ", ".join(on))
+        '
+
+    - name: Meson compile
+      run: meson compile -C build
+
+    - name: Meson test
+      run: meson test -v -C build
+
+    - name: Meson test (privileged)
+      run: |
+        # See the build job: re-run what skipped unprivileged as root.
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
+        if [ "${#skipped[@]}" -eq 0 ]; then
+          echo "::error::no test skipped unprivileged - is this run privileged already?"
+          exit 1
+        fi
+        printf 'skipped unprivileged, now run as root: %s\n' "${skipped[@]}"
+        sudo meson test -v -C build --no-rebuild "${skipped[@]}"
 
   # Memory safety: the same sources built with AddressSanitizer and
   # UndefinedBehaviorSanitizer, then driven hard through the esdm-tool stress
