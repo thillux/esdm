@@ -49,28 +49,6 @@ void env_fini(void)
 	server_pid = 0;
 }
 
-static int env_check_file(const char *path)
-{
-	struct stat sb;
-
-	if (!path) {
-		printf("No file provided\n");
-		return ENOENT;
-	}
-
-	if (stat(path, &sb) == 1) {
-		printf("File not found\n");
-		return errno;
-	}
-
-	if (!S_ISREG(sb.st_mode)) {
-		printf("File not regular file\n");
-		return EPERM;
-	}
-
-	return 0;
-}
-
 int env_init(void)
 {
 	const char *server = getenv("ESDM_SERVER");
@@ -95,7 +73,7 @@ int env_init(void)
 		return -ret;
 	}
 
-	ret = env_check_file(server);
+	ret = test_env_check_file(server);
 	if (ret)
 		goto out;
 

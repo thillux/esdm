@@ -95,7 +95,13 @@ ssize_t esdm_safe_read(int fd, uint8_t *buf, size_t buflen)
 		} else if (readlen == 0) {
 			goto out;
 		} else if (errno != EINTR) {
-			bytes_read = -errno;
+			/*
+			 * Like read(2)/write(2): what was transferred before
+			 * the error is reported, the error is left for the
+			 * next call - the data cannot be put back.
+			 */
+			if (!bytes_read)
+				bytes_read = -errno;
 			goto out;
 		}
 	} while (buflen);
@@ -118,7 +124,13 @@ ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen)
 		} else if (writelen == 0) {
 			goto out;
 		} else if (errno != EINTR) {
-			bytes_written = -errno;
+			/*
+			 * Like read(2)/write(2): what was transferred before
+			 * the error is reported, the error is left for the
+			 * next call - the data cannot be put back.
+			 */
+			if (!bytes_written)
+				bytes_written = -errno;
 			goto out;
 		}
 	} while (buflen);

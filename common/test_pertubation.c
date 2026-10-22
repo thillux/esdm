@@ -112,7 +112,7 @@ static int esdm_test_shm_status_create_shm(void)
 	esdm_test_shmid = shmget(key, sizeof(struct esdm_test_shm_status),
 				 S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
 					 S_IROTH | S_IWOTH);
-	create_shm = (errno == ENOENT) ? 1 : 0;
+	create_shm = (esdm_test_shmid < 0 && errno == ENOENT) ? 1 : 0;
 
 	if (esdm_test_shmid >= 0) {
 		struct shmid_ds buf;
@@ -135,8 +135,6 @@ static int esdm_test_shm_status_create_shm(void)
 				shmget(key, sizeof(struct esdm_test_shm_status),
 				       IPC_CREAT | S_IRUSR | S_IWUSR | S_IRGRP |
 					       S_IWGRP | S_IROTH | S_IWOTH);
-			errsv = errno;
-
 			if (esdm_test_shmid >= 0) {
 				esdm_test_shm_status_reset();
 				esdm_logger(

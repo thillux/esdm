@@ -214,22 +214,13 @@ int systemd_listen_fds(void)
 	return cached_listen_fds;
 }
 
-static void freep(char **p)
-{
-	if (!p || *p == NULL)
-		return;
-
-	free(*p);
-	*p = NULL;
-}
-
 int systemd_listen_fd_for_name(const char *name)
 {
 	const char *listen_fd_names = getenv("LISTEN_FDNAMES");
-	_cleanup_(freep) char *fd_names_copy = NULL;
+	char *fd_names_copy = NULL;
 	char *token = NULL;
 	char *saveptr = NULL;
-	int fd_offset = 0;
+	int fd_offset = 0, fd = -1;
 	int num_listen_fds = systemd_listen_fds();
 
 	/* no env set?*/
@@ -247,8 +238,10 @@ int systemd_listen_fd_for_name(const char *name)
 	/* without tokens present, strtok_r returns the whole string */
 	token = strtok_r(fd_names_copy, ":", &saveptr);
 	while (token != NULL) {
-		if (strcmp(name, token) == 0 && fd_offset < num_listen_fds)
-			return SYSTEMD_LISTEN_FDS_START + fd_offset;
+		if (strcmp(name, token) == 0 && fd_offset < num_listen_fds) {
+			fd = SYSTEMD_LISTEN_FDS_START + fd_offset;
+			break;
+		}
 
 		token = strtok_r(NULL, ":", &saveptr);
 
@@ -259,5 +252,6 @@ int systemd_listen_fd_for_name(const char *name)
 		fd_offset++;
 	}
 
-	return -1;
+	free(fd_names_copy);
+	return fd;
 }

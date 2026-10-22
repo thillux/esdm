@@ -38,6 +38,44 @@ struct thread_wait_queue {
 	pthread_mutex_t thread_wait_lock;
 };
 
+static inline void thread_wait_queue_unlock(void *lock)
+{
+	pthread_mutex_unlock((pthread_mutex_t *)lock);
+}
+
+/*
+ * Wait on the queue - until @abstime (CLOCK_MONOTONIC) if it is not NULL.
+ * Returns the (positive) pthread error code.
+ *
+ * The condition wait is a cancellation point which returns with
+ * thread_wait_lock re-acquired. A waiter killed by thread_cancel() there
+ * would leave the queue locked for good, so a cancellation cleanup handler
+ * releases it. This is a function and not part of the macros below as
+ * pthread_cleanup_push() may be built on setjmp(), which must not be
+ * expanded into the frames of the callers.
+ */
+static inline int thread_wait_queue_wait(struct thread_wait_queue *queue,
+					 const struct timespec *abstime)
+{
+	int ret;
+
+	ret = pthread_mutex_lock(&queue->thread_wait_lock);
+	assert(ret == 0);
+	pthread_cleanup_push(thread_wait_queue_unlock,
+			     &queue->thread_wait_lock);
+	if (abstime) {
+		ret = pthread_cond_clockwait(&queue->thread_wait_cv,
+					     &queue->thread_wait_lock,
+					     CLOCK_MONOTONIC, abstime);
+	} else {
+		ret = pthread_cond_wait(&queue->thread_wait_cv,
+					&queue->thread_wait_lock);
+	}
+	pthread_cleanup_pop(1);
+
+	return ret;
+}
+
 #define DECLARE_WAIT_QUEUE(name)                                               \
 	struct thread_wait_queue name = {                                      \
 		.thread_wait_cv = PTHREAD_COND_INITIALIZER,                    \
@@ -48,12 +86,7 @@ struct thread_wait_queue {
 	do {                                                                   \
 		int __mret __attribute__((unused));                            \
                                                                                \
-		__mret = pthread_mutex_lock(&(queue)->thread_wait_lock);       \
-		assert(__mret == 0);                                           \
-		__mret = pthread_cond_wait(&(queue)->thread_wait_cv,           \
-					   &(queue)->thread_wait_lock);        \
-		assert(__mret == 0);                                           \
-		__mret = pthread_mutex_unlock(&(queue)->thread_wait_lock);     \
+		__mret = thread_wait_queue_wait((queue), NULL);                \
 		assert(__mret == 0);                                           \
 	} while (0)
 
@@ -64,10 +97,7 @@ struct thread_wait_queue {
 #define thread_timedwait_no_event(queue, reltime)                              \
 	do {                                                                   \
 		struct timespec __ts;                                          \
-		int __mret __attribute__((unused));                            \
                                                                                \
-		__mret = pthread_mutex_lock(&(queue)->thread_wait_lock);       \
-		assert(__mret == 0);                                           \
 		clock_gettime(CLOCK_MONOTONIC, &__ts);                         \
 		__ts.tv_sec += (reltime)->tv_sec;                              \
 		__ts.tv_nsec += (reltime)->tv_nsec;                            \
@@ -75,12 +105,8 @@ struct thread_wait_queue {
 			__ts.tv_sec += __ts.tv_nsec / 1000000000;              \
 			__ts.tv_nsec = __ts.tv_nsec % 1000000000;              \
 		}                                                              \
-		ret = -pthread_cond_clockwait(&(queue)->thread_wait_cv,        \
-					      &(queue)->thread_wait_lock,      \
-					      CLOCK_MONOTONIC, &__ts);         \
+		ret = -thread_wait_queue_wait((queue), &__ts);                 \
 		assert(ret == 0 || ret == -ETIMEDOUT);                         \
-		__mret = -pthread_mutex_unlock(&(queue)->thread_wait_lock);    \
-		assert(__mret == 0);                                           \
 	} while (0)
 
 /*
@@ -98,20 +124,14 @@ struct thread_wait_queue {
 		struct timespec __ts;                                          \
 		int __mret __attribute__((unused));                            \
                                                                                \
-		__mret = pthread_mutex_lock(&(queue)->thread_wait_lock);       \
-		assert(__mret == 0);                                           \
 		clock_gettime(CLOCK_MONOTONIC, &__ts);                         \
 		__ts.tv_nsec += 100 * 1000 * 1000;                            \
 		if (__ts.tv_nsec >= 1000000000L) {                            \
 			__ts.tv_sec++;                                        \
 			__ts.tv_nsec -= 1000000000L;                         \
 		}                                                             \
-		__mret = pthread_cond_clockwait(&(queue)->thread_wait_cv,     \
-						&(queue)->thread_wait_lock,   \
-						CLOCK_MONOTONIC, &__ts);      \
+		__mret = thread_wait_queue_wait((queue), &__ts);              \
 		assert(__mret == 0 || __mret == ETIMEDOUT);                   \
-		__mret = pthread_mutex_unlock(&(queue)->thread_wait_lock);    \
-		assert(__mret == 0);                                          \
 	}
 
 /*

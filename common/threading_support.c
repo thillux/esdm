@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,8 +56,12 @@
  * Structure for one thread
  */
 struct thread_ctx {
-	pthread_t thread_id; /* Thread ID from pthread_create */
-	pthread_t parent; /* Parent thread ID */
+	/*
+	 * Thread ID from pthread_create and parent thread ID - atomic as
+	 * thread_send_signal() reads them without holding inuse.
+	 */
+	_Atomic(pthread_t) thread_id;
+	_Atomic(pthread_t) parent;
 	unsigned int thread_num; /* Current slot number */
 	int ret_ancestor; /* Return code of ancestor code */
 
@@ -67,6 +72,7 @@ struct thread_ctx {
 	atomic_bool thread_pending; /* Is thread associated with structure? */
 	mutex_w_t inuse; /* Is thread data structure used? */
 	atomic_bool shutdown; /* Shall the thread be shut down? */
+	atomic_bool inuse_held; /* Does the worker hold inuse? */
 	bool scheduled; /* Is/was a job executed and return code
 					 * is ready for pickup? */
 
@@ -136,6 +142,12 @@ static inline bool thread_is_special(struct thread_ctx *tctx)
 	return (tctx->thread_num >= THREADING_MAX_THREADS) ? true : false;
 }
 
+/* Cancellation cleanup handler releasing a mutex held across a wait */
+static void thread_unlock_mutex(void *lock)
+{
+	pthread_mutex_unlock((pthread_mutex_t *)lock);
+}
+
 static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 {
 	struct timespec ts;
@@ -147,6 +159,11 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 	 * predicate instead of sleeping indefinitely on a missed wake-up.
 	 */
 	pthread_mutex_lock(lock);
+	/*
+	 * The timed wait is a cancellation point which returns with @lock
+	 * re-acquired - release it if the caller is cancelled there.
+	 */
+	pthread_cleanup_push(thread_unlock_mutex, lock);
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	ts.tv_nsec += 100 * 1000 * 1000;
 	if (ts.tv_nsec >= 1000000000L) {
@@ -154,7 +171,7 @@ static inline void thread_block(pthread_cond_t *cv, pthread_mutex_t *lock)
 		ts.tv_nsec -= 1000000000L;
 	}
 	pthread_cond_timedwait(cv, lock, &ts);
-	pthread_mutex_unlock(lock);
+	pthread_cleanup_pop(1);
 }
 
 static inline bool thread_dirty(unsigned int slot)
@@ -318,6 +335,18 @@ out:
 	return ret;
 }
 
+/*
+ * Cancellation cleanup handler of a worker: release the inuse lock if the
+ * worker is cancelled while holding it.
+ */
+static void thread_worker_cancel_cleanup(void *arg)
+{
+	struct thread_ctx *tctx = (struct thread_ctx *)arg;
+
+	if (atomic_load(&tctx->inuse_held))
+		mutex_w_unlock(&tctx->inuse);
+}
+
 /* Worker loop of a thread */
 static void *thread_worker(void *arg)
 {
@@ -326,11 +355,18 @@ static void *thread_worker(void *arg)
 	int (*routine)(void *);
 
 	/*
-	 * pthread_setcanceltype() only affects the calling thread, so it must
-	 * be invoked here in the worker and not in thread_create() (where it
-	 * would mark the creator async-cancelable instead).
+	 * Deferred cancellation, which is the default, stated here as the
+	 * choice it is: a worker runs arbitrary jobs - DRNG reseeds under their
+	 * locks, malloc(), the logger's stdio - none of which is safe to be
+	 * cancelled at an arbitrary instruction, which is all
+	 * PTHREAD_CANCEL_ASYNCHRONOUS would allow. Deferred cancellation is
+	 * honoured at the cancellation points the workers block in anyway:
+	 * the condition wait while idle, and the waits of the jobs themselves.
+	 *
+	 * pthread_setcanceltype() only affects the calling thread, so it is
+	 * invoked here in the worker and not in thread_create().
 	 */
-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 
 	if (!thread_is_special(tctx)) {
 		sigset_t block, old;
@@ -350,12 +386,23 @@ static void *thread_worker(void *arg)
 			return NULL;
 	}
 
+	/*
+	 * The worker holds inuse across the cancellation points of the job it
+	 * runs and of its idle wait (which returns with the lock re-acquired
+	 * on cancellation). A worker killed by thread_cancel() there would
+	 * leave the slot locked for good, so the cleanup handler releases it.
+	 * inuse_held tells the handler whether the lock is held.
+	 */
+	pthread_cleanup_push(thread_worker_cancel_cleanup, tctx);
+
 	while (1) {
 		mutex_w_lock(&tctx->inuse);
+		atomic_store(&tctx->inuse_held, true);
 
 	locked:
 		if (atomic_load(&tctx->shutdown)) {
 			/* Request for termination */
+			atomic_store(&tctx->inuse_held, false);
 			mutex_w_unlock(&tctx->inuse);
 			/*
 			 * As the while loop terminates, the thread will
@@ -374,6 +421,7 @@ static void *thread_worker(void *arg)
 			thread_cleanup(tctx);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
 				    "Thread %u completed\n", tctx->thread_num);
+			atomic_store(&tctx->inuse_held, false);
 			mutex_w_unlock(&tctx->inuse);
 			pthread_cond_broadcast(&thread_wait_cv);
 		} else {
@@ -385,21 +433,24 @@ static void *thread_worker(void *arg)
 		}
 	}
 
+	pthread_cleanup_pop(0);
+
 	return NULL;
 }
 
 /* Spawn a thread */
 static int thread_create(struct thread_ctx *tctx, unsigned int slot)
 {
+	pthread_t thread_id;
 	int ret;
 
 	tctx->thread_num = slot;
 	tctx->data = NULL;
 
-	ret = -pthread_create(&tctx->thread_id, &pthread_attr, &thread_worker,
-			      tctx);
+	ret = -pthread_create(&thread_id, &pthread_attr, &thread_worker, tctx);
 	if (ret)
 		goto err;
+	atomic_store(&tctx->thread_id, thread_id);
 
 	/*
 	 * Publish thread_pending only after pthread_create has written a valid
@@ -447,12 +498,15 @@ void thread_send_signal(uint32_t thread_group, int signal)
 		 * atomically; it stays true until thread_wait_all() joins the
 		 * thread, so gating on it avoids pthread_kill()ing a stale
 		 * thread_id whose thread was already joined (and whose id may
-		 * since have been recycled). A mutex cannot be taken here as
-		 * this may run from a signal-handling context.
+		 * since have been recycled). The inuse lock cannot be taken
+		 * here: a working thread holds it for as long as its job runs,
+		 * which is exactly when it is to be signaled. thread_id and
+		 * parent are atomic for this unlocked access.
 		 */
 		if (thread_dirty(i) && atomic_load(&threads[i].start_routine) &&
-		    !pthread_equal(threads[i].parent, self))
-			pthread_kill(threads[i].thread_id, signal);
+		    !pthread_equal(atomic_load(&threads[i].parent), self))
+			pthread_kill(atomic_load(&threads[i].thread_id),
+				     signal);
 	}
 }
 
@@ -507,7 +561,8 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 			 * mother thread - kick the worker.
 			 */
 			if (threads[j].scheduled &&
-			    !pthread_equal(threads[j].parent, self)) {
+			    !pthread_equal(atomic_load(&threads[j].parent),
+					   self)) {
 				mutex_w_unlock(&threads[j].inuse);
 				pthread_cond_broadcast(&threads[j].worker_cv);
 				continue;
@@ -549,8 +604,12 @@ static int thread_schedule(int (*start_routine)(void *), void *tdata,
 				    "Thread %u for thread group %u assigned\n",
 				    j, thread_group);
 			threads[j].data = tdata;
+			/*
+			 * The parent goes first, so a thread_send_signal()
+			 * seeing the job also sees whose job it is.
+			 */
+			atomic_store(&threads[j].parent, self);
 			atomic_store(&threads[j].start_routine, start_routine);
-			threads[j].parent = pthread_self();
 			threads[j].scheduled = true;
 			pthread_cond_broadcast(&threads[j].worker_cv);
 			mutex_w_unlock(&threads[j].inuse);
@@ -588,7 +647,8 @@ int thread_wait(bool ignore_shutdown)
 				continue;
 
 			/* Thread is not one of our children, skip */
-			if (!pthread_equal(threads[i].parent, self))
+			if (!pthread_equal(atomic_load(&threads[i].parent),
+					   self))
 				continue;
 
 			/* If the thread executes a job, skip but wait. */
@@ -713,7 +773,7 @@ int thread_wait_all(bool system_threads)
 			goto out;
 		}
 		if (join_me[i]) {
-			pthread_join(threads[i].thread_id, NULL);
+			pthread_join(atomic_load(&threads[i].thread_id), NULL);
 			ret |= threads[i].ret_ancestor;
 			thread_cleanup_full(&threads[i]);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
@@ -737,6 +797,7 @@ static void thread_cancel(bool system_threads)
 {
 	unsigned int i, upper = system_threads ? THREADING_REALLY_ALL_THREADS :
 						 THREADING_MAX_THREADS;
+	bool join_me[THREADING_REALLY_ALL_THREADS];
 
 	atomic_store(&threads_in_cancel, true);
 	mutex_w_lock(&threads_cleanup);
@@ -744,23 +805,53 @@ static void thread_cancel(bool system_threads)
 	 * Ensure that no new thread is spawned.
 	 *
 	 * Do not clear threads[i].start_routine here: it is protected by the
-	 * per-slot inuse lock (which we intentionally do not take on this kill
-	 * path), and a running worker dereferences it under that lock. An
+	 * per-slot inuse lock (which we intentionally do not take for a live
+	 * slot on this kill path), and a running worker dereferences it under that lock. An
 	 * unlocked write races that dereference and can crash the worker. The
 	 * shutdown flag plus the pthread_cancel below already terminate every
 	 * worker, so the write is redundant as well as unsafe.
 	 */
 	for (i = 0; i < upper; i++) {
-		atomic_store(&threads[i].shutdown, true);
+		/*
+		 * Snapshot the live slots before requesting shutdown, as in
+		 * thread_wait_all(): a worker observing the flag clears
+		 * thread_pending when it exits, and deciding on thread_dirty()
+		 * after that would skip joining it.
+		 *
+		 * A slot without a thread may still be in the middle of
+		 * thread_schedule() -> thread_create(), which runs under the
+		 * slot's inuse lock and publishes thread_pending only before
+		 * releasing it. Read without the lock, such a slot looks empty,
+		 * its new worker sees the shutdown flag, exits and is never
+		 * joined. So an empty slot is decided under its inuse lock: no
+		 * job can hold it while thread_pending is false, only a
+		 * scheduler for the short time of thread_create(), and with the
+		 * flag set under the lock no scheduler creates a thread after
+		 * us. A live slot is still not locked, its job may run forever.
+		 */
+		for (;;) {
+			if (thread_dirty(i)) {
+				join_me[i] = true;
+				atomic_store(&threads[i].shutdown, true);
+				break;
+			}
+			if (mutex_w_trylock(&threads[i].inuse) == 0) {
+				join_me[i] = thread_dirty(i);
+				atomic_store(&threads[i].shutdown, true);
+				mutex_w_unlock(&threads[i].inuse);
+				break;
+			}
+			sched_yield();
+		}
 		pthread_cond_broadcast(&threads[i].worker_cv);
 	}
 	pthread_cond_broadcast(&thread_wait_cv);
 
 	/* Kill all worker threads. */
 	for (i = 0; i < upper; i++) {
-		if (thread_dirty(i)) {
-			pthread_cancel(threads[i].thread_id);
-			pthread_join(threads[i].thread_id, NULL);
+		if (join_me[i]) {
+			pthread_cancel(atomic_load(&threads[i].thread_id));
+			pthread_join(atomic_load(&threads[i].thread_id), NULL);
 			thread_cleanup_full(&threads[i]);
 			esdm_logger(LOGGER_VERBOSE, LOGGER_C_THREADING,
 				    "Thread %u killed\n", i);

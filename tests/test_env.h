@@ -22,7 +22,10 @@
 #ifndef TEST_ENV_H
 #define TEST_ENV_H
 
+#include <errno.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 extern char **environ;
 
@@ -69,6 +72,35 @@ static inline void test_env_daemon_envp(char **envp, size_t nmemb)
 	}
 
 	envp[used] = NULL;
+}
+
+/*
+ * Check that @path - a daemon or library the test was handed through its own
+ * environment - names a regular file before the test forks anything around it.
+ * Returns 0 or a positive errno value.
+ */
+static inline int test_env_check_file(const char *path)
+{
+	struct stat sb;
+	int ret;
+
+	if (!path) {
+		printf("No file provided\n");
+		return ENOENT;
+	}
+
+	if (stat(path, &sb)) {
+		ret = errno;
+		printf("File %s not found: %s\n", path, strerror(ret));
+		return ret;
+	}
+
+	if (!S_ISREG(sb.st_mode)) {
+		printf("File %s not regular file\n", path);
+		return EPERM;
+	}
+
+	return 0;
 }
 
 #ifdef __cplusplus

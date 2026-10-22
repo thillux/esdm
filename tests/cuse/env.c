@@ -104,28 +104,6 @@ int env_daemons_alive(void)
 	       env_daemon_alive("urandom", &urandom_pid);
 }
 
-static int env_check_file(const char *path)
-{
-	struct stat sb;
-
-	if (!path) {
-		printf("No file provided\n");
-		return ENOENT;
-	}
-
-	if (stat(path, &sb) == 1) {
-		printf("File not found\n");
-		return errno;
-	}
-
-	if (!S_ISREG(sb.st_mode)) {
-		printf("File not regular file\n");
-		return EPERM;
-	}
-
-	return 0;
-}
-
 int env_init(int disable_fallback)
 {
 	char devfile[64];
@@ -158,9 +136,9 @@ int env_init(int disable_fallback)
 		return 77;
 #endif
 
-	CKINT(env_check_file(random));
-	CKINT(env_check_file(urandom));
-	CKINT(env_check_file(server));
+	CKINT(test_env_check_file(random));
+	CKINT(test_env_check_file(urandom));
+	CKINT(test_env_check_file(server));
 	CKINT(esdm_test_shm_status_init());
 
 	/* Built before the forks below - see test_env_daemon_envp() */

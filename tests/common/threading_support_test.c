@@ -32,7 +32,9 @@
  *     bounds,
  *   - the reserved special groups each get their own slot,
  *   - thread_fork_join() runs every task exactly once, whether it can spawn
- *     threads or falls back to running them inline.
+ *     threads or falls back to running them inline,
+ *   - a forced release cancelling workers in the middle of a log record or
+ *     a wait queue leaves neither the logger nor the queue locked.
  *
  * Every wait is bounded, so a regression that wedges the pool shows up as a
  * failed check rather than a test that never returns.
@@ -51,6 +53,8 @@
 
 #include "common_test.h"
 #include "config.h"
+#include "esdm_logger.h"
+#include "queue.h"
 #include "threading_support.h"
 
 #define TEST_GROUPS 2
@@ -59,6 +63,12 @@
 /* Upper bound for every wait below - generous, but never reached when sane */
 #define WAIT_TIMEOUT_MS 20000
 #define WAIT_STEP_US 1000
+/*
+ * Bound of the waits on the forced release: the cancellation it does is
+ * immediate when sane, and a wedged release has to fail well within the
+ * timeout meson grants the whole test.
+ */
+#define CANCEL_TIMEOUT_MS 5000
 
 static atomic_uint jobs_run;
 static atomic_bool release_workers;
@@ -87,18 +97,34 @@ static bool wait_until_uint(atomic_uint *flag, unsigned int value)
 	return atomic_load(flag) >= value;
 }
 
-static bool wait_until_bool(atomic_bool *flag)
+static bool wait_until_bool_ms(atomic_bool *flag, unsigned int timeout_ms)
 {
 	unsigned int waited;
 
-	for (waited = 0; waited < WAIT_TIMEOUT_MS * 1000;
-	     waited += WAIT_STEP_US) {
+	for (waited = 0; waited < timeout_ms * 1000; waited += WAIT_STEP_US) {
 		if (atomic_load(flag))
 			return true;
 		usleep(WAIT_STEP_US);
 	}
 
 	return atomic_load(flag);
+}
+
+static bool wait_until_bool(atomic_bool *flag)
+{
+	return wait_until_bool_ms(flag, WAIT_TIMEOUT_MS);
+}
+
+/*
+ * Give up on a check that found the process wedged: exit() would hang in
+ * the destructor of a logger left locked, and so would fflush(NULL) on its
+ * stream.
+ */
+static void bail_out(void)
+{
+	fflush(stdout);
+	fflush(stderr);
+	_exit(1);
 }
 
 static void sighup_handler(int sig)
@@ -372,6 +398,54 @@ static void test_send_signal(void)
 	CHECK_EQ(sigaction(SIGHUP, &old, NULL), 0);
 }
 
+static atomic_bool signaler_stop;
+
+static void *signaler(void *data)
+{
+	(void)data;
+
+	while (!atomic_load(&signaler_stop))
+		thread_send_signal(1, SIGHUP);
+
+	return NULL;
+}
+
+/*
+ * thread_send_signal() reads the slots without their lock while
+ * thread_schedule() fills them in for a new job - keep both going at once so
+ * a data race between them shows up under ThreadSanitizer.
+ */
+static void test_send_signal_race(void)
+{
+	struct sigaction sa, old;
+	pthread_t thread;
+	unsigned int i;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = sighup_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	CHECK_EQ(sigaction(SIGHUP, &sa, &old), 0);
+
+	atomic_store(&signaler_stop, false);
+	if (pthread_create(&thread, NULL, signaler, NULL)) {
+		CHECK(0, "cannot start the signaling thread");
+		sigaction(SIGHUP, &old, NULL);
+		return;
+	}
+
+	for (i = 0; i < 200; i++) {
+		CHECK_EQ(thread_start(job_count, NULL, 1, NULL), 0);
+		CHECK_EQ(thread_wait(false), 0);
+	}
+
+	atomic_store(&signaler_stop, true);
+	pthread_join(thread, NULL);
+
+	CHECK_EQ(thread_wait_all(true), 0);
+	CHECK_EQ(sigaction(SIGHUP, &old, NULL), 0);
+}
+
 struct fork_join_arg {
 	unsigned int index;
 	unsigned int runs;
@@ -454,9 +528,93 @@ static void test_thread_names(void)
 	CHECK_EQ(thread_get_name(name, 4), -ERANGE);
 }
 
+static atomic_uint cancel_victims;
+static atomic_bool logged_after_cancel;
+static atomic_bool released;
+static atomic_int release_ret;
+static DECLARE_WAIT_QUEUE(cancel_queue);
+
+/* A job logging until it is cancelled - mostly in the middle of a record */
+static int job_log_forever(void *data)
+{
+	(void)data;
+	atomic_fetch_add(&cancel_victims, 1);
+	for (;;) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY, "cancel victim\n");
+		pthread_testcancel();
+	}
+
+	return 0;
+}
+
+/* A job waiting on a wait queue until it is cancelled */
+static int job_wait_forever(void *data)
+{
+	(void)data;
+	atomic_fetch_add(&cancel_victims, 1);
+	thread_wait_event(&cancel_queue, false);
+
+	return 0;
+}
+
+static void *log_after_cancel(void *data)
+{
+	(void)data;
+	esdm_logger(LOGGER_ERR, LOGGER_C_ANY, "logged after cancel\n");
+	atomic_store(&logged_after_cancel, true);
+	return NULL;
+}
+
+/* Start the victims of the forced release of test_stop_spawning() */
+static void test_cancel_start(void)
+{
+	unsigned int i;
+
+	/* The records are of no interest, only the locks they take */
+	CHECK_EQ(esdm_logger_set_file("/dev/null"), 0);
+	esdm_logger_set_verbosity(LOGGER_ERR);
+
+	atomic_store(&cancel_victims, 0);
+	for (i = 0; i < 2; i++)
+		CHECK_EQ(thread_start(job_log_forever, NULL, 0, NULL), 0);
+	CHECK_EQ(thread_start(job_wait_forever, NULL, 0, NULL), 0);
+	CHECK(wait_until_uint(&cancel_victims, 3), "cancel victims not running");
+	/* Let the loggers get going */
+	usleep(10000);
+}
+
+/* Neither the logger nor the wait queue may be left locked by the victims */
+static void test_cancel_check(void)
+{
+	pthread_t tid;
+
+	CHECK_EQ(pthread_mutex_trylock(&cancel_queue.thread_wait_lock), 0);
+	pthread_mutex_unlock(&cancel_queue.thread_wait_lock);
+
+	/*
+	 * Log from a helper thread, so a logger left locked fails the check
+	 * instead of hanging the test.
+	 */
+	CHECK_EQ(pthread_create(&tid, NULL, log_after_cancel, NULL), 0);
+	if (!wait_until_bool_ms(&logged_after_cancel, CANCEL_TIMEOUT_MS)) {
+		CHECK(0, "logger locked after a forced release");
+		bail_out();
+	}
+	pthread_join(tid, NULL);
+}
+
+static void *release_pool(void *data)
+{
+	(void)data;
+	atomic_store(&release_ret, thread_release(false, true));
+	atomic_store(&released, true);
+	return NULL;
+}
+
 static void test_stop_spawning(void)
 {
 	struct fork_join_arg args[4];
+	pthread_t tid;
 	unsigned int i;
 
 	for (i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
@@ -488,8 +646,19 @@ static void test_stop_spawning(void)
 		      "task %u was not run inline during teardown", i);
 	}
 
-	/* A wait while a cancellation is pending is turned into one */
-	CHECK_EQ(thread_release(false, true), 0);
+	/*
+	 * A wait while a cancellation is pending is turned into one. Release
+	 * from a helper thread, so a release wedged on a cancelled victim
+	 * fails the check instead of hanging the test.
+	 */
+	CHECK_EQ(pthread_create(&tid, NULL, release_pool, NULL), 0);
+	if (!wait_until_bool_ms(&released, CANCEL_TIMEOUT_MS)) {
+		CHECK(0, "forced release did not complete within %u ms",
+		      CANCEL_TIMEOUT_MS);
+		bail_out();
+	}
+	pthread_join(tid, NULL);
+	CHECK_EQ(atomic_load(&release_ret), 0);
 }
 
 int main(int argc, char *argv[])
@@ -504,11 +673,14 @@ int main(int argc, char *argv[])
 	test_special_groups();
 	test_group_isolation();
 	test_send_signal();
+	test_send_signal_race();
 	test_fork_join();
 	test_thread_names();
 
 	/* Stops the pool for good, so it has to come last */
+	test_cancel_start();
 	test_stop_spawning();
+	test_cancel_check();
 
 	return common_test_result("threading_support");
 }
