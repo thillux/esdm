@@ -416,6 +416,7 @@ testdirs = [
 	'tests/es',
 	'tests/es_ext',
 	'tests/esdm',
+	'tests/esdm_cdev',
 	'tests/getrandom',
 	'tests/kernel-seeder',
 	'tests/misc',
