@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <json-c/json.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -101,6 +102,17 @@ static void usage(void)
 		"\t\t\tVerbose logging implies running in foreground\n");
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
 	fprintf(stderr,
+		"\t-c --config <FILE>\tRead options from the JSON object in FILE,\n");
+	fprintf(stderr,
+		"\t\t\tkeyed by their long names: true or a count for an option\n");
+	fprintf(stderr,
+		"\t\t\twithout argument, a string or number for one with, an\n");
+	fprintf(stderr,
+		"\t\t\tarray for one given several times; es_ext also takes\n");
+	fprintf(stderr,
+		"\t\t\tobjects of path, entropy_rate and uid. The command\n");
+	fprintf(stderr, "\t\t\tline overrides them\n");
+	fprintf(stderr,
 		"\t-u --username\tUnprivileged user name to switch to (default: \"nobody\")\n");
 	fprintf(stderr,
 		"\t-g --groupname\tSupplemental group name to switch to (default: none)\n");
@@ -146,18 +158,32 @@ static void usage(void)
 		"\t\t\twith what it declares (auto, by default)\n");
 	fprintf(stderr,
 		"\t   --es_ext_uid <USER>\tAccept a provider running as USER\n");
-	fprintf(stderr, "\t\t\t(uid or name) next to one running as root\n");
+	fprintf(stderr,
+		"\t\t\t(uid or name, none for root only) next to one running\n");
+	fprintf(stderr, "\t\t\tas root\n");
 	fprintf(stderr,
 		"\t\t\tThe --es_ext options may be repeated: the n-th occurrence\n");
 	fprintf(stderr,
 		"\t\t\tof one configures the n-th source, of which this build has\n");
-	fprintf(stderr, "\t\t\t%u\n", ESDM_EXT_NUM);
+	fprintf(stderr,
+		"\t\t\t%u; default keeps what the build configured for it\n",
+		ESDM_EXT_NUM);
 	fprintf(stderr,
 		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
 	fprintf(stderr,
 		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
 	fprintf(stderr,
 		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
+	fprintf(stderr,
+		"\t   --es_disable <NAME>\tDo not use the entropy source NAME as\n");
+	fprintf(stderr,
+		"\t\t\tthe status names it, e.g. JitterRNG; may be repeated\n");
+	fprintf(stderr,
+		"\t   --es_<ES>_entropy_rate <BITS>\tCredit BITS of entropy per\n");
+	fprintf(stderr,
+		"\t\t\t256 bits to ES: cpu, jent, irq, kernel, sched, irq_ebpf,\n");
+	fprintf(stderr,
+		"\t\t\tsched_ebpf, hwrand, tpm2 or jent_kernel\n");
 	fprintf(stderr,
 		"\t   --es_jent_instances <N>\tRefill the Jitter RNG buffer with N\n");
 	fprintf(stderr,
@@ -243,6 +269,20 @@ static unsigned int es_ext_instance(struct es_ext_option *opt)
 }
 
 /*
+ * "default" for an option of an external source leaves the source as the build
+ * configured it, counting as its occurrence: a source configured in full can
+ * follow one that is not.
+ */
+static bool es_ext_default(struct es_ext_option *opt, const char *arg)
+{
+	if (strcmp(arg, "default"))
+		return false;
+
+	es_ext_instance(opt);
+	return true;
+}
+
+/*
  * The entropy rate of an external entropy source, @opt for the source of its
  * occurrence, set with @set - "auto" for none, the source being credited at
  * the rate it declares itself
@@ -250,9 +290,13 @@ static unsigned int es_ext_instance(struct es_ext_option *opt)
 static void set_es_ext_rate(struct es_ext_option *opt, const char *arg,
 			    int (*set)(unsigned int idx, uint32_t ent))
 {
-	uint32_t rate = strcmp(arg, "auto") ? parse_entropy_rate(opt->name, arg) :
-					      ESDM_ES_EXT_ENTROPY_RATE_AUTO;
+	uint32_t rate;
 
+	if (es_ext_default(opt, arg))
+		return;
+
+	rate = strcmp(arg, "auto") ? parse_entropy_rate(opt->name, arg) :
+				     ESDM_ES_EXT_ENTROPY_RATE_AUTO;
 	if (set(es_ext_instance(opt), rate)) {
 		fprintf(stderr, "Cannot set the entropy rate of %s %s\n",
 			opt->name, arg);
@@ -275,6 +319,8 @@ static void set_es_ext(const char *path)
 			"The external ES provider socket path must not be empty\n");
 		exit(1);
 	}
+	if (es_ext_default(&es_ext_opt, path))
+		return;
 
 	idx = es_ext_instance(&es_ext_opt);
 	ret = esdm_es_ext_set_path(idx, path);
@@ -313,6 +359,23 @@ static void set_es_jent_kernel_name(const char *name)
 	}
 }
 
+/* An entropy source of the build that is not to be used */
+static void disable_es(const char *name)
+{
+	int ret = esdm_config_es_disable(name);
+
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"--es_disable: this build has no entropy source %s\n",
+			name);
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr, "--es_disable: %s cannot be disabled\n", name);
+		exit(1);
+	}
+}
+
 /* The user a provider may run as next to root: a uid or a user name */
 static void set_es_ext_uid(const char *arg)
 {
@@ -322,10 +385,16 @@ static void set_es_ext_uid(const char *arg)
 	char *end;
 	int ret;
 
+	if (es_ext_default(&es_ext_uid_opt, arg))
+		return;
+
 	errno = 0;
 	val = strtoul(arg, &end, 10);
-	if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
-	    val < UINT32_MAX) {
+	if (!strcmp(arg, "none")) {
+		/* root only */
+		uid = -1;
+	} else if (arg[0] != '\0' && arg[0] != '-' && *end == '\0' && !errno &&
+		   val < UINT32_MAX) {
 		uid = (int64_t)val;
 	} else {
 		struct passwd *pw = getpwnam(arg);
@@ -349,6 +418,269 @@ static void set_es_ext_uid(const char *arg)
 	}
 }
 
+static const struct option server_opts[] = {
+	{ "verbose", 0, 0, 0 },
+	{ "pid", 1, 0, 0 },
+	{ "help", 0, 0, 0 },
+	{ "version", 0, 0, 0 },
+	{ "username", 1, 0, 0 },
+	{ "foreground", 0, 0, 0 },
+	{ "force_irqes", 0, 0, 0 },
+	{ "force_schedes", 0, 0, 0 },
+	{ "jent_block_disable", 0, 0, 0 },
+	{ "syslog", 0, 0, 0 },
+	{ "raise_sched_priority", 0, 0, 0 },
+	{ "groupname", 1, 0, 0 },
+	{ "memlock", 0, 0, 0 },
+	{ "small_memory", 0, 0, 0 },
+	{ "keep_ipc", 0, 0, 0 },
+	{ "pid_namespace", 0, 0, 0 },
+	{ "egd_socket", 1, 0, 0 },
+	{ "es_ext", 1, 0, 0 },
+	{ "es_ext_entropy_rate", 1, 0, 0 },
+	{ "es_ext_uid", 1, 0, 0 },
+	{ "es_jent_kernel_name", 1, 0, 0 },
+	{ "no_dtls", 0, 0, 0 },
+	{ "no_fixed_drng_mapping", 0, 0, 0 },
+	{ "no_conn_balancing", 0, 0, 0 },
+	{ "dtls", 0, 0, 0 },
+	{ "es_jent_instances", 1, 0, 0 },
+	{ "config", 1, 0, 0 },
+	{ "es_disable", 1, 0, 0 },
+#define SERVER_OPT_RATE_FIRST 28
+	{ "es_cpu_entropy_rate", 1, 0, 0 },
+	{ "es_jent_entropy_rate", 1, 0, 0 },
+	{ "es_irq_entropy_rate", 1, 0, 0 },
+	{ "es_kernel_entropy_rate", 1, 0, 0 },
+	{ "es_sched_entropy_rate", 1, 0, 0 },
+	{ "es_irq_ebpf_entropy_rate", 1, 0, 0 },
+	{ "es_sched_ebpf_entropy_rate", 1, 0, 0 },
+	{ "es_hwrand_entropy_rate", 1, 0, 0 },
+	{ "es_tpm2_entropy_rate", 1, 0, 0 },
+	{ "es_jent_kernel_entropy_rate", 1, 0, 0 },
+	{ 0, 0, 0, 0 }
+};
+
+/* The setters of the es_*_entropy_rate options, in the order of server_opts */
+static void (*const server_rate_set[])(uint32_t ent) = {
+	esdm_config_es_cpu_entropy_rate_set,
+	esdm_config_es_jent_entropy_rate_set,
+	esdm_config_es_irq_entropy_rate_set,
+	esdm_config_es_krng_entropy_rate_set,
+	esdm_config_es_sched_entropy_rate_set,
+	esdm_config_es_irq_ebpf_entropy_rate_set,
+	esdm_config_es_sched_ebpf_entropy_rate_set,
+	esdm_config_es_hwrand_entropy_rate_set,
+	esdm_config_es_tpm2_entropy_rate_set,
+	esdm_config_es_jent_kernel_entropy_rate_set,
+};
+
+_Static_assert(ARRAY_SIZE(server_opts) - 1 ==
+		       SERVER_OPT_RATE_FIRST + ARRAY_SIZE(server_rate_set),
+	       "an es_*_entropy_rate option without its setter");
+
+/* The es_*_entropy_rate option @opt_index of server_opts */
+static void set_es_rate(int opt_index, const char *arg)
+{
+	char name[48];
+
+	snprintf(name, sizeof(name), "--%s", server_opts[opt_index].name);
+	server_rate_set[opt_index - SERVER_OPT_RATE_FIRST](
+		parse_entropy_rate(name, arg));
+}
+#define SERVER_SHORT_OPTS "hvp:u:fisSPg:mMe:c:"
+
+static void __attribute__((noreturn))
+config_err(const char *path, const char *key, const char *what)
+{
+	fprintf(stderr, "esdm-server: %s: %s%s%s\n", path, key ? key : "",
+		key ? ": " : "", what);
+	exit(1);
+}
+
+/* Append @s to @argv, growing it as needed */
+static void config_append(char ***argv, int *argc, char *s)
+{
+	char **n = realloc(*argv, ((size_t)*argc + 2) * sizeof(*n));
+
+	if (!s || !n) {
+		fprintf(stderr, "esdm-server: out of memory\n");
+		exit(1);
+	}
+	n[(*argc)++] = s;
+	n[*argc] = NULL;
+	*argv = n;
+}
+
+/* Append --@opt[=@arg], a string that lives on: optarg may point into it */
+static void config_push(char ***argv, int *argc, const char *opt,
+			const char *arg)
+{
+	char *s = NULL;
+
+	if ((arg ? asprintf(&s, "--%s=%s", opt, arg) :
+		   asprintf(&s, "--%s", opt)) < 0)
+		s = NULL;
+	config_append(argv, argc, s);
+}
+
+/* One value of @key, an option taking an argument if @has_arg */
+static void config_value(char ***argv, int *argc, const char *path,
+			 const char *key, int has_arg, struct json_object *v)
+{
+	int64_t i;
+
+	switch (json_object_get_type(v)) {
+	case json_type_boolean:
+		if (has_arg)
+			config_err(path, key, "takes a value, not a boolean");
+		if (json_object_get_boolean(v))
+			config_push(argv, argc, key, NULL);
+		return;
+	case json_type_int:
+		i = json_object_get_int64(v);
+		if (has_arg) {
+			char num[24];
+
+			snprintf(num, sizeof(num), "%lld", (long long)i);
+			config_push(argv, argc, key, num);
+			return;
+		}
+		/* A count, e.g. of verbose */
+		if (i < 0 || i > 16)
+			config_err(path, key, "takes a count from 0 to 16");
+		while (i--)
+			config_push(argv, argc, key, NULL);
+		return;
+	case json_type_string:
+		if (!has_arg)
+			config_err(path, key, "takes true, false or a count");
+		config_push(argv, argc, key, json_object_get_string(v));
+		return;
+	case json_type_null:
+	case json_type_double:
+	case json_type_object:
+	case json_type_array:
+	default:
+		config_err(path, key, "has a value of the wrong type");
+	}
+}
+
+/*
+ * An external source of the "es_ext" array: the path of its socket alone, or
+ * an object of its "path", "entropy_rate" and "uid", any of which left out
+ * keeps what the build configured for it.
+ */
+static void config_es_ext(char ***argv, int *argc, const char *path,
+			  struct json_object *v)
+{
+	static const char *const keys[] = { "path", "entropy_rate", "uid" };
+	static const char *const opts[] = { "es_ext", "es_ext_entropy_rate",
+					    "es_ext_uid" };
+	struct json_object *f;
+	unsigned int i;
+
+	if (!json_object_is_type(v, json_type_object)) {
+		config_value(argv, argc, path, "es_ext", 1, v);
+		return;
+	}
+
+	json_object_object_foreach(v, k, unused)
+	{
+		(void)unused;
+		for (i = 0; i < ARRAY_SIZE(keys); i++) {
+			if (!strcmp(k, keys[i]))
+				break;
+		}
+		if (i == ARRAY_SIZE(keys))
+			config_err(path, k,
+				   "is none of path, entropy_rate and uid of es_ext");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(keys); i++) {
+		if (json_object_object_get_ex(v, keys[i], &f))
+			config_value(argv, argc, path, opts[i], 1, f);
+		else
+			config_push(argv, argc, opts[i], "default");
+	}
+}
+
+/*
+ * The command line with the options of the configuration file named by
+ * -c/--config ahead of the others, so that the command line overrides them.
+ * Without one, @argv itself. Only the file is looked for here, the options
+ * are parsed with the command line by parse_opts().
+ */
+static char **config_argv(int argc, char *argv[], int *new_argc)
+{
+	struct json_object *cfg;
+	const char *path = NULL;
+	char **nargv = NULL;
+	int c, i, nargc = 0;
+
+	opterr = 0;
+	while ((c = getopt_long(argc, argv, SERVER_SHORT_OPTS, server_opts,
+				&i)) != -1) {
+		if (c == 'c' || (c == 0 && !strcmp(server_opts[i].name,
+						   "config")))
+			path = optarg;
+	}
+	opterr = 1;
+	/* The GNU getopt starts over from optind 0 */
+	optind = 0;
+
+	*new_argc = argc;
+	if (!path)
+		return argv;
+
+	cfg = json_object_from_file(path);
+	if (!cfg)
+		config_err(path, NULL, json_util_get_last_err());
+	if (!json_object_is_type(cfg, json_type_object))
+		config_err(path, NULL, "is not a JSON object");
+
+	config_append(&nargv, &nargc, argv[0]);
+	json_object_object_foreach(cfg, key, val)
+	{
+		const struct option *o;
+		size_t j;
+
+		for (o = server_opts; o->name; o++) {
+			if (!strcmp(o->name, key))
+				break;
+		}
+		if (!o->name)
+			config_err(path, key, "is no option of esdm-server");
+		if (!strcmp(key, "config") || !strcmp(key, "help") ||
+		    !strcmp(key, "version"))
+			config_err(path, key, "is not taken from a file");
+
+		if (!strcmp(key, "es_ext") &&
+		    json_object_is_type(val, json_type_array)) {
+			for (j = 0; j < json_object_array_length(val); j++)
+				config_es_ext(
+					&nargv, &nargc, path,
+					json_object_array_get_idx(val, j));
+			continue;
+		}
+		if (!json_object_is_type(val, json_type_array)) {
+			config_value(&nargv, &nargc, path, key, o->has_arg,
+				     val);
+			continue;
+		}
+		for (j = 0; j < json_object_array_length(val); j++)
+			config_value(&nargv, &nargc, path, key, o->has_arg,
+				     json_object_array_get_idx(val, j));
+	}
+	json_object_put(cfg);
+
+	for (i = 1; i < argc; i++)
+		config_append(&nargv, &nargc, argv[i]);
+
+	*new_argc = nargc;
+	return nargv;
+}
+
 static void parse_opts(int argc, char *argv[])
 {
 	int c = 0;
@@ -356,41 +688,16 @@ static void parse_opts(int argc, char *argv[])
 
 	while (1) {
 		int opt_index = 0;
-		static struct option opts[] = {
-			{ "verbose", 0, 0, 0 },
-			{ "pid", 1, 0, 0 },
-			{ "help", 0, 0, 0 },
-			{ "version", 0, 0, 0 },
-			{ "username", 1, 0, 0 },
-			{ "foreground", 0, 0, 0 },
-			{ "force_irqes", 0, 0, 0 },
-			{ "force_schedes", 0, 0, 0 },
-			{ "jent_block_disable", 0, 0, 0 },
-			{ "syslog", 0, 0, 0 },
-			{ "raise_sched_priority", 0, 0, 0 },
-			{ "groupname", 1, 0, 0 },
-			{ "memlock", 0, 0, 0 },
-			{ "small_memory", 0, 0, 0 },
-			{ "keep_ipc", 0, 0, 0 },
-			{ "pid_namespace", 0, 0, 0 },
-			{ "egd_socket", 1, 0, 0 },
-			{ "es_ext", 1, 0, 0 },
-			{ "es_ext_entropy_rate", 1, 0, 0 },
-			{ "es_ext_uid", 1, 0, 0 },
-			{ "es_jent_kernel_name", 1, 0, 0 },
-			{ "no_dtls", 0, 0, 0 },
-			{ "no_fixed_drng_mapping", 0, 0, 0 },
-			{ "no_conn_balancing", 0, 0, 0 },
-			{ "dtls", 0, 0, 0 },
-			{ "es_jent_instances", 1, 0, 0 },
-			{ 0, 0, 0, 0 }
-		};
-		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
+		c = getopt_long(argc, argv, SERVER_SHORT_OPTS, server_opts,
 				&opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
 		case 0:
+			if (opt_index >= SERVER_OPT_RATE_FIRST) {
+				set_es_rate(opt_index, optarg);
+				break;
+			}
 			switch (opt_index) {
 			case 0:
 				/* verbose */
@@ -511,6 +818,13 @@ static void parse_opts(int argc, char *argv[])
 				esdm_config_es_jent_instances_set(
 					(uint32_t)strtoul(optarg, NULL, 10));
 				break;
+			case 26:
+				/* config, read by config_argv() already */
+				break;
+			case 27:
+				/* es_disable */
+				disable_es(optarg);
+				break;
 
 			default:
 				usage();
@@ -567,6 +881,9 @@ static void parse_opts(int argc, char *argv[])
 			/* egd_socket */
 			if (esdm_egd_server_enable(optarg))
 				exit(1);
+			break;
+		case 'c':
+			/* config, read by config_argv() already */
 			break;
 
 		default:
@@ -886,6 +1203,7 @@ int main(int argc, char *argv[])
 
 	may_enable_memory_debugging();
 
+	argv = config_argv(argc, argv, &argc);
 	parse_opts(argc, argv);
 
 	/*

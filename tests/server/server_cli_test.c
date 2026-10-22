@@ -31,6 +31,7 @@
  */
 
 #define _GNU_SOURCE
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -501,6 +502,81 @@ static void test_es_jent_kernel_name_option(void)
 	      r.err);
 }
 
+/* Run with -c and a file holding @json; the exit code, @r has the output */
+static int test_run_config(struct test_run *r, const char *json, bool parsed)
+{
+	char path[] = "/tmp/esdm-server-cli-test-XXXXXX";
+	const char *const opts[] = { "-c", path, NULL };
+	int fd = mkstemp(path), rc;
+	size_t len = strlen(json);
+
+	CHECK(fd >= 0, "no temporary file for the configuration");
+	if (fd < 0)
+		return -1;
+	CHECK(write(fd, json, len) == (ssize_t)len,
+	      "the configuration was not written");
+	close(fd);
+
+	rc = parsed ? test_run_parsed(r, opts) : test_run(r, opts, NULL);
+	unlink(path);
+	return rc;
+}
+
+/*
+ * The JSON configuration file: its options are parsed as those of the command
+ * line, what it holds that is no option or of the wrong type is refused with
+ * the key that is.
+ */
+static void test_config_file(void)
+{
+	static const struct {
+		const char *json;
+		const char *refusal;
+	} bad[] = {
+		{ "[ 1 ]", "is not a JSON object" },
+		{ "{ \"bogus\": true }", "bogus: is no option of esdm-server" },
+		{ "{ \"pid\": true }", "pid: takes a value, not a boolean" },
+		{ "{ \"foreground\": \"yes\" }", "takes true, false or a count" },
+		{ "{ \"config\": \"/x\" }", "is not taken from a file" },
+		{ "{ \"es_jent_entropy_rate\": 300 }",
+		  "entropy rate from 0 to 256" },
+		{ "{ \"es_disable\": \"Auxiliary\" }", "cannot be disabled" },
+		{ "{ \"es_disable\": \"no-such-source\" }",
+		  "has no entropy source" },
+		{ "{ \"es_ext\": [ { \"pth\": \"/x\" } ] }",
+		  "is none of path, entropy_rate and uid" },
+	};
+	const char *const missing[] = { "-c", "/nonexistent/esdm.json", NULL };
+	const char *const good = "{ \"verbose\": 2, \"foreground\": true,"
+				 " \"es_jent_instances\": 2,"
+				 " \"es_cpu_entropy_rate\": 0"
+#ifdef ESDM_ES_CPU
+				 ", \"es_disable\": [ \"CPU\" ]"
+#endif
+				 " }";
+	struct test_run r;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		CHECK_EQ(test_run_config(&r, bad[i].json, false), 1);
+		CHECK(strstr(r.err, bad[i].refusal) != NULL,
+		      "%s was not refused with \"%s\" (output: %.300s)",
+		      bad[i].json, bad[i].refusal, r.err);
+	}
+
+	CHECK_EQ(test_run(&r, missing, NULL), 1);
+	CHECK(strstr(r.err, "/nonexistent/esdm.json") != NULL,
+	      "a missing configuration was not named (output: %.300s)", r.err);
+
+	/* Accepted, as root the daemon would start */
+	if (geteuid()) {
+		CHECK_EQ(test_run_config(&r, good, true), 1);
+		CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
+		      "the configuration was not accepted (output: %.300s)",
+		      r.err);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
@@ -523,6 +599,7 @@ int main(int argc, char *argv[])
 	test_es_ext_options();
 	test_es_ext_repeated_options();
 	test_es_jent_kernel_name_option();
+	test_config_file();
 
 	test_run_fini();
 
