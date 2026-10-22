@@ -28,6 +28,11 @@ extern "C" {
 
 /**
  * @brief Initialize the semaphore to be notified about inserting entropy
+ *
+ * The semaphore and the status shared memory segment are the ESDM server's,
+ * this creates neither. If the server is not running yet, the wait below
+ * attaches to them once it has created them, and does so again after the
+ * server replaced them, e.g. when it was restarted.
  */
 int esdm_aux_init_wait_for_need_entropy(void);
 
@@ -50,10 +55,10 @@ void esdm_aux_fini_wait_for_need_entropy(void);
  * This function allows the caller to specify a timeout when this function shall
  * return even though the semaphore did not fire.
  *
- * The API is a wrapper around sem_clockwait([1]) including the purpose of the
- * @param ts as well as the return code and the errno.
+ * The API follows sem_clockwait([1]) in the purpose of the @param ts as well as
+ * the return code and the errno, with CLOCK_MONOTONIC as its clock.
  *
- * @param [in] ts See [1]
+ * @param [in] ts Absolute deadline on CLOCK_MONOTONIC - not CLOCK_REALTIME
  *
  * @return See [1]
  *

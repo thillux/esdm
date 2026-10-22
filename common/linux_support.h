@@ -33,11 +33,19 @@ int linux_isolate_namespace(void);
  * The calling process becomes a pure supervisor that forwards signals and
  * mirrors the daemon's exit status; only the child returns from this call.
  *
+ * @param [in] fwd_signals Signals the supervisor forwards to the daemon -
+ *	       every signal the daemon handles, as the supervisor dies from
+ *	       one it does not forward. The daemon must install its handlers
+ *	       for them before this call: the kernel drops a signal sent to a
+ *	       PID namespace init from outside that has no handler for it.
+ * @param [in] nr_fwd_signals Number of entries in fwd_signals.
  * @param [in] supervisor_exit_cb Optional callback (may be NULL) the
  *	       supervisor invokes - with its retained privileges - after the
  *	       daemon terminated and before it exits itself.
  */
-int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void));
+int linux_isolate_namespace_prefork(const int *fwd_signals,
+				    unsigned int nr_fwd_signals,
+				    void (*supervisor_exit_cb)(void));
 int linux_personalization_string(char **ptr, size_t *length);
 
 #ifdef __cplusplus

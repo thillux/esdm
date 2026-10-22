@@ -33,6 +33,7 @@
 #endif
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <json-c/json.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -908,6 +909,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 {
 	uint8_t *buffer = calloc(1, ESDM_RPC_MAX_DATA);
 	unsigned int flags = 0;
+	int result = EXIT_FAILURE;
 	ssize_t ret;
 
 	if (buffer == NULL) {
@@ -923,9 +925,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 	if (ret < 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Unable to fetch seed, exiting.\n");
-		memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
-		free(buffer);
-		return EXIT_FAILURE;
+		goto out;
 	}
 
 	if (raw) {
@@ -933,7 +933,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		if (written != ret) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 				    "error writing bytes to stdout\n");
-			return EXIT_FAILURE;
+			goto out;
 		}
 	} else {
 		for (ssize_t i = 0; i < ret; ++i) {
@@ -942,9 +942,13 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		}
 	}
 
+	result = EXIT_SUCCESS;
+
+out:
+	/* The seed is wiped on every way out, not only on success */
 	memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
 	free(buffer);
-	return EXIT_SUCCESS;
+	return result;
 }
 
 /*
@@ -1053,7 +1057,7 @@ static int handle_seed_via_os(void)
 	}
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_TOOL,
-		"Inserted %li byte into ESDM, accounted with %li bit of entropy\n",
+		"Inserted %zu byte into ESDM, accounted with %zu bit of entropy\n",
 		sizeof(seed_buffer), sizeof(seed_buffer) * 8);
 
 out_1:
@@ -1065,7 +1069,7 @@ out_ret:
 
 static int handle_reseed_via_os(long reseed_delay_ms)
 {
-	const uint32_t timeout_secs = 100;
+	const time_t timeout_secs = 100;
 	struct timespec start, wait, before, after;
 	uint8_t reseed_buffer[512 / 8];
 	int ret_val = EXIT_SUCCESS;
@@ -1099,12 +1103,12 @@ static int handle_reseed_via_os(long reseed_delay_ms)
 		if (ret == 0) {
 			esdm_logger(
 				LOGGER_STATUS, LOGGER_C_TOOL,
-				"Wakeup %li after %s: handling conditional wake after %s\n",
+				"Wakeup %" PRIu64 " after %s: handling conditional wake after %s\n",
 				wakeups, t1, t2);
 		} else if (ret == -1 && errno == ETIMEDOUT) {
 			esdm_logger(
 				LOGGER_STATUS, LOGGER_C_TOOL,
-				"Wakeup %li after %s: handling timeout wake after %s\n",
+				"Wakeup %" PRIu64 " after %s: handling timeout wake after %s\n",
 				wakeups, t1, t2);
 		} else {
 			esdm_logger(LOGGER_STATUS, LOGGER_C_TOOL,
@@ -1148,7 +1152,7 @@ static int handle_reseed_via_os(long reseed_delay_ms)
 		}
 		esdm_logger(
 			LOGGER_DEBUG, LOGGER_C_TOOL,
-			"Inserted %li byte into ESDM, accounted with %li bit of entropy\n",
+			"Inserted %zu byte into ESDM, accounted with %zu bit of entropy\n",
 			sizeof(reseed_buffer), sizeof(reseed_buffer) * 8);
 	}
 

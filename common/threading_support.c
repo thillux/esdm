@@ -248,6 +248,7 @@ static inline void thread_cleanup_full(struct thread_ctx *tctx)
 	 */
 }
 
+DSO_PUBLIC
 void thread_set_default_stacksize(size_t stacksize)
 {
 	pthread_stacksize = stacksize;
@@ -489,6 +490,7 @@ err:
 	return ret;
 }
 
+DSO_PUBLIC
 void thread_send_signal(uint32_t thread_group, int signal)
 {
 	pthread_t self = pthread_self();
@@ -900,11 +902,13 @@ int thread_start(int (*start_routine)(void *), void *tdata,
 	return 0;
 }
 
+DSO_PUBLIC
 void thread_stop_spawning(void)
 {
 	atomic_store(&threads_in_cancel, true);
 }
 
+DSO_PUBLIC
 void thread_fork_join(void *(*start_routine)(void *), void *args,
 		      size_t arg_stride, size_t num)
 {

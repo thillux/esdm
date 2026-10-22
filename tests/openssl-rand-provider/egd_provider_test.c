@@ -425,20 +425,22 @@ int main(int argc, char *argv[])
 	setenv(TEST_EGD_SOCKET_ENV, sockpath, 1);
 
 	if (OSSL_PROVIDER_set_default_search_path(NULL, provider_path) != 1) {
-		printf("Cannot set the provider search path\n");
+		CHECK(0, "cannot set the provider search path");
 		goto out;
 	}
 
 	prov_esdm = OSSL_PROVIDER_load(NULL, TEST_EGD_PROVIDER);
 	if (!prov_esdm) {
-		printf("Cannot load " TEST_EGD_PROVIDER ": %s\n", last_error());
+		CHECK(0, "cannot load " TEST_EGD_PROVIDER ": %s",
+		      last_error());
 		goto out;
 	}
 
 	/* For the DRBG that takes this provider as its seed source */
 	prov_default = OSSL_PROVIDER_load(NULL, "default");
 	if (!prov_default) {
-		printf("Cannot load the default provider: %s\n", last_error());
+		CHECK(0, "cannot load the default provider: %s",
+		      last_error());
 		goto out;
 	}
 

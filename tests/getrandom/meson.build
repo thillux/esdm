@@ -25,6 +25,21 @@ if get_option('linux-getrandom').enabled()
 			dependencies: esdm_getrandom_dep
 		)
 
+	# The library against an ESDM that answers as told: getrandom.c is
+	# compiled in and the RPC client calls it makes are provided by the
+	# test, so neither a server nor privileges are needed.
+	getrandom_shim_test = executable(
+			'getrandom_shim_test',
+			[ 'getrandom_shim_test.c' ],
+			include_directories: [ include_dirs_client,
+					       include_directories('../../frontends/getrandom'),
+					       include_directories('../common') ],
+			dependencies: [ dependencies_client ],
+			link_with: [ esdm_common_static_lib ],
+		)
+
+	test('getrandom library against a stubbed ESDM', getrandom_shim_test)
+
 	test('getrandom library API', getrandom_api_test,
 		# Each request the ESDM cannot answer waits out the RPC
 		# client's connection attempts before it reaches the kernel.
@@ -52,6 +67,8 @@ if get_option('linux-getrandom').enabled()
 		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()])
 
 	test('System call getrandom get_seed', getrandom_get_seed_test,
-		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()])
+		env: [ tester_getrandom_env , 'LD_PRELOAD=' + esdm_getrandom_lib.full_path()],
+		# It waits up to a minute for the server to be fully seeded.
+		timeout: 120)
 
 endif

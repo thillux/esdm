@@ -4,7 +4,16 @@ cuse_src = [
 	'privileges.c'
 ]
 
-cuse_deps = [ dependency('fuse3') ]
+fuse3_dep = dependency('fuse3')
+
+# libfuse 3.12 brought the loop configuration that sets how many worker threads
+# serve a device, see main_common(). Before, there was no limit to set.
+fuse3_args = []
+if fuse3_dep.version().version_compare('>=3.12')
+	fuse3_args += '-DESDM_FUSE_LOOP_CONFIG'
+endif
+cuse_deps = [ declare_dependency(dependencies: fuse3_dep,
+				 compile_args: fuse3_args) ]
 
 if get_option('selinux').enabled()
 	cuse_src += 'selinux.c'

@@ -17,13 +17,20 @@
  * USE OF THIS SOFTWARE, EVEN IF NOT ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGE.
  */
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/syscall.h>
 
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "env.h"
 #include "getrandom.h"
@@ -64,10 +71,63 @@ static void bin2hex(const uint8_t *bin, uint32_t binlen, char *hex,
 	}
 }
 
+/*
+ * Take the kernel out of the picture: from here on, the getrandom system call
+ * of this process fails with ENOSYS. The library falls back to it whenever the
+ * ESDM does not answer, so random bytes that still arrive came from the ESDM -
+ * and a fallback shows up as a failed call instead of passing unnoticed.
+ *
+ * The server was started before and is not affected. The filter does not look
+ * at the architecture of the call: all it can get wrong is to fail a system
+ * call of a foreign ABI that has the same number, and this test makes none.
+ */
+static int deny_kernel_getrandom(void)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+			 offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrandom, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+		.filter = filter,
+	};
+
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+	    prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0))
+		return -errno;
+
+	return 0;
+}
+
+static int check_getrandom(const char *call, ssize_t rc, const uint8_t *random,
+			   size_t len)
+{
+	char hex_random[2 * 16 + 1];
+
+	if (rc < 0) {
+		printf("%s call failed - the ESDM did not answer it: %s\n",
+		       call, strerror(errno));
+		return 1;
+	}
+	if ((size_t)rc != len) {
+		printf("%s returned %zd bytes, expected %zu\n", call, rc, len);
+		return 1;
+	}
+
+	hex_random[sizeof(hex_random) - 1] = '\0';
+	bin2hex(random, (uint32_t)len, hex_random, sizeof(hex_random) - 1, 0);
+	printf("%s: random value %s\n", call, hex_random);
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	uint8_t random[16];
-	char hex_random[sizeof(random) + 1];
+	ssize_t rc;
 	int ret;
 
 	(void)argc;
@@ -77,25 +137,31 @@ int main(int argc, char *argv[])
 	if (ret)
 		return ret;
 
-	hex_random[sizeof(hex_random) - 1] = '\0';
-
-	if (getrandom_random(random, sizeof(random)) < 0) {
-		printf("getrandom(GRND_RANDOM) call failed\n");
-	} else {
-		bin2hex(random, sizeof(random), hex_random,
-			sizeof(hex_random) - 1, 0);
-		printf("random value %s\n", hex_random);
+	ret = deny_kernel_getrandom();
+	if (ret) {
+		printf("Cannot keep the kernel from answering getrandom: %s\n",
+		       strerror(-ret));
+		ret = 1;
+		goto out;
 	}
 
-	if (getrandom_urandom(random, sizeof(random)) < 0) {
-		printf("getrandom(0) call failed\n");
-	} else {
-		bin2hex(random, sizeof(random), hex_random,
-			sizeof(hex_random) - 1, 0);
-		printf("random value %s\n", hex_random);
+	/* The filter is in place: the kernel's own call is refused */
+	rc = syscall(__NR_getrandom, random, sizeof(random), 0);
+	if (rc >= 0 || errno != ENOSYS) {
+		printf("the kernel still answers getrandom: %zd\n", rc);
+		ret = 1;
+		goto out;
 	}
 
+	rc = getrandom_random(random, sizeof(random));
+	ret |= check_getrandom("getrandom(GRND_RANDOM)", rc, random,
+			       sizeof(random));
+
+	rc = getrandom_urandom(random, sizeof(random));
+	ret |= check_getrandom("getrandom(0)", rc, random, sizeof(random));
+
+out:
 	env_fini();
 
-	return 0;
+	return ret;
 }

@@ -82,7 +82,7 @@ extern "C" {
 #define ESDM_CUSE_URANDOM_DEVNAME "uesdm"
 #define ESDM_CUSE_URANDOM_DEVICE "/dev/" ESDM_CUSE_URANDOM_DEVNAME
 
-#define ESDM_SHM_STATUS_VERSION 2
+#define ESDM_SHM_STATUS_VERSION 4
 
 /*
  * Size of the rendered status report kept in the shared memory segment.
@@ -103,7 +103,12 @@ struct esdm_shm_status {
 
 	/* String with status information */
 	char info[ESDM_SHM_STATUS_INFO_SIZE];
-	size_t infolen;
+	/*
+	 * Fixed width and no member aligned to more than 4 bytes: a 32-bit
+	 * client attaches to the segment of a 64-bit server. With a size_t
+	 * here, it read every member after this one 4 bytes off. Version 4.
+	 */
+	uint32_t infolen;
 
 	/* Number of threads handling the unprivileged interface */
 	uint32_t unpriv_threads;
@@ -112,8 +117,14 @@ struct esdm_shm_status {
 	atomic_bool operational;
 	/* Do we need new entropy? */
 	atomic_bool need_entropy;
-	/* Wake up due to suspend/hibernate trigger */
-	atomic_bool suspend_trigger;
+	/*
+	 * Bumped on a suspend/hibernate trigger and when the server exits. A
+	 * counter rather than a flag a client clears: every CUSE daemon tracks
+	 * the value it has seen on its own, so one of them cannot take the
+	 * event away from another. Growing it to a counter is the bump of
+	 * version 3.
+	 */
+	atomic_uint suspend_gen;
 };
 
 static inline key_t esdm_ftok(const char *pathname, int proj_id)

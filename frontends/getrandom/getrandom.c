@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -51,6 +52,8 @@
 #define GRND_FULLY_SEEDED 0x0020
 
 static atomic_bool is_initialized = false;
+/* Whether this library holds a reference on the RPC client */
+static atomic_bool rpc_initialized = false;
 static DEFINE_MUTEX_UNLOCKED(getrandom_mutex);
 
 static void esdm_getrandom_lib_init(void)
@@ -66,8 +69,12 @@ static void esdm_getrandom_lib_init(void)
 	esdm_rpcc_set_max_online_nodes(ESDM_GETRANDOM_NUM_NODES);
 #endif
 
-	/* Return code irrelevant due to fallback in functions below */
-	esdm_rpcc_init_unpriv_service(NULL);
+	/*
+	 * A failure is not fatal due to the fallback in the functions below,
+	 * but it means there is no reference to drop at exit.
+	 */
+	if (esdm_rpcc_init_unpriv_service(NULL) == 0)
+		atomic_store(&rpc_initialized, true);
 
 	atomic_store(&is_initialized, true);
 
@@ -78,10 +85,36 @@ out:
 ESDM_DEFINE_DESTRUCTOR(esdm_getrandom_lib_exit);
 static void esdm_getrandom_lib_exit(void)
 {
-	esdm_rpcc_fini_unpriv_service();
+	/*
+	 * The RPC client is reference counted and shared with everybody else
+	 * in this process. A fini for an init that never happened - the library
+	 * was loaded but never called - would drop somebody else's reference.
+	 */
+	if (atomic_load(&rpc_initialized))
+		esdm_rpcc_fini_unpriv_service();
 }
 
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags);
+
+/*
+ * Whether a request for seeded randomness would block. The ESDM blocks such a
+ * request until it is fully seeded, and its RPC client keeps asking until then,
+ * so GRND_NONBLOCK has to be honored here, before the request is made.
+ *
+ * Returns 1 if it would block, 0 if not and < 0 if the ESDM cannot tell.
+ */
+static int esdm_getrandom_would_block(void)
+{
+	bool fully_seeded = false;
+	int ret;
+
+	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+	if (ret < 0)
+		return ret;
+
+	return !fully_seeded;
+}
+
 DSO_PUBLIC
 ssize_t __real_getrandom(void *__buffer, size_t __length, unsigned int __flags)
 {
@@ -92,10 +125,14 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 {
 	ssize_t ret;
 
+	/*
+	 * getrandom(2) semantics: -1 with errno on error, never a negative
+	 * error code as return value.
+	 */
 	if (flags &
 	    (unsigned int)(~(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE |
 			     GRND_SEED | GRND_FULLY_SEEDED)))
-		return -EINVAL;
+		goto inval;
 
 	/*
 	 * Requesting insecure and blocking randomness at the same time makes
@@ -103,12 +140,12 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	 */
 	if ((flags & (GRND_INSECURE | GRND_RANDOM)) ==
 	    (GRND_INSECURE | GRND_RANDOM))
-		return -EINVAL;
+		goto inval;
 	if ((flags & (GRND_INSECURE | GRND_SEED)) ==
 	    (GRND_INSECURE | GRND_SEED))
-		return -EINVAL;
+		goto inval;
 	if ((flags & (GRND_RANDOM | GRND_SEED)) == (GRND_RANDOM | GRND_SEED))
-		return -EINVAL;
+		goto inval;
 
 	/*
 	 * Cap to INT_MAX to match the kernel getrandom() behavior which
@@ -121,10 +158,45 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 		esdm_getrandom_lib_init();
 	}
 
+	/*
+	 * getrandom(2) returns EAGAIN for GRND_NONBLOCK as long as it would
+	 * block. Without an answer from the ESDM, the kernel decides - which
+	 * also spares a non-blocking caller the wait for a second RPC that
+	 * would fail the same way.
+	 */
+	if ((flags & GRND_NONBLOCK) && !(flags & (GRND_INSECURE | GRND_SEED))) {
+		int rc = esdm_getrandom_would_block();
+
+		if (rc > 0) {
+			errno = EAGAIN;
+			return -1;
+		}
+		if (rc < 0)
+			return syscall(
+				__NR_getrandom, buffer, length,
+				flags & ~(unsigned int)GRND_FULLY_SEEDED);
+	}
+
 	if (flags & GRND_INSECURE) {
 		esdm_invoke(esdm_rpcc_get_random_bytes(buffer, length));
 	} else if (flags & GRND_RANDOM) {
-		esdm_invoke(esdm_rpcc_get_random_bytes_pr(buffer, length));
+		if (!(flags & GRND_NONBLOCK)) {
+			esdm_invoke(
+				esdm_rpcc_get_random_bytes_pr(buffer, length));
+		} else {
+			/*
+			 * Seeded is not enough: the RPC client waits for as
+			 * long as the PR DRNG is busy or not operational.
+			 * That is the ESDM's answer, not a failure, so it is
+			 * not handed to the kernel either.
+			 */
+			esdm_invoke(esdm_rpcc_get_random_bytes_pr_nonblock(
+				buffer, length));
+			if (ret == -EAGAIN) {
+				errno = EAGAIN;
+				return -1;
+			}
+		}
 	} else if (flags & GRND_SEED) {
 		unsigned int seed_flags =
 			(flags & GRND_NONBLOCK) ? ESDM_GET_SEED_NONBLOCK : 0;
@@ -145,7 +217,13 @@ static ssize_t getrandom_common(void *buffer, size_t length, unsigned int flags)
 	if (ret >= 0)
 		return ret;
 
-	return syscall(__NR_getrandom, buffer, length, flags);
+	/* GRND_FULLY_SEEDED is ESDM's own, the kernel would refuse it */
+	return syscall(__NR_getrandom, buffer, length,
+		       flags & ~(unsigned int)GRND_FULLY_SEEDED);
+
+inval:
+	errno = EINVAL;
+	return -1;
 }
 
 /* Declare the prototype even though libc declares it internally */
@@ -162,34 +240,54 @@ ssize_t getrandom(void *buffer, size_t length, unsigned int flags)
 	return getrandom_common(buffer, length, flags);
 }
 
+/*
+ * getentropy(3) from the kernel, filling the buffer or failing as the glibc and
+ * musl implementations do: an interrupted system call is retried - a caller of
+ * getentropy has no reason to expect EINTR - and a partial read continued.
+ */
+static int esdm_getentropy_kernel(void *buffer, size_t length)
+{
+	uint8_t *p = buffer;
+
+	while (length) {
+		ssize_t ret = syscall(__NR_getrandom, p, length, 0);
+
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			/* the syscall already set errno */
+			return -1;
+		}
+
+		/* No progress at all - fail the way getentropy(3) documents */
+		if (ret == 0) {
+			errno = EIO;
+			return -1;
+		}
+
+		p += ret;
+		length -= (size_t)ret;
+	}
+
+	return 0;
+}
+
 int __real_getentropy(void *__buffer, size_t __length);
 DSO_PUBLIC
 int __real_getentropy(void *__buffer, size_t __length)
 {
-	ssize_t ret;
-
 	/* getentropy(3) semantics: 0 on success, -1 with errno on error. */
 	if (__length > 256) {
 		errno = EIO;
 		return -1;
 	}
 
-	ret = syscall(__NR_getrandom, __buffer, __length, 0);
-	if (ret < 0)
-		/* the syscall already set errno */
-		return -1;
-	if ((size_t)ret != __length) {
-		/* getentropy must fill the whole buffer or fail */
-		errno = EIO;
-		return -1;
-	}
-
-	return 0;
+	return esdm_getentropy_kernel(__buffer, __length);
 }
 
 static int getentropy_common(void *buffer, size_t length)
 {
-	ssize_t ret = -EFAULT;
+	ssize_t ret;
 
 	/* getentropy(3) semantics: 0 on success, -1 with errno on error. */
 	if (length > 256) {
@@ -202,21 +300,9 @@ static int getentropy_common(void *buffer, size_t length)
 	}
 
 	esdm_invoke(esdm_rpcc_get_random_bytes_full(buffer, length));
-	if (ret < 0) {
-		ssize_t rc = syscall(__NR_getrandom, buffer, length, 0);
+	if (ret < 0)
+		return esdm_getentropy_kernel(buffer, length);
 
-		/* Kernel returned an error */
-		if (rc < 0) {
-			/* errno is already set properly */
-			return (int)rc;
-		}
-
-		/* We received insufficient data */
-		if ((size_t)rc != length) {
-			errno = EFAULT;
-			return -1;
-		}
-	}
 	return 0;
 }
 

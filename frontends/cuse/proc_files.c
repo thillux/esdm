@@ -18,14 +18,21 @@
  * DAMAGE.
  */
 
+/*
+ * Before any system header: MUTEX_UNLOCKED_PREFER_WRITER silently falls back
+ * to the reader-preferring lock without the glibc extensions.
+ */
+#define _GNU_SOURCE
 #define FUSE_USE_VERSION 31
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse3/fuse.h>
 #include <fuse3/fuse_lowlevel.h>
 #include <libgen.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +75,25 @@ struct esdm_proc_file {
  * Helper
  ******************************************************************************/
 static const char *esdm_proc_unprivileged_user = "nobody";
+
+/*
+ * Still being root after a privilege drop would serve every request with root
+ * privileges. That is not recoverable, so stop serving requests - the session
+ * loop then returns and unmounts the file system.
+ */
+static void esdm_proc_drop_failed(void)
+{
+	struct fuse *fuse = fuse_get_context()->fuse;
+
+	if (geteuid() != 0)
+		return;
+
+	esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+		    "Cannot drop privileges, terminating\n");
+	if (fuse)
+		fuse_exit(fuse);
+}
+
 static void esdm_proc_drop_privileges(void)
 {
 	static bool dropped = false;
@@ -77,6 +103,8 @@ static void esdm_proc_drop_privileges(void)
 
 	if (drop_privileges_transient(esdm_proc_unprivileged_user) == 0)
 		dropped = true;
+	else
+		esdm_proc_drop_failed();
 }
 
 /*
@@ -88,8 +116,13 @@ static void esdm_proc_drop_privileges(void)
  * design: privileged operations take the write lock, unprivileged operations
  * take the read lock, so the elevated-credential window is never concurrent
  * with another request.
+ *
+ * Writer-preferring, as in CUSE: open and getattr hold the read lock across an
+ * RPC, so with a reader-preferring lock a steady stream of unprivileged readers
+ * could keep root's writes waiting for good. Readers never nest, which the
+ * non-recursive kind requires.
  */
-static mutex_t esdm_proc_priv = MUTEX_UNLOCKED;
+static mutex_t esdm_proc_priv = MUTEX_UNLOCKED_PREFER_WRITER;
 
 static bool esdm_proc_client_privileged(void)
 {
@@ -119,7 +152,8 @@ static void esdm_proc_raise_privilege(void)
 
 static void esdm_proc_drop_privilege(void)
 {
-	drop_privileges_transient(esdm_proc_unprivileged_user);
+	if (drop_privileges_transient(esdm_proc_unprivileged_user))
+		esdm_proc_drop_failed();
 	mutex_unlock(&esdm_proc_priv);
 }
 
@@ -217,14 +251,17 @@ static int esdm_proc_get_write_wakeup_thresh(struct esdm_proc_file *file)
 	return esdm_proc_data(file, esdm_rpcc_get_write_wakeup_thresh);
 }
 
-static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
-					     const char *buf, size_t buflen)
+/*
+ * Parse a number written to one of the writable files the way the kernel's
+ * proc_dointvec() does: white space around it - such as the newline of an
+ * "echo" - is fine, anything else that is not part of the number is not. The
+ * value has to fit the 32 bit interface of the ESDM.
+ */
+static int esdm_proc_parse_u32(const char *buf, size_t buflen, uint32_t *val)
 {
 	char tmp[32];
-	unsigned long thresh;
-	int ret = 0;
-
-	(void)file;
+	unsigned long parsed;
+	char *start, *end;
 
 	/* Ensure NUL-terminated input for strtoul */
 	if (buflen == 0 || buflen >= sizeof(tmp))
@@ -232,15 +269,44 @@ static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
 	memcpy(tmp, buf, buflen);
 	tmp[buflen] = '\0';
 
+	start = tmp;
+	while (isspace((unsigned char)*start))
+		start++;
+
+	/* strtoul() takes a sign, and wraps a negative number around */
+	if (!isdigit((unsigned char)*start))
+		return -EINVAL;
+
 	errno = 0;
-	thresh = strtoul(tmp, NULL, 0);
-	if (errno || thresh >= UINT32_MAX)
+	parsed = strtoul(start, &end, 0);
+	if (errno || parsed >= UINT32_MAX)
 		return -ERANGE;
 
+	while (isspace((unsigned char)*end))
+		end++;
+	if (*end != '\0')
+		return -EINVAL;
+
+	*val = (uint32_t)parsed;
+
+	return 0;
+}
+
+static int esdm_proc_set_write_wakeup_thresh(struct esdm_proc_file *file,
+					     const char *buf, size_t buflen)
+{
+	uint32_t thresh;
+	int ret;
+
+	(void)file;
+
+	CKINT(esdm_proc_parse_u32(buf, buflen, &thresh));
+
 	esdm_proc_raise_privilege();
-	esdm_invoke(esdm_rpcc_set_write_wakeup_thresh((uint32_t)thresh));
+	esdm_invoke(esdm_rpcc_set_write_wakeup_thresh(thresh));
 	esdm_proc_drop_privilege();
 
+out:
 	return ret;
 }
 
@@ -252,27 +318,18 @@ static int esdm_proc_get_min_reseed_secs(struct esdm_proc_file *file)
 static int esdm_proc_set_min_reseed_secs(struct esdm_proc_file *file,
 					 const char *buf, size_t buflen)
 {
-	char tmp[32];
-	unsigned long thresh;
-	int ret = 0;
+	uint32_t thresh;
+	int ret;
 
 	(void)file;
 
-	/* Ensure NUL-terminated input for strtoul */
-	if (buflen == 0 || buflen >= sizeof(tmp))
-		return -EINVAL;
-	memcpy(tmp, buf, buflen);
-	tmp[buflen] = '\0';
-
-	errno = 0;
-	thresh = strtoul(tmp, NULL, 0);
-	if (errno || thresh >= UINT32_MAX)
-		return -ERANGE;
+	CKINT(esdm_proc_parse_u32(buf, buflen, &thresh));
 
 	esdm_proc_raise_privilege();
-	esdm_invoke(esdm_rpcc_set_min_reseed_secs((uint32_t)thresh));
+	esdm_invoke(esdm_rpcc_set_min_reseed_secs(thresh));
 	esdm_proc_drop_privilege();
 
+out:
 	return ret;
 }
 
@@ -475,16 +532,32 @@ static int esdm_proc_getattr(const char *path, struct stat *stbuf,
 
 				if (file->fill_data) {
 					/*
+					 * Filled into a buffer of this request's
+					 * own: concurrent requests must not
+					 * rewrite each other's content.
+					 */
+					struct esdm_proc_file *snap =
+						calloc(1, sizeof(*snap));
+
+					if (!snap) {
+						ret = -ENOMEM;
+						goto out;
+					}
+
+					/*
 					 * fill_data issues unprivileged RPCs; take
 					 * the read lock so it never overlaps a
 					 * privileged (write-locked) raise/drop
 					 * window in another thread.
 					 */
 					mutex_reader_lock(&esdm_proc_priv);
-					ret = file->fill_data(file);
+					ret = file->fill_data(snap);
 					mutex_reader_unlock(&esdm_proc_priv);
-					if (ret < 0)
-						goto out;
+					if (ret >= 0)
+						stbuf->st_size =
+							(off_t)snap->vallen;
+					free(snap);
+					goto out;
 				}
 
 				stbuf->st_size = (off_t)file->vallen;
@@ -533,6 +606,58 @@ out:
 	return ret;
 }
 
+/*
+ * The content of a file is generated when it is opened, into a buffer of that
+ * open file's own. Requests run concurrently, so a buffer shared by all of them
+ * would be rewritten by one while another copies out of it. Every open of
+ * "uuid" thus yields a fresh UUID, and reads at any offset of one open file see
+ * the same content.
+ */
+static int esdm_proc_open_snapshot(struct esdm_proc_file *file,
+				   struct fuse_file_info *fi)
+{
+	struct esdm_proc_file *snap;
+	int ret;
+
+	if (!file->fill_data)
+		return 0;
+
+	snap = calloc(1, sizeof(*snap));
+	if (!snap)
+		return -ENOMEM;
+	snap->filename = file->filename;
+
+	/* See esdm_proc_getattr() for why fill_data runs under the read lock */
+	mutex_reader_lock(&esdm_proc_priv);
+	ret = file->fill_data(snap);
+	mutex_reader_unlock(&esdm_proc_priv);
+	if (ret < 0) {
+		free(snap);
+		return ret;
+	}
+
+	fi->fh = (uint64_t)(uintptr_t)snap;
+	/*
+	 * The content changes with every open, the page cache must not keep
+	 * it - nor cut it to a size getattr reported at another time.
+	 */
+	fi->direct_io = 1;
+
+	return 0;
+}
+
+static int esdm_proc_release(const char *path, struct fuse_file_info *fi)
+{
+	(void)path;
+
+	if (fi && fi->fh) {
+		free((void *)(uintptr_t)fi->fh);
+		fi->fh = 0;
+	}
+
+	return 0;
+}
+
 static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 {
 	size_t pathlen;
@@ -552,8 +677,10 @@ static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 		if (pathlen == file->filename_len &&
 		    !strncmp(path + 1, file->filename, file->filename_len)) {
 			/* Read-access is always granted */
-			if ((fi->flags & O_ACCMODE) == O_RDONLY)
+			if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+				ret = esdm_proc_open_snapshot(file, fi);
 				goto out;
+			}
 
 			/*
 			 * Write access is only granted for root and then only
@@ -562,8 +689,11 @@ static int esdm_proc_open(const char *path, struct fuse_file_info *fi)
 			if ((((fi->flags & O_ACCMODE) == O_WRONLY) ||
 			     ((fi->flags & O_ACCMODE) == O_RDWR)) &&
 			    (file->perm & S_IWUSR) &&
-			    (fuse_get_context()->uid == 0))
+			    (fuse_get_context()->uid == 0)) {
+				if ((fi->flags & O_ACCMODE) == O_RDWR)
+					ret = esdm_proc_open_snapshot(file, fi);
 				goto out;
+			}
 
 			/* All other access requests are denied. */
 			return -EACCES;
@@ -583,8 +713,6 @@ static int esdm_proc_read(const char *path, char *buf, size_t size,
 	unsigned int i;
 	int ret = 0;
 
-	(void)fi;
-
 	CKNULL(path, -ENOENT);
 	pathlen = strlen(path);
 	if (pathlen <= 1)
@@ -599,6 +727,17 @@ static int esdm_proc_read(const char *path, char *buf, size_t size,
 		/* pathlen is one longer than file name due to / */
 		if (pathlen == file->filename_len &&
 		    !strncmp(path + 1, file->filename, file->filename_len)) {
+			/*
+			 * Content generated at open time, see open_snapshot.
+			 * Only boot_id is served from the table itself, which
+			 * is written once before the file system is mounted.
+			 */
+			if (fi && fi->fh)
+				file = (struct esdm_proc_file *)(uintptr_t)
+					       fi->fh;
+			else if (file->fill_data)
+				return 0;
+
 			if ((size_t)offset < file->vallen) {
 				if ((size_t)offset + size > file->vallen) {
 					size = file->vallen - (size_t)offset;
@@ -665,6 +804,7 @@ static const struct fuse_operations esdm_proc_oper = {
 	.open = esdm_proc_open,
 	.read = esdm_proc_read,
 	.write = esdm_proc_write,
+	.release = esdm_proc_release,
 };
 
 static struct esdm_proc_options {

@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "config.h"
 
@@ -66,6 +67,18 @@ int esdm_egd_server_enable(const char *socket_path);
  * @return 0 on success, < 0 on error
  */
 int esdm_egd_server_enable_pr(const char *socket_path);
+
+/**
+ * @brief Set the PID the EGD get PID command reports
+ *
+ * The PID to report is the one external parties signal the daemon by. In a PID
+ * namespace (linux_isolate_namespace_prefork()) that is the supervisor, while
+ * the daemon itself is PID 1 of its namespace - so record it before that fork.
+ * Without this call the daemon's own PID is reported.
+ *
+ * @param [in] pid PID to report
+ */
+void esdm_egd_server_set_pid(pid_t pid);
 
 /**
  * @brief Was a socket path requested on the command line?

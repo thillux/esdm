@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -34,10 +35,34 @@ static inline ssize_t getrandom_seed_initial_n(uint8_t *buffer,
 	return __getrandom(buffer, bufferlen, GRND_SEED | GRND_NONBLOCK);
 }
 
-static inline ssize_t getrandom_seed_n(uint8_t *buffer, size_t bufferlen)
+/*
+ * How long the server may take to become fully seeded. The server answers once
+ * it has bound its socket, which is not the moment it is fully seeded: with the
+ * oversampling of an SP800-90C or NTG.1 build, the seeding takes seconds.
+ */
+#define SEED_WAIT_SEC 60
+
+/*
+ * Until the server is fully seeded, a non-blocking request is answered with
+ * EAGAIN - and with 0 bytes if a DRNG lost its seed during the request, as
+ * the reseed of the DRNG takes precedence. Both are what the request is
+ * defined to return, not a failure, so the request is repeated for as long as
+ * the server may take to get there. Should the server never get there, the
+ * last answer stands - and fails the test.
+ */
+static ssize_t getrandom_seed_n(uint8_t *buffer, size_t bufferlen)
 {
-	return __getrandom(buffer, bufferlen,
-			   GRND_SEED | GRND_FULLY_SEEDED | GRND_NONBLOCK);
+	static const struct timespec poll_ts = { .tv_nsec = 100 * 1000 * 1000 };
+	unsigned int tries = SEED_WAIT_SEC * 10;
+	ssize_t rc;
+
+	for (;;) {
+		rc = __getrandom(buffer, bufferlen,
+				 GRND_SEED | GRND_FULLY_SEEDED | GRND_NONBLOCK);
+		if ((rc > 0 || (rc < 0 && errno != EAGAIN)) || !--tries)
+			return rc;
+		nanosleep(&poll_ts, NULL);
+	}
 }
 
 int main(int argc, char *argv[])
@@ -95,7 +120,7 @@ int main(int argc, char *argv[])
 
 	if (rc == 0) {
 		printf("esdm_get_seed was unable to produce entropy\n");
-		ret = 77;
+		ret = 1;
 		goto out;
 	}
 
@@ -128,7 +153,7 @@ int main(int argc, char *argv[])
 
 	if (rc == 0) {
 		printf("esdm_get_seed was unable to produce entropy\n");
-		ret = 77;
+		ret = 1;
 		goto out;
 	}
 

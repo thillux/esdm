@@ -86,7 +86,7 @@ static int setent_ioctl(int fd, int exp)
 	}
 
 	/* Note, we have to account for oversampling of entropy */
-	if (ent_count_bits2 - ent_count_bits < 10) {
+	if (ent_count_bits2 < ent_count_bits + 10) {
 		printf("RNDADDTOENTCNT failed to add entropy: %u %u\n",
 		       ent_count_bits2, ent_count_bits);
 		return 1;
@@ -138,13 +138,13 @@ int main(int argc, char *argv[])
 
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret = test_ioctl(devfile, -1);
+	ret = !!test_ioctl(devfile, -1);
 	raise_privilege();
 	printf("============== Privileged Tests ============================\n");
-	ret += test_ioctl(devfile, 0);
+	ret += !!test_ioctl(devfile, 0);
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret += test_ioctl(devfile, -1);
+	ret += !!test_ioctl(devfile, -1);
 
 	raise_privilege();
 	env_fini();

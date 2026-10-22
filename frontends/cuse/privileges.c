@@ -19,10 +19,17 @@
 
 #define _DEFAULT_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <pwd.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/fsuid.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -30,13 +37,66 @@
 #include "privileges.h"
 #include "visibility.h"
 
+/* Does LeakSanitizer check this process for leaks when it exits? */
+#if defined(__SANITIZE_ADDRESS__)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer)
+#define PRIV_LEAK_CHECK_AT_EXIT
+#endif
+#endif
+
+/*
+ * Changing the effective or file system UID or GID makes the kernel reset the
+ * dumpable attribute of the process to fs.suid_dumpable - which systemd sets
+ * to 2 - and with it undoes a PR_SET_DUMPABLE 0 applied before, e.g. to keep
+ * secrets out of core dumps. The transient drops and raises below change
+ * those IDs on every privileged request, so each of them records the
+ * attribute up front and restores a non-dumpable state afterwards.
+ */
+static int priv_dumpable_get(void)
+{
+	return prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+}
+
+static int priv_dumpable_restore(int before)
+{
+#ifdef PRIV_LEAK_CHECK_AT_EXIT
+	/*
+	 * The leak check at exit stops all threads by ptrace()ing them from a
+	 * helper task running with the credentials of the process. Without
+	 * capabilities, that only works while the process is dumpable for its
+	 * user (1): the sanitizer runtime turns a non-dumpable process (0)
+	 * dumpable for the check, but leaves 2 alone - which is what a change
+	 * of the IDs leaves behind with fs.suid_dumpable = 2. A daemon exiting
+	 * with its privileges dropped then gets a "fatal error" instead of a
+	 * leak report and, as meson's ASAN_OPTIONS ask for, aborts. Turn 2
+	 * into 0 so the check runs; only sanitizer builds do this.
+	 */
+	if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 2)
+		before = 0;
+#endif
+
+	if (before == 0 && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 &&
+	    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+		int errsv = errno;
+
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Cannot keep core dumps disabled: %s\n",
+			    strerror(errsv));
+		return -errsv;
+	}
+
+	return 0;
+}
+
 int drop_privileges_transient(const char *user)
 {
 	const struct passwd *pwd;
 	static uid_t uid = 0;
 	static gid_t gid = 0;
 	static bool initialized = false;
-	int ret = 0;
+	int ret = 0, dumpable;
 
 	if (!user)
 		return -EINVAL;
@@ -53,6 +113,8 @@ int drop_privileges_transient(const char *user)
 		gid = pwd->pw_gid;
 		initialized = true;
 	}
+
+	dumpable = priv_dumpable_get();
 
 	/* Drop privileged group */
 	if (setegid(gid) == -1) {
@@ -71,6 +133,10 @@ int drop_privileges_transient(const char *user)
 			    strerror(errno));
 		return ret;
 	}
+
+	ret = priv_dumpable_restore(dumpable);
+	if (ret)
+		return ret;
 
 	esdm_logger(
 		LOGGER_VERBOSE, LOGGER_C_ANY,
@@ -108,6 +174,8 @@ int drop_supplemental_groups(void)
 
 int raise_privilege_transient(uid_t uid, gid_t gid)
 {
+	int ret, dumpable = priv_dumpable_get();
+
 	/* Raise privileged group */
 	if (setegid(gid) == -1) {
 		int errsv = errno;
@@ -128,9 +196,185 @@ int raise_privilege_transient(uid_t uid, gid_t gid)
 		return -errsv;
 	}
 
+	ret = priv_dumpable_restore(dumpable);
+	if (ret)
+		return ret;
+
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_ANY,
 		    "Successfully raised privileges to UID %u, GID %u\n", uid,
 		    gid);
 
 	return 0;
+}
+
+/* Read a /proc file of at most buflen - 1 bytes into buf, NUL-terminated */
+static int read_proc_file(const char *path, char *buf, size_t buflen)
+{
+	size_t len = 0;
+	ssize_t rc;
+	int fd;
+
+	/* Room for at least one byte and the terminating NUL */
+	if (buflen < 2)
+		return -EINVAL;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+
+	do {
+		rc = read(fd, buf + len, buflen - 1 - len);
+		if (rc > 0)
+			len += (size_t)rc;
+	} while ((rc > 0 || (rc < 0 && errno == EINTR)) && len < buflen - 1);
+
+	close(fd);
+
+	if (rc < 0)
+		return -EIO;
+
+	/* A file that does not fit is not one this parser understands */
+	if (len >= buflen - 1)
+		return -EFBIG;
+
+	buf[len] = '\0';
+
+	return 0;
+}
+
+int caller_status_cap_sys_admin(const char *status, uid_t fsuid)
+{
+	unsigned int ruid, euid, suid, fs;
+	unsigned long long capeff;
+	const char *p;
+	char *end;
+
+	/* The UIDs are real, effective, saved and file system UID */
+	p = strstr(status, "\nUid:");
+	if (!p || sscanf(p + 5, "%u %u %u %u", &ruid, &euid, &suid, &fs) != 4)
+		return 0;
+
+	/*
+	 * The FUSE request carries the file system UID of the caller. A
+	 * different one means the PID no longer names the caller.
+	 */
+	if ((uid_t)fs != fsuid)
+		return 0;
+
+	p = strstr(status, "\nCapEff:");
+	if (!p)
+		return 0;
+
+	errno = 0;
+	capeff = strtoull(p + 8, &end, 16);
+	if (errno || end == p + 8)
+		return 0;
+
+	return !!(capeff & (1ULL << CAP_SYS_ADMIN));
+}
+
+/*
+ * A /proc entry of the caller that cannot be opened says nothing about its
+ * capabilities: with /proc mounted with hidepid=, that is what every process
+ * but our own looks like to the unprivileged user.
+ */
+static int caller_proc_err(int ret)
+{
+	if (ret == -EACCES || ret == -EPERM || ret == -ENOENT)
+		return -EACCES;
+
+	return 0;
+}
+
+int caller_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	char path[64], buf[8192], own_map[256], caller_map[256];
+	int ret;
+
+	/* A caller outside of our PID namespace is not identifiable */
+	if (pid <= 0)
+		return 0;
+
+	/*
+	 * Capabilities count in the user namespace they are held in, and only
+	 * those in ours are the kernel's capable(CAP_SYS_ADMIN). Reading the
+	 * namespace itself needs ptrace access to the caller, its UID map does
+	 * not - the caller has to have the map we have.
+	 */
+	if (read_proc_file("/proc/self/uid_map", own_map, sizeof(own_map)))
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)pid);
+	ret = read_proc_file(path, caller_map, sizeof(caller_map));
+	if (ret)
+		return caller_proc_err(ret);
+	if (strcmp(own_map, caller_map))
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+	ret = read_proc_file(path, buf, sizeof(buf));
+	if (ret)
+		return caller_proc_err(ret);
+
+	return caller_status_cap_sys_admin(buf, fsuid);
+}
+
+int caller_has_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	return caller_cap_sys_admin(pid, fsuid) > 0;
+}
+
+/* Whether the calling thread has these file system IDs */
+static bool thread_fsids_are(uid_t uid, gid_t gid)
+{
+	return (uid_t)setfsuid((uid_t)-1) == uid &&
+	       (gid_t)setfsgid((gid_t)-1) == gid;
+}
+
+int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
+{
+	struct __user_cap_header_struct hdr = { _LINUX_CAPABILITY_VERSION_3,
+						0 };
+	struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+	struct __user_cap_data_struct raised[_LINUX_CAPABILITY_U32S_3];
+	uid_t old_fsuid;
+	gid_t old_fsgid;
+	unsigned int i;
+	int ret = 0, dumpable;
+
+	/*
+	 * Opening a /proc entry is decided on the file system IDs and the
+	 * effective capabilities of the opening thread. A transient raise to
+	 * root sets the former to 0 and the latter to the permitted ones, so
+	 * that is what this thread gets. Unlike that raise, which glibc applies
+	 * to every thread of the process, setfs[ug]id() and capset() only
+	 * change the calling thread.
+	 */
+	if (syscall(SYS_capget, &hdr, caps))
+		return 0;
+	memcpy(raised, caps, sizeof(raised));
+	for (i = 0; i < _LINUX_CAPABILITY_U32S_3; i++)
+		raised[i].effective = raised[i].permitted;
+
+	dumpable = priv_dumpable_get();
+	old_fsuid = (uid_t)setfsuid((uid_t)-1);
+	old_fsgid = (gid_t)setfsgid((gid_t)-1);
+
+	setfsgid(0);
+	setfsuid(0);
+	if (thread_fsids_are(0, 0) && !syscall(SYS_capset, &hdr, raised))
+		ret = caller_cap_sys_admin(pid, fsuid);
+
+	/* Leaving file system UID 0 drops the capabilities it raised, too */
+	setfsuid(old_fsuid);
+	setfsgid(old_fsgid);
+	if (syscall(SYS_capset, &hdr, caps) ||
+	    !thread_fsids_are(old_fsuid, old_fsgid) ||
+	    priv_dumpable_restore(dumpable)) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Cannot restore the file system IDs and capabilities\n");
+		return -ENOTRECOVERABLE;
+	}
+
+	return ret > 0;
 }

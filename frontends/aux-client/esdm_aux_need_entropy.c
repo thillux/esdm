@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <semaphore.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/shm.h>
 #include <time.h>
@@ -28,13 +29,24 @@
 #include "esdm_aux_client.h"
 #include "esdm_logger.h"
 #include "esdm_rpc_service.h"
-#include "ret_checkers.h"
 #include "visibility.h"
 
 /******************************************************************************
  * Shared memory segment
+ *
+ * The status segment and the semaphore belong to the ESDM server: it creates
+ * them, and it removes a segment that another user created, which is how a
+ * planted one is kept from steering the clients. So a client never creates
+ * either - one it created before the server started would be removed under it,
+ * and it would wait on a segment nobody writes any more. It attaches to what
+ * the server created instead, and does so again whenever the server removed or
+ * replaced it, e.g. when it was restarted.
  ******************************************************************************/
 static struct esdm_shm_status *esdm_cuse_shm_status = NULL;
+static int esdm_cuse_shmid = -1;
+static sem_t *esdm_semid_need_entropy_level = SEM_FAILED;
+static bool esdm_semid_need_entropy_level_tried = false;
+static bool esdm_aux_initialized = false;
 
 static int esdm_cuse_shm_status_avail(void)
 {
@@ -54,109 +66,133 @@ static int esdm_cuse_shm_status_avail(void)
 	return ret;
 }
 
+static void esdm_cuse_shm_status_close_sem(void)
+{
+	if (esdm_semid_need_entropy_level != SEM_FAILED) {
+		sem_t *tmp = esdm_semid_need_entropy_level;
+
+		esdm_semid_need_entropy_level = SEM_FAILED;
+		sem_close(tmp);
+	}
+}
+
 static void esdm_cuse_shm_status_close_shm(void)
 {
 	if (esdm_cuse_shm_status) {
 		shmdt(esdm_cuse_shm_status);
 		esdm_cuse_shm_status = NULL;
 	}
+	esdm_cuse_shmid = -1;
+
+	/* The semaphore goes with the segment the server created it with */
+	esdm_cuse_shm_status_close_sem();
+	esdm_semid_need_entropy_level_tried = false;
 }
 
-static int esdm_cuse_shm_status_create_shm(void)
+/*
+ * Attach to the segment the server created, unless it is the one attached to
+ * already. A segment that is gone, or that is another one now, is let go of.
+ */
+static void esdm_cuse_shm_status_attach_shm(void)
 {
-	int esdm_cuse_shmid = -1;
-	int errsv, create_shm;
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	struct shmid_ds buf;
+	int shmid;
 	void *tmp;
 
-	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	/* No IPC_CREAT: there is no segment until the server created it */
+	shmid = shmget(key, sizeof(struct esdm_shm_status), 0);
 
-	esdm_cuse_shmid = shmget(key, sizeof(struct esdm_shm_status),
-				 S_IRUSR | S_IRGRP | S_IROTH);
-	create_shm = (errno == ENOENT) ? 1 : 0;
+	/*
+	 * Removing a segment takes its key away at once, and a segment created
+	 * anew under the key gets an identifier of its own.
+	 */
+	if (shmid >= 0 && shmid == esdm_cuse_shmid)
+		return;
 
-	/* Check whether the SHM segment is stale */
-	if (esdm_cuse_shmid >= 0) {
-		struct shmid_ds buf;
+	esdm_cuse_shm_status_close_shm();
 
-		if (shmctl(esdm_cuse_shmid, IPC_STAT, &buf) < 0) {
-			errsv = errno;
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-			}
-			return -errsv;
-		}
+	if (shmid < 0)
+		return;
 
-		/*
-		 * Ownership is not enforced here: a client cannot know the
-		 * server's uid (it may run unprivileged), so rejecting on owner
-		 * would break legitimate cross-uid deployments and could strand
-		 * a client whose segment the server later re-creates. The primary
-		 * defense against a planted status segment is server-side: the
-		 * server evicts any foreign-owned segment when it (re)creates the
-		 * segment. Note this only covers segments planted before the
-		 * server runs its create path; a client that attaches while no
-		 * server is running has no way to authenticate the segment, so it
-		 * relies on the version gate and the server's eventual eviction.
-		 */
+	/*
+	 * Nobody is attached to it, so no server writes it: it is what a server
+	 * that died left behind. Its contents tell nothing about the current
+	 * state, and removing it is up to the next server.
+	 */
+	if (shmctl(shmid, IPC_STAT, &buf) < 0 || buf.shm_nattch == 0)
+		return;
 
-		/* SHM exists, but has no attachments -> stale */
-		if (buf.shm_nattch == 0) {
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-				esdm_cuse_shmid = -1;
-				create_shm = 1;
-			}
-		}
-	}
-
-	if (esdm_cuse_shmid < 0) {
-		if (create_shm) {
-			esdm_cuse_shmid =
-				shmget(key, sizeof(struct esdm_shm_status),
-				       IPC_CREAT | S_IRUSR | S_IWUSR | S_IRGRP |
-					       S_IROTH);
-			if (esdm_cuse_shmid < 0) {
-				errsv = errno;
-				esdm_logger(
-					LOGGER_ERR, LOGGER_C_ANY,
-					"ESDM shared memory segment creation failed: %s\n",
-					strerror(errsv));
-				return -errsv;
-			}
-		}
-	}
-
-	tmp = shmat(esdm_cuse_shmid, NULL, 0);
+	/*
+	 * Read-only: a client only reads the segment, and the server creates it
+	 * writable for its own user only.
+	 */
+	tmp = shmat(shmid, NULL, SHM_RDONLY);
 	if (tmp == (void *)-1) {
-		errsv = errno;
-		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 			    "Attaching to shared memory segment failed: %s\n",
-			    strerror(errsv));
-		esdm_cuse_shm_status_close_shm();
-		return -errsv;
+			    strerror(errno));
+		return;
 	}
+
 	esdm_cuse_shm_status = tmp;
+	esdm_cuse_shmid = shmid;
 
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 		    "ESDM shared memory segment successfully attached to\n");
-
-	return 0;
 }
 
 /******************************************************************************
  * Semaphore for shared memory segment
  ******************************************************************************/
 
-static sem_t *esdm_semid_need_entropy_level = SEM_FAILED;
+/*
+ * Open the semaphore the server created with the segment. It is there once the
+ * server published its status, which it does only after it created both - so
+ * it is tried once per segment.
+ *
+ * Opening it takes write access, which the server grants its own user only. A
+ * client running as another one waits by watching the segment instead.
+ */
+static void esdm_cuse_shm_status_open_sem(void)
+{
+	if (esdm_semid_need_entropy_level_tried ||
+	    !esdm_cuse_shm_status_avail())
+		return;
+	esdm_semid_need_entropy_level_tried = true;
+
+	/* No O_CREAT, for the same reason as for the segment */
+	esdm_semid_need_entropy_level =
+		sem_open(ESDM_SEM_NEED_ENTROPY_LEVEL, 0);
+	if (esdm_semid_need_entropy_level == SEM_FAILED) {
+		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+			    "ESDM change indicator semaphore not usable: %s\n",
+			    strerror(errno));
+		return;
+	}
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
+		    "ESDM change indicator semaphore initialized\n");
+}
+
+/* Whether a is before b */
+static bool esdm_cuse_ts_before(const struct timespec *a,
+				const struct timespec *b)
+{
+	return a->tv_sec < b->tv_sec ||
+	       (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
+}
 
 static int esdm_cuse_shm_status_down(struct timespec *ts)
 {
+	/*
+	 * How long one wait lasts at most before the segment is checked
+	 * again. Without the semaphore, the segment is all there is to watch.
+	 */
 	static const long poll_nsec = 50 * 1000 * 1000;
-	struct timespec ts_init = { .tv_sec = 0, .tv_nsec = poll_nsec };
+	static const time_t sem_sec = 1;
 
-	if (esdm_semid_need_entropy_level == SEM_FAILED) {
+	if (!esdm_aux_initialized) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_ANY, "Cannot use semaphore\n");
 		errno = EINVAL;
 		return -1;
@@ -169,92 +205,81 @@ static int esdm_cuse_shm_status_down(struct timespec *ts)
 	 * when a caller needs it. @ts is the absolute CLOCK_MONOTONIC deadline
 	 * of the sem_clockwait() below, so the same deadline applies here and
 	 * the timeout is reported the same way.
+	 *
+	 * The wait is cut into slices, between which the segment is attached
+	 * anew should the server have replaced it: the semaphore of the server
+	 * that is gone would never fire again.
 	 */
-	while (!esdm_cuse_shm_status_avail()) {
-		struct timespec now;
+	for (;;) {
+		struct timespec now, until;
+
+		esdm_cuse_shm_status_attach_shm();
+		esdm_cuse_shm_status_open_sem();
+
+		/*
+		 * If the ESDM server already indicates it needs entropy,
+		 * return immediately.
+		 */
+		if (esdm_cuse_shm_status_avail() &&
+		    atomic_load(&esdm_cuse_shm_status->need_entropy))
+			return 0;
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (now.tv_sec > ts->tv_sec ||
-		    (now.tv_sec == ts->tv_sec && now.tv_nsec >= ts->tv_nsec)) {
+		if (!esdm_cuse_ts_before(&now, ts)) {
 			errno = ETIMEDOUT;
 			return -1;
 		}
 
-		nanosleep(&ts_init, NULL);
-	}
-
-	/*
-	 * If the ESDM server already indicates it needs entropy, return
-	 * immediately.
-	 */
-	if (atomic_load(&esdm_cuse_shm_status->need_entropy))
-		return 0;
-
-	/*
-	 * sem_timedwait uses CLOCK_REALTIME, which is subject to
-	 * clock adjustments, use sem_clockwait instead here.
-	 */
-	return sem_clockwait(esdm_semid_need_entropy_level, CLOCK_MONOTONIC,
-			     ts);
-}
-
-static void esdm_cuse_shm_status_close_sem(void)
-{
-	if (esdm_semid_need_entropy_level != SEM_FAILED) {
-		sem_t *tmp = esdm_semid_need_entropy_level;
-
-		esdm_semid_need_entropy_level = SEM_FAILED;
-		sem_close(tmp);
-	}
-}
-
-static int esdm_cuse_shm_status_create_sem(void)
-{
-	int errsv;
-
-	esdm_semid_need_entropy_level = sem_open(ESDM_SEM_NEED_ENTROPY_LEVEL,
-						 O_CREAT | O_EXCL, 0644, 0);
-	if (esdm_semid_need_entropy_level == SEM_FAILED) {
-		if (errno == EEXIST) {
-			esdm_semid_need_entropy_level = sem_open(
-				ESDM_SEM_NEED_ENTROPY_LEVEL, O_CREAT, 0644, 0);
-			if (esdm_semid_need_entropy_level == SEM_FAILED)
-				goto err;
+		until = now;
+		if (esdm_semid_need_entropy_level != SEM_FAILED) {
+			until.tv_sec += sem_sec;
 		} else {
-			goto err;
+			until.tv_nsec += poll_nsec;
+			if (until.tv_nsec >= 1000000000) {
+				until.tv_sec++;
+				until.tv_nsec -= 1000000000;
+			}
 		}
+		if (esdm_cuse_ts_before(ts, &until))
+			until = *ts;
+
+		if (esdm_semid_need_entropy_level == SEM_FAILED) {
+			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until,
+					NULL);
+			continue;
+		}
+
+		/*
+		 * sem_timedwait uses CLOCK_REALTIME, which is subject to
+		 * clock adjustments, use sem_clockwait instead here.
+		 */
+		if (!sem_clockwait(esdm_semid_need_entropy_level,
+				   CLOCK_MONOTONIC, &until))
+			return 0;
+		if (errno != ETIMEDOUT)
+			return -1;
 	}
-
-	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
-		    "ESDM change indicator semaphore initialized\n");
-
-	return 0;
-
-err:
-	errsv = errno;
-	esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-		    "ESDM change indicator semaphore creation failed: %s\n",
-		    strerror(errsv));
-	return -errsv;
 }
 
 DSO_PUBLIC
 int esdm_aux_init_wait_for_need_entropy(void)
 {
-	int ret;
+	/*
+	 * Nothing to create: what the server has not created yet is attached
+	 * to by the wait, once it has.
+	 */
+	esdm_aux_initialized = true;
+	esdm_cuse_shm_status_attach_shm();
+	esdm_cuse_shm_status_open_sem();
 
-	CKINT(esdm_cuse_shm_status_create_sem());
-	CKINT(esdm_cuse_shm_status_create_shm());
-
-out:
-	return ret;
+	return 0;
 }
 
 DSO_PUBLIC
 void esdm_aux_fini_wait_for_need_entropy(void)
 {
 	esdm_cuse_shm_status_close_shm();
-	esdm_cuse_shm_status_close_sem();
+	esdm_aux_initialized = false;
 }
 
 DSO_PUBLIC

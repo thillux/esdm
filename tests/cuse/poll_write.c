@@ -21,11 +21,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/random.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/wait.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "env.h"
@@ -135,6 +139,46 @@ out:
 	return ret;
 }
 
+/*
+ * A suspend trigger wakes every poller, whatever it waits for. Both CUSE
+ * daemons watch for it, and the /dev/urandom daemon, which has no pollers, used
+ * to take it away from the /dev/random daemon.
+ *
+ * Expects the write poll of @fd to sleep otherwise.
+ */
+static int test_poll_suspend(int fd)
+{
+	static const struct timespec delay = { .tv_nsec = 500 * 1000 * 1000 };
+	struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+	fd_set fds;
+	pid_t pid;
+	int ret;
+
+	/* Once the select sleeps, the suspend signal of esdm-server-suspend */
+	pid = fork();
+	if (pid < 0)
+		return 1;
+	if (!pid) {
+		nanosleep(&delay, NULL);
+		env_signal_server(SIGUSR1);
+		_exit(0);
+	}
+
+	FD_ZERO(&fds);
+	FD_SET(fd, &fds);
+	ret = select((fd + 1), NULL, &fds, NULL, &timeout);
+	waitpid(pid, NULL, 0);
+
+	if (ret == 1) {
+		printf("Poll - passed: a suspend trigger wakes the write select\n");
+		return 0;
+	}
+
+	printf("Poll - failed: a suspend trigger did not wake the write select (%d)\n",
+	       ret);
+	return 1;
+}
+
 /**
  * Test poll system call to wait for insufficient entropy
  *
@@ -229,9 +273,60 @@ static int test_poll_write(const char *path)
 		goto out;
 	}
 
+	ret = test_poll_suspend(fd);
+
 out:
 	if (fd >= 0)
 		close(fd);
+	return ret;
+}
+
+/**
+ * Test poll system call on /dev/urandom
+ *
+ * Expected: poll never waits. The kernel's /dev/urandom has no poll handler,
+ * so it is always readable and writable - also with the ESDM holding all the
+ * entropy it asks for, where /dev/random is not writable.
+ */
+static int test_poll_urandom(const char *path)
+{
+	struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
+	fd_set rfds, wfds;
+	int ret = 0, fd;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		ret = errno;
+		printf("Cannot open file %s: %d\n", path, ret);
+		return -ret;
+	}
+
+	ret = fill_aux_pool(fd);
+	if (ret)
+		goto out;
+
+	FD_ZERO(&rfds);
+	FD_SET(fd, &rfds);
+	FD_ZERO(&wfds);
+	FD_SET(fd, &wfds);
+
+	ret = select((fd + 1), &rfds, &wfds, NULL, &timeout);
+	if (ret == 2) {
+		printf("Poll - passed: /dev/urandom is readable and writable\n");
+		ret = 0;
+	} else if (ret == -1) {
+		printf("Poll - failed: select returns unexpected error code: %u\n",
+		       errno);
+		ret = 1;
+	} else {
+		printf("Poll - failed: /dev/urandom is %s%s\n",
+		       FD_ISSET(fd, &rfds) ? "" : "not readable ",
+		       FD_ISSET(fd, &wfds) ? "" : "not writable");
+		ret = 1;
+	}
+
+out:
+	close(fd);
 	return ret;
 }
 
@@ -256,7 +351,10 @@ int main(int argc, char *argv[])
 	if (ret)
 		return ret;
 
-	ret = test_poll_write(devfile);
+	if (!strcmp(argv[1], "urandom"))
+		ret = test_poll_urandom(devfile);
+	else
+		ret = test_poll_write(devfile);
 
 	env_fini();
 

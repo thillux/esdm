@@ -29,6 +29,7 @@ void env_fini(void);
 int env_daemons_alive(void);
 int env_init(int disable_fallback);
 void env_kill_server(void);
+void env_signal_server(int sig);
 
 #ifdef __cplusplus
 }

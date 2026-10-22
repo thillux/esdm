@@ -18,6 +18,23 @@ if get_option('linux-devfiles').enabled()
 
 	test('CUSE device handlers', cuse_device_test)
 
+	# How the handlers answer: each request exactly once, and none of them
+	# held up by another one. Compiled the same way as the test above.
+	cuse_requests_test = executable(
+			'cuse_requests_test',
+			[ 'cuse_requests_test.c' ],
+			include_directories: [
+				include_dirs_client,
+				include_dirs_server,
+				include_directories('../../frontends/cuse'),
+				include_directories('../common') ],
+			dependencies: [ dependencies_client, cuse_deps ],
+			link_with: [ esdm_common_static_lib,
+				     esdm_rpc_client_lib ],
+		)
+
+	test('CUSE request replies', cuse_requests_test, timeout: 60)
+
 	cuse_tester_common = files([
 		'env.c'
 		])
@@ -109,6 +126,13 @@ if get_option('linux-devfiles').enabled()
 	random_write_no_server_tester = executable(
 		'random_write_no_server_tester',
 		[ cuse_tester_common, 'random_write_no_server.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_common_static_lib,
+		)
+
+	random_read_blocked_tester = executable(
+		'random_read_blocked_tester',
+		[ cuse_tester_common, 'random_read_blocked.c' ],
 		include_directories: include_dirs_server,
 		link_with: esdm_common_static_lib,
 		)
@@ -284,6 +308,22 @@ if get_option('linux-devfiles').enabled()
 	test('Write /dev/urandom - w/o ESDM server', random_write_no_server_tester,
 		env: [ tester_cuse_env ],
 		args : ['urandom' ],
+		is_parallel: false,
+		priority: -10,
+		suite: 'cuse')
+
+	# The readers wait for the RPC timeout once the server is let go again
+	test('Read /dev/random - many blocked readers', random_read_blocked_tester,
+		env: [ tester_cuse_env ],
+		args : ['random' ],
+		timeout: 300,
+		is_parallel: false,
+		priority: -10,
+		suite: 'cuse')
+	test('Read /dev/urandom - many blocked readers', random_read_blocked_tester,
+		env: [ tester_cuse_env ],
+		args : ['urandom' ],
+		timeout: 300,
 		is_parallel: false,
 		priority: -10,
 		suite: 'cuse')

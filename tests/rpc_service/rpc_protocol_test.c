@@ -105,7 +105,11 @@ static void test_rpc_alloc(void)
 
 static void test_rpc_alloc_limits(void)
 {
-	uint8_t mem[64];
+	/*
+	 * Aligned, as the full arena only fits without alignment padding -
+	 * which a byte array on the stack is not spared on 32-bit systems.
+	 */
+	uint8_t mem[64] __attribute__((aligned(8)));
 	struct buffer tlh;
 
 	tlh.buf = mem;

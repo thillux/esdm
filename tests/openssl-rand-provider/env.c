@@ -51,7 +51,7 @@ void env_fini(void)
 
 int env_init(void)
 {
-	const char *server = getenv("ESDM_SERVER");
+	const char *server;
 	char *server_envp[TEST_ENV_MAX_VARS + 1];
 	pid_t pid;
 	int ret;
@@ -73,10 +73,6 @@ int env_init(void)
 		return -ret;
 	}
 
-	ret = test_env_check_file(server);
-	if (ret)
-		goto out;
-
 	/*
 	 * The EGD provider speaks the EGD protocol over a socket of its own, so
 	 * the server is given one and the client pointed at it. Doing this
@@ -85,6 +81,12 @@ int env_init(void)
 	 * test, so the fixed name cannot collide.
 	 */
 	setenv(ESDM_EGD_SOCKET_ENV, ESDM_TEST_EGD_SOCKET, 1);
+
+	/* Fetched only now - setenv() may invalidate what getenv() returned */
+	server = getenv("ESDM_SERVER");
+	ret = test_env_check_file(server);
+	if (ret)
+		goto out;
 
 	/* Built before the fork - see test_env_daemon_envp() */
 	test_env_daemon_envp(server_envp, TEST_ENV_MAX_VARS + 1);
@@ -105,12 +107,21 @@ int env_init(void)
 		return EFAULT;
 	}
 	server_pid = pid;
-	/* The server is up once it has bound its unprivileged RPC socket */
-	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
-	/* and serving EGD once that socket is there as well */
-	test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
-			   TEST_WAIT_TIMEOUT_MS);
+
+	/*
+	 * The server is up once it has bound its unprivileged RPC socket and
+	 * serving EGD once that socket is there as well. Unlike the other test
+	 * environments, a server that never comes up is an error here rather
+	 * than left to the test: one of the tests is expected to fail, and
+	 * must not pass merely because there was nothing to talk to.
+	 */
+	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
+				TEST_WAIT_TIMEOUT_MS) ||
+	    !test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
+				TEST_WAIT_TIMEOUT_MS)) {
+		env_fini();
+		ret = ETIMEDOUT;
+	}
 
 out:
 	return ret;

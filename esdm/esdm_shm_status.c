@@ -157,7 +157,7 @@ static void esdm_shm_status_set_suspend(void)
 	if (!status)
 		return;
 
-	atomic_store(&status->suspend_trigger, true);
+	atomic_fetch_add(&status->suspend_gen, 1);
 
 	/* Wake up all waiters */
 	esdm_shm_wake_all();
@@ -242,9 +242,9 @@ void esdm_shm_status_cleanup_ipc(void)
 
 		/*
 		 * Skip the removal while other processes are still attached:
-		 * the CUSE daemons and aux clients only attach at startup, so
-		 * removing the segment under them and recreating it later
-		 * strands them on the orphaned mapping forever. The caller of
+		 * the CUSE daemons and aux clients attach to a segment created
+		 * anew only once they notice it, and are told nothing on the
+		 * orphaned mapping until then. The caller of
 		 * this cleanup is never attached itself at this point (the
 		 * server detaches first, the PID namespace supervisor never
 		 * attaches), so a non-zero count is always someone else.
@@ -312,8 +312,9 @@ static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
 	 * posts meant for the CUSE poll checker and the aux clients, or post
 	 * in our stead. So a semaphore of another user is removed and created
 	 * anew, as the segment is in esdm_shm_status_create_shm(). Ours - the
-	 * one a previous instance of this server or a CUSE daemon running as
-	 * the same user created - is kept, so their waiters keep working.
+	 * one a previous instance of this server created; the CUSE daemons and
+	 * the aux clients never create one - is kept, so their waiters keep
+	 * working.
 	 *
 	 * The directory the file is in is sticky: a file found to be ours
 	 * cannot be removed and replaced by another user before it is opened,
@@ -582,7 +583,7 @@ int esdm_shm_status_init(void)
 			"Status report truncated to the %zu bytes of the shared memory segment\n",
 			sizeof(esdm_shm_status->info));
 	}
-	esdm_shm_status->infolen = strlen(esdm_shm_status->info);
+	esdm_shm_status->infolen = (uint32_t)strlen(esdm_shm_status->info);
 	esdm_shm_status->unpriv_threads = esdm_config_online_nodes();
 
 	/*
@@ -595,8 +596,11 @@ int esdm_shm_status_init(void)
 
 	esdm_shm_status_set_operational(esdm_state_operational());
 	esdm_shm_status_set_need_entropy();
+	/*
+	 * suspend_gen is not reset: a CUSE daemon takes the value it finds when
+	 * it attaches, to which a reset would look like a new event.
+	 */
 	esdm_shm_status_install_signal_suspend();
-	atomic_store(&esdm_shm_status->suspend_trigger, false);
 
 	return 0;
 }

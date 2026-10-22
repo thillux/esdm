@@ -6,6 +6,8 @@ openssl_rng_tester = executable(
 		dependencies: [ openssl_dep ],
 	)
 
+# Each tester forks its own esdm-server bound to fixed socket paths. env.c runs
+# it in a private mount and IPC namespace, so the tests can run concurrently.
 tester_esdm_env = [
 		'ESDM_SERVER=' + esdm_server.full_path(),
 		]
@@ -29,43 +31,31 @@ test('OpenSSL 3.x EGD Provider - against the test peer', egd_provider_test,
 test('OpenSSL 3.x RNG Provider - simple random', openssl_rng_tester, 
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'random', 'rng'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 test('OpenSSL 3.x RNG Provider - instance pr', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'rng'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 test('OpenSSL 3.x RNG Provider - instance full', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_full', 'rng'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 test('OpenSSL 3.x SEED-SRC Provider - simple random', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'random', 'seed-src'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 test('OpenSSL 3.x SEED-SRC Provider - instance pr', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'seed-src'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 test('OpenSSL 3.x SEED-SRC Provider - instance full', openssl_rng_tester,
 	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_full', 'seed-src'],
 	env: tester_esdm_env,
-	# Each test forks its own esdm-server bound to a fixed RPC socket path,
-	# so they must not run concurrently with each other.
 )
 
 # The EGD provider. It speaks the EGD protocol rather than the RPC one, so it
@@ -80,12 +70,11 @@ test('OpenSSL 3.x EGD Provider - instance full', openssl_rng_tester,
 	env: tester_esdm_env,
 )
 
-# Expected to fail: the EGD protocol has no way to ask for prediction
-# resistance, so this provider refuses rather than quietly handing back data
-# that does not have the property the caller asked for. The two tests above
-# would catch a socket that is simply not reachable.
+# The EGD protocol has no way to ask for prediction resistance, so this
+# provider refuses rather than quietly handing back data that does not have the
+# property the caller asked for. The tester checks for the refusal itself,
+# rather than taking any failure for it.
 test('OpenSSL 3.x EGD Provider - instance pr is refused', openssl_rng_tester,
-	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr', 'egd'],
+	args: [meson.project_build_root() + '/frontends/openssl-provider', 'instantiate_pr_refused', 'egd'],
 	env: tester_esdm_env,
-	should_fail: true,
 )

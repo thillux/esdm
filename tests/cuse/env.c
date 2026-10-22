@@ -233,3 +233,13 @@ void env_kill_server(void)
 	server_pid = 0;
 	nanosleep(&ts, NULL);
 }
+
+/*
+ * E.g. SIGSTOP keeps the server from answering without the RPC client noticing:
+ * its sockets stay connected, so every RPC waits until its timeout or SIGCONT.
+ */
+void env_signal_server(int sig)
+{
+	if (server_pid > 0)
+		kill(server_pid, sig);
+}

@@ -35,12 +35,25 @@
  * The ESDM is deliberately absent, so every RPC below fails - the only way to
  * reach the fallback to the kernel device that keeps /dev/random working while
  * the daemon is not running.
+ *
+ * The one exception is the non-blocking prediction resistant read, whose
+ * EAGAIN is an answer of the ESDM rather than a failure. It is replaced by
+ * test_pr_nonblock() below, which answers as scripted. So are the privileged
+ * calls, whose -EINPROGRESS is no failure to cover for either.
  */
+
+#define esdm_rpcc_get_random_bytes_pr_nonblock_int test_pr_nonblock
+#define esdm_rpcc_rnd_add_to_ent_cnt_int test_add_to_ent_cnt
+#define esdm_rpcc_rnd_add_entropy_int test_add_entropy
+#define esdm_rpcc_rnd_clear_pool_int test_clear_pool
+#define esdm_rpcc_rnd_reseed_crng_int test_reseed_crng
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/random.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +96,10 @@ static unsigned int destroy_calls;
 static unsigned int raise_calls;
 static unsigned int drop_calls;
 
+/* The check with the /proc access of root, and whether it held a reader lock */
+static unsigned int fsroot_calls;
+static bool fsroot_reader_locked;
+
 static void reply_reset(void)
 {
 	memset(&reply, 0, sizeof(reply));
@@ -90,6 +107,8 @@ static void reply_reset(void)
 	destroy_calls = 0;
 	raise_calls = 0;
 	drop_calls = 0;
+	fsroot_calls = 0;
+	fsroot_reader_locked = false;
 }
 
 /******************************************************************************
@@ -234,6 +253,44 @@ int drop_supplemental_groups(void)
 	return 0;
 }
 
+/* Whether the caller holds CAP_SYS_ADMIN, see caller_is() */
+static bool test_caller_cap;
+
+/* Whether the caller's /proc entries are hidden from the unprivileged user */
+static bool test_proc_hidden;
+
+/* Whether the last check of the caller ran with the privileges raised */
+static bool checked_raised;
+
+int caller_cap_sys_admin(pid_t pid, uid_t fsuid)
+{
+	(void)pid;
+	(void)fsuid;
+
+	checked_raised = raise_calls > drop_calls;
+
+	return test_proc_hidden ? -EACCES : test_caller_cap;
+}
+
+int caller_cap_sys_admin_fsroot(pid_t pid, uid_t fsuid)
+{
+	int ret;
+
+	(void)pid;
+	(void)fsuid;
+
+	fsroot_calls++;
+	checked_raised = raise_calls > drop_calls;
+
+	/* Held, but not for writing - which would be this thread's own */
+	ret = pthread_rwlock_trywrlock(&esdm_cuse_priv);
+	if (!ret)
+		pthread_rwlock_unlock(&esdm_cuse_priv);
+	fsroot_reader_locked = (ret == EBUSY);
+
+	return test_caller_cap;
+}
+
 /******************************************************************************
  * The device helpers of cuse_helper.c
  *
@@ -276,13 +333,22 @@ int esdm_cuse_bind_unmount(char **src, char **dst)
 #define TEST_REQ ((fuse_req_t)&reply)
 #define TEST_PH ((struct fuse_pollhandle *)&notify_calls)
 
-/* The caller of the requests that follow */
-static void caller_is_root(bool root)
+/*
+ * The caller of the requests that follow: its UID, and whether it holds
+ * CAP_SYS_ADMIN, which is what the kernel checks and the UID is not.
+ */
+static void caller_is(uid_t uid, bool cap_sys_admin)
 {
 	memset(&test_ctx, 0, sizeof(test_ctx));
-	test_ctx.uid = root ? 0 : 1000;
-	test_ctx.gid = root ? 0 : 1000;
+	test_ctx.uid = uid;
+	test_ctx.gid = uid;
 	test_ctx.pid = getpid();
+	test_caller_cap = cap_sys_admin;
+}
+
+static void caller_is_root(bool root)
+{
+	caller_is(root ? 0 : 1000, root);
 }
 
 static void ioctl_call(unsigned long cmd, const void *in_buf, size_t in_bufsz,
@@ -317,19 +383,46 @@ static void test_open(void)
 }
 
 /*
- * A 32 bit ioctl into a 64 bit daemon. The structures do not match, so the
- * request is refused rather than misread.
+ * A 32 bit ioctl into a 64 bit daemon. Every command transfers ints or bytes
+ * only, laid out the same for both, so it is served like any other rather than
+ * refused - a 32 bit program has to be able to use /dev/random as well.
  */
-static void test_ioctl_compat(void)
+static void compat_ioctl_call(unsigned long cmd, const void *in_buf,
+			      size_t in_bufsz, size_t out_bufsz)
 {
 	struct fuse_file_info fi;
 
 	memset(&fi, 0, sizeof(fi));
 	reply_reset();
-	esdm_cuse_ioctl(-1, TEST_REQ, RNDGETENTCNT, (void *)0x1000, &fi,
-			FUSE_IOCTL_COMPAT, NULL, 0, 0);
+	esdm_cuse_ioctl(-1, TEST_REQ, cmd, (void *)0x1000, &fi,
+			FUSE_IOCTL_COMPAT, in_buf, in_bufsz, out_bufsz);
+}
+
+static void test_ioctl_compat(void)
+{
+	uint8_t raw[sizeof(struct rand_pool_info) + 4] = { 0 };
+	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
+	int bits = -1;
+
+	/* The transfers are asked for as for a 64 bit caller */
+	compat_ioctl_call(RNDGETENTCNT, NULL, 0, 0);
+	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
+
+	compat_ioctl_call(RNDADDENTROPY, NULL, 0, 0);
+	CHECK_EQ(reply.kind, REPLY_IOCTL_RETRY);
+
+	/* And the data transferred is checked as for one */
+	rpi->buf_size = 4;
+	rpi->entropy_count = 33;
+	compat_ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0);
 	CHECK_EQ(reply.kind, REPLY_ERR);
-	CHECK_EQ(reply.err, ENOSYS);
+	CHECK_EQ(reply.err, EINVAL);
+
+	caller_is_root(true);
+	compat_ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+	caller_is_root(false);
 }
 
 /*
@@ -402,6 +495,36 @@ static void test_ioctl_addentropy_rejected(void)
 }
 
 /*
+ * RNDADDTOENTCNT takes an int, and the kernel refuses a negative one. Read as
+ * unsigned, -1 would claim the largest entropy count there is.
+ */
+static void test_ioctl_addtoentcnt_negative(void)
+{
+	int bits = -1;
+
+	caller_is_root(true);
+
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+
+	/* Raised for the check of the caller only, and dropped right after */
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
+
+	bits = INT32_MIN;
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+
+	/* The privilege check comes first, as in the kernel */
+	caller_is_root(false);
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+}
+
+/*
  * The commands that change the ESDM's state are for root. This is the check
  * that stands between any user of /dev/random and the entropy accounting, so
  * each command is asked for as an ordinary user and has to be refused.
@@ -454,6 +577,164 @@ static void test_ioctl_privileged_refused(void)
 }
 
 /*
+ * What decides is CAP_SYS_ADMIN, as in the kernel, not the UID: root without
+ * the capability - a container's root, a service with a bounding set - is
+ * refused, and a user holding it is not.
+ */
+static void test_ioctl_privilege_is_capability(void)
+{
+	caller_is(0, false);
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+
+	/* A refused caller does not get the privileges raised at all */
+	CHECK(!checked_raised, "the caller was checked with privileges");
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+	CHECK_EQ(fsroot_calls, 0);
+
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+
+	caller_is(1000, true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind == REPLY_ERR || reply.kind == REPLY_IOCTL,
+	      "RNDRESEEDCRNG was not answered");
+	CHECK(reply.kind != REPLY_ERR || reply.err != EPERM,
+	      "a caller holding CAP_SYS_ADMIN was refused");
+	CHECK(!checked_raised, "the caller was checked with privileges");
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
+
+	/*
+	 * With /proc mounted with hidepid=, the unprivileged user cannot open
+	 * the caller's entries. They are opened once more with the /proc
+	 * access of root then - for the checking thread only, so with no
+	 * privileges raised, but under the reader lock that keeps them from
+	 * being raised meanwhile.
+	 */
+	test_proc_hidden = true;
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind != REPLY_ERR || reply.err != EPERM,
+	      "a hidden caller holding CAP_SYS_ADMIN was refused");
+	CHECK_EQ(fsroot_calls, 1);
+	CHECK(fsroot_reader_locked,
+	      "the caller was checked without the reader lock");
+	CHECK(!checked_raised, "the caller was checked with privileges");
+	CHECK_EQ(raise_calls, 1);
+	CHECK_EQ(drop_calls, 1);
+
+	caller_is(1000, false);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+	CHECK_EQ(fsroot_calls, 1);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+	test_proc_hidden = false;
+
+	caller_is_root(false);
+}
+
+/*
+ * The device takes requests of any user while esdm_cuse_init_done() still
+ * runs, before the privileges are dropped. A privileged ioctl must neither be
+ * served then nor drop the privileges early: the daemon would stay with the
+ * unprivileged user for good, never knowing it can raise again.
+ */
+static void test_ioctl_before_init_done(void)
+{
+	atomic_store(&esdm_cuse_ready, false);
+	esdm_cuse_dropped = false;
+
+	caller_is_root(false);
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	/* Not refused: the caller may be entitled to it in a moment */
+	caller_is_root(true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	/* A daemon that never dropped has nothing to raise or drop */
+	atomic_store(&esdm_cuse_ready, true);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK(reply.kind == REPLY_ERR || reply.kind == REPLY_IOCTL,
+	      "RNDRESEEDCRNG was not answered");
+	CHECK(reply.kind != REPLY_ERR || reply.err != EAGAIN,
+	      "RNDRESEEDCRNG was refused after the initialization");
+	CHECK_EQ(raise_calls, 0);
+	CHECK_EQ(drop_calls, 0);
+
+	caller_is_root(false);
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EPERM);
+	CHECK_EQ(drop_calls, 0);
+}
+
+static void *refused_ioctl(void *arg)
+{
+	(void)arg;
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, -1);
+
+	return NULL;
+}
+
+/*
+ * A privileged ioctl of a caller that is refused must not wait for the write
+ * lock. The lock prefers writers, so a waiting one keeps every new read and
+ * write of the device waiting as well - with a reader in a long read holding
+ * the lock, any user could stall the device by asking for RNDCLEARPOOL.
+ */
+static void test_ioctl_refused_without_write_lock(void)
+{
+	unsigned int hidden;
+
+	caller_is_root(false);
+
+	for (hidden = 0; hidden < 2; hidden++) {
+		struct timespec deadline;
+		pthread_t thread;
+
+		test_proc_hidden = hidden;
+
+		/* The long read */
+		mutex_reader_lock(&esdm_cuse_priv);
+
+		if (pthread_create(&thread, NULL, refused_ioctl, NULL)) {
+			mutex_reader_unlock(&esdm_cuse_priv);
+			CHECK(0, "cannot start the ioctl thread");
+			break;
+		}
+
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_sec += 5;
+		if (pthread_timedjoin_np(thread, NULL, &deadline)) {
+			CHECK(0, "a refused caller waited for the write lock");
+			mutex_reader_unlock(&esdm_cuse_priv);
+			pthread_join(thread, NULL);
+		} else {
+			mutex_reader_unlock(&esdm_cuse_priv);
+		}
+
+		CHECK_EQ(reply.kind, REPLY_ERR);
+		CHECK_EQ(reply.err, EPERM);
+		CHECK_EQ(fsroot_calls, hidden);
+	}
+
+	test_proc_hidden = false;
+}
+
+/*
  * The ESDM specific status ioctl before the status segment is attached, and a
  * command that is none of the above.
  */
@@ -466,6 +747,10 @@ static void test_ioctl_status_and_unknown(void)
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EAGAIN);
 
+	/*
+	 * An unknown command is refused the way the kernel refuses it: its
+	 * random_ioctl() answers EINVAL, not the ENOTTY of other drivers.
+	 */
 	ioctl_call(0xdead, NULL, 0, 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
@@ -525,6 +810,73 @@ static void test_read_fallback(void)
 	close(fd);
 }
 
+static void read_fallback_eof_hung(int sig)
+{
+	static const char msg[] =
+		"FAIL: a read from a fallback at its end did not return\n";
+
+	(void)sig;
+	if (write(STDOUT_FILENO, msg, sizeof(msg) - 1) < 0) {
+		/* Nothing left to report it with */
+	}
+	_exit(1);
+}
+
+/*
+ * A fallback that has nothing more to give - a read of 0 bytes, the end of a
+ * regular file - fails the request. It used to add the 0 bytes to what it had
+ * and ask again, forever: the alarm turns that into a failure of this test.
+ */
+static void test_read_fallback_eof(void)
+{
+	char path[] = "/tmp/esdm-cuse-read-XXXXXX";
+	struct fuse_file_info fi;
+	int fd = mkstemp(path);
+
+	if (fd < 0) {
+		CHECK(0, "cannot create a temporary file: %s", strerror(errno));
+		return;
+	}
+	unlink(path);
+
+	signal(SIGALRM, read_fallback_eof_hung);
+
+	/* An empty fallback, for the on-stack and for the heap buffer */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 1024, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	/* One that runs out part way through the request fails it as well */
+	CHECK(write(fd, "0123456789abcdef", 16) == 16,
+	      "cannot fill the fallback file");
+	CHECK(lseek(fd, 0, SEEK_SET) == 0, "cannot rewind the fallback file");
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	alarm(10);
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+	alarm(0);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EIO);
+
+	signal(SIGALRM, SIG_DFL);
+	close(fd);
+}
+
 /*
  * Writing with no ESDM to take the data. It goes to the fallback whole or not
  * at all - a write split between the ESDM and the kernel would leave neither
@@ -570,6 +922,45 @@ static void test_write_fallback(void)
 	CHECK(reply.err != 0, "a write with nothing behind it reported success");
 
 	close(fd);
+}
+
+/*
+ * A fallback that fails passes its errno on. It used to be the -1 of read() or
+ * write() negated, which every caller saw as EPERM.
+ */
+static void test_fallback_errno(void)
+{
+	int wronly = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	int rdonly = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	uint8_t buf[32] = { 0 };
+	struct fuse_file_info fi;
+
+	if (wronly < 0 || rdonly < 0) {
+		CHECK(0, "cannot open /dev/null: %s", strerror(errno));
+		goto out;
+	}
+
+	/* Reading from a descriptor open for writing only */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, sizeof(buf), 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, wronly);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EBADF);
+
+	/* Writing to one open for reading only */
+	memset(&fi, 0, sizeof(fi));
+	reply_reset();
+	esdm_cuse_write_internal(TEST_REQ, (const char *)buf, sizeof(buf), 0,
+				 &fi, rdonly);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EBADF);
+
+out:
+	if (wronly >= 0)
+		close(wronly);
+	if (rdonly >= 0)
+		close(rdonly);
 }
 
 /*
@@ -634,6 +1025,91 @@ static void test_pollmask(void)
 	mask = POLLIN | POLLOUT;
 	esdm_cuse_set_pollmask(POLLIN, &mask);
 	CHECK_EQ(mask, POLLIN);
+}
+
+/* What the privileged calls answer: by default, that there is no ESDM */
+static int priv_rpc_ret = -ECONNREFUSED;
+
+int test_add_to_ent_cnt(unsigned int entcnt, void *int_data)
+{
+	(void)entcnt;
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_add_entropy(const uint8_t *entropy_buf, size_t entropy_buf_len,
+		     uint32_t entropy_cnt, void *int_data)
+{
+	(void)entropy_buf;
+	(void)entropy_buf_len;
+	(void)entropy_cnt;
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_clear_pool(void *int_data)
+{
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+int test_reseed_crng(void *int_data)
+{
+	(void)int_data;
+	return priv_rpc_ret;
+}
+
+/*
+ * A privileged call interrupted after its request went out may be applied by
+ * the ESDM all the same. The kernel fallback must not credit the entropy a
+ * second time then, and the caller is told EINTR as for an interrupted ioctl.
+ *
+ * The fallback goes to /dev/null, whose ENOTTY tells that it ran.
+ */
+static void test_privileged_in_progress(void)
+{
+	uint8_t raw[sizeof(struct rand_pool_info) + 32] = { 0 };
+	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
+	uint32_t bits = 8;
+	int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/null: %s", strerror(errno));
+		return;
+	}
+
+	caller_is_root(true);
+	rpi->buf_size = 32;
+	rpi->entropy_count = 8;
+
+	/* Without an ESDM, the fallback runs */
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, ENOTTY);
+
+	priv_rpc_ret = -EINPROGRESS;
+
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+	CHECK_EQ(raise_calls, drop_calls);
+
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDCLEARPOOL, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+
+	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINTR);
+	CHECK_EQ(raise_calls, drop_calls);
+
+	priv_rpc_ret = -ECONNREFUSED;
+	caller_is_root(false);
+	close(fd);
 }
 
 /*
@@ -719,39 +1195,369 @@ static void test_privileged_ioctls(void)
 }
 
 /*
+ * A non-blocking read of /dev/random while the ESDM is not seeded yet. The
+ * kernel answers it with EAGAIN, and so does this device - the request would
+ * otherwise wait for the seeding like a blocking one. Called with the status
+ * segment attached, which is where the seeding state comes from.
+ */
+static void read_call(int flags, get_func_t get, int fd)
+{
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = flags;
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, 32, 0, &fi, get, fd);
+}
+
+/*
+ * What test_pr_nonblock() answers, call by call: a number of bytes it fills
+ * in, or an error. Past the script, the ESDM cannot be reached.
+ */
+static ssize_t pr_script[4];
+static unsigned int pr_script_len;
+static unsigned int pr_calls;
+
+#define PR_BYTE 0xa5
+
+ssize_t test_pr_nonblock(uint8_t *buf, size_t buflen, void *int_data)
+{
+	ssize_t ret = -ECONNREFUSED;
+
+	(void)int_data;
+
+	if (pr_calls < pr_script_len)
+		ret = pr_script[pr_calls];
+	pr_calls++;
+
+	if (ret > 0) {
+		if ((size_t)ret > buflen)
+			ret = (ssize_t)buflen;
+		memset(buf, PR_BYTE, (size_t)ret);
+	}
+
+	return ret;
+}
+
+static void pr_script_set(ssize_t first, ssize_t second, ssize_t third)
+{
+	pr_script[0] = first;
+	pr_script[1] = second;
+	pr_script[2] = third;
+	pr_script_len = 3;
+	pr_calls = 0;
+}
+
+static void read_call_size(int flags, size_t size, int fd)
+{
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.flags = flags;
+	reply_reset();
+	esdm_cuse_read_internal(TEST_REQ, size, 0, &fi,
+				esdm_rpcc_get_random_bytes_full_int, fd);
+}
+
+/* Whether the reply carries what test_pr_nonblock() filled in */
+static bool reply_is_pr_bytes(void)
+{
+	size_t i;
+
+	for (i = 0; i < reply.size && i < sizeof(reply.buf); i++) {
+		if (reply.buf[i] != PR_BYTE)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * A non-blocking prediction resistant read of a seeded ESDM. Its EAGAIN is
+ * the ESDM's answer that it cannot serve without blocking - no failure the
+ * kernel device is to cover for, although there is one here.
+ */
+static void test_read_pr_nonblock(int fd)
+{
+	const int flags = O_NONBLOCK | O_SYNC;
+
+	/* Nothing read: the reader is told to try again */
+	pr_script_set(-EAGAIN, 32, 32);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	CHECK_EQ(pr_calls, 1);
+
+	/* A full chunk, then EAGAIN: a short read of that chunk */
+	pr_script_set(ESDM_RPC_MAX_DATA, -EAGAIN, 32);
+	read_call_size(flags, ESDM_RPC_MAX_DATA + 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, ESDM_RPC_MAX_DATA);
+	CHECK_EQ(pr_calls, 2);
+
+	/* Partial answers within one chunk, then EAGAIN: what was read */
+	pr_script_set(8, 8, -EAGAIN);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 16);
+	CHECK(reply_is_pr_bytes(), "the short read is not what the ESDM gave");
+	CHECK_EQ(pr_calls, 3);
+
+	/* And a partial answer the ESDM completes is a full read */
+	pr_script_set(8, 24, -EAGAIN);
+	read_call_size(flags, 32, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
+	CHECK(reply_is_pr_bytes(), "the read is not what the ESDM gave");
+	CHECK_EQ(pr_calls, 2);
+
+	/* Past the script, the ESDM is unreachable, as for every other test */
+	pr_script_len = 0;
+}
+
+static void test_read_nonblock(void)
+{
+	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0) {
+		CHECK(0, "cannot open /dev/urandom: %s", strerror(errno));
+		return;
+	}
+
+	atomic_store(&esdm_cuse_shm_status->operational, false);
+
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+
+	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+
+	/* /dev/urandom never blocks */
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/* A blocking reader is served - here from the fallback */
+	read_call(0, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/* And once the ESDM is seeded, a non-blocking one as well */
+	atomic_store(&esdm_cuse_shm_status->operational, true);
+	read_call(O_NONBLOCK, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+
+	/*
+	 * The prediction resistant one takes the non-blocking RPC, which only
+	 * stops at an EAGAIN of the ESDM - one that cannot be reached at all is
+	 * covered by the fallback as before.
+	 */
+	read_call(O_NONBLOCK | O_SYNC, esdm_rpcc_get_random_bytes_full_int, fd);
+	CHECK_EQ(reply.kind, REPLY_BUF);
+	CHECK_EQ(reply.size, 32);
+
+	test_read_pr_nonblock(fd);
+	atomic_store(&esdm_cuse_shm_status->operational, false);
+
+	close(fd);
+}
+
+/*
  * The status segment and the semaphore that go with it.
  *
  * Both are machine-global names, so this test creates them in an IPC namespace
- * of its own (see tests/test_ipc_ns.c). What matters is that a segment nobody
- * is attached to any more is treated as a leftover and replaced rather than
- * trusted - it is what a crashed server leaves behind, and its contents would
- * otherwise be reported as the current state.
+ * of its own (see tests/test_ipc_ns.c), playing the server's part: they are the
+ * server's, and the daemon only ever attaches to them. It must not create
+ * either, nor take a segment nobody is attached to - what a crashed server
+ * leaves behind, whose contents would be reported as the current state - nor
+ * one the server has not published yet.
  */
+static int test_server_shmid = -1;
+static struct esdm_shm_status *test_server_shm = (void *)-1;
+
+static void test_server_shm_create(void)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+
+	test_server_shmid = shmget(key, sizeof(struct esdm_shm_status),
+				   IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR |
+					   S_IRGRP | S_IROTH);
+	CHECK(test_server_shmid >= 0, "cannot create the segment: %s",
+	      strerror(errno));
+	test_server_shm = shmat(test_server_shmid, NULL, 0);
+	CHECK(test_server_shm != (void *)-1, "cannot attach the segment: %s",
+	      strerror(errno));
+}
+
+/* Attach as the daemon does, checking that the privileges are put back */
+static bool test_attach(void)
+{
+	unsigned int raised = raise_calls, dropped = drop_calls;
+	bool attached = esdm_cuse_shm_status_attach();
+
+	CHECK_EQ(raise_calls - raised, drop_calls - dropped);
+
+	return attached;
+}
+
+/*
+ * A suspend trigger, or the server going away, as the server signals it: every
+ * poller is woken, whatever it waits for. Both CUSE daemons watch the one
+ * segment, so neither may consume the event in it - the /dev/urandom daemon,
+ * which has no pollers, used to clear it before the /dev/random daemon woke its
+ * own.
+ */
+static void test_suspend_event(void)
+{
+	static const unsigned int all =
+		POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+	struct fuse_file_info fi;
+	unsigned int mask, gen;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.fh = 4712;
+	fi.poll_events = POLLIN;
+
+	/* Nothing ready, so the poller waits */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, 0);
+	CHECK(esdm_cuse_poll_list != NULL,
+	      "the poll handle was not registered");
+
+	gen = atomic_fetch_add(&test_server_shm->suspend_gen, 1) + 1;
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, all);
+
+	reply_reset();
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 1);
+
+	/* Left in the segment for the other daemon */
+	CHECK_EQ(atomic_load(&test_server_shm->suspend_gen), gen);
+
+	/*
+	 * No news to this daemon any more - but to the poll the kernel answers
+	 * the notification with, which used to go back to sleep.
+	 */
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, 0);
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, POLLIN);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "the woken poll handle was left registered");
+
+	/* Once */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(reply.revents, 0);
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 0);
+
+	reply_reset();
+	esdm_cuse_release(TEST_REQ, &fi);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "closing the descriptor left its poll registration behind");
+
+	/* A descriptor closed before its next poll takes the marker along */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	atomic_fetch_add(&test_server_shm->suspend_gen, 1);
+	esdm_cuse_poll_check();
+	CHECK_EQ(notify_calls, 1);
+	esdm_cuse_release(TEST_REQ, &fi);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "closing the descriptor left its suspend marker behind");
+	CHECK_EQ(notify_calls, 1);
+}
+
 static void test_shm_status(void)
 {
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	static char sem_name[64];
+	struct esdm_shm_status *first;
 	unsigned int mask;
+	sem_t *sem;
+	int shmid;
 
-	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
-	CHECK(esdm_cuse_shm_status != NULL,
-	      "the status segment was not attached");
+	/* No server, nothing to attach to - and nothing is created */
+	CHECK(!test_attach(), "attached to a segment nobody created");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+	CHECK(shmget(key, sizeof(struct esdm_shm_status), 0) < 0,
+	      "the daemon created the status segment");
 
-	/* A segment without the version this build speaks is not usable */
-	CHECK_EQ(esdm_cuse_shm_status_avail(), 0);
-	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
+	/* The poll checker waits for the server meanwhile */
+	esdm_cuse_shm_status_down();
+	CHECK(shmget(key, sizeof(struct esdm_shm_status), 0) < 0,
+	      "the poll checker created the status segment");
+
+	test_server_shm_create();
+	if (test_server_shm == (void *)-1)
+		return;
+
+	/* Not published by the server yet */
+	CHECK(!test_attach(), "attached to a segment not published yet");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+
+	/* A segment nobody is attached to is a leftover */
+	test_server_shm->version = ESDM_SHM_STATUS_VERSION;
+	shmdt(test_server_shm);
+	CHECK(!test_attach(), "attached to the leftover of a died server");
+	CHECK(esdm_cuse_shm_status == NULL, "a status segment is attached");
+
+	/*
+	 * The server is back. The semaphore is not there, which leaves the
+	 * segment usable nevertheless.
+	 */
+	test_server_shm = shmat(test_server_shmid, NULL, 0);
+	/* /dev/shm is no part of the IPC namespace, so the name is our own */
+	snprintf(sem_name, sizeof(sem_name), "/esdm-cuse-device-test-%d",
+		 (int)getpid());
+	esdm_sem_name = sem_name;
+	sem_unlink(esdm_sem_name);
+	CHECK(test_attach(), "the server's segment was not attached");
+	if (!esdm_cuse_shm_status) {
+		CHECK(0, "the status segment was not attached");
+		return;
+	}
 	CHECK(esdm_cuse_shm_status_avail() != 0,
 	      "an attached status segment is not reported as available");
+	CHECK(esdm_cuse_semid == SEM_FAILED, "a semaphore is open");
+	CHECK(sem_open(esdm_sem_name, 0) == SEM_FAILED,
+	      "the daemon created the semaphore");
 
-	/* Detaching and attaching again finds it as the leftover it now is */
-	esdm_cuse_shm_status_close_shm();
-	CHECK(esdm_cuse_shm_status == NULL,
-	      "the status segment was not detached");
-	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
-	CHECK(esdm_cuse_shm_status != NULL,
-	      "the status segment was not attached again");
-	CHECK_EQ(esdm_cuse_shm_status->version, 0);
+	/* Without a semaphore, the poll checker watches the segment */
+	esdm_cuse_shm_status_down();
 
-	/* A fresh segment, so the version has to be put back into it */
-	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
+	/* The one attached to is not attached again */
+	CHECK(!test_attach(), "the same segment was attached again");
+
+	/* A segment the server replaced is attached to anew, semaphore and all */
+	sem = sem_open(esdm_sem_name, O_CREAT | O_EXCL, 0600, 0);
+	CHECK(sem != SEM_FAILED, "cannot create the semaphore: %s",
+	      strerror(errno));
+	first = esdm_cuse_shm_status;
+	shmctl(test_server_shmid, IPC_RMID, NULL);
+	shmdt(test_server_shm);
+	test_server_shm_create();
+	if (test_server_shm == (void *)-1 || sem == SEM_FAILED)
+		return;
+	test_server_shm->version = ESDM_SHM_STATUS_VERSION;
+	shmid = test_server_shmid;
+	CHECK(test_attach(), "the replaced segment was not attached");
+	CHECK_EQ(esdm_cuse_shmid, shmid);
+	CHECK(esdm_cuse_semid != SEM_FAILED, "the semaphore was not opened");
+
+	/* The previous one stays readable for the threads that still use it */
+	CHECK_EQ(first->version, ESDM_SHM_STATUS_VERSION);
+
+	/* A post of the server wakes the poll checker */
+	sem_post(sem);
+	esdm_cuse_shm_status_down();
+	CHECK(sem_trywait(sem) < 0 && errno == EAGAIN,
+	      "the poll checker did not take the post");
+	sem_close(sem);
 
 	/*
 	 * With a segment in place the poll mask follows what it says. Each
@@ -768,10 +1574,9 @@ static void test_shm_status(void)
 	CHECK_EQ(mask, POLLOUT | POLLWRNORM);
 
 	atomic_store(&esdm_cuse_shm_status->need_entropy, false);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, true);
-	esdm_cuse_get_pollmask(&mask);
-	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, false);
+	test_suspend_event();
+
+	test_read_nonblock();
 
 	/* The status ioctl answers out of the same segment */
 	esdm_cuse_shm_status->infolen = 5;
@@ -786,6 +1591,17 @@ static void test_shm_status(void)
 	CHECK_STR_EQ((const char *)reply.buf, "ESDM");
 
 	/*
+	 * Without the version, the server has not finished writing the
+	 * report - it is starting, or restarting over this segment - so it is
+	 * not served half-written.
+	 */
+	esdm_cuse_shm_status->version = 0;
+	ioctl_call(42, NULL, 0, sizeof(reply.buf), -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EAGAIN);
+	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
+
+	/*
 	 * A length beyond the segment is clamped rather than read past - the
 	 * segment is written by another process, so its length is not to be
 	 * trusted.
@@ -795,22 +1611,6 @@ static void test_shm_status(void)
 	CHECK(reply.kind == REPLY_IOCTL &&
 		      reply.size == ESDM_SHM_STATUS_INFO_SIZE,
 	      "an oversized info length was not clamped to the segment");
-
-	/* Waiting on a semaphore that was never created says so and returns */
-	CHECK_EQ(esdm_cuse_semid, SEM_FAILED);
-	esdm_cuse_shm_status_down();
-
-	/* The name is what the frontend passes in; without one there is none */
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), -EFAULT);
-
-	esdm_sem_name = "/esdm-cuse-device-test";
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), 0);
-	CHECK(esdm_cuse_semid != SEM_FAILED,
-	      "the semaphore was not created");
-
-	/* Opening the one that is already there is the other startup order */
-	esdm_cuse_shm_status_close_sem();
-	CHECK_EQ(esdm_cuse_shm_status_create_sem(), 0);
 
 	/*
 	 * The wait returns without blocking once the shutdown flag is set,
@@ -822,10 +1622,15 @@ static void test_shm_status(void)
 
 	esdm_cuse_shm_status_close_sem();
 	sem_unlink(esdm_sem_name);
-	CHECK_EQ(esdm_cuse_semid, SEM_FAILED);
+	CHECK(esdm_cuse_semid == SEM_FAILED, "the semaphore was not closed");
 	esdm_cuse_shm_status_close_sem();
 
 	esdm_cuse_shm_status_close_shm();
+	CHECK(esdm_cuse_shm_status == NULL,
+	      "the status segment was not detached");
+
+	shmdt(test_server_shm);
+	shmctl(test_server_shmid, IPC_RMID, NULL);
 }
 
 int main(int argc, char *argv[])
@@ -835,17 +1640,29 @@ int main(int argc, char *argv[])
 
 	caller_is_root(false);
 
+	test_ioctl_before_init_done();
+
+	/* What the daemon is once the device is up: dropped to "nobody" */
+	esdm_cuse_dropped = true;
+	atomic_store(&esdm_cuse_ready, true);
+
 	test_open();
 	test_ioctl_compat();
 	test_ioctl_retries();
 	test_ioctl_addentropy_rejected();
+	test_ioctl_addtoentcnt_negative();
 	test_ioctl_privileged_refused();
+	test_ioctl_privilege_is_capability();
+	test_ioctl_refused_without_write_lock();
 	test_ioctl_status_and_unknown();
 	test_read_fallback();
+	test_read_fallback_eof();
 	test_write_fallback();
+	test_fallback_errno();
 	test_poll_registration();
 	test_pollmask();
 	test_privileged_ioctls();
+	test_privileged_in_progress();
 	test_shm_status();
 
 	return common_test_result("cuse_device");

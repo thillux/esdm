@@ -113,7 +113,7 @@ static int addent_ioctl(int fd, int exp)
 
 	if (esdm_cuse_sp80090c_enabled()) {
 		/* Note, we have to account for oversampling of entropy */
-		if (ent_count_bits2 - ent_count_bits < 10) {
+		if (ent_count_bits2 < ent_count_bits + 10) {
 			printf("RNDADDENTROPY failed to add entropy: %u %u\n",
 			       ent_count_bits2, ent_count_bits);
 			ret = 1;
@@ -180,13 +180,13 @@ int main(int argc, char *argv[])
 
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret = test_ioctl(devfile, -1);
+	ret = !!test_ioctl(devfile, -1);
 	raise_privilege();
 	printf("============== Privileged Tests ============================\n");
-	ret += test_ioctl(devfile, 0);
+	ret += !!test_ioctl(devfile, 0);
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret += test_ioctl(devfile, -1);
+	ret += !!test_ioctl(devfile, -1);
 
 	env_fini();
 

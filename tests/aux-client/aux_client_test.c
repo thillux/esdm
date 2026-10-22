@@ -22,23 +22,31 @@
  *
  * This is the interface an external entropy provider uses: attach, sleep until
  * the ESDM wants entropy, insert some, repeat. It needs neither privileges nor
- * a running server - the semaphore and the shared memory segment are created by
- * whichever side gets there first - so what is covered here is the behaviour a
- * provider meets before and without a server, which is what its documented
- * timeout exists for.
+ * a running server, so what is covered here is the behaviour a provider meets
+ * before and without a server, which is what its documented timeout exists
+ * for - and how it finds the server's semaphore and shared memory segment,
+ * which this test creates the way the server does.
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "common_test.h"
 #include "esdm_aux_client.h"
+#include "esdm_rpc_service.h"
 
 static double elapsed_since(const struct timespec *start)
 {
@@ -145,6 +153,186 @@ static void test_wait_honours_timeout(void)
 	esdm_aux_fini_wait_for_need_entropy();
 }
 
+/*
+ * What the server creates: the status segment, attached to for as long as it
+ * runs, and the semaphore it posts when it wants entropy.
+ */
+struct test_server {
+	int shmid;
+	struct esdm_shm_status *status;
+	sem_t *sem;
+};
+
+static int test_server_start(struct test_server *srv, bool need_entropy)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	void *tmp;
+
+	srv->shmid = shmget(key, sizeof(struct esdm_shm_status),
+			    IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR | S_IRGRP |
+				    S_IROTH);
+	if (srv->shmid < 0) {
+		CHECK(0, "cannot create the status segment: %s",
+		      strerror(errno));
+		return 1;
+	}
+
+	tmp = shmat(srv->shmid, NULL, 0);
+	if (tmp == (void *)-1) {
+		CHECK(0, "cannot attach the status segment: %s",
+		      strerror(errno));
+		shmctl(srv->shmid, IPC_RMID, NULL);
+		return 1;
+	}
+	srv->status = tmp;
+
+	srv->sem = sem_open(ESDM_SEM_NEED_ENTROPY_LEVEL, O_CREAT | O_EXCL,
+			    0644, 0);
+	if (srv->sem == SEM_FAILED) {
+		CHECK(0, "cannot create the semaphore: %s", strerror(errno));
+		shmdt(srv->status);
+		shmctl(srv->shmid, IPC_RMID, NULL);
+		return 1;
+	}
+
+	atomic_store(&srv->status->need_entropy, need_entropy);
+	srv->status->version = ESDM_SHM_STATUS_VERSION;
+
+	return 0;
+}
+
+/* A server that exits and removes what it created */
+static void test_server_stop(struct test_server *srv)
+{
+	srv->status->version = 0;
+	atomic_store(&srv->status->need_entropy, false);
+	shmdt(srv->status);
+	shmctl(srv->shmid, IPC_RMID, NULL);
+	sem_close(srv->sem);
+	sem_unlink(ESDM_SEM_NEED_ENTROPY_LEVEL);
+}
+
+/* Wait for at most msec, returning what the wait returned and its errno */
+static int timedwait_ms(long msec, int *errsv)
+{
+	struct timespec ts;
+	int rc;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ts.tv_sec += msec / 1000;
+	ts.tv_nsec += (msec % 1000) * 1000000;
+	if (ts.tv_nsec >= 1000000000) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000;
+	}
+
+	errno = 0;
+	rc = esdm_aux_timedwait_for_need_entropy(&ts);
+	*errsv = errno;
+
+	return rc;
+}
+
+/*
+ * A provider started before the server creates nothing: the server would
+ * remove a segment of another user as one planted on it, and the provider
+ * would keep waiting on that one.
+ */
+static void test_creates_nothing(void)
+{
+	key_t key = esdm_ftok(ESDM_SHM_NAME, ESDM_SHM_STATUS);
+	sem_t *sem;
+	int errsv;
+
+	CHECK_EQ(esdm_aux_init_wait_for_need_entropy(), 0);
+	CHECK_EQ(timedwait_ms(100, &errsv), -1);
+	CHECK_EQ(errsv, ETIMEDOUT);
+
+	CHECK(shmget(key, sizeof(struct esdm_shm_status), 0) < 0 &&
+		      errno == ENOENT,
+	      "the client created the status segment");
+
+	sem = sem_open(ESDM_SEM_NEED_ENTROPY_LEVEL, 0);
+	CHECK(sem == SEM_FAILED && errno == ENOENT,
+	      "the client created the semaphore");
+	if (sem != SEM_FAILED) {
+		sem_close(sem);
+		sem_unlink(ESDM_SEM_NEED_ENTROPY_LEVEL);
+	}
+
+	esdm_aux_fini_wait_for_need_entropy();
+}
+
+/*
+ * The server starts after the provider, and is restarted later on. Either
+ * time, the provider finds what the server created.
+ */
+static void test_finds_server(void)
+{
+	struct test_server srv;
+	int errsv;
+
+	CHECK_EQ(esdm_aux_init_wait_for_need_entropy(), 0);
+
+	if (test_server_start(&srv, false))
+		goto out;
+
+	/* Attached now, and the server does not want entropy */
+	CHECK_EQ(timedwait_ms(200, &errsv), -1);
+	CHECK_EQ(errsv, ETIMEDOUT);
+
+	/* The semaphore wakes the provider */
+	sem_post(srv.sem);
+	CHECK_EQ(timedwait_ms(2000, &errsv), 0);
+
+	/* And so does the flag in the segment */
+	atomic_store(&srv.status->need_entropy, true);
+	CHECK_EQ(timedwait_ms(2000, &errsv), 0);
+
+	/*
+	 * The server restarts, removing the segment and the semaphore and
+	 * creating both anew. Only the new semaphore is posted, which the
+	 * provider only sees when it let go of the old ones.
+	 */
+	test_server_stop(&srv);
+	if (test_server_start(&srv, false))
+		goto out;
+	sem_post(srv.sem);
+	CHECK_EQ(timedwait_ms(3000, &errsv), 0);
+
+	/* The same with the flag of the new segment */
+	atomic_store(&srv.status->need_entropy, true);
+	CHECK_EQ(timedwait_ms(3000, &errsv), 0);
+
+	test_server_stop(&srv);
+
+out:
+	esdm_aux_fini_wait_for_need_entropy();
+}
+
+/*
+ * A segment nobody is attached to is what a server that died left behind.
+ * Whatever it says is not the state of a running server.
+ */
+static void test_ignores_leftover(void)
+{
+	struct test_server srv;
+	int errsv;
+
+	if (test_server_start(&srv, true))
+		return;
+	shmdt(srv.status);
+
+	CHECK_EQ(esdm_aux_init_wait_for_need_entropy(), 0);
+	CHECK_EQ(timedwait_ms(200, &errsv), -1);
+	CHECK_EQ(errsv, ETIMEDOUT);
+	esdm_aux_fini_wait_for_need_entropy();
+
+	shmctl(srv.shmid, IPC_RMID, NULL);
+	sem_close(srv.sem);
+	sem_unlink(ESDM_SEM_NEED_ENTROPY_LEVEL);
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -153,6 +341,9 @@ int main(int argc, char *argv[])
 	test_wait_without_init();
 	test_init_fini();
 	test_wait_honours_timeout();
+	test_creates_nothing();
+	test_finds_server();
+	test_ignores_leftover();
 
 	return common_test_result("aux_client");
 }

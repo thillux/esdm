@@ -55,10 +55,11 @@ static int getinfo_ioctl(int fd)
 		goto out;
 	}
 
-	printf("RNDADDENTROPY: passed\n");
+	printf("get info IOCTL: passed\n");
 
-	len = strlen(buf);
-	if (len == 0 || len > sizeof(buf)) {
+	/* The status is a string within the buffer, not running past it */
+	len = strnlen(buf, sizeof(buf));
+	if (len == 0 || len == sizeof(buf)) {
 		printf("get info IOCTL failed: unexpected data buffer received\n");
 		ret = 1;
 		goto out;
@@ -66,11 +67,10 @@ static int getinfo_ioctl(int fd)
 
 	buf_p = strstr(buf, "ESDM");
 	if (!buf_p) {
-		if (len == 0 || len > sizeof(buf)) {
-			printf("get info IOCTL failed: unexpected data contents received\n");
-			ret = 1;
-			goto out;
-		}
+		printf("get info IOCTL failed: the status does not name the ESDM: %s\n",
+		       buf);
+		ret = 1;
+		goto out;
 	}
 
 	printf("get info IOCTL: passed to obtain status\n");
@@ -118,13 +118,13 @@ int main(int argc, char *argv[])
 
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret = test_ioctl(devfile);
+	ret = !!test_ioctl(devfile);
 	raise_privilege();
 	printf("============== Privileged Tests ============================\n");
-	ret += test_ioctl(devfile);
+	ret += !!test_ioctl(devfile);
 	drop_privileges();
 	printf("============== Unprivileged Tests ============================\n");
-	ret += test_ioctl(devfile);
+	ret += !!test_ioctl(devfile);
 
 	env_fini();
 

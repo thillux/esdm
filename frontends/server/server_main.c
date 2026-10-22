@@ -659,9 +659,20 @@ int main(int argc, char *argv[])
 	 * the daemon permanently drops its privileges and can no longer remove
 	 * the root-owned sockets, SHM segment and semaphores itself.
 	 */
-	if (pid_namespace)
-		CKINT(linux_isolate_namespace_prefork(
-			esdm_rpc_server_cleanup));
+	if (pid_namespace) {
+		/*
+		 * The termination signals of install_term() and SIGUSR1, the
+		 * suspend trigger handled once libesdm is initialized.
+		 */
+		static const int fwd_signals[] = { SIGHUP, SIGINT, SIGQUIT,
+						   SIGTERM, SIGUSR1 };
+
+		/* The EGD clients are told the supervisor's PID. */
+		esdm_egd_server_set_pid(getpid());
+		CKINT(linux_isolate_namespace_prefork(fwd_signals,
+						      ARRAY_SIZE(fwd_signals),
+						      esdm_rpc_server_cleanup));
+	}
 
 	/*
 	 * The IPC cleanup at shutdown only succeeds with privileges retained,
