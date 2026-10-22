@@ -159,6 +159,11 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
 	fprintf(stderr,
+		"\t   --es_jent_instances <N>\tRefill the Jitter RNG buffer with N\n");
+	fprintf(stderr,
+		"\t\t\tcollectors, each in a thread of its own (default %u)\n",
+		ESDM_JENT_INSTANCES);
+	fprintf(stderr,
 		"\t   --dtls\tOffer DTLS on the RPC interfaces to the clients asking\n");
 	fprintf(stderr,
 		"\t\t\tfor it, where built (default: unencrypted only)\n");
@@ -377,6 +382,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "no_fixed_drng_mapping", 0, 0, 0 },
 			{ "no_conn_balancing", 0, 0, 0 },
 			{ "dtls", 0, 0, 0 },
+			{ "es_jent_instances", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:", opts,
@@ -499,6 +505,11 @@ static void parse_opts(int argc, char *argv[])
 			case 24:
 				/* dtls */
 				esdm_rpc_server_set_dtls(true);
+				break;
+			case 25:
+				/* es_jent_instances */
+				esdm_config_es_jent_instances_set(
+					(uint32_t)strtoul(optarg, NULL, 10));
 				break;
 
 			default:

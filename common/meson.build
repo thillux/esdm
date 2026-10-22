@@ -160,6 +160,7 @@ if get_option('es_buf_max_age') == 1
 	error('es_buf_max_age must be 0 or at least 2')
 endif
 conf_data.set('ESDM_ES_BUF_MAX_AGE', get_option('es_buf_max_age'))
+conf_data.set('ESDM_JENT_INSTANCES', get_option('es_jent_instances'))
 
 # esdm_es_buf_alloc() refuses any other block count at runtime, which silently
 # leaves the ES without its cache. A power of two up to 2^31 is what divides
