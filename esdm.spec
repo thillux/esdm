@@ -25,6 +25,13 @@ BuildRequires:  gcc-c++
 BuildRequires:  meson
 BuildRequires:  ninja
 BuildRequires:  systemd-rpm-macros
+# Of the main package, which holds the server and the client libraries. The
+# subpackages below are named esdm-<name>: a package section of its own for
+# them would declare an esdm-esdm, which no files section builds.
+Requires:       libjitterentropy3
+Requires:       libleancrypto1
+Requires:       libprotobuf-c1
+Requires:       systemd
 
 %description
 The Entropy Source and DRNG Manager (ESDM) manages a set of deterministic
@@ -33,21 +40,7 @@ To seed the DRNGs, a set of entropy sources are managed by the ESDM. The
 cryptographic strength of the entire ESDM is always 256 bits. All entropy
 processing is designed to maintain this strength.
 
-%package %{name}
-Summary:        Entropy Source and DRNG Manager
-Requires:       libjitterentropy3
-Requires:       libleancrypto1
-Requires:       libprotobuf-c1
-Requires:       systemd
-
-%description %{name}
-The Entropy Source and DRNG Manager (ESDM) manages a set of deterministic
-random number generators (DRNG) and ensures their proper seeding and reseeding.
-To seed the DRNGs, a set of entropy sources are managed by the ESDM. The
-cryptographic strength of the entire ESDM is always 256 bits. All entropy
-processing is designed to maintain this strength.
-
-This subpackage holds the ESDM server, and the RPC client library allowing
+This package holds the ESDM server, and the RPC client library allowing
 users to interact with the ESDM via its APIs.
 
 %package devel
@@ -210,6 +203,7 @@ This subpackage holds the OpenSSL 3 RAND provider
 %doc README.md README.usage.md
 %{_libdir}/lib%{name}_aux*.so*
 %{_libdir}/lib%{name}_egd_client*.so*
+%{_libdir}/lib%{name}_es_ext*.so*
 %{_libdir}/lib%{name}-getrandom*.so*
 %{_libdir}/lib%{name}_rpc_client*.so*
 %{_libdir}/lib%{name}.so*
@@ -249,5 +243,6 @@ This subpackage holds the OpenSSL 3 RAND provider
 %files devel-static
 %{_libdir}/lib%{name}_aux_client.a
 %{_libdir}/lib%{name}_egd_client.a
+%{_libdir}/lib%{name}_es_ext.a
 %{_libdir}/lib%{name}-getrandom.a
 %{_libdir}/lib%{name}_rpc_client.a

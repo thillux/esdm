@@ -129,14 +129,15 @@
             # list rather than appending to it.
             kernelPatches =
               lpsuper.kernel.kernelPatches
-              ++ lpself.callPackage ./addon/linux_esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
+              ++ lpself.callPackage ./kernel/esdm_es/kernelPatches.nix { inherit (lpsuper) kernel; }
               ++ lib.optionals kernelFips (
-                lpself.callPackage ./addon/linux_esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
+                lpself.callPackage ./kernel/esdm_es/fipsConfig.nix { inherit (lpsuper) kernel; }
               )
-              ++ lib.optionals kernelDebug (lpself.callPackage ./addon/linux_esdm_es/debug.nix { })
-              ++ lpself.callPackage ./addon/linux_esdm_es/drbg.nix { inherit (lpsuper) kernel; };
+              ++ lib.optionals kernelDebug (lpself.callPackage ./kernel/esdm_es/debug.nix { })
+              ++ lpself.callPackage ./kernel/esdm_es/drbg.nix { inherit (lpsuper) kernel; };
           };
-          esdm_es = lpself.callPackage ./addon/linux_esdm_es { };
+          esdm_es = lpself.callPackage ./kernel/esdm_es { };
+          esdm_cdev = lpself.callPackage ./kernel/esdm_cdev { };
         };
 
         # 6.1 is the first kernel version supported by ESDM.
@@ -282,8 +283,8 @@
                   )
                   peak = max(peak, avail())
               print(f"peak available entropy of the eBPF pool: {peak} bits")
-              # The pool is a SHA-512 state and holds at most one digest of
-              # entropy (SP800-90B section 3.1.5.1 table 1).
+              # The pool is an XDRBG-256 whose state of 512 bits is the most
+              # entropy it holds (SP800-90B section 3.1.5.1 table 1).
               assert peak <= 512, (
                   f"available entropy reached {peak} bits, more than the "
                   "conditioning pool can hold - the ingest credits events whose "
@@ -335,7 +336,7 @@
         # analysis scripts drive the NIST SP800-90B non-IID estimator over them.
         # This tests the measurement tooling, NOT a validation grade assessment
         # - a claim must be measured on the deployment environment, which a qemu
-        # VM is not (see addon/es_ebpf_testing/README.md), so nothing is
+        # VM is not (see tests/es_ebpf_testing/README.md), so nothing is
         # asserted about the magnitude. Single kernel on purpose: the estimator
         # dominates the run time and nothing here is kernel specific.
         mkEbpfRawCheck =
@@ -351,7 +352,7 @@
             # The example scripts live next to the collector and are what this
             # check drives - the pipeline is only worth testing as the tooling
             # a user would actually run.
-            tools = lib.cleanSource ./addon/es_ebpf_testing;
+            tools = lib.cleanSource ./tests/es_ebpf_testing;
 
             # Deltas to collect from the one CPU this assesses - the CPUs are
             # separate noise sources, so a collection is never split across
@@ -492,6 +493,10 @@
                       ];
                       environment.etc."esdm-startup-loop.py".source = ./tests/startup/esdm_startup_loop.py;
 
+                      # kmemleak and page_owner only take effect on a kernel
+                      # built with kernelDebug = true (DEBUG_KMEMLEAK,
+                      # PAGE_OWNER - see kernel/esdm_es/debug.nix), and the
+                      # check reads neither of their reports.
                       boot.kernelParams = [
                         "kmemleak=on"
                         "page_owner=on"
@@ -535,12 +540,33 @@
               out = machine.succeed("esdm-tool --get-random 32").strip()
               assert len(out) >= 64, f"short random output: {out!r}"
 
-              # Linux-compat frontends: /dev/random is served by the CUSE
-              # daemon once the compat target is up.
+              # Linux-compat frontends: /dev/random and /dev/urandom are served
+              # by the CUSE daemons, /proc/sys/kernel/random by esdm-proc, once
+              # the compat target is up. Their units are of Type=simple, so
+              # the target is up as soon as the daemons are started - and the
+              # kernel's own /dev/random (1:8) serves a read just as well - so
+              # wait for the takeover itself: the device of the CUSE daemon
+              # bind mounted over the kernel's, and the FUSE file system of
+              # esdm-proc mounted over the kernel's directory.
               machine.wait_for_unit("esdm-linux-compat.target")
+              for unit in ["esdm-cuse-random", "esdm-cuse-urandom", "esdm-proc"]:
+                  machine.wait_for_unit(f"{unit}.service")
+                  machine.succeed(f"systemctl is-active --quiet {unit}.service")
+              for dev, kernel_dev in [("random", "1:8"), ("urandom", "1:9")]:
+                  machine.wait_until_succeeds(f"findmnt -n -M /dev/{dev}", timeout=60)
+                  devno = machine.succeed(f"stat -c %t:%T /dev/{dev}").strip()
+                  assert devno != kernel_dev, (
+                      f"/dev/{dev} is still the kernel's device ({devno})"
+                  )
+              machine.wait_until_succeeds(
+                  "findmnt -n -M /proc/sys/kernel/random -o FSTYPE | grep -q '^fuse'",
+                  timeout=60,
+              )
               machine.succeed("test \"$(head -c 32 /dev/random | wc -c)\" = 32")
+              machine.succeed("test \"$(head -c 32 /dev/urandom | wc -c)\" = 32")
+              machine.succeed("grep -qx '[0-9][0-9]*' /proc/sys/kernel/random/entropy_avail")
 
-              # A clean shutdown must not deadlock or leak (kmemleak is on).
+              # A clean shutdown must not deadlock.
               machine.succeed("systemctl stop esdm-server.service")
 
               # The service credits the kernel ES with nothing, so it seeds
@@ -860,8 +886,12 @@
               machine.succeed(f"echo '{pubkey}' > /root/.ssh/authorized_keys")
               machine.succeed("chmod 600 /root/.ssh/authorized_keys")
 
+              # -n: the client must not read the standard input it inherits
+              # from the test driver's shell. Reading it, it hung now and then
+              # after the session had ended, waiting on input that never
+              # comes.
               opts = (
-                  "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                  "-n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
                   "-o IdentitiesOnly=yes -i /root/.ssh/id_ed25519"
               )
               kex_algorithms = ${builtins.toJSON kexAlgorithms}
@@ -918,6 +948,431 @@
             '';
           };
 
+        # The PKCS#11 entropy source as an operator sets it up: esdm-es-pkcs11
+        # started by its systemd unit as its system user, the PIN a systemd
+        # credential imported from the credential store, serving a SoftHSM
+        # token - and esdm-server reading it through its ExternalSocket
+        # source, told about the socket and the user with ESDM_SERVER_OPTIONS
+        # of its unit, nothing in it knowing of PKCS#11. The source has to be
+        # credited in the status, deliver on a reseed, and be read again once
+        # the daemon was restarted. Not kernel specific, so defined once.
+        mkPkcs11Check =
+          let
+            esdm = self.packages.${system}.esdm;
+            socket = "/run/esdm-es-pkcs11/esdm-es-pkcs11.socket";
+            label = "esdm-vm-token";
+            pin = "648219";
+            # nixpkgs' SoftHSM has no configuration at the path it compiles
+            # in, so the daemon and the token setup get this one. The token
+            # directory is the one the sandbox of the daemon lets it write.
+            softhsmConf = pkgs.writeText "softhsm2.conf" ''
+              directories.tokendir = /var/lib/softhsm/tokens
+              objectstore.backend = file
+              log.level = ERROR
+            '';
+          in
+          pkgs.testers.nixosTest {
+            name = "PKCS#11 entropy source served by esdm-es-pkcs11";
+
+            nodes.machine =
+              { ... }:
+              {
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                # The user the unit runs as. The package ships it as a
+                # sysusers.d file, which a NixOS without systemd-sysusers does
+                # not read - an administrator declares it like this.
+                users.users.esdm-es-pkcs11 = {
+                  isSystemUser = true;
+                  group = "esdm-es-pkcs11";
+                };
+                users.groups.esdm-es-pkcs11 = { };
+
+                # The token, created once, as the user of the daemon, before
+                # the daemon starts
+                systemd.services.softhsm-token = {
+                  wantedBy = [ "multi-user.target" ];
+                  before = [ "esdm-es-pkcs11.service" ];
+                  environment.SOFTHSM2_CONF = "${softhsmConf}";
+                  path = [ pkgs.softhsm ];
+                  serviceConfig = {
+                    Type = "oneshot";
+                    RemainAfterExit = true;
+                    User = "esdm-es-pkcs11";
+                    StateDirectory = "softhsm/tokens";
+                  };
+                  script = ''
+                    softhsm2-util --show-slots | grep -q 'Label: *${label}' ||
+                      softhsm2-util --init-token --free --label ${label} \
+                        --so-pin 1234567890 --pin ${pin}
+                  '';
+                };
+
+                # What the unit of the package leaves to the site: the module,
+                # the token, and SoftHSM's configuration
+                systemd.services.esdm-es-pkcs11 = {
+                  wantedBy = [ "multi-user.target" ];
+                  environment = {
+                    SOFTHSM2_CONF = "${softhsmConf}";
+                    ESDM_ES_PKCS11_OPTIONS = "--module ${pkgs.softhsm}/lib/softhsm/libsofthsm2.so --token_label ${label}";
+                  };
+                };
+
+                # The PIN, imported by the unit (ImportCredential=pkcs11-pin)
+                environment.etc."credstore/pkcs11-pin" = {
+                  text = pin;
+                  mode = "0400";
+                };
+
+                # The ESDM reads the daemon through its provider socket source
+                systemd.services.esdm-server.environment.ESDM_SERVER_OPTIONS =
+                  "--es_ext_socket ${socket} --es_ext_socket_uid esdm-es-pkcs11";
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.softhsm
+                ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import json
+              import time
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-es-pkcs11.service")
+              machine.wait_for_unit("esdm-server.service")
+
+              # Installed by the package, next to the unit
+              machine.succeed("test -f ${esdm}/lib/sysusers.d/esdm-es-pkcs11.conf")
+              machine.succeed("test -f ${esdm}/lib/systemd/system/esdm-es-pkcs11.service")
+
+              # Ordered before the ESDM, and ready - socket served, token
+              # looked for - before the ESDM was started
+              ready = int(machine.succeed(
+                  "systemctl show -P ActiveEnterTimestampMonotonic esdm-es-pkcs11.service"
+              ).strip())
+              started = int(machine.succeed(
+                  "systemctl show -P InactiveExitTimestampMonotonic esdm-server.service"
+              ).strip())
+              assert 0 < ready <= started, f"esdm-es-pkcs11 ready at {ready}, esdm-server started at {started}"
+
+              # The PIN is nowhere on a command line or in the environment
+              pid = machine.succeed("systemctl show -P MainPID esdm-es-pkcs11.service").strip()
+              machine.fail(f"tr '\\0' ' ' < /proc/{pid}/cmdline | grep -q ${pin}")
+              machine.fail("systemctl show -P Environment esdm-es-pkcs11.service | grep -q ${pin}")
+              # ... and the credential is not taken for a file open to all
+              machine.fail("journalctl -b -u esdm-es-pkcs11.service | grep -q 'open to every user'")
+
+              uid = machine.succeed("id -u esdm-es-pkcs11").strip()
+
+              def pkcs11_source():
+                  status = json.loads(machine.succeed("esdm-tool --status-json"))
+                  for es in status["entropy_sources"]:
+                      if es.get("instance") == "ExternalSocket":
+                          return es
+                  raise Exception(f"no ExternalSocket source in {status}")
+
+              # The provider status is asked for at most every 5 seconds, and
+              # not while a request is in progress
+              def credited_source(what):
+                  es = None
+                  for _ in range(30):
+                      es = pkcs11_source()
+                      plugin = (es.get("provider") or {}).get("plugin") or {}
+                      if (f"connected (uid {uid})" in es["status"]
+                              and "failing" not in es["status"]
+                              and es["available_entropy"] > 0
+                              and plugin.get("token") == "${label}"):
+                          return es
+                      time.sleep(1)
+                  raise Exception(f"{what}: the PKCS#11 source is not credited: {es}")
+
+              es = credited_source("at start up")
+              print(json.dumps(es, indent=2))
+              assert es["name"] == "PKCS#11 ${label}", es["name"]
+              assert es["entropy_rate"] == 128, es["entropy_rate"]
+              assert es["entropy_rate_source"] == "provider", es["entropy_rate_source"]
+              plugin = es["provider"]["plugin"]
+              assert plugin["token_present"] and plugin["logged_in"], plugin
+              assert plugin["pin"] == "set", plugin
+              assert plugin["repetition_test"] == "passed", plugin
+              assert plugin["last_error"] is None, plugin
+
+              # A reseed reads the token: still credited, and not failing,
+              # with the daemon having served requests since
+              requests = es["provider"]["server"]["requests"]
+              machine.succeed("esdm-tool --reseed-crng")
+              time.sleep(6)
+              es = credited_source("after a reseed")
+              assert es["provider"]["server"]["requests"] > requests, es
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              # The daemon restarted is read again, without the ESDM being
+              # restarted
+              server = machine.succeed("systemctl show -P MainPID esdm-server.service").strip()
+              machine.succeed("systemctl restart esdm-es-pkcs11.service")
+              machine.wait_for_unit("esdm-es-pkcs11.service")
+              machine.succeed("esdm-tool --reseed-crng")
+              time.sleep(6)
+              es = credited_source("after a restart of the daemon")
+              assert es["provider"]["server"]["uptime_seconds"] < 60, es
+              assert machine.succeed("systemctl show -P MainPID esdm-server.service").strip() == server
+            '';
+          };
+
+        # The esdm_cdev kernel module: /dev/esdm_random, /dev/esdm_urandom and
+        # /proc/esdm served by the ESDM over its EGD socket. On the stock
+        # kernels - the module needs no kernel patches -, one check per kernel
+        # like the live_* and ebpf_* ones: the per kernel builds below only
+        # show that it compiles there, this that it works there.
+        mkEsdmCdevCheck =
+          kernel:
+          let
+            esdm = self.packages.${system}.esdm;
+            # The checks of tests/esdm_cdev, one subcommand each, installed
+            # with the ESDM by its option esdm-cdev-check. The ones running
+            # in the background are stopped by pkill -f 'esdm-cdev-check
+            # [b]lock' and the like, which matches their command line only:
+            # the brackets keep the pattern from matching one that holds the
+            # pattern itself, such as that of a shell running pkill.
+            check = "${esdm}/bin/esdm-cdev-check";
+          in
+          pkgs.testers.nixosTest {
+            name = "esdm_cdev character devices";
+
+            nodes.machine =
+              { config, ... }:
+              {
+                boot.kernelPackages = kernel;
+                boot.extraModulePackages = [
+                  (config.boot.kernelPackages.callPackage ./kernel/esdm_cdev { })
+                ];
+
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                # The module talks to the EGD socket, which is opt-in.
+                systemd.sockets."esdm-server-egd".wantedBy = [ "sockets.target" ];
+
+                environment.systemPackages = [ esdm ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              import time
+
+              def bounded(cmd, limit):
+                  start = time.monotonic()
+                  out = machine.succeed(cmd)
+                  took = time.monotonic() - start
+                  assert took < limit, f"{cmd} took {took:.1f} s"
+                  return out
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-server-egd.socket")
+              machine.wait_for_unit("esdm-server.service")
+              machine.wait_until_succeeds(
+                  "journalctl -b -u esdm-server.service | grep -q 'EGD server: serving'", 30
+              )
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              with subtest("devices and proc files with the ESDM running"):
+                  machine.succeed("modprobe esdm_cdev")
+                  for dev in ["esdm_random", "esdm_urandom"]:
+                      machine.succeed(f"test -c /dev/{dev}")
+                      mode = machine.succeed(f"stat -c %a /dev/{dev}").strip()
+                      assert mode == "666", f"/dev/{dev} has mode {mode}"
+                  # The kernel's own devices stay as they are
+                  machine.succeed("test \"$(stat -c %t:%T /dev/urandom)\" = 1:9")
+                  machine.succeed("test \"$(stat -c %t:%T /dev/random)\" = 1:8")
+                  print(machine.succeed("cat /proc/esdm/status"))
+
+              with subtest("reads, poll, O_NONBLOCK, O_SYNC and writes"):
+                  machine.succeed("${check} reads")
+                  machine.succeed("${check} reads sync")
+                  machine.succeed("${check} nonblock")
+                  machine.succeed("${check} poll")
+                  machine.succeed("${check} writes")
+
+              with subtest("throughput, informational"):
+                  # Logged, never asserted on: the VM shares its host with
+                  # whatever else runs there. Whether it runs with KVM, and
+                  # the figures with the clocksource the test framework pins,
+                  # acpi_pm - every read of it traps to QEMU, as it has no
+                  # vDSO - and with kvm-clock, which a KVM guest runs with
+                  # otherwise.
+                  print("virtualization: " + machine.succeed("systemd-detect-virt || true"))
+                  print(machine.succeed("${check} throughput"))
+                  cs = "/sys/devices/system/clocksource/clocksource0"
+                  pinned = machine.succeed(f"cat {cs}/current_clocksource").strip()
+                  if "kvm-clock" in machine.succeed(f"cat {cs}/available_clocksource"):
+                      machine.succeed(f"echo kvm-clock > {cs}/current_clocksource")
+                      print(machine.succeed("${check} throughput"))
+                      machine.succeed(f"echo {pinned} > {cs}/current_clocksource")
+
+              with subtest("/proc/esdm"):
+                  machine.succeed("${check} proc")
+
+              with subtest("ioctls as root, as nobody and without CAP_SYS_ADMIN"):
+                  machine.succeed("${check} ioctl-priv")
+                  machine.succeed(
+                      "setpriv --reuid=nobody --regid=nogroup --clear-groups "
+                      "--inh-caps=-all ${check} ioctl-unpriv"
+                  )
+                  machine.succeed(
+                      "setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin "
+                      "${check} ioctl-unpriv"
+                  )
+                  # As root, as meson test runs it there: the check gives up
+                  # CAP_SYS_ADMIN itself
+                  machine.succeed("${check} ioctl-unpriv")
+
+              with subtest("writers whose data does not come keep nobody waiting"):
+                  machine.succeed("timeout 60 ${check} stalled-writers")
+
+              with subtest("reconnect after a restart of the ESDM"):
+                  machine.succeed(
+                      "nohup ${check} loop /dev/esdm_urandom 20 > /tmp/loop.log 2>&1 &"
+                  )
+                  machine.sleep(3)
+                  machine.succeed("systemctl restart esdm-server.service")
+                  machine.wait_until_succeeds("grep -q 'loop reads' /tmp/loop.log", 90)
+                  print(machine.succeed("cat /tmp/loop.log"))
+                  machine.succeed("grep -q 'errors=0' /tmp/loop.log")
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+                  machine.succeed("${check} proc")
+
+              with subtest("unloading is refused while a reader blocks"):
+                  # A frozen ESDM keeps the reader waiting for its answer
+                  machine.succeed("systemctl kill -s SIGSTOP esdm-server.service")
+                  machine.succeed(
+                      "nohup ${check} block /dev/esdm_random > /tmp/block.log 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q blocking /tmp/block.log", 30)
+                  machine.sleep(1)
+                  machine.fail("rmmod esdm_cdev")
+                  machine.succeed("systemctl kill -s SIGCONT esdm-server.service")
+                  machine.succeed("pkill -f 'esdm-cdev-check [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm-cdev-check [b]lock'", 30)
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+
+              with subtest("the ESDM unreachable: the kernel's RNG serves"):
+                  machine.succeed("systemctl stop esdm-server-egd.socket esdm-server.service")
+                  bounded("${check} reads", 120)
+                  machine.succeed("${check} nonblock")
+                  machine.succeed("${check} writes")
+                  machine.succeed("${check} proc-empty")
+                  machine.succeed("${check} ioctl-unreachable")
+                  machine.succeed("dmesg | grep -q 'esdm_cdev: cannot connect to the ESDM'")
+
+              with subtest("loading with the ESDM stopped returns at once"):
+                  machine.succeed("rmmod esdm_cdev")
+                  bounded("modprobe esdm_cdev", 10)
+                  machine.succeed("test -c /dev/esdm_random")
+                  machine.succeed(
+                      "cmp /proc/esdm/boot_id /proc/sys/kernel/random/boot_id"
+                  )
+                  bounded("head -c 4096 /dev/esdm_random > /dev/null", 30)
+
+              with subtest("the ESDM comes back"):
+                  machine.succeed("systemctl start esdm-server-egd.socket esdm-server.service")
+                  machine.wait_until_succeeds(
+                      "grep -q 'ESDM library version' /proc/esdm/status", 60
+                  )
+                  machine.succeed("${check} reads")
+                  machine.succeed("${check} ioctl-priv")
+
+              # The module against the fake EGD server of esdm-cdev-check, for
+              # what the ESDM cannot be made to do: see its fake-egd command.
+              def fake_egd(mode, params=""):
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.succeed("rm -f /tmp/fake-egd.log")
+                  machine.succeed(
+                      "nohup ${check} fake-egd /run/fake-egd.socket "
+                      f"/tmp/fake-egd.log {mode} > /dev/null 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q listening /tmp/fake-egd.log", 30)
+                  machine.succeed(
+                      f"modprobe esdm_cdev egd_socket=/run/fake-egd.socket {params}"
+                  )
+
+              def real_egd():
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.succeed("pkill -f 'esdm-cdev-check [f]ake-egd'")
+                  machine.succeed("modprobe esdm_cdev")
+
+              with subtest("an ESDM that accepts but does not answer is backed off from"):
+                  fake_egd("mute", "connections=1 timeout_ms=200")
+                  machine.succeed("${check} backoff /tmp/fake-egd.log 8")
+                  real_egd()
+
+              with subtest("RNDADDENTROPY credits once all of the data is in, writes never"):
+                  fake_egd("notop")
+                  machine.succeed("${check} addentropy /tmp/fake-egd.log")
+                  machine.succeed("${check} write-notop /tmp/fake-egd.log")
+                  real_egd()
+
+              with subtest("RNDADDTOENTCNT is not carried out twice for a signal"):
+                  fake_egd("notop")
+                  machine.succeed("${check} addtoentcnt-signal /tmp/fake-egd.log")
+                  real_egd()
+
+              with subtest("poll() reports what a read does of an ESDM not operational"):
+                  fake_egd("notop")
+                  # The watcher, kicked at load, learned the state
+                  machine.sleep(1)
+                  machine.succeed("${check} poll-notop")
+                  real_egd()
+
+              with subtest("reads waiting for an ESDM not operational wait, until a signal"):
+                  fake_egd("notop")
+                  machine.succeed("timeout 60 ${check} block-notop")
+                  real_egd()
+
+              with subtest("/proc/esdm of an ESDM not operational, uuid from the kernel's RNG"):
+                  fake_egd("notop")
+                  machine.succeed("${check} proc-notop")
+                  real_egd()
+
+              with subtest("unloading once the reader is gone"):
+                  machine.succeed(
+                      "nohup ${check} block /dev/esdm_urandom > /tmp/block2.log 2>&1 &"
+                  )
+                  machine.wait_until_succeeds("grep -q blocking /tmp/block2.log", 30)
+                  machine.fail("rmmod esdm_cdev")
+                  machine.succeed("pkill -f 'esdm-cdev-check [b]lock'")
+                  machine.wait_until_fails("pgrep -f 'esdm-cdev-check [b]lock'", 30)
+                  machine.succeed("rmmod esdm_cdev")
+                  machine.fail("test -e /dev/esdm_random")
+                  machine.fail("test -e /proc/esdm")
+
+              with subtest("no oops, BUG or WARN"):
+                  kmsg = machine.succeed("dmesg")
+                  for bad in ["BUG:", "WARNING:", "Oops", "Call Trace", "general protection"]:
+                      assert bad not in kmsg, f"dmesg holds {bad}:\n{kmsg}"
+            '';
+          };
+
       in
       {
         # nix fmt
@@ -929,6 +1384,9 @@
         checks =
           lib.mapAttrs' (name: kernel: lib.nameValuePair "live_${name}" (mkCheck kernel)) kernels
           // lib.mapAttrs' (name: kernel: lib.nameValuePair "ebpf_${name}" (mkEbpfCheck kernel)) stockKernels
+          // lib.mapAttrs' (
+            name: kernel: lib.nameValuePair "cdev_${name}" (mkEsdmCdevCheck kernel)
+          ) stockKernels
           // {
             # Only for the rolling kernel - see mkEbpfRawCheck on why this is
             # not instantiated per kernel version.
@@ -939,6 +1397,10 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # esdm-es-pkcs11 from its unit, read by esdm-server - see
+            # mkPkcs11Check.
+            pkcs11 = mkPkcs11Check;
 
             # The test suite in a build without fips140 - see esdm-plain.
             plain = self.packages.${system}.esdm-plain;
@@ -956,7 +1418,7 @@
             # loaded - the jitter RNG and the crypto backend - against a
             # reference HMAC in .<name>.hmac next to each file, which whoever
             # builds and installs the module provides. The key and format are
-            # those of common/fips_integrity.c (fipscheck).
+            # those of common/sys/fips_integrity.c (fipscheck).
             #
             # A file is checked under the name it was loaded by, so a library
             # symlink needs a reference value of its own.
@@ -990,8 +1452,18 @@
             # backend (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68080).
             # gcovr treats that as fatal and produces no report at all, so warn
             # once per affected file and keep the rest of the data.
-            gcovrIgnoreParseErrors =
-              "--gcov-ignore-parse-errors negative_hits.warn_once_per_file";
+            #
+            # The same for counts gcovr finds suspiciously high (2^32 and up):
+            # in the VMs booted with fips=1, every program runs the FIPS
+            # integrity self test, which hashes the files of the module - so
+            # the compression of crypto/sha256.c runs billions of times in one
+            # suite, and gcovr 8 aborted on it with SuspiciousHits, leaving no
+            # report. Such a line is counted as not executed, and named in the
+            # warning.
+            gcovrIgnoreParseErrors = lib.concatMapStringsSep " " (e: "--gcov-ignore-parse-errors ${e}") [
+              "negative_hits.warn_once_per_file"
+              "suspicious_hits.warn_once_per_file"
+            ];
 
             # Turn one of the esdm packages above into a coverage build of
             # itself: instrument with gcov, run "meson test" and export the HTML
@@ -1041,28 +1513,27 @@
                   "-Dtestmode=enabled"
 
                   # Every entropy source that can be compiled in. Most disable
-                  # themselves at runtime for want of a TPM, a /dev/hwrng, a
-                  # token or a patched kernel, but their initialization,
-                  # configuration and refusal paths are code like any other.
-                  # The eBPF sources are left out on purpose - esdm-coverage-ebpf
-                  # covers those, since enabling them changes the credited source.
+                  # themselves at runtime for want of a TPM, a /dev/hwrng or a
+                  # patched kernel, but their initialization, configuration
+                  # and refusal paths are code like any other. The eBPF
+                  # sources are left out on purpose - esdm-coverage-ebpf
+                  # covers those, since enabling them changes the credited
+                  # source. esdm-es-pkcs11 comes with the package already.
                   "-Des_kernel=enabled"
                   "-Des_jent_kernel=enabled"
-                  "-Des_pkcs11=enabled"
 
-                  # Point the PKCS#11 source at SoftHSM, which needs no
-                  # hardware. The path is compile-time only, so without it the
-                  # source disables itself at startup. Label and PIN stay unset
-                  # - the test installs both at runtime, as the server does from
-                  # its RPC handler.
+                  # The default module of esdm-es-pkcs11: SoftHSM, which needs
+                  # no hardware. Its tests take the SoftHSM next to the
+                  # softhsm2-util on the path in any case, creating the tokens
+                  # with it in a directory of their own.
                   "-Des_pkcs11_module_path=${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
                 ];
 
               # es_jent_kernel reaches the kernel crypto API through libkcapi.
               # es_pkcs11 needs libp11, which is already among the inputs;
-              # softhsm supplies the module it loads plus the softhsm2-util
-              # the test initializes the token with. ea_non_iid assesses the
-              # output's min-entropy.
+              # softhsm supplies the module esdm-es-pkcs11 is tested with plus
+              # the softhsm2-util its tests create their tokens with.
+              # ea_non_iid assesses the output's min-entropy.
               buildInputs = prev.buildInputs ++ [ self.packages.${system}.libkcapi ];
               nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [
                 pkgs.softhsm
@@ -1076,18 +1547,6 @@
               doCheck = true;
               checkPhase = ''
                 runHook preCheck
-
-                # Every ESDM this suite starts loads the SoftHSM module the
-                # PKCS#11 source was built against, and SoftHSM logs three
-                # errors per start when it finds no configuration - nixpkgs
-                # ships none at the path it compiles in. Point it at one of our
-                # own so the run stays readable; the PKCS#11 test overrides this
-                # with the config of the token it creates.
-                mkdir -p "$NIX_BUILD_TOP/softhsm/tokens"
-                printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' \
-                  "$NIX_BUILD_TOP/softhsm/tokens" \
-                  >"$NIX_BUILD_TOP/softhsm/softhsm2.conf"
-                export SOFTHSM2_CONF="$NIX_BUILD_TOP/softhsm/softhsm2.conf"
 
                 # The builder may be busy and is not necessarily fast - give the
                 # tests that wait for entropy room before they time out.
@@ -1194,8 +1653,8 @@
                   # pkill and umount for the cleanup of a failed run
                   pkgs.procps
                   pkgs.util-linux
-                  # softhsm2-util, which the PKCS#11 test initializes its own
-                  # token with - without it that test skips
+                  # softhsm2-util, which the tests of esdm-es-pkcs11 create
+                  # their tokens with - without it they skip the token part
                   pkgs.softhsm
                   # ea_non_iid for the output min-entropy test, which skips without it
                   pkgs.sp800-90b-entropyassessment
@@ -1323,20 +1782,6 @@
                        \( -name '*.so' -o -name '*.so.*' \) \) \
                     \) -exec ${fipsHmac} {} +
 
-                  # Every ESDM this suite starts loads the SoftHSM module the
-                  # PKCS#11 source was built against, and SoftHSM logs three
-                  # errors per start when it finds no configuration - nixpkgs
-                  # ships none at the path it compiles in. Point it at one of
-                  # our own so the run stays readable. Below $work, which the
-                  # privileged tests pin across their private /tmp, and which
-                  # the chmod below opens up for the daemons that drop
-                  # privileges. The PKCS#11 test overrides this with the config
-                  # of the token it creates.
-                  mkdir -p "$work/softhsm/tokens"
-                  printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' \
-                    "$work/softhsm/tokens" >"$work/softhsm/softhsm2.conf"
-                  export SOFTHSM2_CONF="$work/softhsm/softhsm2.conf"
-
                   # The esdm-server and the CUSE frontends drop privileges, and
                   # libgcov writes their counters into the build tree as the
                   # dropped user. mktemp's 0700 root owned directory is not even
@@ -1376,6 +1821,11 @@
                   # gcov ships with the compiler itself rather than with its
                   # wrapper, and has to be the one matching the compiler that
                   # produced the notes - so name it instead of searching $PATH.
+                  #
+                  # Its status is kept apart from the suite's: a failing gcovr
+                  # must neither end the script before the status of the suite
+                  # is out, nor be mistaken for a failed test.
+                  report_status=0
                   gcovr \
                     --gcov-executable '${pkgs.stdenv.cc.cc}/bin/gcov' \
                     --root "$work/source" \
@@ -1389,22 +1839,34 @@
                     --html-title 'ESDM ${cov.version} test coverage' \
                     --txt "$work/report/coverage.txt" \
                     --print-summary \
-                    "$work/build"
+                    "$work/build" || report_status=$?
 
                   cp -r "$work/report/." "$report_dir/"
                   chmod -R u+w "$report_dir"
+                  echo "$test_status" >"$report_dir/suite-status"
+                  echo "$report_status" >"$report_dir/report-status"
 
                   echo
-                  echo "Coverage report written to $report_dir/index.html"
+                  if [ "$report_status" -ne 0 ]; then
+                    echo "WARNING: gcovr failed (exit $report_status) - no or" \
+                         "only a partial report in $report_dir"
+                  else
+                    echo "Coverage report written to $report_dir/index.html"
+                  fi
                   if [ "$test_status" -ne 0 ]; then
                     echo "WARNING: the test run failed (exit $test_status) - see" \
                          "$report_dir/testlog.txt"
-                  else
+                  elif [ "$report_status" -eq 0 ]; then
                     # Everything is out and every test passed - nothing left in
                     # the build tree that anybody would want to look at.
                     keep_work=0
                   fi
-                  exit "$test_status"
+                  # The suite's status first; a run whose tests passed still
+                  # fails without its report.
+                  if [ "$test_status" -ne 0 ]; then
+                    exit "$test_status"
+                  fi
+                  exit "$report_status"
                 '';
               };
 
@@ -1539,6 +2001,10 @@
                   echo "The coverage run as root failed (exit $status) - failed tests:"
                   grep -E '^ *[0-9]+/[0-9]+ .* (FAIL|TIMEOUT|ERROR) ' \
                     ${run}/coverage/coverage-run.log || true
+                  report_status="$(cat ${run}/coverage/report-status 2>/dev/null || echo 0)"
+                  if [ "$report_status" != 0 ]; then
+                    echo "gcovr failed (exit $report_status), see coverage-run.log"
+                  fi
                   echo "Report and test log of the run: ${run}/coverage"
                   exit 1
                 fi
@@ -1619,6 +2085,17 @@
                     "-Dbotan_drng_type=chacha20"
                     "-Dais2031_ntg1=false"
                     "-Dais2031_drg4=false"
+                    # Opportunistic DTLS of the RPC and external entropy
+                    # source connections, by the TLS stack of Botan
+                    "-Ddtls=enabled"
+                    # esdm-es-pkcs11, the PKCS#11 entropy source - a provider
+                    # of its own, the only part of the ESDM linking libp11 -
+                    # with its systemd unit. It needs a --module, as no
+                    # default is built in. See mkPkcs11Check.
+                    "-Des_pkcs11=enabled"
+                    # esdm-cdev-check, the checks of the esdm_cdev kernel
+                    # module, which the VM of mkEsdmCdevCheck runs
+                    "-Desdm-cdev-check=enabled"
                   ];
                 mesonBuildType = if debugEsdm then "debug" else "release";
                 doCheck = false;
@@ -1718,6 +2195,9 @@
               ];
 
             doCheck = true;
+            # softhsm2-util for the tests of esdm-es-pkcs11, which skip their
+            # token part without it
+            nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [ pkgs.softhsm ];
 
             meta = prev.meta // {
               description = "ESDM built without fips140 and sp80090c, running the meson test suite";
@@ -1761,6 +2241,8 @@
             separateDebugInfo = false;
 
             doCheck = true;
+            # softhsm2-util for the tests of esdm-es-pkcs11, see esdm-plain
+            nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [ pkgs.softhsm ];
             checkPhase = ''
               runHook preCheck
 
@@ -1821,7 +2303,7 @@
 
           # clang and bpftool are only build time tools of the eBPF variant, so
           # they have to be on the path of the script that does the building -
-          # esdm/es_ebpf/meson.build looks both of them up with find_program().
+          # esdm/es/ebpf/meson.build looks both of them up with find_program().
           esdm-coverage-ebpf-root = coverageRunnerOf {
             name = "esdm-coverage-ebpf-run";
             cov = self.packages.${system}.esdm-coverage-ebpf;
@@ -1933,21 +2415,36 @@
 
         }
         # One out-of-tree esdm_es module build per defined kernel, e.g.
-        # esdm_es_6_6 / esdm_es_latest. These carry the debugfs testing
-        # interfaces, so they stay compiled on every kernel; the module the
-        # checks and live systems load comes from the kernel package set and
-        # leaves them out.
+        # esdm_es_6_6 / esdm_es_latest, with the warnings of W=1 as errors.
+        # These carry the debugfs testing interfaces, so they stay compiled
+        # on every kernel; the module the checks and live systems load comes
+        # from the kernel package set and leaves them out.
         // lib.mapAttrs' (
           name: kernel:
           lib.nameValuePair "esdm_es_${name}" (
-            pkgs.callPackage ./addon/linux_esdm_es {
+            pkgs.callPackage ./kernel/esdm_es {
               inherit (pkgs) lib;
               inherit (kernel) kernel;
               enableTesting = true;
+              werror = true;
             }
           )
         ) kernels
+        # One esdm_cdev module build per defined kernel, e.g. esdm_cdev_6_1 /
+        # esdm_cdev_latest, with the warnings of W=1 as errors. Against the
+        # stock kernels: the module needs no kernel patches.
+        // lib.mapAttrs' (
+          name: kernel:
+          lib.nameValuePair "esdm_cdev_${name}" (
+            pkgs.callPackage ./kernel/esdm_cdev {
+              inherit (pkgs) lib;
+              inherit (kernel) kernel;
+              werror = true;
+            }
+          )
+        ) stockKernels
         # The ESDM on a 32-bit system, running the meson test suite as its
+
         # check phase: size_t and long are 32 bits wide there, which none of
         # the packages above sees. The builtin backend, as the Hash DRBG and
         # the other builtin primitives are where the tree computes limits and
@@ -1988,6 +2485,8 @@
                     && (!lib.hasInfix "max_threads" x)
                     && (!lib.hasInfix "term-on-signal" x)
                     && (!lib.hasInfix "ais2031" x)
+                    # The builtin backend has no TLS stack for the DTLS
+                    && (x != "-Ddtls=enabled")
                   ) prev.mesonFlags)
                   ++ [
                     "-Dcrypto_backend=builtin"
@@ -2009,7 +2508,11 @@
             buildInputs = prev.buildInputs ++ [ pkgs.pkgsi686Linux.openssl ];
             mesonFlags =
               (builtins.filter (x: !lib.hasInfix "crypto_backend" x) prev.mesonFlags)
-              ++ [ "-Dcrypto_backend=openssl" ];
+              ++ [
+                "-Dcrypto_backend=openssl"
+                # The DTLS by OpenSSL, which the builtin backend has not
+                "-Ddtls=enabled"
+              ];
             meta = prev.meta // {
               description = "ESDM built for i686 with the OpenSSL backend, running the meson test suite";
             };
@@ -2055,6 +2558,8 @@
               bpftop
               bpftools
               bpftrace
+              # softhsm2-util for the tests of esdm-es-pkcs11
+              softhsm
               sp800-90b-entropyassessment
             ];
           };

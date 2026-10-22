@@ -8,9 +8,9 @@ on:
 
 env:
   JITTERENTROPY_VERSION: "3.7.0"
-  # Ubuntu 24.04 only ships Botan 2, while ESDM requires botan-3 >= 3.0, and it
+  # Ubuntu 24.04 only ships Botan 2, while ESDM requires botan-3 >= 3.2, and it
   # does not package leancrypto at all - both are therefore built from source
-  # and cached.
+  # and cached, on 26.04 as well, so that both releases build the same.
   BOTAN_VERSION: "3.12.0"
   LEANCRYPTO_VERSION: "1.8.0"
   # The GnuTLS backend drives GnuTLS' SP800-90A CTR DRBG through
@@ -23,7 +23,7 @@ env:
   # changes (configure flags, meson options, module selection). The version
   # alone does not identify the artefact: without this a recipe change silently
   # keeps restoring the previously built - and now wrong - prefix from cache.
-  BOTAN_BUILD_REV: "1"
+  BOTAN_BUILD_REV: "2"
   LEANCRYPTO_BUILD_REV: "1"
   GNUTLS_BUILD_REV: "2"
   # One prefix and one cache per dependency. They must not share a cache key:
@@ -44,9 +44,11 @@ jobs:
       # first one - the configurations are independent of each other.
       fail-fast: false
       matrix:
-        # ubuntu-24.04-arm is the native arm64 runner, so the arm64 leg is a
-        # real build and test run rather than an emulated one.
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        # Both LTS releases of Ubuntu, whose toolchains and libraries differ
+        # - gcc 13 and OpenSSL 3.0 on 24.04, gcc 15 and OpenSSL 3.5 on 26.04.
+        # The -arm runners are native arm64 ones, so the arm64 legs are real
+        # build and test runs rather than emulated ones.
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
         # Every crypto backend, including the DRNG variants the backends offer.
         # The variants matter: they select different code paths behind #ifdef
         # and are not covered by building the backend's default alone.
@@ -72,6 +74,42 @@ jobs:
             opts: -Dcrypto_backend=leancrypto
           - name: gnutls
             opts: -Dcrypto_backend=gnutls
+        # Several external entropy sources: the tests of the instances
+        # against each other are only built where there are some. On x86_64
+        # only, the code is the same on arm64 - but on both releases, as are
+        # the configurations below. The second one of each takes the backend
+        # of the first by its YAML anchor.
+        include:
+          - runner: ubuntu-24.04
+            backend: &several-ext-sources
+              name: openssl-several-ext-sources
+              opts: >-
+                -Dcrypto_backend=openssl
+                -Des_ext_socket_num=4
+          - runner: ubuntu-26.04
+            backend: *several-ext-sources
+          # The opportunistic DTLS, by the TLS stacks of OpenSSL and GnuTLS,
+          # and esdm-es-pkcs11 - none of the jobs above builds them. The
+          # minimized Botan has no TLS. The OpenSSL, libp11 and SoftHSM of
+          # the two releases differ.
+          - runner: ubuntu-24.04
+            backend: &openssl-dtls
+              name: openssl-dtls
+              opts: >-
+                -Dcrypto_backend=openssl
+                -Ddtls=enabled
+                -Des_pkcs11=enabled
+          - runner: ubuntu-26.04
+            backend: *openssl-dtls
+          - runner: ubuntu-24.04
+            backend: &gnutls-dtls
+              name: gnutls-dtls
+              opts: >-
+                -Dcrypto_backend=gnutls
+                -Ddtls=enabled
+                -Des_pkcs11=enabled
+          - runner: ubuntu-26.04
+            backend: *gnutls-dtls
 
     steps:
     - uses: actions/checkout@v4
@@ -85,6 +123,13 @@ jobs:
         sudo apt-get install -y meson ninja-build pkg-config \
                                 libprotobuf-c-dev libfuse3-dev libssl-dev \
                                 libjson-c-dev nettle-dev
+
+    # esdm-es-pkcs11 links libp11; its tests create their tokens with the
+    # softhsm2-util of SoftHSM and load the module next to it, and skip the
+    # token part without.
+    - name: Install the PKCS#11 dependencies
+      if: contains(matrix.backend.opts, '-Des_pkcs11=enabled')
+      run: sudo apt-get install -y libp11-dev softhsm2
 
     - name: Install Jitter RNG
       run: |
@@ -113,19 +158,22 @@ jobs:
         tar xf botan.tar.xz
         cd Botan-${BOTAN_VERSION}
         # Minimized build with just the primitives esdm_botan.cpp asks for:
-        # SHA-3(512) and SHA-512 for conditioning, plus the HMAC-DRBG and
-        # ChaCha20 DRNG cores. A full Botan build would dominate the job time.
+        # SHA-3(512) and SHA-512 for conditioning, the SHAKE-256 XOF of the
+        # auxiliary pool (shake_xof, which brings the xof module and
+        # botan/xof.h along), plus the HMAC-DRBG and ChaCha20 DRNG cores. A
+        # full Botan build would dominate the job time.
         ./configure.py \
           --prefix="${BOTAN_PREFIX}" \
           --build-targets=shared \
           --without-documentation \
           --minimized-build \
-          --enable-modules=sha2_64,sha3,hmac,hmac_drbg,chacha,chacha_rng,system_rng,auto_rng
+          --enable-modules=sha2_64,sha3,shake_xof,hmac,hmac_drbg,chacha,chacha_rng,system_rng,auto_rng
         make -j"$(nproc)"
         make install
 
-    # Both botan jobs can miss and race to save the same key; a losing save
-    # must not fail the build.
+    # Both botan jobs can miss and race to save the same key - as can the two
+    # leancrypto and the two gnutls jobs below; a losing save must not fail
+    # the build.
     - name: Save Botan
       if: startsWith(matrix.backend.name, 'botan') && steps.botan-cache.outputs.cache-hit != 'true'
       continue-on-error: true
@@ -135,7 +183,7 @@ jobs:
         key: ${{ matrix.runner }}-botan-${{ env.BOTAN_VERSION }}-r${{ env.BOTAN_BUILD_REV }}
 
     - name: Restore leancrypto
-      if: matrix.backend.name == 'leancrypto'
+      if: startsWith(matrix.backend.name, 'leancrypto')
       id: leancrypto-cache
       uses: actions/cache/restore@v4
       with:
@@ -143,7 +191,7 @@ jobs:
         key: ${{ matrix.runner }}-leancrypto-${{ env.LEANCRYPTO_VERSION }}-r${{ env.LEANCRYPTO_BUILD_REV }}
 
     - name: Build leancrypto
-      if: matrix.backend.name == 'leancrypto' && steps.leancrypto-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'leancrypto') && steps.leancrypto-cache.outputs.cache-hit != 'true'
       run: |
         wget -O leancrypto.tar.gz https://github.com/smuellerDD/leancrypto/archive/refs/tags/v${LEANCRYPTO_VERSION}.tar.gz
         tar xfz leancrypto.tar.gz
@@ -161,7 +209,7 @@ jobs:
         ninja -C build install
 
     - name: Save leancrypto
-      if: matrix.backend.name == 'leancrypto' && steps.leancrypto-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'leancrypto') && steps.leancrypto-cache.outputs.cache-hit != 'true'
       continue-on-error: true
       uses: actions/cache/save@v4
       with:
@@ -169,7 +217,7 @@ jobs:
         key: ${{ matrix.runner }}-leancrypto-${{ env.LEANCRYPTO_VERSION }}-r${{ env.LEANCRYPTO_BUILD_REV }}
 
     - name: Restore GnuTLS
-      if: matrix.backend.name == 'gnutls'
+      if: startsWith(matrix.backend.name, 'gnutls')
       id: gnutls-cache
       uses: actions/cache/restore@v4
       with:
@@ -177,7 +225,7 @@ jobs:
         key: ${{ matrix.runner }}-gnutls-${{ env.GNUTLS_VERSION }}-fips-r${{ env.GNUTLS_BUILD_REV }}
 
     - name: Build GnuTLS with FIPS140 mode
-      if: matrix.backend.name == 'gnutls' && steps.gnutls-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'gnutls') && steps.gnutls-cache.outputs.cache-hit != 'true'
       run: |
         sudo apt-get install -y libgmp-dev
         wget -O gnutls.tar.xz "https://www.gnupg.org/ftp/gcrypt/gnutls/v${GNUTLS_VERSION%.*}/gnutls-${GNUTLS_VERSION}.tar.xz"
@@ -216,7 +264,7 @@ jobs:
           || { echo "::error::built GnuTLS does not export drbg_aes_* - FIPS140 mode not active"; exit 1; }
 
     - name: Save GnuTLS
-      if: matrix.backend.name == 'gnutls' && steps.gnutls-cache.outputs.cache-hit != 'true'
+      if: startsWith(matrix.backend.name, 'gnutls') && steps.gnutls-cache.outputs.cache-hit != 'true'
       continue-on-error: true
       uses: actions/cache/save@v4
       with:
@@ -224,12 +272,12 @@ jobs:
         key: ${{ matrix.runner }}-gnutls-${{ env.GNUTLS_VERSION }}-fips-r${{ env.GNUTLS_BUILD_REV }}
 
     - name: Export source-built dependencies
-      if: startsWith(matrix.backend.name, 'botan') || matrix.backend.name == 'leancrypto' || matrix.backend.name == 'gnutls'
+      if: startsWith(matrix.backend.name, 'botan') || startsWith(matrix.backend.name, 'leancrypto') || startsWith(matrix.backend.name, 'gnutls')
       run: |
         case "${{ matrix.backend.name }}" in
           botan*)      prefix="${BOTAN_PREFIX}"      ; pc=botan-3   ;;
-          leancrypto)  prefix="${LEANCRYPTO_PREFIX}" ; pc=leancrypto ;;
-          gnutls)      prefix="${GNUTLS_PREFIX}"     ; pc=gnutls    ;;
+          leancrypto*) prefix="${LEANCRYPTO_PREFIX}" ; pc=leancrypto ;;
+          gnutls*)     prefix="${GNUTLS_PREFIX}"     ; pc=gnutls    ;;
         esac
 
         # Discover the pkgconfig/library directories instead of assuming lib
@@ -318,7 +366,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
 
     steps:
     - uses: actions/checkout@v4
@@ -384,7 +432,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ ubuntu-24.04, ubuntu-24.04-arm ]
+        runner: [ ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm ]
 
     env:
       # halt_on_error/abort_on_error make a finding fail the job instead of
@@ -499,12 +547,17 @@ jobs:
         fi
 
   # eBPF-based entropy sources plus the raw measurement addon
-  # (addon/es_ebpf_testing -> esdm-ebpf-collect). The eBPF programs are
+  # (tests/es_ebpf_testing -> esdm-ebpf-collect). The eBPF programs are
   # compiled for the BPF target with clang and turned into libbpf skeletons by
   # bpftool, so this covers a toolchain the other jobs never touch.
   ebpf:
-    name: ebpf
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.runner }} / ebpf
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-24.04, ubuntu-26.04 ]
 
     steps:
     - uses: actions/checkout@v4
@@ -513,10 +566,11 @@ jobs:
       run: |
         sudo apt-get update
         # libbpf >= 1.2, clang for the BPF target and bpftool for the skeleton
-        # headers - see esdm/es_ebpf/meson.build.
+        # headers - see esdm/es/ebpf/meson.build.
         #
         # "bpftool" itself is only a virtual package on 24.04, so it cannot be
         # installed by that name - the providers are the linux-tools packages.
+        # On 26.04 it is a package of its own, which they pull in.
         sudo apt-get install -y meson ninja-build pkg-config \
                                 libprotobuf-c-dev libfuse3-dev \
                                 libjson-c-dev libbpf-dev clang \
@@ -533,7 +587,8 @@ jobs:
         # The build only ever calls "bpftool gen skeleton", which transforms an
         # ELF object in userspace and does not have to match the running
         # kernel, so any real binary will do - point PATH at the one that
-        # linux-tools-generic brought in.
+        # linux-tools-generic brought in. On 26.04 the bpftool package puts
+        # the program itself at /usr/sbin/bpftool, which is used as it is.
         if bpftool version >/dev/null 2>&1; then
           echo "bpftool already usable"
           exit 0
@@ -590,11 +645,11 @@ jobs:
 
     - name: Check that the measurement addon was built
       run: |
-        # addon/es_ebpf_testing is only built with -Des_ebpf_testing=enabled;
+        # tests/es_ebpf_testing is only built with -Des_ebpf_testing=enabled;
         # make its absence an explicit failure rather than something the later
         # steps skip over silently.
-        test -x build/addon/es_ebpf_testing/esdm-ebpf-collect
-        build/addon/es_ebpf_testing/esdm-ebpf-collect --help
+        test -x build/tests/es_ebpf_testing/esdm-ebpf-collect
+        build/tests/es_ebpf_testing/esdm-ebpf-collect --help
 
     - name: Meson test
       run: meson test -v -C build
@@ -609,7 +664,7 @@ jobs:
 
     - name: Collect raw eBPF entropy events
       run: |
-        # Exercise addon/es_ebpf_testing for real: attach with raw sampling
+        # Exercise tests/es_ebpf_testing for real: attach with raw sampling
         # enabled - a code path none of the entropy source tests take and one
         # the verifier has to accept - and gather enough events for the
         # analysis steps below to work on.
@@ -633,7 +688,7 @@ jobs:
           # makes the collector stop and write out what it has, so a quiet
           # machine fails on the record count of the next step instead.
           if sudo timeout -s TERM 120 \
-                  build/addon/es_ebpf_testing/esdm-ebpf-collect \
+                  build/tests/es_ebpf_testing/esdm-ebpf-collect \
                   --source "${src}" --out "raw-${src}.txt" --events 20000 \
                   2> "collect-${src}.log"; then
             cat "collect-${src}.log"
@@ -667,10 +722,144 @@ jobs:
         # would show up as a short output file here.
         for src in sched; do
           lines=$(wc -l < "raw-${src}.txt")
-          build/addon/test/esdm-extractlsb "raw-${src}.txt" "raw-${src}.bin" \
+          build/tests/validation-helpers/esdm-extractlsb "raw-${src}.txt" "raw-${src}.bin" \
               "${lines}" FF
           bytes=$(stat -c %s "raw-${src}.bin")
           echo "${src}: ${lines} deltas -> ${bytes} bytes"
           test "${lines}" -eq "${bytes}" \
             || { echo "::error::${src}: esdm-extractlsb produced ${bytes} bytes for ${lines} deltas"; exit 1; }
         done
+
+  # Distributions other than Ubuntu, in their container images: Arch Linux
+  # and openSUSE Tumbleweed with the newest toolchains and libraries, Debian
+  # stable, Fedora, SUSE Linux Enterprise Server 15 SP7 and 16.0 and Red Hat
+  # Enterprise Linux 9 and 10. The SLES and RHEL images are the BCI and UBI
+  # ones, whose repositories hold a part of the distribution only -
+  # .github/scripts/distro-deps.sh builds what is missing. Each in the
+  # configuration of the build job with the OpenSSL of the distribution, and
+  # in the default one; with the other backends a distribution packages as
+  # well: Botan 3 on Arch and Fedora, leancrypto on Arch and Tumbleweed, and
+  # GnuTLS on Fedora and Tumbleweed, which build it with the FIPS 140 mode
+  # the GnuTLS backend needs.
+  distro:
+    name: ${{ matrix.distro.name }} / ${{ matrix.config.name }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.distro.image }}
+      # For the privileged run, what the build job has as root on the
+      # runner: the CUSE device, the kernel's entropy interfaces, and the
+      # unshare(2) of the servers and tests, which the default seccomp
+      # profile of a container refuses.
+      options: --privileged
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - &archlinux
+            name: archlinux
+            image: archlinux:latest
+          - name: debian-stable
+            image: debian:stable
+          - &fedora
+            name: fedora
+            image: fedora:latest
+          - &tumbleweed
+            name: opensuse-tumbleweed
+            image: opensuse/tumbleweed:latest
+          - name: sles-15.7
+            image: registry.suse.com/bci/bci-base:15.7
+          - name: sles-16.0
+            image: registry.suse.com/bci/bci-base:16.0
+          - name: rhel-9
+            image: registry.access.redhat.com/ubi9/ubi:latest
+          - name: rhel-10
+            image: registry.access.redhat.com/ubi10/ubi:latest
+        config:
+          - name: openssl
+            opts: >-
+              -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+              -Dcrypto_backend=openssl
+              -Ddtls=enabled
+          - name: default
+            opts: ""
+        include:
+          - distro: *archlinux
+            config:
+              name: botan
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=botan
+                -Ddtls=enabled
+          - distro: *archlinux
+            config:
+              name: leancrypto
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=leancrypto
+          - distro: *fedora
+            config:
+              name: botan
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=botan
+                -Ddtls=enabled
+          - distro: *fedora
+            config: &gnutls
+              name: gnutls
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=gnutls
+                -Ddtls=enabled
+          - distro: *tumbleweed
+            config: *gnutls
+          - distro: *tumbleweed
+            config:
+              name: leancrypto
+              opts: >-
+                -Dais2031_ntg1=false -Dais2031_drg4=false -Dfips140=true
+                -Dcrypto_backend=leancrypto
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install the dependencies
+      run: bash .github/scripts/distro-deps.sh
+
+    # The job runs as root in the container: the unprivileged run is that of
+    # a user of its own, who builds as well, so that the build tree is theirs.
+    - name: Meson setup
+      run: |
+        useradd -m builder
+        chown -R builder .
+        # ESDM_DISTRO_OPTS is a list of options, split on purpose
+        # shellcheck disable=SC2086
+        runuser -u builder -- \
+          meson setup build -Dtestmode=enabled \
+                            ${{ matrix.config.opts }} ${ESDM_DISTRO_OPTS}
+
+    - name: Meson compile
+      run: runuser -u builder -- meson compile -C build
+
+    - name: Meson test
+      run: runuser -u builder -- meson test -v -C build
+
+    - name: Meson test (privileged)
+      run: |
+        # See the build job: re-run what skipped unprivileged as root - but
+        # the cuse suite: the device files of the CUSE frontends appear in
+        # the devtmpfs of the runner, not in the /dev of the container. The
+        # build job runs them on the runner itself.
+        skipped_list="$(python3 .github/scripts/skipped-tests.py build cuse)"
+        mapfile -t skipped <<< "${skipped_list}"
+        [ -n "${skipped_list}" ] || skipped=()
+        if [ "${#skipped[@]}" -eq 0 ]; then
+          echo "::error::no test skipped unprivileged - is this run privileged already?"
+          exit 1
+        fi
+        printf 'skipped unprivileged, now run as root: %s\n' "${skipped[@]}"
+        meson test -v -C build --no-rebuild "${skipped[@]}"
