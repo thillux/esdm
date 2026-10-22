@@ -37,6 +37,7 @@
 #include "bitshift_be.h"
 #include "build_bug_on.h"
 #include "esdm.h"
+#include "esdm_config.h"
 #include "esdm_egd_protocol.h"
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
@@ -61,6 +62,24 @@
 #define ESDM_EGD_BUFSIZE (2 * ESDM_EGD_MAX_CMD_SIZE)
 
 /*
+ * Input taken from one connection per round of the event loop. Insertions have
+ * no response, so a client streaming them never fills its socket and never
+ * stops being readable: without a bound, one sending faster than they are
+ * inserted would keep the worker - and every other client on it - to itself.
+ * Client sockets are level-triggered, so the rest is taken in the next round.
+ */
+#define ESDM_EGD_READ_BUDGET (4 * ESDM_EGD_BUFSIZE)
+
+/*
+ * Prediction resistant generations per connection and round. One costs several
+ * reseeds - tens of milliseconds - for a two byte request, so the read budget
+ * alone would let one client pipeline seconds of work into a single round and
+ * hold up everybody else on the worker. The ordinary generator is cheap enough
+ * for the read budget to bound it.
+ */
+#define ESDM_EGD_PR_BUDGET 1
+
+/*
  * Upper bound of concurrently served clients. EGD clients may hold their
  * connection open for their entire lifetime, so this limits clients, not
  * requests; beyond it, connections stay queued in the listen backlog. Generous
@@ -69,25 +88,71 @@
  * accept failing for want of a descriptor leaves the client queued, and the
  * server stops listening for a moment rather than being woken for it over and
  * over.
+ *
+ * Once all slots are taken, a new client is not left queued behind whoever
+ * holds them - that would lock it out for as long as they care to - but a
+ * connection is closed to make room for it, see esdm_egd_evict_candidate().
  */
+#ifndef ESDM_EGD_MAX_CONNECTIONS
 #define ESDM_EGD_MAX_CONNECTIONS 2048
+#endif
 
 /*
- * Concurrent connections of one unprivileged UID - root is exempt. Without it,
- * any local user could take all ESDM_EGD_MAX_CONNECTIONS slots and lock every
- * other EGD consumer out. A process that uses the EGD client library holds one
- * connection, so this leaves room for many such consumers per user.
+ * Concurrent connections of one unprivileged UID - root is exempt. A process
+ * that uses the EGD client library holds one connection, so this leaves room
+ * for many such consumers per user.
+ *
+ * It does not bound a user, though: one can map the UIDs of its /etc/subuid
+ * range in a user namespace and connect as each of them - eight of them fill
+ * all ESDM_EGD_MAX_CONNECTIONS slots, and a cheap request now and then keeps
+ * every one of them from ever being idle. What does set such a user apart is
+ * that each of its UIDs holds many connections, where the consumers of
+ * everybody else hold a few: when connections have to be closed - to make
+ * room for a new one, or because slots or descriptors run short - those of the
+ * UID holding the most are closed first, see esdm_egd_evict_candidate() and
+ * esdm_egd_idle_reapable().
  */
+#ifndef ESDM_EGD_MAX_CONNECTIONS_PER_UID
 #define ESDM_EGD_MAX_CONNECTIONS_PER_UID 256
+#endif
 
 /*
  * Time a connection may sit idle - no command received, no response owed -
- * before it is closed, so that abandoned clients do not hold their slot and
- * descriptor forever. The EGD client library reconnects transparently, as do
- * clients that open a connection per request.
+ * before it may be closed, so that abandoned clients do not hold their slot and
+ * descriptor forever while others need them.
+ *
+ * Only then, though: an idle connection is closed only under pressure, see
+ * esdm_egd_idle_reapable(). The consumers that hold a connection for their
+ * whole lifetime and use it rarely are the ones that cannot reconnect - a
+ * process confined by seccomp after connecting, OpenSSH's pre-authentication
+ * child being the reference case, is killed for the connect(2). Closing their
+ * connection after a minute of silence would trade an idle descriptor for a
+ * dead consumer. As long as slots and descriptors are plentiful, the
+ * connection costs nobody anything, and the protection against clients that
+ * hog them takes effect exactly when they become scarce - and even then it is
+ * aimed at those holding the most, so that a user filling the slots cannot have
+ * the idle connections of everybody else closed.
  */
 #ifndef ESDM_EGD_IDLE_TIMEOUT_MS
 #define ESDM_EGD_IDLE_TIMEOUT_MS 60000
+#endif
+
+/*
+ * Connections in use from which on idle ones are closed: once fewer slots are
+ * left than a single unprivileged UID may hold, so the slots are reclaimed
+ * before a new client has to make room for itself.
+ *
+ * Reaching it says nothing about who is to blame: a user can get there on its
+ * own with the UIDs of its subordinate range, see
+ * ESDM_EGD_MAX_CONNECTIONS_PER_UID. The idle connections closed from here on
+ * are therefore only those of the UIDs holding the most connections, see
+ * esdm_egd_idle_reapable() - closing everybody's would let that user have the
+ * long lived consumers of everybody else closed, the sandboxed ones among them
+ * that cannot connect again.
+ */
+#ifndef ESDM_EGD_IDLE_REAP_CONNECTIONS
+#define ESDM_EGD_IDLE_REAP_CONNECTIONS                                         \
+	(ESDM_EGD_MAX_CONNECTIONS - ESDM_EGD_MAX_CONNECTIONS_PER_UID)
 #endif
 
 /* Interval of the scan for idle connections */
@@ -140,6 +205,9 @@ struct esdm_egd_conn {
 	/* Accounted in esdm_egd_peer_limit */
 	bool peer_counted;
 
+	/* Holds one of the ESDM_EGD_MAX_CONNECTIONS in esdm_egd_connections */
+	bool slot_counted;
+
 	/* Last time the client sent something or took a response, see
 	 * ESDM_EGD_IDLE_TIMEOUT_MS. */
 	uint64_t last_active;
@@ -181,6 +249,27 @@ struct esdm_egd_conn {
 	 */
 	uint8_t answer[ESDM_EGD_MAX_TRANSFER];
 	uint8_t answer_len;
+
+	/*
+	 * Generations left in this round of the event loop, see
+	 * ESDM_EGD_PR_BUDGET, and the round they were granted for.
+	 */
+	unsigned int pr_budget;
+	uint64_t budget_round;
+
+	/*
+	 * A command is waiting in the input buffer for the next round's
+	 * budget. It is served by the event loop without any event of its own:
+	 * its bytes are no longer in the socket.
+	 */
+	bool yielded;
+
+	/*
+	 * The client takes no more responses - it hung up, or shut down its
+	 * receiving side. What it sent before still counts, see
+	 * esdm_egd_peer_gone().
+	 */
+	bool peer_gone;
 
 	TAILQ_ENTRY(esdm_egd_conn) tailq;
 };
@@ -241,7 +330,23 @@ static atomic_int esdm_egd_exit = 0;
 
 static struct esdm_peer_limit esdm_egd_peer_limit =
 	ESDM_PEER_LIMIT_INIT("EGD server", ESDM_EGD_MAX_CONNECTIONS_PER_UID);
-static atomic_bool esdm_egd_worker_running = false;
+/* Workers serving the EGD sockets, see esdm_egd_server_start() */
+static atomic_uint esdm_egd_workers_running = 0;
+
+/*
+ * Connections served by all workers together - each worker takes the clients it
+ * accepts, and ESDM_EGD_MAX_CONNECTIONS bounds them all.
+ */
+static atomic_size_t esdm_egd_connections = 0;
+
+/*
+ * When an accept last failed for want of descriptors or memory, 0 once one
+ * succeeded again. The RLIMIT_NOFILE is shared with the RPC interfaces, so this
+ * can happen well below ESDM_EGD_MAX_CONNECTIONS. A time rather than a flag:
+ * a client that gave up waiting in the backlog leaves no accept behind to clear
+ * it, and the shortage must not be believed forever.
+ */
+static _Atomic uint64_t esdm_egd_starved_at = 0;
 
 static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
 				    const char *socket_path)
@@ -494,6 +599,37 @@ static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
 	return (conn->out_off < conn->out_len);
 }
 
+/* Wipe the response in flight, delivered or not, and free its buffer. */
+static void esdm_egd_out_clear(struct esdm_egd_conn *conn)
+{
+	memset_secure(conn->out, 0, conn->out_len);
+	conn->out_len = 0;
+	conn->out_off = 0;
+}
+
+/*
+ * The client takes no more responses.
+ *
+ * A client that writes and then exits - a feeder handing over its entropy and
+ * closing right away is the textbook case - leaves its bytes readable behind
+ * the hangup. They are processed nevertheless, but whatever needs answering is
+ * dropped from here on: the response in flight and a deferred request, which
+ * would otherwise keep collecting entropy for nobody, and every reply command
+ * still in the stream, see esdm_egd_process(). The rest of the stream is thus
+ * reduced to the insertions, which cannot block, so draining it cannot tie up
+ * the worker.
+ */
+static void esdm_egd_peer_gone(struct esdm_egd_conn *conn)
+{
+	conn->peer_gone = true;
+
+	esdm_egd_out_clear(conn);
+
+	conn->deferred = 0;
+	memset_secure(conn->answer, 0, sizeof(conn->answer));
+	conn->answer_len = 0;
+}
+
 /*
  * Push out what is left of the response.
  *
@@ -501,6 +637,10 @@ static bool esdm_egd_out_pending(const struct esdm_egd_conn *conn)
  * connection, the event loop arms EPOLLOUT and it goes out once the client has
  * made room. Waiting here would hand every other client's latency to whichever
  * one is slowest to read.
+ *
+ * A client that does not take responses any more is no reason to drop what it
+ * still sends - see esdm_egd_peer_gone() - so EPIPE leaves the connection open
+ * for the rest of its stream, which ends at its EOF.
  *
  * @return 0 when the connection remains usable, whether or not everything went
  *	   out, < 0 when it has to be closed
@@ -534,13 +674,16 @@ static int esdm_egd_flush(struct esdm_egd_conn *conn)
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
 			return 0;
 
+		if (ret < 0 && errno == EPIPE) {
+			esdm_egd_peer_gone(conn);
+			return 0;
+		}
+
 		return ret < 0 ? -errno : -EIO;
 	}
 
 	/* Delivered - and the buffer is free for the next response. */
-	memset_secure(conn->out, 0, conn->out_len);
-	conn->out_len = 0;
-	conn->out_off = 0;
+	esdm_egd_out_clear(conn);
 
 	return 0;
 }
@@ -584,8 +727,8 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
  * Exactly one non-blocking generation is attempted. A request it does not cover
  * goes back to the event loop as a deferred request (see
  * esdm_egd_cmd_read_block()) rather than being retried here, which would tie the
- * worker - it serves every client of both sockets - to a single request for as
- * long as the entropy sources need.
+ * worker - it serves every client it accepted on both sockets - to a single
+ * request for as long as the entropy sources need.
  *
  * @generated reports how much was produced, which matters for the prediction
  * resistance generator: it hands out no more than was just delivered, so a
@@ -596,7 +739,7 @@ static int esdm_egd_write(struct esdm_egd_conn *conn, const uint8_t *buf,
  *	   caller decides whether to answer short or to come back for more),
  *	   < 0 on all other errors
  */
-static int esdm_egd_get_random(const struct esdm_egd_conn *conn, uint8_t *buf,
+static int esdm_egd_get_random(struct esdm_egd_conn *conn, uint8_t *buf,
 			       size_t len, size_t *generated)
 {
 	bool pr = conn->listener->prediction_resistance;
@@ -604,10 +747,20 @@ static int esdm_egd_get_random(const struct esdm_egd_conn *conn, uint8_t *buf,
 
 	*generated = 0;
 
-	if (pr)
+	if (pr) {
+		if (conn->pr_budget)
+			conn->pr_budget--;
 		ret = esdm_get_random_bytes_pr_noblock(buf, len);
-	else
+	} else
 		ret = esdm_get_random_bytes_full_noblock(buf, len);
+
+	/*
+	 * The ESDM left the operational state on the way - its initial DRNG
+	 * reached its limit without a reseed. A blocking read waits for it to
+	 * return, as for one that never got there.
+	 */
+	if (ret == -EOPNOTSUPP && !esdm_state_operational())
+		return -EAGAIN;
 
 	if (ret < 0)
 		return (ret == -EAGAIN) ? -EAGAIN : (int)ret;
@@ -781,6 +934,22 @@ static int esdm_egd_cmd_get_pid(struct esdm_egd_conn *conn)
 	return esdm_egd_write(conn, resp, 1 + (size_t)len);
 }
 
+/* May the connection generate once more in this round? */
+static bool esdm_egd_may_generate(const struct esdm_egd_conn *conn)
+{
+	return !conn->listener->prediction_resistance || conn->pr_budget;
+}
+
+/* Grant the connection its budget once per round of the event loop. */
+static void esdm_egd_conn_round(struct esdm_egd_conn *conn, uint64_t round)
+{
+	if (conn->budget_round == round)
+		return;
+
+	conn->budget_round = round;
+	conn->pr_budget = ESDM_EGD_PR_BUDGET;
+}
+
 /* Serve a deferred blocking read request, if there is one. */
 static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 {
@@ -788,6 +957,10 @@ static int esdm_egd_serve_deferred(struct esdm_egd_conn *conn)
 
 	if (!conn->deferred)
 		return 0;
+
+	/* Still deferred - the next round continues it. */
+	if (!esdm_egd_may_generate(conn))
+		return -EAGAIN;
 
 	ret = esdm_egd_cmd_read_block(conn, conn->deferred);
 	if (ret)
@@ -847,13 +1020,20 @@ static void esdm_egd_consume(struct esdm_egd_conn *conn, size_t len)
  *
  * It stops at the first command whose response the client did not take right
  * away, which is what makes one response buffer enough: a client asking faster
- * than it reads is slowed down by its own socket, not buffered for.
+ * than it reads is slowed down by its own socket, not buffered for. It also
+ * stops at a generation the round has no budget left for (conn->yielded).
  *
  * @return 0 when the connection remains usable, < 0 when it has to be closed
  */
 static int esdm_egd_process(struct esdm_egd_conn *conn)
 {
 	int ret;
+
+	conn->yielded = false;
+
+	/* Nothing new is started once shutdown is requested. */
+	if (atomic_load(&esdm_egd_exit))
+		return 0;
 
 	/* The response of the previous command has to be out of the way. */
 	ret = esdm_egd_flush(conn);
@@ -905,6 +1085,25 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		if (conn->in_len < cmd_len)
 			return 0;
 
+		/*
+		 * Nobody is left to take an answer, so a command that does
+		 * nothing but produce one is skipped - see
+		 * esdm_egd_peer_gone().
+		 */
+		if (conn->peer_gone &&
+		    conn->in[0] != ESDM_EGD_CMD_WRITE_ENTROPY) {
+			ret = 0;
+			goto consume;
+		}
+
+		/* Left for the next round, see ESDM_EGD_PR_BUDGET. */
+		if ((conn->in[0] == ESDM_EGD_CMD_READ_NONBLOCK ||
+		     conn->in[0] == ESDM_EGD_CMD_READ_BLOCK) &&
+		    conn->in[1] && !esdm_egd_may_generate(conn)) {
+			conn->yielded = true;
+			return 0;
+		}
+
 		switch (conn->in[0]) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = esdm_egd_cmd_entropy_count(conn);
@@ -940,6 +1139,7 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 			break;
 		}
 
+consume:
 		/* Do not leave client supplied entropy data in the buffer. */
 		memset_secure(conn->in, 0, cmd_len);
 		esdm_egd_consume(conn, cmd_len);
@@ -953,6 +1153,9 @@ static int esdm_egd_process(struct esdm_egd_conn *conn)
 		 * response would otherwise be read as the answer to this one.
 		 */
 		if (esdm_egd_out_pending(conn))
+			return 0;
+
+		if (atomic_load(&esdm_egd_exit))
 			return 0;
 	}
 
@@ -1003,7 +1206,11 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 			pos += chunk;
 		}
 
-		ret = esdm_egd_process(&conn);
+		/* Each record is a round, and as many follow as it needs. */
+		do {
+			conn.pr_budget = ESDM_EGD_PR_BUDGET;
+			ret = esdm_egd_process(&conn);
+		} while (!ret && conn.yielded);
 		if (ret)
 			break;
 	}
@@ -1017,29 +1224,51 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 #endif /* ESDM_FUZZING */
 
 /*
- * Read from the connection and process what became complete.
+ * Read from the connection and process what became complete, up to
+ * ESDM_EGD_READ_BUDGET bytes.
  *
- * @return 0 when the connection remains usable, < 0 when it has to be closed
+ * @return 0 when the connection remains usable, 1 when it does and the budget
+ *	   ran out with input possibly left, < 0 when it has to be closed
  */
 static int esdm_egd_read(struct esdm_egd_conn *conn)
 {
+	size_t budget = ESDM_EGD_READ_BUDGET;
+	int ret;
+
+	/* What a previous round left for this one comes first. */
+	if (conn->yielded) {
+		ret = esdm_egd_process(conn);
+		if (ret)
+			return ret;
+	}
+
 	while (1) {
 		ssize_t received;
-		int ret;
+		size_t room;
 
 		/*
-		 * While a request is deferred, a response is on its way out or
-		 * the buffer is full, do not read further: the pending data
-		 * stays in the socket buffer, which applies backpressure to the
-		 * client instead of requiring unbounded buffering here.
+		 * While a request is deferred or waits for its budget, a
+		 * response is on its way out or the buffer is full, do not read
+		 * further: the pending data stays in the socket buffer, which
+		 * applies backpressure to the client instead of requiring
+		 * unbounded buffering here.
 		 */
-		if (conn->deferred || esdm_egd_out_pending(conn) ||
+		if (conn->deferred || conn->yielded ||
+		    esdm_egd_out_pending(conn) ||
 		    conn->in_len >= sizeof(conn->in))
 			return 0;
 
+		/* Leave the rest to the next round, or to nobody at shutdown. */
+		if (!budget)
+			return 1;
+		if (atomic_load(&esdm_egd_exit))
+			return 0;
+
 		/* recv() for symmetry with the send() of the response. */
-		received = recv(conn->fd, conn->in + conn->in_len,
-				sizeof(conn->in) - conn->in_len, 0);
+		room = sizeof(conn->in) - conn->in_len;
+		if (room > budget)
+			room = budget;
+		received = recv(conn->fd, conn->in + conn->in_len, room, 0);
 		if (received == 0) {
 			/* Orderly shutdown by the client. */
 			return -EPIPE;
@@ -1053,6 +1282,7 @@ static int esdm_egd_read(struct esdm_egd_conn *conn)
 		}
 
 		conn->in_len += (size_t)received;
+		budget -= (size_t)received;
 		conn->last_active = esdm_egd_now_ms();
 
 		ret = esdm_egd_process(conn);
@@ -1075,16 +1305,162 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 	if (conn->peer_counted)
 		esdm_peer_limit_put(&esdm_egd_peer_limit, conn->peer_uid);
 
+	if (conn->slot_counted)
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+
 	memset_secure(conn->in, 0, sizeof(conn->in));
 	memset_secure(conn->out, 0, sizeof(conn->out));
 	memset_secure(conn->answer, 0, sizeof(conn->answer));
 	free(conn);
 }
 
-/* Accept one client and register it with the event loop. */
+/*
+ * Is something owed to the client, or is it in the middle of a command? Its
+ * connection is then closed to make room only when no other one is left, see
+ * esdm_egd_evict_candidate().
+ */
+static bool esdm_egd_conn_busy(const struct esdm_egd_conn *conn)
+{
+	return conn->deferred || conn->yielded || conn->in_len ||
+	       esdm_egd_out_pending(conn);
+}
+
+/*
+ * May this worker close one of its connections for a new one? Only those of
+ * unprivileged UIDs are ever closed for that: root is exempt from the per-UID
+ * bound as it is the owner of the daemon, and a root consumer is the last one
+ * to be turned into collateral damage.
+ */
+static bool esdm_egd_can_make_room(const struct esdm_egd_conn_list *list)
+{
+	const struct esdm_egd_conn *conn;
+
+	TAILQ_FOREACH (conn, list, tailq) {
+		if (conn->peer_counted)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * The connection to close for a new one once all ESDM_EGD_MAX_CONNECTIONS slots
+ * are taken, chosen among the connections of this worker - each worker owns its
+ * connections, and closing one of another worker would race with that worker
+ * serving it.
+ *
+ * It is a connection of the UID holding the most connections over all workers:
+ * whoever fills the slots - by the UIDs of a subordinate range, see
+ * ESDM_EGD_MAX_CONNECTIONS_PER_UID - holds many per UID, so this takes the
+ * slots from that user and leaves the consumers of everybody else alone. A new
+ * connection of that user then only ever costs it one of its own, and service
+ * goes on for everybody, at the price of churn under attack.
+ *
+ * Within that UID, the least recently active connection with nothing owed to
+ * its client is closed, else the least recently active one at all: sparing
+ * busy connections altogether would let a client that always keeps a request
+ * in flight hold its slots forever. Root's connections are never closed, see
+ * esdm_egd_can_make_room().
+ *
+ * @count receives the number of connections the UID of the candidate holds.
+ *
+ * @return the connection to close, NULL if this worker holds none that may be
+ */
+static struct esdm_egd_conn *
+esdm_egd_evict_candidate(struct esdm_egd_conn_list *list, unsigned int *count)
+{
+	struct esdm_egd_conn *conn, *victim = NULL;
+	unsigned int victim_count = 0;
+	bool victim_busy = false;
+
+	TAILQ_FOREACH (conn, list, tailq) {
+		unsigned int held;
+		bool busy;
+
+		if (!conn->peer_counted)
+			continue;
+
+		held = esdm_peer_limit_count(&esdm_egd_peer_limit,
+					     conn->peer_uid);
+		busy = esdm_egd_conn_busy(conn);
+
+		if (victim) {
+			if (held < victim_count)
+				continue;
+			if (held == victim_count) {
+				if (busy && !victim_busy)
+					continue;
+				if (busy == victim_busy &&
+				    conn->last_active >= victim->last_active)
+					continue;
+			}
+		}
+
+		victim = conn;
+		victim_count = held;
+		victim_busy = busy;
+	}
+
+	*count = victim_count;
+
+	return victim;
+}
+
+/*
+ * Close a connection of this worker to make room for a new one, see
+ * esdm_egd_evict_candidate(). Its slot is handed on to the new connection
+ * rather than given back: another worker would otherwise be free to take it in
+ * between. The events still to be handled in this round, @num of @pending, are
+ * voided for the closed connection.
+ *
+ * The new connection never costs a UID holding fewer connections than its own
+ * does with the new one, @newcomer_count: a worker chooses among the
+ * connections it serves, and one that happens to serve none of the UIDs
+ * filling the slots would otherwise close the connection of somebody else
+ * whenever one of those UIDs connects again. Such a newcomer is turned away
+ * instead - at no cost to anybody but the UID holding the most.
+ *
+ * @return true when a connection was closed and its slot is the caller's
+ */
+static bool esdm_egd_make_room(int epfd, struct esdm_egd_conn_list *list,
+			       struct epoll_event *pending, int num,
+			       unsigned int newcomer_count)
+{
+	unsigned int victim_count;
+	struct esdm_egd_conn *victim =
+		esdm_egd_evict_candidate(list, &victim_count);
+	int i;
+
+	if (!victim || victim_count < newcomer_count)
+		return false;
+
+	esdm_logger(LOGGER_DEBUG, LOGGER_C_SERVER,
+		    "EGD server: closing connection on FD %d of UID %u to make room\n",
+		    victim->fd, (unsigned int)victim->peer_uid);
+
+	for (i = 0; i < num; i++) {
+		if (pending[i].data.ptr == victim)
+			pending[i].data.ptr = NULL;
+	}
+
+	epoll_ctl(epfd, EPOLL_CTL_DEL, victim->fd, NULL);
+	TAILQ_REMOVE(list, victim, tailq);
+	victim->slot_counted = false;
+	esdm_egd_release_conn(victim);
+
+	return true;
+}
+
+/*
+ * Accept one client and register it with the event loop. @list holds the
+ * connections of this worker, and the events of this round still to be handled
+ * are @num of @pending - one of the connections may be closed to make room for
+ * the new one.
+ */
 static struct esdm_egd_conn *
 esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
-		bool *out_of_resources)
+		bool *out_of_resources, struct esdm_egd_conn_list *list,
+		struct epoll_event *pending, int num)
 {
 	struct esdm_egd_conn *conn;
 	struct ucred cred;
@@ -1103,9 +1479,12 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 					"EGD server: cannot accept connections: %s\n",
 					strerror(errno));
 			*out_of_resources = true;
+			atomic_store(&esdm_egd_starved_at, esdm_egd_now_ms());
 		}
 		return NULL;
 	}
+
+	atomic_store(&esdm_egd_starved_at, 0);
 
 	conn = calloc(1, sizeof(struct esdm_egd_conn));
 	if (!conn) {
@@ -1145,6 +1524,29 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 		return NULL;
 	}
 	conn->peer_counted = true;
+
+	/*
+	 * Several workers accept from the same listener - which one of them
+	 * takes the last slot is decided here. Without a free one, this worker
+	 * makes room by closing one of its connections, whose slot the new one
+	 * takes over, see esdm_egd_make_room().
+	 */
+	if (atomic_fetch_add(&esdm_egd_connections, 1) >=
+	    ESDM_EGD_MAX_CONNECTIONS) {
+		atomic_fetch_sub(&esdm_egd_connections, 1);
+		if (!esdm_egd_make_room(epfd, list, pending, num,
+					esdm_peer_limit_count(
+						&esdm_egd_peer_limit,
+						conn->peer_uid))) {
+			esdm_logger(
+				LOGGER_DEBUG, LOGGER_C_SERVER,
+				"EGD server: no room for a connection on FD %d\n",
+				fd);
+			esdm_egd_release_conn(conn);
+			return NULL;
+		}
+	}
+	conn->slot_counted = true;
 	conn->last_active = esdm_egd_now_ms();
 
 	ev.events = EPOLLIN | EPOLLRDHUP;
@@ -1167,23 +1569,88 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
 	return conn;
 }
 
-/* Thread main serving the EGD socket. */
-static int esdm_egd_handler(void __unused *args)
+/* Did an accept fail for want of descriptors within the last poll interval? */
+static bool esdm_egd_starving(uint64_t now)
 {
+	uint64_t starved_at = atomic_load(&esdm_egd_starved_at);
+
+	/* Another worker may have stored a time later than @now. */
+	return starved_at && (now < starved_at ||
+			      now - starved_at < ESDM_EGD_IDLE_POLL_MS);
+}
+
+/*
+ * Is the server short of connection slots or descriptors? See
+ * ESDM_EGD_IDLE_TIMEOUT_MS. A failed accept counts for as long as a connection
+ * may idle - long enough for the reclaimed descriptors to be taken.
+ */
+static bool esdm_egd_scarce(uint64_t now)
+{
+	uint64_t starved_at = atomic_load(&esdm_egd_starved_at);
+
+	if (atomic_load(&esdm_egd_connections) >= ESDM_EGD_IDLE_REAP_CONNECTIONS)
+		return true;
+
+	/* Another worker may have stored a time later than @now. */
+	return starved_at &&
+	       (now < starved_at ||
+		now - starved_at <= ESDM_EGD_IDLE_TIMEOUT_MS);
+}
+
+/*
+ * May the idle connection be closed? See ESDM_EGD_IDLE_TIMEOUT_MS.
+ *
+ * Only when nothing is owed to it, it was silent for the idle timeout, and its
+ * slot or descriptor is wanted:
+ *
+ *   - the server is short of them (@scarce) and the connection's UID is among
+ *     those holding the most connections, @top as told by
+ *     esdm_peer_limit_max_count(). Whoever fills the slots does so with many
+ *     connections per UID, so its idle ones go first, and the consumers of
+ *     everybody else are left alone - a user keeping its own connections
+ *     from ever being idle gains nothing but its own slots. Where no UID
+ *     stands out, all of them hold the most, and any idle connection may go.
+ *     Root is not accounted and holds none by that count.
+ *   - the connection's own UID is being refused further connections - which
+ *     reclaims the slots of a client that abandons its connections without
+ *     closing them for that client's own UID, at no cost to anybody else's.
+ */
+static bool esdm_egd_idle_reapable(const struct esdm_egd_conn *conn,
+				   uint64_t now, bool scarce, unsigned int top)
+{
+	if (conn->deferred || conn->yielded || esdm_egd_out_pending(conn) ||
+	    now - conn->last_active <= ESDM_EGD_IDLE_TIMEOUT_MS)
+		return false;
+
+	if (scarce &&
+	    esdm_peer_limit_count(&esdm_egd_peer_limit, conn->peer_uid) >= top)
+		return true;
+
+	return esdm_peer_limit_exhausted(&esdm_egd_peer_limit, conn->peer_uid);
+}
+
+/*
+ * Thread main of one worker serving the EGD sockets. The workers share both
+ * listeners, and each serves the clients it accepted.
+ */
+static int esdm_egd_handler(void *args)
+{
+	uint32_t id = (uint32_t)(uintptr_t)args;
 	struct esdm_egd_conn_list conn_list;
 	struct esdm_egd_conn *conn, *tmp;
 	struct esdm_egd_listener *listener;
 	struct epoll_event events[ESDM_EGD_MAX_EVENTS];
-	size_t num_connections = 0;
 	size_t deferred_requests = 0;
 	/*
-	 * Did a deferred request get any data in the last round? As long as one
-	 * makes progress the next round follows immediately: the prediction
-	 * resistance generator delivers a large request in chunks, and waiting
-	 * the poll interval between them would multiply its latency. Other
-	 * clients are still served in between.
+	 * Did a deferred request get any data in the last round, or does a
+	 * command wait for the next round's budget? Then the next round follows
+	 * immediately: the prediction resistance generator delivers a large
+	 * request in chunks, and waiting the poll interval between them would
+	 * multiply its latency. Other clients are still served in between.
 	 */
 	bool deferred_progress = false;
+	/* Round of the event loop, see esdm_egd_conn_round() */
+	uint64_t round = 0;
 	/*
 	 * The listening FD is level-triggered, so it has to be disarmed while
 	 * no further client may be accepted - otherwise epoll_wait would
@@ -1193,7 +1660,7 @@ static int esdm_egd_handler(void __unused *args)
 	/*
 	 * accept() ran out of descriptors or memory. The client stays queued,
 	 * so the level-triggered listener would wake us again at once: listen
-	 * no more until a connection closes or a poll interval passes quietly.
+	 * no more for a while, see below.
 	 */
 	bool accept_paused = false;
 	size_t paused_connections = 0;
@@ -1201,7 +1668,7 @@ static int esdm_egd_handler(void __unused *args)
 	int epfd = -1;
 	int ret = 0;
 
-	thread_set_name(egd_server, 0);
+	thread_set_name(egd_server, id);
 	TAILQ_INIT(&conn_list);
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -1214,7 +1681,7 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	/*
-	 * Both sockets are served by this one thread: a listener is identified
+	 * Both sockets are served by every worker: a listener is identified
 	 * by its own pointer in the epoll data, a connection by the pointer to
 	 * its own structure, and the two can never collide.
 	 */
@@ -1250,9 +1717,19 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	while (atomic_load(&esdm_egd_exit) == 0) {
-		bool want_armed = (num_connections < ESDM_EGD_MAX_CONNECTIONS) &&
+		/*
+		 * With all slots taken, a worker goes on accepting as long as
+		 * it can make room by closing one of its connections, see
+		 * esdm_egd_make_room(). One that cannot leaves the client to a
+		 * worker that can, rather than taking it only to turn it away.
+		 */
+		bool want_armed = (atomic_load(&esdm_egd_connections) <
+					   ESDM_EGD_MAX_CONNECTIONS ||
+				   esdm_egd_can_make_room(&conn_list)) &&
 				  !accept_paused;
 		int nfds, i;
+
+		round++;
 
 		if (want_armed != listen_armed) {
 			bool armed_all = true;
@@ -1297,11 +1774,26 @@ static int esdm_egd_handler(void __unused *args)
 			goto out;
 		}
 
+		/*
+		 * The pause ends with a quiet poll interval, a connection
+		 * closed here, or a shortage older than the interval - the
+		 * descriptors may have been freed elsewhere, and a client of
+		 * this worker sending more often than the interval would
+		 * otherwise keep it paused.
+		 */
 		if (accept_paused &&
-		    (!nfds || num_connections < paused_connections))
+		    (!nfds ||
+		     atomic_load(&esdm_egd_connections) < paused_connections ||
+		     !esdm_egd_starving(esdm_egd_now_ms())))
 			accept_paused = false;
 
 		for (i = 0; i < nfds; i++) {
+			bool more_input;
+
+			/* Closed to make room earlier in this round */
+			if (!events[i].data.ptr)
+				continue;
+
 			/*
 			 * Tell the two apart by the pointer itself: the
 			 * listeners live in a static array of their own, so a
@@ -1313,26 +1805,56 @@ static int esdm_egd_handler(void __unused *args)
 					    esdm_egd_listeners)]) {
 				conn = esdm_egd_accept(epfd,
 						       events[i].data.ptr,
-						       &accept_paused);
+						       &accept_paused,
+						       &conn_list,
+						       events + i + 1,
+						       nfds - i - 1);
 				if (!conn) {
-					paused_connections = num_connections;
+					paused_connections = atomic_load(
+						&esdm_egd_connections);
 					continue;
 				}
 
 				TAILQ_INSERT_TAIL(&conn_list, conn, tailq);
-				num_connections++;
 				continue;
 			}
 
 			conn = events[i].data.ptr;
+			esdm_egd_conn_round(conn, round);
 
-			if (events[i].events & (EPOLLERR | EPOLLHUP))
-				ret = -EPIPE;
-			else if (esdm_egd_out_pending(conn))
+			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+				/*
+				 * Gone for good - but on a stream socket what it
+				 * sent before it closed is still readable, and a
+				 * client writing and exiting right away raises
+				 * the hangup together with EPOLLIN. EPOLLERR is
+				 * no different: a Unix socket reports a client
+				 * that closed with a response of ours unread as
+				 * ECONNRESET, and still hands out the bytes it
+				 * sent before that error. Take what is there,
+				 * a read budget per round, and close once it
+				 * ends at EOF or the error. Nothing is owed to
+				 * the client any more, so the RDHUP rule below
+				 * does not hold this up.
+				 */
+				esdm_egd_peer_gone(conn);
+				ret = esdm_egd_read(conn);
+				if (!ret)
+					ret = -EPIPE;
+			} else if (esdm_egd_out_pending(conn))
 				/* Room was made - deliver the rest and go on. */
 				ret = esdm_egd_process(conn);
 			else
 				ret = esdm_egd_read(conn);
+
+			/*
+			 * The read budget ran out with input left. Both the
+			 * hangup and the input behind EPOLLRDHUP are reported
+			 * again next round, so the rest is not lost by waiting.
+			 */
+			more_input = (ret > 0);
+			if (more_input)
+				ret = 0;
 
 			/*
 			 * EPOLLRDHUP only signals that the client will not send
@@ -1341,8 +1863,9 @@ static int esdm_egd_handler(void __unused *args)
 			 * a request that has yet to find its entropy. Close only
 			 * once nothing is owed to it any more.
 			 */
-			if (!ret && (events[i].events & EPOLLRDHUP) &&
-			    !conn->deferred && !esdm_egd_out_pending(conn))
+			if (!ret && !more_input &&
+			    (events[i].events & EPOLLRDHUP) && !conn->deferred &&
+			    !conn->yielded && !esdm_egd_out_pending(conn))
 				ret = -EPIPE;
 
 			if (ret) {
@@ -1353,7 +1876,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1365,10 +1887,11 @@ static int esdm_egd_handler(void __unused *args)
 
 		/*
 		 * Whatever is not waiting for an event of its own: a deferred
-		 * request, which completes when entropy arrives, and a response
-		 * whose client has not made room, retried here so a missed
-		 * EPOLLOUT cannot strand it. The deferred requests are recounted
-		 * on the way, as the loop above may have changed their number.
+		 * request, which completes when entropy arrives, a command
+		 * waiting for its budget, and a response whose client has not
+		 * made room, retried here so a missed EPOLLOUT cannot strand it.
+		 * The deferred requests are recounted on the way, as the loop
+		 * above may have changed their number.
 		 */
 		deferred_requests = 0;
 		deferred_progress = false;
@@ -1377,9 +1900,14 @@ static int esdm_egd_handler(void __unused *args)
 			uint64_t out_since = conn->out_since;
 			bool stuck;
 
-			if (!conn->deferred && !esdm_egd_out_pending(conn))
+			if (atomic_load(&esdm_egd_exit))
+				break;
+
+			if (!conn->deferred && !conn->yielded &&
+			    !esdm_egd_out_pending(conn))
 				continue;
 
+			esdm_egd_conn_round(conn, round);
 			collected = conn->answer_len;
 			deferred = conn->deferred;
 
@@ -1391,7 +1919,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1412,7 +1939,6 @@ static int esdm_egd_handler(void __unused *args)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
 				continue;
 			}
 
@@ -1432,33 +1958,59 @@ static int esdm_egd_handler(void __unused *args)
 					deferred_requests++;
 			}
 
+			if (conn->yielded)
+				deferred_progress = true;
+
 			esdm_egd_conn_arm(epfd, conn);
 		}
 
 		/*
-		 * Close the connections that sat idle for too long: nothing
-		 * owed to them, nothing heard from them. Without this, clients
-		 * that went away without closing - or never meant to send
-		 * anything - hold their slots and descriptors forever.
+		 * Close the connections that sat idle for too long while their
+		 * slots are wanted: nothing owed to them, nothing heard from
+		 * them. Without this, clients that went away without closing -
+		 * or never meant to send anything - hold their slots and
+		 * descriptors forever, and enough of them lock everybody else
+		 * out.
 		 */
 		if (esdm_egd_now_ms() - last_idle_scan >= ESDM_EGD_IDLE_SCAN_MS) {
 			uint64_t now = esdm_egd_now_ms();
+			bool scarce = esdm_egd_scarce(now);
+			unsigned int top =
+				scarce ? esdm_peer_limit_max_count(
+						 &esdm_egd_peer_limit) :
+					 0;
 
 			last_idle_scan = now;
 			TAILQ_FOREACH_SAFE (conn, &conn_list, tailq, tmp) {
-				if (conn->deferred || esdm_egd_out_pending(conn) ||
-				    now - conn->last_active <=
-					    ESDM_EGD_IDLE_TIMEOUT_MS)
+				if (!esdm_egd_idle_reapable(conn, now, scarce,
+							    top))
 					continue;
 
 				esdm_logger(
 					LOGGER_DEBUG, LOGGER_C_SERVER,
-					"EGD server: closing idle connection on FD %d\n",
-					conn->fd);
+					"EGD server: closing idle connection on FD %d of UID %u\n",
+					conn->fd, (unsigned int)conn->peer_uid);
 				epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
-				num_connections--;
+
+				/*
+				 * The slot may have been the one wanted, and
+				 * the UID has one connection less - it may no
+				 * longer be alone at the top, or still be: the
+				 * rest of its idle ones go in this same scan as
+				 * long as it holds the most and slots are
+				 * short. Neither is decided once for the whole
+				 * scan, or the connections of the UID next in
+				 * line would follow as soon as it caught up.
+				 */
+				if (scarce) {
+					scarce = esdm_egd_scarce(now);
+					top = scarce ?
+						      esdm_peer_limit_max_count(
+							      &esdm_egd_peer_limit) :
+						      0;
+				}
 			}
 		}
 	}
@@ -1477,31 +2029,62 @@ out:
 	if (epfd >= 0)
 		close(epfd);
 
-	atomic_store(&esdm_egd_worker_running, false);
+	atomic_fetch_sub(&esdm_egd_workers_running, 1);
 
 	return ret;
 }
 
 int esdm_egd_server_start(void)
 {
-	int ret;
+	uint32_t num_workers, t;
+	int ret = 0;
 
 	/*
 	 * The interface is active exactly when esdm_egd_server_socket_init()
 	 * obtained a listening socket - either from systemd or by binding the
-	 * path requested on the command line. One worker serves both of them.
+	 * path requested on the command line. Every worker serves both of them.
 	 */
 	if (!esdm_egd_server_active())
 		return 0;
 
-	atomic_store(&esdm_egd_worker_running, true);
+	/*
+	 * A worker serves its clients one request at a time, and a request may
+	 * take as long as the DRNG it goes to needs for a reseed. More workers
+	 * keep the other clients going meanwhile - up to one per CPU, within
+	 * the thread slots reserved for them.
+	 */
+	num_workers = esdm_config_online_nodes();
+	if (num_workers > ESDM_THREAD_EGD_SLOTS)
+		num_workers = ESDM_THREAD_EGD_SLOTS;
+	if (!num_workers)
+		num_workers = 1;
 
-	ret = thread_start(esdm_egd_handler, NULL, ESDM_THREAD_EGD_GROUP, NULL);
-	if (ret) {
-		atomic_store(&esdm_egd_worker_running, false);
-		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
-			    "EGD server: starting worker thread failed\n");
+	for (t = 0; t < num_workers; t++) {
+		atomic_fetch_add(&esdm_egd_workers_running, 1);
+
+		ret = thread_start(esdm_egd_handler, (void *)(uintptr_t)t,
+				   ESDM_THREAD_EGD_GROUP, NULL);
+		if (ret) {
+			atomic_fetch_sub(&esdm_egd_workers_running, 1);
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_SERVER,
+				"EGD server: starting worker thread %u failed\n",
+				t);
+
+			/*
+			 * The workers started so far serve both sockets
+			 * already - carry on with them, and fail only if there
+			 * is none at all.
+			 */
+			if (t)
+				ret = 0;
+			break;
+		}
 	}
+
+	esdm_logger(LOGGER_STATUS, LOGGER_C_SERVER,
+		    "EGD server: %u worker thread(s)\n",
+		    atomic_load(&esdm_egd_workers_running));
 
 	return ret;
 }
@@ -1522,13 +2105,15 @@ void esdm_egd_server_fini(void)
 	esdm_egd_server_signal_exit_safe();
 
 	/*
-	 * Wait for the worker to leave its event loop before the ESDM is
-	 * finalized - it must not be inside esdm_get_random_bytes_full_noblock
-	 * or esdm_pool_insert_aux by then. It is a special thread and thus not
+	 * Wait for the workers to leave their event loops before the ESDM is
+	 * finalized - none may be inside esdm_get_random_bytes_full_noblock or
+	 * esdm_pool_insert_aux by then. They are special threads and thus not
 	 * covered by the RPC server's thread_wait_all(). The bound is generous
-	 * against the poll interval, but shutdown must not hang either.
+	 * against the poll interval and the one generation a worker may still
+	 * be in - no further command is started once exit is requested - but
+	 * shutdown must not hang either.
 	 */
-	for (i = 0; i < 100 && atomic_load(&esdm_egd_worker_running); i++) {
+	for (i = 0; i < 100 && atomic_load(&esdm_egd_workers_running); i++) {
 		struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
 
 		nanosleep(&ts, NULL);

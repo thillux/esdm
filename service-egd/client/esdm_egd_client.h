@@ -64,16 +64,28 @@ extern "C" {
  * Syscall discipline
  * ------------------
  * Once connected, the operations stay within read(2), write(2), poll(2),
- * close(2), getpid(2), clock_gettime(2), nanosleep(2) and getsockopt(2) - the
- * set a seccomp confined process is typically still allowed, OpenSSH's pre-auth
- * sandbox being the reference case. send(2)/recv(2) are avoided as they are
- * sendto(2)/recvfrom(2), which that filter answers with SECCOMP_RET_KILL, so
- * MSG_NOSIGNAL is unavailable and a write is preceded by a poll instead.
+ * rt_sigprocmask(2), close(2), getpid(2), clock_gettime(2), nanosleep(2),
+ * getsockopt(2) and - on a kernel without socket cookies - getpeername(2), the
+ * latter two to confirm that the descriptor is still the connection made
+ * earlier. That is the set a seccomp confined process is typically still
+ * allowed, OpenSSH's pre-auth sandbox being the reference case. send(2)/recv(2)
+ * are avoided as they are sendto(2)/recvfrom(2), which that filter answers with
+ * SECCOMP_RET_KILL, so MSG_NOSIGNAL is unavailable: SIGPIPE is blocked around a
+ * write instead. Should the peer vanish right before a write, the SIGPIPE it
+ * raises is taken off with sigtimedwait(2) - unless SIGPIPE was ignored when
+ * the connection was made, as it is in OpenSSH.
  *
  * Connecting needs socket(2) and connect(2), which such a sandbox kills the
  * process for. A client serving a sandboxed process must therefore be connected
  * before the sandbox is entered - and a process that forks into one cannot be
  * served at all, since the fork forces a reconnect.
+ *
+ * The esdm-server keeps such a connection open for as long as it sits idle,
+ * unless it runs short of them: an idle connection is only closed once nearly
+ * all connection slots or descriptors of the server are taken, or the UID of
+ * the consumer is being refused further connections. A sandboxed consumer
+ * whose connection is closed nevertheless - that way, or by a restart of the
+ * daemon - is killed by its sandbox on the reconnect.
  */
 struct esdm_egd_client;
 

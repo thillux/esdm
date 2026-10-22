@@ -75,6 +75,37 @@ bool esdm_peer_limit_get(struct esdm_peer_limit *limit, uid_t uid);
  */
 void esdm_peer_limit_put(struct esdm_peer_limit *limit, uid_t uid);
 
+/**
+ * @brief Is @uid being refused connections?
+ *
+ * @return true when a connection of @uid was refused for its limit and none of
+ *	   its connections has been released since - the UID wants more than
+ *	   its share right now. Never true for root.
+ */
+bool esdm_peer_limit_exhausted(struct esdm_peer_limit *limit, uid_t uid);
+
+/**
+ * @brief Connections @uid holds right now
+ *
+ * @return the number of connections admitted for @uid and not released yet,
+ *	   0 for root, which is not accounted
+ */
+unsigned int esdm_peer_limit_count(struct esdm_peer_limit *limit, uid_t uid);
+
+/**
+ * @brief Connections the UID holding the most of them holds right now
+ *
+ * The per-UID bound does not bound a user, who can connect under each UID of
+ * its subordinate range (/etc/subuid) from a user namespace. What sets a user
+ * hogging the connections apart from everybody else is what its UIDs hold,
+ * which is what this tells - a UID with fewer connections than this is not the
+ * one to take connections from first.
+ *
+ * @return the largest count of any unprivileged UID, 0 when none holds a
+ *	   connection
+ */
+unsigned int esdm_peer_limit_max_count(struct esdm_peer_limit *limit);
+
 #ifdef __cplusplus
 }
 #endif

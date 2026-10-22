@@ -33,22 +33,101 @@ test('EGD client library', egd_client_test, timeout: 120)
 
 test('EGD client robustness', egd_robust_test, timeout: 120)
 
+# The client's write(2) and sigtimedwait(2) are wrapped, to close the peer
+# right before the write and count the calls - see the test.
+egd_client_sigpipe_test = executable(
+		'egd_client_sigpipe_test',
+		[ 'egd_client_sigpipe_test.c' ],
+		include_directories: include_dirs_egd_client,
+		dependencies: egd_test_deps,
+		link_args: [ '-Wl,--wrap=write', '-Wl,--wrap=sigtimedwait' ],
+		link_with: [ esdm_egd_client_lib.get_static_lib() ]
+	)
+
+test('EGD client SIGPIPE', egd_client_sigpipe_test)
+
 if get_option('esdm-server').enabled()
 	# The server side driven in-process and spoken to in raw protocol
 	# bytes. Unlike the test below it needs no daemon and therefore no
 	# privileges, and it decides itself when the ESDM turns operational -
 	# which is the only way to observe what the blocking read command does
-	# while it is not.
+	# while it is not. Its server closes idle connections after a few
+	# seconds rather than a minute, so that this can be tested as well -
+	# well above anything the other tests leave a connection unused for -
+	# and does so whenever a single connection is open: the pressure it
+	# otherwise waits for is the connection lifecycle test's to cover.
 	egd_server_raw_test = executable(
 			'egd_server_raw_test',
 			[ egd_server_src, files('../test_ipc_ns.c'),
 			  'egd_server_raw_test.c' ],
+			c_args: [
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=1',
+			],
 			include_directories: include_dirs_server,
 			dependencies: [ dependencies_server, egd_test_deps ],
 			link_with: esdm_static_lib
 		)
 
 	test('EGD server raw protocol', egd_server_raw_test, timeout: 300)
+
+	# The same setup for the end of a connection, the client's and the
+	# server's. The insertion command has no response, so the server's call
+	# into the auxiliary pool is renamed to a counting wrapper in the test.
+	# Idle connections time out after a second, and the per-UID limit is
+	# small enough for the test to run into it.
+	egd_server_conn_test = executable(
+			'egd_server_conn_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_conn_test.c' ],
+			c_args: [
+				'-Desdm_pool_insert_aux=test_pool_insert_aux',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=1000',
+				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=48',
+			],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server connection lifecycle', egd_server_conn_test,
+		timeout: 300)
+
+	# The same setup with all connection slots taken. The server is cut
+	# down to a few slots, more of them per UID than in all - a single UID
+	# stands for a user connecting under each UID of its subordinate range
+	# - and slots are short from three quarters of them on. Idle
+	# connections time out after three seconds, well above how long the
+	# tests not about them take. Several UIDs, and the tests needing them,
+	# take root.
+	egd_server_evict_test = executable(
+			'egd_server_evict_test',
+			[ egd_server_src, files('../test_ipc_ns.c'),
+			  'egd_server_evict_test.c' ],
+			c_args: [
+				'-DESDM_EGD_MAX_CONNECTIONS=16',
+				'-DESDM_EGD_MAX_CONNECTIONS_PER_UID=24',
+				'-DESDM_EGD_IDLE_REAP_CONNECTIONS=12',
+				'-DESDM_EGD_IDLE_TIMEOUT_MS=3000',
+			],
+			include_directories: include_dirs_server,
+			dependencies: [ dependencies_server, egd_test_deps ],
+			link_with: esdm_static_lib
+		)
+
+	test('EGD server with all slots taken', egd_server_evict_test,
+		timeout: 300)
+
+	# The per-UID connection accounting shared by the RPC and EGD servers,
+	# compiled into the test to inspect its table. Needs no server.
+	egd_peer_limit_test = executable(
+			'egd_peer_limit_test',
+			[ 'egd_peer_limit_test.c' ],
+			include_directories: include_dirs_server,
+			dependencies: egd_test_deps
+		)
+
+	test('EGD server peer limit', egd_peer_limit_test)
 
 	egd_server_test = executable(
 			'egd_server_test',

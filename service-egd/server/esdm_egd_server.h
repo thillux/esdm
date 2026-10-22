@@ -122,10 +122,10 @@ void esdm_egd_server_signal_exit_safe(void);
 void esdm_egd_server_fini(void);
 
 /**
- * @brief Remove the EGD socket from the file system
+ * @brief Remove the EGD sockets from the file system
  *
- * The socket is created by the server itself (it has no socket activation
- * counterpart), so it is also the server's job to remove it. As with the RPC
+ * A socket the server bound itself is also the server's to remove; one handed
+ * over by systemd socket activation is left to systemd. As with the RPC
  * sockets, the removal needs the privileges the daemon dropped, hence this is
  * invoked from the privileged context performing the IPC cleanup.
  */

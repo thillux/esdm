@@ -51,6 +51,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_protocol.h"
@@ -386,11 +387,21 @@ static int test_cmd_write_entropy(int fd, const uint8_t *buf, uint8_t len,
  * whoever asks the ESDM for random data next is what turns it into an
  * operational state. That is deliberate - the point of the test is that the
  * deferred request of the server is what picks the entropy up.
+ *
+ * The NTG.1 seeding strategy wants two entropy sources of 240 bits each for
+ * the initial seeding, and the auxiliary pool is only one. The jitter RNG is
+ * credited again as the second one - at this moment rather than from the
+ * start, so the moment the ESDM becomes operational stays the test's to
+ * choose. An NTG.1 conformant jitter RNG suffices on its own, which makes no
+ * difference here.
  */
 static int test_esdm_seed(void)
 {
 	uint8_t seed[64];
 	unsigned int i, round;
+
+	if (esdm_ntg1_2024_compliant())
+		esdm_config_es_jent_entropy_rate_set(256);
 
 	for (round = 0; round < TEST_SEED_ROUNDS; round++) {
 		if (esdm_state_operational())
@@ -579,12 +590,21 @@ static void test_unknown_command(void)
 static void test_unread_responses(void)
 {
 	/*
-	 * One command of two bytes is answered with up to 256, so a few
-	 * thousand of them are far more than a socket buffer holds. The writes
-	 * stop at the first that would block, which is where the client's own
-	 * end is congested as well.
+	 * A UNIX socket accounts its buffer per queued message, at several
+	 * hundred bytes for even the smallest, so a few thousand answers of
+	 * two bytes are far more than it holds. The writes stop at the first
+	 * that would block, which is where the client's own end is congested
+	 * as well.
+	 *
+	 * One byte per request, not the largest transfer: a few hundred of
+	 * those take the DRNG past its reseed threshold, and the entropy
+	 * sources this test switched off cannot complete that reseed. Every
+	 * request after it would retry the reseed, polling the entropy
+	 * sources, which is the DRNG manager's business and not what this
+	 * tests - on a slow machine it delays the answers to the other
+	 * client beyond the response timeout.
 	 */
-	uint8_t cmd[2] = { ESDM_EGD_CMD_READ_NONBLOCK, ESDM_EGD_MAX_TRANSFER };
+	uint8_t cmd[2] = { ESDM_EGD_CMD_READ_NONBLOCK, 1 };
 	unsigned int sent = 0, i;
 	uint32_t bits = 0;
 	pid_t pid = 0;
@@ -647,14 +667,13 @@ static void test_unread_responses(void)
 		uint8_t delivered = 0;
 		uint8_t buf[ESDM_EGD_MAX_TRANSFER];
 
-		/*
-		 * The length byte cannot exceed what was asked for: the request
-		 * was for the largest transfer the byte can express.
-		 */
 		CHECK(test_recv(slow, &delivered, sizeof(delivered),
 				TEST_RESPONSE_MS) == 0,
 		      "the stuck client got nothing at all");
-		if (delivered) {
+		CHECK(delivered <= cmd[1],
+		      "the stuck client got %u bytes for a request of %u",
+		      delivered, cmd[1]);
+		if (delivered && delivered <= cmd[1]) {
 			CHECK(test_recv(slow, buf, delivered,
 					TEST_RESPONSE_MS) == 0,
 			      "the answer of the stuck client is truncated");
@@ -940,6 +959,86 @@ out:
 		close(other);
 }
 
+static uint64_t test_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/*
+ * A connection that sits idle is closed, one that is in use is not.
+ *
+ * This build of the server closes idle connections after the short
+ * ESDM_EGD_IDLE_TIMEOUT_MS it is compiled with instead of a minute. The server
+ * scans for them once a second, so the close comes up to that much later.
+ */
+static void test_idle_close(void)
+{
+	const int scan_slack_ms = 1000 + 2000;
+	/*
+	 * The server starts the idle time once it has sent the last answer,
+	 * this test once it has read it - later, by however long the answer
+	 * took to arrive and be parsed, which a loaded or sanitizer build
+	 * stretches. So the close can come a little before the timeout as
+	 * measured here. A close that is early by a scan interval of a second
+	 * or more is still caught.
+	 */
+	const uint64_t clock_slack_ms = 250;
+	uint64_t last_answer, closed_after;
+	uint32_t bits = 0;
+	uint8_t byte;
+	unsigned int i;
+	int fd, other, rc;
+
+	printf("EGD raw: idle connections are closed\n");
+
+	fd = test_connect();
+	if (fd < 0) {
+		CHECK(0, "cannot connect to %s: %s", sockpath, strerror(errno));
+		return;
+	}
+
+	/*
+	 * In use for longer than the idle timeout, with pauses shorter than
+	 * it: every command keeps the connection alive.
+	 */
+	for (i = 0; i < 6; i++) {
+		CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+		      "a connection in use was not served after %u pauses", i);
+		test_sleep_ms(ESDM_EGD_IDLE_TIMEOUT_MS / 3);
+	}
+	CHECK(test_cmd_entropy_count(fd, &bits, TEST_RESPONSE_MS) == 0,
+	      "a connection in use was closed");
+	last_answer = test_now_ms();
+
+	/* Now it falls silent, and the server is to close it. */
+	rc = test_recv(fd, &byte, sizeof(byte),
+		       ESDM_EGD_IDLE_TIMEOUT_MS + scan_slack_ms);
+	closed_after = test_now_ms() - last_answer;
+	CHECK(rc == -EPIPE || rc == -ECONNRESET,
+	      "an idle connection was not closed: %d", rc);
+	CHECK(closed_after + clock_slack_ms >= ESDM_EGD_IDLE_TIMEOUT_MS,
+	      "an idle connection was closed after %llu ms, its timeout is %u ms",
+	      (unsigned long long)closed_after,
+	      (unsigned int)ESDM_EGD_IDLE_TIMEOUT_MS);
+	printf("  closed after %llu ms of silence\n",
+	       (unsigned long long)closed_after);
+	close(fd);
+
+	/* Closing it costs nobody else anything. */
+	other = test_connect();
+	CHECK(other >= 0, "the server stopped accepting clients");
+	if (other >= 0) {
+		CHECK(test_cmd_entropy_count(other, &bits, TEST_RESPONSE_MS) ==
+			      0,
+		      "the server stopped serving after closing an idle client");
+		close(other);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	struct stat sb;
@@ -974,6 +1073,19 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 	}
+
+#ifndef ESDM_ES_JENT
+	/*
+	 * The NTG.1 seeding strategy wants two entropy sources of 240 bits each
+	 * for the initial seeding, and the auxiliary pool the entropy is
+	 * inserted into is only one: without the jitter RNG as the second, see
+	 * test_esdm_seed(), the ESDM would never become operational.
+	 */
+	if (esdm_ntg1_2024_compliant()) {
+		printf("the NTG.1 seeding strategy needs the jitter RNG next to the auxiliary pool\n");
+		return 77;
+	}
+#endif
 
 	esdm_logger_set_verbosity(LOGGER_WARN);
 
@@ -1032,6 +1144,7 @@ int main(int argc, char *argv[])
 	test_unread_responses();
 	test_vanishing_client();
 	test_unknown_command();
+	test_idle_close();
 
 	/* Nothing anywhere above may have signalled the process. */
 	CHECK(!test_sigpipe, "the server raised SIGPIPE");
