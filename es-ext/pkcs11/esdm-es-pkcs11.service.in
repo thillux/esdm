@@ -1,0 +1,108 @@
+# Systemd configuration file of esdm-es-pkcs11, the PKCS#11 entropy source of
+# the ESDM - see esdm-es-pkcs11(8).
+#
+# The daemon serves the random number generator of a PKCS#11 token on the
+# socket below, which the ESDM reads through one of its provider socket
+# sources. Tell the ESDM about it with a drop-in of esdm-server.service, e.g.
+# /etc/systemd/system/esdm-server.service.d/pkcs11.conf:
+#
+#	[Service]
+#	Environment="ESDM_SERVER_OPTIONS=--es_ext_socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket --es_ext_socket_uid esdm-es-pkcs11"
+#
+# and tell this daemon about the module and the token with one of its own,
+# /etc/systemd/system/esdm-es-pkcs11.service.d/token.conf:
+#
+#	[Service]
+#	Environment="ESDM_ES_PKCS11_OPTIONS=--module /usr/lib/softhsm/libsofthsm2.so --token_label my-token"
+#
+# The PIN, for a token that wants a login, is the systemd credential
+# pkcs11-pin: the daemon reads it from $CREDENTIALS_DIRECTORY, never from its
+# command line. ImportCredential= below takes it from the credential store -
+# /etc/credstore/pkcs11-pin, or encrypted with
+#
+#	systemd-creds encrypt --name=pkcs11-pin pin.txt /etc/credstore.encrypted/pkcs11-pin
+#
+# - and the unit runs without a PIN if there is none. A systemd older than 254
+# ignores ImportCredential=; give the PIN with LoadCredential= (or
+# LoadCredentialEncrypted=) in the drop-in instead:
+#
+#	LoadCredential=pkcs11-pin:/etc/esdm/pkcs11-pin
+#
+# The daemon runs as the system user esdm-es-pkcs11 (see sysusers.d), a user
+# of its own rather than a DynamicUser=: the ESDM accepts a provider by the
+# user it runs as, which it has to be able to name when it starts. That user
+# needs access to the token:
+#
+# - A smartcard or USB token is reached through pcscd, whose polkit rules
+#   have to let the user use it (actions org.debian.pcsc-lite.access_pcsc and
+#   org.debian.pcsc-lite.access_card).
+# - A SoftHSM token is a directory of files, which the user has to be allowed
+#   to read and write - e.g. SupplementaryGroups=softhsm in the drop-in, where
+#   the token directory belongs to that group. Its default token directory
+#   /var/lib/softhsm is writable below.
+# - A module reaching its device directly, rather than through pcscd, needs
+#   PrivateDevices=no and a DeviceAllow= for the device; a network HSM needs
+#   PrivateNetwork=no and RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6.
+
+[Unit]
+Description=ESDM PKCS#11 entropy source
+Documentation=man:esdm-es-pkcs11(8)
+
+# Started together with the ESDM, the daemon has the token ready for its
+# initial seeding. An ordering only: the ESDM reads the daemon again on its
+# own whenever it comes later or is restarted, and does without it meanwhile.
+Before=esdm-server.service
+
+# A smartcard is reached through pcscd, activated by its socket
+After=pcscd.socket
+
+[Service]
+@SERVICE_TYPE@
+ExecStart=@PATH@/esdm-es-pkcs11 --socket /run/esdm-es-pkcs11/esdm-es-pkcs11.socket -vvv $ESDM_ES_PKCS11_OPTIONS
+User=esdm-es-pkcs11
+Group=esdm-es-pkcs11
+# The socket goes into a directory of the daemon's own, which the ESDM, running
+# as nobody, can traverse. The daemon serves the ESDM and root only, so the
+# socket itself is open to everybody (--mode 0666, --client_uid nobody).
+RuntimeDirectory=esdm-es-pkcs11
+RuntimeDirectoryMode=0755
+ImportCredential=pkcs11-pin
+Restart=on-failure
+RestartSec=5s
+# Ready once the module was loaded and the token looked for, which a module
+# that hangs must not hold the ESDM ordered after it up for long
+TimeoutStartSec=20s
+
+AmbientCapabilities=
+CapabilityBoundingSet=
+DevicePolicy=closed
+IPAddressDeny=any
+LimitCORE=0
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/softhsm
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

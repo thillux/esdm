@@ -1116,6 +1116,14 @@ The DTLS is provided by the TLS stack of the crypto backend: crypto_backend
 openssl, gnutls or botan. The builtin and the leancrypto backend have none.
 ''')
 
+option('esdm-es-ext', type: 'feature', value: 'enabled',
+       description: '''Enable the external entropy source library
+
+libesdm_es_ext and its header esdm_es_ext.h are what an external entropy
+source is developed against: the callbacks of a source, the provider server
+serving them on a Unix domain socket the ESDM connects to (es_ext), and the
+provider program around it - a program serving a source is its callbacks and
+a main() calling esdm_es_ext_provider_main(). See libesdm_es_ext(3).''')
 
 # WARNING: handle all of these options with care as they may lead to an increased
 # number of failed RPC replies to the client without random data or higher load

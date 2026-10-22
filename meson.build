@@ -200,6 +200,18 @@ include_dirs_client = include_directories([ 'common',
 					    'service-rpc/client' ])
 dependencies_client = dependencies
 
+# The external entropy source library needs the common code and the socket
+# creation of the servers - see es-ext/meson.build.
+include_dirs_es_ext = include_directories([ 'common',
+					    'common/log',
+					    'common/sys',
+					    'common/testmode',
+					    'common/threading',
+					    'common/tls',
+					    'common/util',
+					    'es-ext',
+					    'service-egd/server' ])
+
 # For the tests looking up symbols with dlsym(3) - in the C library itself
 # since glibc 2.34
 
@@ -365,6 +377,16 @@ else
 	include_dirs_aux_client = []
 endif
 
+if get_option('esdm-es-ext').enabled()
+	subdirs += [ 'es-ext' ]
+endif
+
+# The PKCS#11 entropy source is a provider served by the library of the
+# external entropy sources - see es-ext/meson.build
+if get_option('es_pkcs11').enabled() and get_option('esdm-es-ext').disabled()
+	error('es_pkcs11 builds esdm-es-pkcs11, a provider served by libesdm_es_ext - enable esdm-es-ext as well')
+endif
+
 if get_option('esdm-tool').enabled()
 	subdirs += [ 'frontends/tool' ]
 endif
@@ -392,6 +414,7 @@ testdirs = [
 	'tests/cuse',
 	'tests/egd',
 	'tests/es',
+	'tests/es_ext',
 	'tests/esdm',
 	'tests/getrandom',
 	'tests/kernel-seeder',
