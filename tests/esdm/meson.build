@@ -73,6 +73,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_es_disable_test = executable(
+		'esdm_es_disable_test',
+		[ esdm_ipc_ns, 'esdm_es_disable_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_lib,
+		dependencies: dependencies_server,
+	)
+
 	# Root only: a second uid plays the user racing for the status segment
 	esdm_shm_status_owner_test = executable(
 		'esdm_shm_status_owner_test',
@@ -428,6 +436,7 @@ if get_option('esdm-server').enabled()
 	test('ESDM failed init unwinds', esdm_init_unwind_test)
 
 	test('ESDM API call esdm_status', esdm_status_test)
+	test('ESDM disabled entropy source', esdm_es_disable_test)
 	test('ESDM API call esdm_version', esdm_version_test)
 	test('ESDM status segment of another user', esdm_shm_status_owner_test)
 	# Both draw some 16 MiB in requests of up to 1 MiB. With the reseeding

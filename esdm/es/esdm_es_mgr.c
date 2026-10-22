@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 #include "build_bug_on.h"
 #include "cpu_random.h"
 #include "esdm.h"
+#include "esdm_config.h"
 #include "esdm_drng_mgr.h"
 #include "esdm_es_aux.h"
 #include "esdm_es_cpu.h"
@@ -171,6 +173,87 @@ bool esdm_es_name_taken(const char *name, const struct esdm_es_cb *self)
 	}
 
 	return false;
+}
+
+/*************************** Disabled entropy sources *************************/
+
+/*
+ * A disabled source is replaced in the ES table by a stub of its name that
+ * offers nothing, so that none of its callbacks runs and every caller of the
+ * table skips it as it skips an inactive source.
+ */
+static void esdm_es_off_get_ent(struct entropy_es *eb, uint32_t requested_bits,
+				bool allow_cached)
+{
+	(void)requested_bits;
+	(void)allow_cached;
+	memset_secure(eb, 0, sizeof(*eb));
+}
+
+static uint32_t esdm_es_off_curr_entropy(uint32_t requested_bits)
+{
+	(void)requested_bits;
+	return 0;
+}
+
+static uint32_t esdm_es_off_max_entropy(void)
+{
+	return 0;
+}
+
+static void esdm_es_off_state(struct json_object *obj)
+{
+	json_object_object_add(obj, "disabled", json_object_new_boolean(true));
+}
+
+static void esdm_es_off_reset(void)
+{
+}
+
+static bool esdm_es_off_active(void)
+{
+	return false;
+}
+
+static int esdm_es_off_selftest(void)
+{
+	return 0;
+}
+
+static struct esdm_es_cb esdm_es_off[esdm_ext_es_last];
+
+DSO_PUBLIC
+int esdm_config_es_disable(const char *name)
+{
+	unsigned int i;
+
+	if (!name)
+		return -EINVAL;
+
+	for_each_esdm_es (i) {
+		if (strcasecmp(esdm_es[i]->name, name))
+			continue;
+		/* It holds what is written to the ESDM and the startup seed */
+		if (i == esdm_ext_es_aux)
+			return -EINVAL;
+
+		esdm_es_off[i] = (struct esdm_es_cb){
+			.name = esdm_es[i]->name,
+			.get_ent = esdm_es_off_get_ent,
+			.curr_entropy = esdm_es_off_curr_entropy,
+			.max_entropy = esdm_es_off_max_entropy,
+			.state = esdm_es_off_state,
+			.reset = esdm_es_off_reset,
+			.active = esdm_es_off_active,
+			.selftest = esdm_es_off_selftest,
+		};
+		esdm_es[i] = &esdm_es_off[i];
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_ES, "ES %s disabled\n",
+			    esdm_es[i]->name);
+		return 0;
+	}
+
+	return -ENOENT;
 }
 
 /******************************** ES monitor **********************************/

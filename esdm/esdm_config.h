@@ -64,6 +64,20 @@ uint32_t esdm_config_es_jent_async_enabled(void);
 void esdm_config_es_jent_async_enabled_set(int setting);
 
 /**
+ * @brief Disable an entropy source of the build
+ *
+ * The source is neither initialized nor asked for entropy, the status lists
+ * it as disabled. To be called before esdm_init(), for good.
+ *
+ * @param [in] name Name of the source as the status shows it, e.g. JitterRNG,
+ *		    in any case
+ *
+ * @return 0 on success, -ENOENT for no such source in the build, -EINVAL for
+ *	   the auxiliary pool, which cannot be disabled
+ */
+int esdm_config_es_disable(const char *name);
+
+/**
  * @brief Obtain the number of Jitter RNG instances refilling its buffer
  *
  * @return The number of instances, each with a collector and a thread of its
