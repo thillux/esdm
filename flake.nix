@@ -944,13 +944,15 @@
                   # SoftHSM as the module of the build, which needs no hardware:
                   # one PKCS#11 test runs esdm-es-pkcs11 without --module.
                   "-Des_pkcs11_module_path=${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
+                  # esdm-es-pcsc, its tests running against a fake pcscd
+                  "-Des_pcsc=enabled"
                 ];
 
               # es_jent_kernel reaches the kernel crypto API through libkcapi.
               # es_pkcs11 needs libp11, which is already among the inputs;
               # softhsm supplies the module it loads plus the softhsm2-util
-              # the test initializes the token with.
-              buildInputs = prev.buildInputs ++ [ pkgs.libkcapi ];
+              # the test initializes the token with. es_pcsc needs pcsc-lite.
+              buildInputs = prev.buildInputs ++ [ pkgs.libkcapi pkgs.pcsclite ];
               nativeCheckInputs = (prev.nativeCheckInputs or [ ]) ++ [
                 pkgs.softhsm
               ];
