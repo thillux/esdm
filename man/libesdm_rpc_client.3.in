@@ -125,9 +125,6 @@ Set the write wakeup threshold.
 .TP
 .BI "int esdm_rpcc_set_min_reseed_secs(unsigned int " seconds ");"
 Set the minimum reseed interval.
-.TP
-.BI "int esdm_rpcc_set_pkcs11_config(const char *" token_label ", const char *" pin ");"
-Set the token label and user PIN of the PKCS#11 entropy source.
 .SS Linux random device IOCTLs
 These mirror the
 .BR ioctl (2)
