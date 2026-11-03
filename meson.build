@@ -149,6 +149,7 @@ include_user_files = [ ]
 include_dirs_server = include_directories([ 'esdm',
 					    'crypto',
 					    'common',
+					    'es-ext',
 					    'service-egd',
 					    'service-egd/server',
 					    'service-rpc/service',
