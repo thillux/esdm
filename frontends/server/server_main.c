@@ -36,6 +36,7 @@
 #include "esdm.h"
 #include "esdm_config.h"
 #include "esdm_egd_server.h"
+#include "esdm_es_jent_kernel.h"
 #include "esdm_rpc_server.h"
 #include "esdm_logger.h"
 #include "helper.h"
@@ -141,7 +142,40 @@ static void usage(void)
 	fprintf(stderr,
 		"\t\t\tresistance generator - the EGD protocol cannot select it\n");
 	fprintf(stderr, "\t\t\tper request, so it gets a socket of its own\n");
+	fprintf(stderr,
+		"\t   --es_jent_kernel_name <NAME>\tRead the kernel crypto API RNG\n");
+	fprintf(stderr,
+		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
+	fprintf(stderr,
+		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
 	exit(1);
+}
+
+/*
+ * The kernel crypto API RNG of the kernel Jitter RNG source, in place of the
+ * one the build names (es_jent_kernel_name).
+ */
+static void set_es_jent_kernel_name(const char *name)
+{
+	int ret;
+
+	if (name[0] == '\0') {
+		fprintf(stderr,
+			"The kernel Jitter RNG name must not be empty\n");
+		exit(1);
+	}
+
+	ret = esdm_es_jent_kernel_set_name(name);
+	if (ret == -ENOENT) {
+		fprintf(stderr,
+			"The kernel Jitter RNG entropy source is not part of this build (meson option es_jent_kernel)\n");
+		exit(1);
+	}
+	if (ret) {
+		fprintf(stderr, "Cannot use the kernel RNG %s: %s\n", name,
+			strerror(-ret));
+		exit(1);
+	}
 }
 
 static void parse_opts(int argc, char *argv[])
@@ -171,6 +205,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "egd_socket", 1, 0, 0 },
 			{ "egd_socket_pr", 1, 0, 0 },
 			{ "es_jent_instances", 1, 0, 0 },
+			{ "es_jent_kernel_name", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -269,6 +304,10 @@ static void parse_opts(int argc, char *argv[])
 				/* es_jent_instances */
 				esdm_config_es_jent_instances_set(
 					(uint32_t)strtoul(optarg, NULL, 10));
+				break;
+			case 19:
+				/* es_jent_kernel_name */
+				set_es_jent_kernel_name(optarg);
 				break;
 
 			default:

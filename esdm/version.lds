@@ -133,6 +133,12 @@ LIBESDM_PRIVATE_1.0 {
 		esdm_jent_status;
 
 		/*
+		 * esdm_es_jent_kernel.h - the kernel RNG the server sets from
+		 * its command line. Only built when es_jent_kernel is enabled.
+		 */
+		esdm_es_jent_kernel_set_name;
+
+		/*
 		 * esdm_es_pkcs11.h - the token configuration the server sets
 		 * from its RPC handler. Only built when es_pkcs11 is enabled;
 		 * the linker is asked for --undefined-version so naming them
