@@ -23,8 +23,9 @@
 #define _ESDM_XOF_H
 
 /*
- * The kernel module esdm_es (kernel/esdm_es) operates the XDRBG-256 of
- * esdm_xdrbg.c on such an XOF, the SHAKE256 of the kernel.
+ * Shared by the ESDM and the kernel module esdm_es (kernel/esdm_es), which
+ * both operate the XDRBG-256 of esdm_xdrbg.c on such an XOF - the crypto
+ * backend's SHAKE256 in the ESDM, the kernel's in the module.
  */
 
 #ifdef __KERNEL__
@@ -40,7 +41,8 @@ extern "C" {
 
 /**
  * struct esdm_xof_cb - cryptographic callback functions defining SHAKE256,
- *			the extendable-output function the XDRBG-256 is built on
+ *			the extendable-output function the XDRBG-256 operating
+ *			the auxiliary pool is built on
  * @xof_name		Name of the XOF
  * @xof_init:		Start a new message, discarding the previous one
  *			xof: is pointer to data structure allocated with

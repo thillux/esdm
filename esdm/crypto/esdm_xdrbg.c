@@ -20,7 +20,7 @@
  */
 
 /*
- * The kernel module esdm_es compiles this file, with the environment
+ * The kernel module esdm_es compiles this file as well, with the environment
  * esdm_portable.h provides there.
  */
 #include "esdm_portable.h"

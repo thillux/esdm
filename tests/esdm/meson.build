@@ -207,6 +207,26 @@ if get_option('esdm-server').enabled()
 	test('ESDM asynchronous reseed worker', esdm_reseed_worker_test,
 		timeout: 120)
 
+	esdm_aux_xdrbg_test = executable(
+		'esdm_aux_xdrbg_test',
+		[ esdm_ipc_ns, 'esdm_aux_xdrbg_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM aux pool XDRBG-256', esdm_aux_xdrbg_test)
+
+	esdm_aux_xof_failure_test = executable(
+		'esdm_aux_xof_failure_test',
+		[ esdm_ipc_ns, 'esdm_aux_xof_failure_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM aux pool XOF failure', esdm_aux_xof_failure_test)
+
 	# Sits out a reseed interval, so it needs more than the default timeout
 	# of 30 seconds only if the machine is loaded - keep some headroom.
 	test('ESDM security - Jitter RNG as the only credited source',

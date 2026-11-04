@@ -30,7 +30,7 @@
 
 /*
  * ESDM_DRNG_INIT_SEED_SIZE_BYTES: in the kernel module esdm_es, which
- * compiles esdm_xdrbg.c, the one of its own esdm_definitions.h
+ * compiles esdm_xdrbg.c as well, the one of its own esdm_definitions.h
  */
 #include "esdm_definitions.h"
 #include "esdm_xof.h"
@@ -42,8 +42,9 @@ extern "C" {
 /*
  * XDRBG-256 (J. Kelsey, S. Lucks, S. Mueller: XDRBG: A Proposed Deterministic
  * Random Bit Generator Based on Any XOF, IACR ToSC 2024(1)): the XDRBG over
- * SHAKE256 with a state V of 64 bytes, as the kernel module esdm_es operates
- * the entropy pools of its interrupt and scheduler entropy sources.
+ * SHAKE256 with a state V of 64 bytes, as the entropy pools are operated
+ * with - the auxiliary pool and the conditioning pool of the eBPF entropy
+ * sources.
  *
  *	instantiate:	V = SHAKE256(seed || encode(alpha, 0), 64)
  *	reseed:		V = SHAKE256(V || seed || encode(alpha, 1), 64)
@@ -58,8 +59,10 @@ extern "C" {
  * gives the backtracking resistance; a single unknown input after an
  * extraction suffices for the prediction resistance of the next one.
  *
- * The SHAKE256 is esdm_default_xof_cb, the kernel's in the module. The caller
- * serializes the calls on one XDRBG.
+ * The SHAKE256 is esdm_default_xof_cb: the one of the crypto backend, or the
+ * kernel's in the kernel module esdm_es, whose interrupt and scheduler
+ * entropy sources condition their time stamps with this XDRBG-256 as well.
+ * The caller serializes the calls on one XDRBG.
  */
 
 /* Size of the state V, which is the most entropy a pool holds */
