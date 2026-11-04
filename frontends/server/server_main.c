@@ -111,6 +111,11 @@ static void usage(void)
 	fprintf(stderr,
 		"\t   --jent_block_disable\tDisable Jitter RNG block collection\n");
 	fprintf(stderr,
+		"\t   --es_jent_instances <N>\tRefill the Jitter RNG buffer with N\n");
+	fprintf(stderr,
+		"\t\t\tcollectors, each in a thread of its own (default %u)\n",
+		ESDM_JENT_INSTANCES);
+	fprintf(stderr,
 		"\t-S --syslog\tLog to syslog instead of stdout/stderr\n");
 	fprintf(stderr,
 		"\t-P --raise_sched_priority\tRaise scheduling priority/nice level\n");
@@ -165,6 +170,7 @@ static void parse_opts(int argc, char *argv[])
 			{ "pid_namespace", 0, 0, 0 },
 			{ "egd_socket", 1, 0, 0 },
 			{ "egd_socket_pr", 1, 0, 0 },
+			{ "es_jent_instances", 1, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 		c = getopt_long(argc, argv, "hvp:u:fisSPg:mMe:E:", opts,
@@ -258,6 +264,11 @@ static void parse_opts(int argc, char *argv[])
 				/* egd_socket_pr */
 				if (esdm_egd_server_enable_pr(optarg))
 					exit(1);
+				break;
+			case 18:
+				/* es_jent_instances */
+				esdm_config_es_jent_instances_set(
+					(uint32_t)strtoul(optarg, NULL, 10));
 				break;
 
 			default:
