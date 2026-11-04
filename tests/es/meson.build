@@ -191,6 +191,21 @@ if get_option('es_irq_ebpf').enabled()
 	test('ES Interrupt eBPF', es_irq_ebpf_tester, timeout: 120)
 endif
 
+if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
+	# The conditioning pool is internal to the glue, which the test
+	# compiles in - see the file header.
+	es_ebpf_pool_tester = executable(
+		'es_ebpf_pool_tester',
+		[ esdm_ipc_ns, 'es_ebpf_pool_test.c' ],
+		dependencies: dependencies_server,
+		include_directories: [ include_dirs_server,
+				       include_directories('../common') ],
+		link_with: esdm_static_lib,
+	)
+
+	test('ES eBPF conditioning pool', es_ebpf_pool_tester)
+endif
+
 if get_option('es_pkcs11').enabled()
 	es_pkcs11_tester = executable(
 		'es_pkcs11_tester',
