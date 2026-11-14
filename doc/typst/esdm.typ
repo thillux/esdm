@@ -3,7 +3,7 @@
 #show: esdm-doc.with(
   title: [Entropy Source and DRNG Manager],
   author: [Stephan Müller \<smueller\@chronox.de\>],
-  date: [February 7, 2024],
+  date: [ESDM 1.2.4 \ November 14, 2026],
   abstract: [
     Almost all parts of cryptography rest on a random number generator
     which produces data that are indistinguishable from a perfect generator.
@@ -16,7 +16,8 @@
     Manager (ESDM) provides a flexible and extensible framework. The ESDM
     also provides a set of well-known interfaces: an API and ABI compliant
     drop-in replacement for Linux /dev/random, /dev/urandom and
-    getrandom(2) system call.
+    getrandom(2) system call as well as for an Entropy Gathering Daemon
+    (EGD).
   ],
 )
 
