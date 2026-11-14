@@ -1,0 +1,49 @@
+@startuml
+' Figure 2.8: Auxiliary Pool Processing
+' The auxiliary pool is a hash state; user space inserts three buffers.
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #000000
+skinparam ActivityBorderColor #000000
+skinparam ActivityBackgroundColor #EC9BA4
+skinparam ActivityDiamondBackgroundColor #FFFFFF
+skinparam ActivityDiamondBorderColor #000000
+skinparam NoteBackgroundColor #EC9BA4
+skinparam NoteBorderColor #000000
+
+:ESDM lib start; <<#FFFFFF>>
+:Hash Init;
+note left #FFFFFF: Auxiliary Pool
+repeat
+  :Hash Update;
+  note right
+    User Space
+    Writes
+    IOCTL
+  end note
+  :Hash Update;
+  note right
+    User Space
+    Writes
+    IOCTL
+  end note
+  -[dotted]-> ...;
+  :Hash Update;
+  note right
+    User Space
+    Writes
+    IOCTL
+  end note
+  :Hash Final;
+  note right #FFFFFF
+    |<#66FFFF>   |<#FFB66C>   |<#AFD095>   |<#FFFFA6>   |<#FF4000>   |<#6B5E9B>   |<#EC9BA4>   |<#E8F2A1> |
+  end note
+  :Hash Init;
+  :Hash Update;
+  note right #FFFFFF
+    |<#66FFFF>   |<#FFB66C>   |<#AFD095>   |<#FFFFA6>   |<#FF4000>   |<#6B5E9B>   |<#EC9BA4>   |<#E8F2A1> |
+  end note
+repeat while (...)
+detach
+@enduml
