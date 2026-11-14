@@ -1,0 +1,37 @@
+@startuml
+' Figure 2.7: Scheduler per-CPU Entropy Pool Management
+' Life cycle of the per-CPU entropy pool (a hash state) of the scheduler ES.
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #000000
+skinparam ActivityBorderColor #000000
+skinparam ActivityBackgroundColor #66FFFF
+skinparam ActivityDiamondBackgroundColor #FFFFFF
+skinparam ActivityDiamondBorderColor #000000
+skinparam NoteBackgroundColor #FFFFFF
+skinparam NoteBorderColor #000000
+
+:Kernel Start; <<#FFFFFF>>
+:Hash Init;
+note left: Entropy Pool
+repeat
+  :Hash Update;
+  note right
+    Filled Collection Pool Instance
+    |<#66FFFF>| |<#66FFFF>| |<#66FFFF>| |<#66FFFF>      ...      |<#66FFFF>| |<#66FFFF>| |<#66FFFF>| |
+  end note
+  :Hash Final;
+  :Hash Init;
+  note right
+    |<#66FFFF> Digest CPU0 | CPU 0 |
+     
+    |<#66FFFF>   |<#FFB66C>   |<#AFD095>   |<#FFFFA6>   |<#FF4000>   |<#6B5E9B>   |<#EC9BA4>   |<#E8F2A1> |
+     
+    |<#66FFFF> Digest CPU1 | CPU 1 |
+    |<#66FFFF> Digest CPUn | CPU n |
+  end note
+  :Hash Update;
+repeat while (...)
+detach
+@enduml
