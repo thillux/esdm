@@ -1240,6 +1240,37 @@
                       assert bad not in kmsg, f"dmesg holds {bad}:\n{kmsg}"
             '';
           };
+
+        # What doc/typst/Makefile runs: drawio-headless is drawio under
+        # xvfb-run, which works in the sandbox.
+        docTools = [
+          pkgs.drawio-headless
+          pkgs.gnumake
+          pkgs.plantuml
+          pkgs.typst
+        ];
+        # Only these fonts and the ones typst carries (New Computer Modern of
+        # the design document, DejaVu Sans Mono), so that a build looks the
+        # same everywhere: Source Sans 3 and Source Code Pro of the slides -
+        # their static OpenType fonts, typst renders the weights of variable
+        # ones wrong -, Liberation Sans of the figures and the plots.
+        docFontDirs = [
+          "${pkgs.source-sans}/share/fonts/opentype"
+          "${pkgs.source-code-pro}/share/fonts/opentype"
+          "${pkgs.liberation_ttf}/share/fonts"
+        ];
+        docFontEnv = ''
+          export TYPST_FONT_PATHS="${lib.concatStringsSep ":" docFontDirs}"
+          export TYPST_IGNORE_SYSTEM_FONTS=true
+          export FONTCONFIG_FILE="${pkgs.makeFontsConf { fontDirectories = docFontDirs; }}"
+        '';
+        docEnv = ''
+          export HOME="$TMPDIR"
+          export XDG_CACHE_HOME="$TMPDIR"
+          export SOURCE_DATE_EPOCH="${toString self.lastModified}"
+          export DRAWIO=drawio
+          ${docFontEnv}
+        '';
       in
       {
         # nix fmt
@@ -2222,6 +2253,32 @@
                 cp $run/testlog.junit.xml $doc/
               '';
 
+          # The design document and the slide deck from their Typst sources
+          # in doc/typst, with doc/typst/Makefile: the figures are rendered
+          # from their draw.io and PlantUML sources here.
+          #
+          #   nix build .#esdm-doc
+          #   xdg-open result/share/doc/esdm/esdm.pdf
+          esdm-doc = pkgs.stdenvNoCC.mkDerivation {
+            pname = "esdm-doc";
+            inherit (self.packages.${system}.esdm) version;
+            src = lib.fileset.toSource {
+              root = ./doc;
+              fileset = ./doc/typst;
+            };
+            nativeBuildInputs = docTools;
+            buildPhase = ''
+              runHook preBuild
+              ${docEnv}
+              cores=$NIX_BUILD_CORES
+              [ "$cores" -gt 0 ] || cores=$(nproc)
+              make -C typst -j"$cores" OUT="$out/share/doc/esdm"
+              runHook postBuild
+            '';
+            dontInstall = true;
+            meta.description = "ESDM design document and slide deck";
+          };
+
           esdm-coverage = coverageOf "esdm-coverage" self.packages.${system}.esdm;
 
           # The same, for the build carrying the eBPF entropy sources. A separate
@@ -2432,6 +2489,14 @@
               clang-tools
               sp800-90b-entropyassessment
             ];
+          };
+
+          # The tools and fonts of doc/typst/Makefile, the same as in
+          # nix build .#esdm-doc:
+          #   nix develop .#doc -c make -C doc/typst
+          doc = pkgs.mkShell {
+            packages = docTools;
+            shellHook = docFontEnv;
           };
         };
 
