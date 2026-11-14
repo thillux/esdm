@@ -1249,6 +1249,13 @@
           pkgs.plantuml
           pkgs.typst
         ];
+        # What make diff runs on top: it extracts the old version with git
+        # archive, doc/tools/typstdiff.py merges both.
+        docDiffTools = [
+          pkgs.git
+          pkgs.gnutar
+          pkgs.python3
+        ];
         # Only these fonts and the ones typst carries (New Computer Modern of
         # the design document, DejaVu Sans Mono), so that a build looks the
         # same everywhere: Source Sans 3 and Source Code Pro of the slides -
@@ -2495,9 +2502,37 @@
           # nix build .#esdm-doc:
           #   nix develop .#doc -c make -C doc/typst
           doc = pkgs.mkShell {
-            packages = docTools;
+            packages = docTools ++ docDiffTools;
             shellHook = docFontEnv;
           };
+        };
+
+        # make diff of doc/typst/Makefile with the tools and fonts of
+        # nix build .#esdm-doc: the design document and the slide deck with
+        # the changes since a git revision marked. It needs the history of
+        # the checkout it is run in, so it is not a package:
+        #   nix run .#esdm-doc-diff -- doc-1.2.3 [make variables, e.g. OUT=dir]
+        apps.esdm-doc-diff = {
+          type = "app";
+          program = lib.getExe (
+            pkgs.writeShellApplication {
+              name = "esdm-doc-diff";
+              runtimeInputs = docTools ++ docDiffTools;
+              text = ''
+                if [ $# -lt 1 ]; then
+                  echo "usage: esdm-doc-diff <git revision> [make variables]" >&2
+                  exit 2
+                fi
+                rev=$1
+                shift
+                top=$(git rev-parse --show-toplevel)
+                export DRAWIO=drawio
+                ${docFontEnv}
+                exec make -C "$top/doc/typst" diff REV="$rev" "$@"
+              '';
+            }
+          );
+          meta.description = "ESDM documentation with the changes since a git revision marked";
         };
 
         # shortcut for development - track the rolling "latest" kernel so this
