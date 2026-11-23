@@ -216,8 +216,12 @@ void esdm_ebpf_fill_config(struct esdm_ebpf_es *es,
 	#endif
 	uint32_t rate = es->entropy_rate(), osr = esdm_ebpf_osr(es);
 
-	/* Health tests are only requested in FIPS or NTG.1 mode */
-	es->health_enabled = !!esdm_config_fips_enabled() || ntg1_seeding;
+	/*
+	 * Health tests are requested in every mode an assessment is claimed
+	 * for: FIPS, SP800-90C (which FIPS implies) and NTG.1.
+	 */
+	es->health_enabled = !!esdm_config_fips_enabled() ||
+			     !!esdm_config_sp80090c_compliant() || ntg1_seeding;
 
 	cfg->health_enabled = es->health_enabled;
 	esdm_ebpf_health_cutoffs(osr, cfg);
