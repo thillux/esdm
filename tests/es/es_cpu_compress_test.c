@@ -152,10 +152,10 @@ static void check_digest_sized_request(void)
  * with.
  *
  * The mechanism rather than the compliance claim is what is checked for:
- * esdm_sp80090c_compliant() answers no in a build to one of the DRG classes
- * even where the oversampling is applied. It cannot be switched on at all in a
- * build that left it out at compile time - the FIPS, SP800-90C and DRG.3 builds
- * are the ones that cover this half.
+ * esdm_sp80090c_compliant() answers no in a build to DRG.3 even where the
+ * oversampling is applied. It cannot be switched on at all in a build that left
+ * it out at compile time - the FIPS, SP800-90C, DRG.3 and DRG.4 builds are the
+ * ones that cover this half.
  */
 static void check_oversampling(void)
 {

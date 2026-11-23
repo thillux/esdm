@@ -130,8 +130,9 @@ data are four events - and the oversampling rate is `ceil(1 / H)`.
 The two have to agree. The accounting credits the smaller of what each yields,
 `min(rate / 4, 1 / OSR)` bits per event, and `OSR` is a whole number: an event
 measured above 1 bit cannot be claimed as such, because `OSR = 1` is the most
-precise setting there is. `analyze_non_iid.sh` caps its suggestion at
-`4 / OSR` accordingly.
+precise setting there is: configure an entropy rate of at most `4 / OSR`.
+`analyze_non_iid.sh` only reports the estimate - the derivation is left to
+the reader.
 
 Use the **minimum** across all measured environments, CPUs, bit widths and
 load profiles, and configure it at build time

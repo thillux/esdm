@@ -145,7 +145,7 @@ if get_option('es_irq').enabled() or get_option('es_sched').enabled()
 	)
 
 	test('ES kernel configuration per descriptor', es_kernel_conf_tester,
-	     timeout: 120)
+	     timeout: 120, suite: 'es')
 endif
 
 # The following hardware/service-backed sources may be absent on the test

@@ -123,10 +123,11 @@ from the jitter RNG alone, once it delivered its 240 bits of entropy. The
 requirement is bound to the jitter RNG: another entropy source delivering the
 same amount of entropy does not replace it.
 
-The compile time option of `ais2031_drg4` is independent of it and caps the
-request size based reseeding limits to the values required by DRG.4.10 of the
-same standard, i.e. a reseed is attempted after 2**16 output bits and the fully
-seeded state is lost after 2**17 output bits without a successful reseed.
+The compile time option of `ais2031_drg4` is independent of it. It applies the
+entropy source oversampling of DRG.3 and caps the request size based reseeding
+limits to the values required by DRG.4.10 of the same standard, i.e. a reseed
+is attempted after 98304 (three quarters of 2**17) output bits and no request
+is started after 2**17 output bits without a successful reseed.
 
 ## AIS 20/31 (2011) Compliance
 

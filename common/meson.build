@@ -36,11 +36,14 @@ endif
 # rather than the option; the thresholds further down are left to the option, so
 # that a DRG.3 build does not pick them up.
 #
+# DRG.4 satisfies DRG.3 and therefore applies the same oversampling, with the
+# reseeding limits further down on top.
+#
 # fips140 implies the SP800-90C compliance mode, which a FIPS kernel turns on at
 # runtime - and so the build adjustments of sp80090c: the reseeding limits
 # further down.
 sp80090c = get_option('sp80090c') or get_option('ais2031_drg3') or \
-	   get_option('fips140')
+	   get_option('ais2031_drg4') or get_option('fips140')
 
 conf_data.set('ESDM_OVERSAMPLE_ENTROPY_SOURCES', sp80090c)
 conf_data.set('ESDM_AIS2031_NTG1_SEEDING_STRATEGY', get_option('ais2031_ntg1'))

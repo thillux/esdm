@@ -416,8 +416,9 @@ int esdm_sp80090c_compliant(void)
 	 * with it. DRG.4 satisfies DRG.3 and so answers esdm_drg3_compliant()
 	 * too, but the two options cannot both be set - which is what makes
 	 * "satisfies DRG.3 and is not DRG.4" the test for the DRG.3 option
-	 * alone. A DRG.4 build applies no oversampling of its own and answers
-	 * here whenever SP800-90C was configured next to it.
+	 * alone. A DRG.4 build applies the oversampling as well as the
+	 * reseeding limits, i.e. everything SP800-90C asks for, and answers
+	 * here like an SP800-90C build.
 	 */
 	if (esdm_drg3_compliant() && !esdm_drg4_compliant())
 		return false;
@@ -811,7 +812,7 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 		 *
 		 * The PR DRNG should be a RBG3(RS) if properly seeded, therefore
 		 * oversample ES by 64 bit, when seeding this DRNG instance.
-		 * See SP800-90C sec. 6.5.1.2.
+		 * See SP800-90C sec. 6.5.2 requirement 1.
 		 */
 		esdm_get_seed_buffers(&seedbuf, &addtl, requested_bits, forced);
 
@@ -1941,7 +1942,7 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 
 			/*
 			 * Output at most the fresh entropy less the 64 bits of
-			 * oversampling of SP800-90C 6.5.1.2 RBG3(RS), capped at
+			 * oversampling of SP800-90C 6.5.2 RBG3(RS), capped at
 			 * the security strength. Stop below a full byte:
 			 * drng_generate(0) fails, discarding earlier output.
 			 */

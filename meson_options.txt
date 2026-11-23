@@ -676,12 +676,16 @@ limits belong to DRG.4.
 Setting 'sp80090c' alongside this option does not bring the
 limits back.
 
-Mutually exclusive with 'ais2031_drg4', whose whole content is
-the reseeding limits this option leaves out.
+Mutually exclusive with 'ais2031_drg4', which adds the
+reseeding limits this option leaves out.
 ''')
 
 option('ais2031_drg4', type: 'boolean', value: false,
-       description:'''German AIS 20/31 3.0 (2024) DRG.4 reseeding limits.
+       description:'''German AIS 20/31 3.0 (2024) DRG.4 class.
+
+DRG.4 satisfies DRG.3: this option applies the entropy source
+oversampling of 'ais2031_drg3' and in addition the request
+size based reseeding limits of DRG.4.
 
 When enabling this option, the request size based reseeding
 limits are capped to the values required by DRG.4.10 of
@@ -754,9 +758,10 @@ option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
        DRG.4.10 of AIS 20/31 Version 3.0. E.g. 65536 (2**16) and
        'drng_max_reseed_bits' to 131072 (2**17).
 
-       Both specified limits of 2**17 and 2**16 are applied unless smaller
-       values are configured when the options sp80090c and/or ais2031_drg4
-       are defined.
+       When the options sp80090c, fips140 and/or ais2031_drg4 are defined,
+       'drng_max_reseed_bits' is capped at 131072 (2**17) and this option
+       at three quarters of it, 98304 bits, unless smaller values are
+       configured. ais2031_drg3 leaves both uncapped.
        ''')
 
 option('drng_max_reseed_bits', type: 'integer', value: 0xffffffff,
