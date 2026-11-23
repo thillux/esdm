@@ -1904,20 +1904,17 @@
               );
           });
 
-          # leancrypto, not in nixpkgs, built as the CI builds it. The patch
-          # (not upstream yet) keeps lc_free() from passing memfd_secret memory
-          # to free() after an EMFILE cleared the process-wide flag.
+          # leancrypto, not in nixpkgs, built as the CI builds it.
           leancrypto = withFipsHmac (
             pkgs.stdenv.mkDerivation (finalAttrs: {
               pname = "leancrypto";
-              version = "1.8.0";
+              version = "1.9.1";
               src = pkgs.fetchFromGitHub {
                 owner = "smuellerDD";
                 repo = "leancrypto";
                 tag = "v${finalAttrs.version}";
-                hash = "sha256-76qzK2gDFqfIT2CJkHHmVYcM/bPCQsjUaW8kxqiK9nM=";
+                hash = "sha256-7+GWgGJsclKUegFKByVIlQ+71AwRljUwQrsqA5r2iZQ=";
               };
-              patches = [ ./nix/leancrypto-memfd-secret-free.patch ];
               # The header generation and checks the build runs
               postPatch = ''
                 patchShebangs addon

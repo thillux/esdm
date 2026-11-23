@@ -12,7 +12,7 @@ env:
   # Not every tested Ubuntu ships botan-3 >= 3.2, none packages leancrypto:
   # both are built from source and cached, one version on every runner.
   BOTAN_VERSION: "3.12.0"
-  LEANCRYPTO_VERSION: "1.8.0"
+  LEANCRYPTO_VERSION: "1.9.1"
   # The GnuTLS backend drives GnuTLS' SP800-90A CTR DRBG through
   # drbg_aes_init/reseed/generate. Those live in the GNUTLS_FIPS140_3_4 version
   # node and are only exported by a build configured with
@@ -195,9 +195,6 @@ jobs:
         wget -O leancrypto.tar.gz https://github.com/smuellerDD/leancrypto/archive/refs/tags/v${LEANCRYPTO_VERSION}.tar.gz
         tar xfz leancrypto.tar.gz
         cd leancrypto-${LEANCRYPTO_VERSION}
-        # lc_free() after a failed memfd_secret crashes the RPC server
-        # robustness test; not upstream yet, the flake applies it too.
-        patch -p1 < "${GITHUB_WORKSPACE}/nix/leancrypto-memfd-secret-free.patch"
         # ESDM only links the library: skip leancrypto's own test suite and its
         # helper apps, which dominate the build time here. The algorithm
         # self-tests (enable_selftests) stay on - those run inside the library.
