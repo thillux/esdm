@@ -160,7 +160,11 @@ void esdm_gcd_add_value(u64 time)
 
 		/*  Adjust all deltas by the observed (small) common factor. */
 		esdm_gcd_set_check(gcd);
-		atomic_set(&esdm_gcd_history_ptr, 0);
+		/*
+		 * Back to the initial value, so that a recalculation after a
+		 * reset uses the full window again.
+		 */
+		atomic_set(&esdm_gcd_history_ptr, -1);
 	}
 }
 
@@ -172,15 +176,23 @@ static void esdm_time_process_common(struct esdm_es_ring *ring,
 	enum esdm_health_res health_test;
 	u64 *last_timestamp = &this_cpu_ptr(ring->cpu)->last_timestamp;
 	u64 delta = time - *last_timestamp;
+	bool gcd_switch;
 
 	if (*last_timestamp == 0) {
 		*last_timestamp = time;
 		return;
 	}
 
+	/*
+	 * When the GCD becomes known, the preceding time stamp of this CPU is
+	 * still undivided and the first divided one lies below it: that delta
+	 * spans the switch and is no time difference. It is processed as usual
+	 * but not recorded as raw noise source data.
+	 */
+	gcd_switch = time < *last_timestamp;
 	*last_timestamp = time;
 
-	if (raw_hires_store(delta))
+	if (!gcd_switch && raw_hires_store(delta))
 		return;
 
 	health_test = esdm_health_test(time, es);
