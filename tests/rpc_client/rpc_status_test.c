@@ -56,11 +56,11 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	if (!strstr(buf, "DRNG name") ||
-	    !strstr(buf, "ESDM security strength") ||
-	    !strstr(buf, "Number of DRNG instances") ||
-	    !strstr(buf, "Standards compliance") ||
-	    !strstr(buf, "ESDM fully seeded")) {
+	if (!strstr(buf, "\nDRNG name: ") ||
+	    !strstr(buf, "\nSecurity strength bits: ") ||
+	    !strstr(buf, "\nDRNG instances: ") ||
+	    !strstr(buf, "\nStandards compliance: ") ||
+	    !strstr(buf, "\nFully seeded: ")) {
 		printf("Unexpected status: %s\n", buf);
 		ret = 1;
 		goto out;

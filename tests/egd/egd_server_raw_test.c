@@ -401,6 +401,15 @@ static int test_esdm_seed(void)
 	uint8_t seed[64];
 	unsigned int i, round;
 
+#ifdef ESDM_AIS2031_NTG1_SEEDING_STRATEGY
+	/*
+	 * The NTG.1 seeding strategy wants two entropy sources with 240 bits
+	 * each: the auxiliary pool alone is one. The Jitter RNG, taken out of
+	 * the picture by test_esdm_disable_es(), is the second.
+	 */
+	esdm_config_es_jent_entropy_rate_set(256);
+#endif
+
 	for (round = 0; round < TEST_SEED_ROUNDS; round++) {
 		if (esdm_state_operational())
 			return 0;

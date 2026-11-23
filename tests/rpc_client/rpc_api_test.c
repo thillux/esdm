@@ -72,8 +72,8 @@ static void test_status(void)
 	esdm_invoke(esdm_rpcc_status(buf, sizeof(buf)));
 	CHECK_EQ(ret, 0);
 	CHECK(buf[0] != '\0', "the status report is empty");
-	CHECK(strstr(buf, "ESDM") != NULL,
-	      "the status report does not name the ESDM");
+	CHECK(strstr(buf, "Library version: ") != NULL,
+	      "the status report does not name the library version");
 }
 
 static void test_status_json(void)
