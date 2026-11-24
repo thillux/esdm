@@ -109,7 +109,7 @@
 #define ESDM_EBPF_HIGHRES_MAX_NS 1000
 
 /* The additional input alpha of the XDRBG of a source, before its name */
-#define ESDM_EBPF_POOL_ALPHA "ESDM eBPF pool "
+#define ESDM_EBPF_POOL_ALPHA "ESDM eBPF pool"
 
 bool esdm_ebpf_btf_available(void)
 {
