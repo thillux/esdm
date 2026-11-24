@@ -841,6 +841,20 @@ int main(int argc, char *argv[])
 				    "Cannot disable core dumps\n");
 			exit(-1);
 		}
+
+		/*
+		 * The privilege drop resets the dumpable flag to
+		 * fs.suid_dumpable, which systemd-coredump sets to 2. A core
+		 * size limit of 0 survives it, and core files and
+		 * systemd-coredump honor it.
+		 */
+		rl.rlim_cur = 0;
+		rl.rlim_max = 0;
+		if (setrlimit(RLIMIT_CORE, &rl) != 0) {
+			esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+				    "Cannot disable core dumps\n");
+			exit(-1);
+		}
 	}
 
 	CKINT(daemon_init());

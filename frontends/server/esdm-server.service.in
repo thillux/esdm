@@ -57,6 +57,9 @@ DevicePolicy=strict
 # esdm-es-pkcs11.service. Unset, it adds nothing.
 ExecStart=@PATH@/esdm-server -f --pid /run/esdm-server.pid --syslog --memlock --keep_ipc -vvv $ESDM_SERVER_OPTIONS
 IPAddressDeny=any
+# No core dump of the secrets: --memlock makes the server non-dumpable, but
+# its privilege drop resets that to fs.suid_dumpable, 2 with systemd-coredump.
+LimitCORE=0
 LimitMEMLOCK=infinity
 # The EGD clients hold their connection open for their entire lifetime, so the
 # server keeps one descriptor per consumer on the system, next to the RPC ones.
