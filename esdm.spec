@@ -207,7 +207,7 @@ This subpackage holds the OpenSSL 3 RAND provider
 
 %files -n %{name}
 %license LICENSE LICENSE.bsd LICENSE.gplv2
-%doc README.md README.usage.md
+%doc README.md
 %{_libdir}/lib%{name}_aux*.so*
 %{_libdir}/lib%{name}-getrandom*.so*
 %{_libdir}/lib%{name}_rpc_client*.so*

@@ -356,10 +356,10 @@ The ESDM consists of the following components:
   property `provider=esdm`.
 
   `libesdm-egd-provider.so` is an alternative to `libesdm-rng-provider.so` that
-  obtains its random numbers over the EGD interface instead (see
-  README.usage.md). It needs nothing but that one socket - no RPC client, no
-  shared memory - which makes it usable where the RPC interface cannot be
-  reached. Its algorithms carry the property `provider=esdm-egd`, so it can be
+  obtains its random numbers over the EGD interface instead (see the chapter
+  "Using the ESDM" of the design document). It needs nothing but that one
+  socket - no RPC client, no shared memory - which makes it usable where the
+  RPC interface cannot be reached. Its algorithms carry the property `provider=esdm-egd`, so it can be
   loaded next to the RPC based ones, and the socket it uses is named with the
   `egd_socket` key of its `openssl.cnf` section. Note that the EGD protocol
   cannot express prediction resistance: a request explicitly asking for it is

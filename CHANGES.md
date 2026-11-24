@@ -92,7 +92,7 @@ tests/es_ebpf_testing
 
 * Add a stress test of the RPC request path under concurrent load, every request carrying an ID the answer has to carry back
 
-* FIPS 140 integrity test: a missing HMAC file is now a failed integrity test rather than a pass; the reference values are written at installation time with esdm-tool (see README.usage.md)
+* FIPS 140 integrity test: a missing HMAC file is now a failed integrity test rather than a pass; the reference values are written at installation time with esdm-tool (see the FIPS 140 configuration in the design document)
 
 * FIPS 140 integrity test: attest the ESDM library as well, not only the executable
 
