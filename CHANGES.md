@@ -167,6 +167,8 @@ the ESDM
 
 * Timeouts, ages and reseed intervals use CLOCK_MONOTONIC_COARSE, saving a clock source read per request - a hypervisor trap in VMs without a vDSO capable clock source
 
+* esdm_cdev: /dev/esdm_pr serves the prediction resistance DRNG without O_SYNC, for the virtio-rng backends of QEMU and Cloud Hypervisor: a non-blocking read gives data or EAGAIN only, and poll() backs off after an empty read
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

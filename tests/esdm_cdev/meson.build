@@ -39,6 +39,10 @@ test('esdm_cdev O_NONBLOCK', esdm_cdev_check,
 test('esdm_cdev poll', esdm_cdev_check,
 	args: [ 'poll' ],
 	suite: 'esdm_cdev')
+test('esdm_cdev /dev/esdm_pr', esdm_cdev_check,
+	args: [ 'pr' ],
+	timeout: 120,
+	suite: 'esdm_cdev')
 test('esdm_cdev writes', esdm_cdev_check,
 	args: [ 'writes' ],
 	suite: 'esdm_cdev')

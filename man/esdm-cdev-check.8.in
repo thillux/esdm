@@ -11,7 +11,8 @@ runs the checks of the
 .I esdm_cdev
 kernel module, which serves
 .IR /dev/esdm_random ,
-.I /dev/esdm_urandom
+.IR /dev/esdm_urandom ,
+.I /dev/esdm_pr
 and
 .I /proc/esdm
 from the ESDM over its EGD socket (see
@@ -66,6 +67,16 @@ has no
 .BR poll ()
 and is readable and writable as any file without one.
 .TP
+.B pr
+.I /dev/esdm_pr
+serves the prediction resistance DRNG without
+.BR O_SYNC :
+blocking reads of up to 64 bytes are random and differ; with
+.BR O_NONBLOCK ,
+a read gives data or EAGAIN and no other error, and
+.BR poll ()
+reports the device readable again within a second.
+.TP
 .B writes
 Writes of nothing up to 300 KiB are taken in full, each in one
 .BR write ().
@@ -105,6 +116,10 @@ waits \- with
 .BR O_NONBLOCK ,
 EAGAIN \- and is not readable for
 .BR poll ().
+.I /dev/esdm_pr
+waits as well, with
+.B O_NONBLOCK
+EAGAIN and nothing else.
 Writes, the ioctls and the files of
 .I /proc/esdm
 fail with ENOTCONN.

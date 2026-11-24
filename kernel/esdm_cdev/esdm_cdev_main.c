@@ -15,8 +15,15 @@
  *  - Opened with O_SYNC, either reads from the prediction resistance DRNG,
  *    which hands out no more than its entropy sources just delivered. Without
  *    O_NONBLOCK, the read waits for the rest. O_DSYNC alone does not.
- *  - Data written to either is mixed into the ESDM's auxiliary pool without
- *    being credited with entropy.
+ *  - /dev/esdm_pr always reads from the prediction resistance DRNG, for
+ *    readers that cannot open with O_SYNC: the virtio-rng backends of QEMU
+ *    and Cloud Hypervisor. QEMU reads with O_NONBLOCK once poll() reports
+ *    the device readable, and aborts on any error but EAGAIN: a non-blocking
+ *    read of it gives data or -EAGAIN only, also while the ESDM cannot be
+ *    reached, and poll() reports it not readable for a while after a read
+ *    found no prediction resistant data, so that QEMU does not spin.
+ *  - Data written to any of them is mixed into the ESDM's auxiliary pool
+ *    without being credited with entropy.
  *  - The ioctls of the kernel's devices: RNDGETENTCNT for everybody, the ones
  *    changing the entropy accounting only for a caller with CAP_SYS_ADMIN.
  *
@@ -68,6 +75,17 @@ static atomic_t esdm_cdev_waiters = ATOMIC_INIT(0);
 
 /* Prediction resistant reads ask again after this long for the rest */
 #define ESDM_CDEV_PR_RETRY_MS 50
+
+/*
+ * poll() of /dev/esdm_pr reports it not readable until this time, in
+ * jiffies, after a read found no prediction resistant data; the wake work
+ * then tells the pollers. Shared by all readers, as the prediction
+ * resistance DRNG of the ESDM is.
+ */
+static unsigned long esdm_cdev_pr_empty_until;
+static DECLARE_WAIT_QUEUE_HEAD(esdm_cdev_pr_wait);
+static void esdm_cdev_pr_wake(struct work_struct *work);
+static DECLARE_DELAYED_WORK(esdm_cdev_pr_wake_work, esdm_cdev_pr_wake);
 
 static void esdm_cdev_watch(struct work_struct *work);
 static DECLARE_DELAYED_WORK(esdm_cdev_watch_work, esdm_cdev_watch);
@@ -138,6 +156,26 @@ static void esdm_cdev_watch(struct work_struct *work)
 				   msecs_to_jiffies(esdm_cdev_watch_ms));
 }
 
+static void esdm_cdev_pr_wake(struct work_struct *work)
+{
+	wake_up_interruptible_poll(&esdm_cdev_pr_wait, EPOLLIN | EPOLLRDNORM);
+}
+
+/* A prediction resistant read got data, or found none */
+static void esdm_cdev_pr_result(bool got)
+{
+	unsigned long tmo = msecs_to_jiffies(ESDM_CDEV_PR_RETRY_MS);
+
+	if (got) {
+		WRITE_ONCE(esdm_cdev_pr_empty_until, jiffies);
+		return;
+	}
+
+	WRITE_ONCE(esdm_cdev_pr_empty_until, jiffies + tmo);
+	if (!READ_ONCE(esdm_cdev_stopping))
+		mod_delayed_work(esdm_cdev_wq, &esdm_cdev_pr_wake_work, tmo);
+}
+
 /*
  * Wait for the ESDM to turn operational after a read found it not, or could
  * not reach it. Returns 0 once it is, or -ERESTARTSYS.
@@ -160,17 +198,19 @@ static int esdm_cdev_wait_operational(void)
 /********************************* Devices ***********************************/
 
 static struct miscdevice esdm_cdev_urandom_dev;
+static struct miscdevice esdm_cdev_pr_dev;
 
 static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 			      size_t count, loff_t *ppos)
 {
 	bool urandom = file->private_data == &esdm_cdev_urandom_dev;
+	bool pr_dev = file->private_data == &esdm_cdev_pr_dev;
 	bool nonblock = file->f_flags & O_NONBLOCK;
 	/*
 	 * O_SYNC is __O_SYNC | O_DSYNC, so a test of O_SYNC would take O_DSYNC
 	 * alone for it. The kernel tells them apart by __O_SYNC, too.
 	 */
-	bool pr = file->f_flags & __O_SYNC;
+	bool pr = pr_dev || (file->f_flags & __O_SYNC);
 	u8 read = pr ? ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK :
 		       (urandom ? ESDM_EGD_CMD_ESDM_READ_UNSEEDED :
 				  ESDM_EGD_CMD_READ_NONBLOCK);
@@ -184,7 +224,7 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 
 	block = kvmalloc(room, GFP_KERNEL);
 	if (!block)
-		return -ENOMEM;
+		return (pr_dev && nonblock) ? -EAGAIN : -ENOMEM;
 
 	while (done < count) {
 		int got;
@@ -222,6 +262,8 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 		 */
 		if (!pr)
 			esdm_cdev_set_operational(got);
+		else
+			esdm_cdev_pr_result(got);
 
 		if (!got) {
 			/* Not operational, or no prediction resistant data */
@@ -259,6 +301,10 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 	if (done)
 		return (ssize_t)done;
 
+	/* /dev/esdm_pr: data or -EAGAIN for a reader that may not wait */
+	if (pr_dev && nonblock && ret != -EFAULT)
+		return -EAGAIN;
+
 	return ret;
 }
 
@@ -284,6 +330,28 @@ static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
 	esdm_cdev_watch_kick();
 
 	return EPOLLOUT | EPOLLWRNORM;
+}
+
+/*
+ * poll() of /dev/esdm_pr: readable once the ESDM is operational, but not for
+ * ESDM_CDEV_PR_RETRY_MS after a read found no prediction resistant data -
+ * QEMU reads at once whenever it is readable. Always writable: writes are
+ * taken whatever the state.
+ */
+static __poll_t esdm_cdev_pr_poll(struct file *file, poll_table *wait)
+{
+	poll_wait(file, &esdm_cdev_wait, wait);
+	poll_wait(file, &esdm_cdev_pr_wait, wait);
+
+	if (!atomic_read(&esdm_cdev_operational)) {
+		esdm_cdev_watch_kick();
+		return EPOLLOUT | EPOLLWRNORM;
+	}
+
+	if (time_before(jiffies, READ_ONCE(esdm_cdev_pr_empty_until)))
+		return EPOLLOUT | EPOLLWRNORM;
+
+	return EPOLLIN | EPOLLRDNORM | EPOLLOUT | EPOLLWRNORM;
 }
 
 /*
@@ -416,6 +484,16 @@ static const struct file_operations esdm_cdev_urandom_fops = {
 	.llseek = noop_llseek,
 };
 
+static const struct file_operations esdm_cdev_pr_fops = {
+	.owner = THIS_MODULE,
+	.read = esdm_cdev_read,
+	.write = esdm_cdev_write,
+	.poll = esdm_cdev_pr_poll,
+	.unlocked_ioctl = esdm_cdev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
+	.llseek = noop_llseek,
+};
+
 static struct miscdevice esdm_cdev_random_dev = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "esdm_random",
@@ -430,12 +508,21 @@ static struct miscdevice esdm_cdev_urandom_dev = {
 	.mode = 0666,
 };
 
+/* As accessible as O_SYNC on the other two, which it equals */
+static struct miscdevice esdm_cdev_pr_dev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "esdm_pr",
+	.fops = &esdm_cdev_pr_fops,
+	.mode = 0666,
+};
+
 /********************************** Module ***********************************/
 
 static void esdm_cdev_watch_stop(void)
 {
 	WRITE_ONCE(esdm_cdev_stopping, true);
 	cancel_delayed_work_sync(&esdm_cdev_watch_work);
+	cancel_delayed_work_sync(&esdm_cdev_pr_wake_work);
 }
 
 static int __init esdm_cdev_init(void)
@@ -458,12 +545,18 @@ static int __init esdm_cdev_init(void)
 	if (ret)
 		goto err_random;
 
+	ret = misc_register(&esdm_cdev_pr_dev);
+	if (ret)
+		goto err_urandom;
+
 	/* Learn the state of the ESDM, without waiting for it */
 	WRITE_ONCE(esdm_cdev_watch_next, jiffies);
 	esdm_cdev_watch_kick();
 
 	return 0;
 
+err_urandom:
+	misc_deregister(&esdm_cdev_urandom_dev);
 err_random:
 	misc_deregister(&esdm_cdev_random_dev);
 err_proc:
@@ -482,6 +575,7 @@ err_egd:
  */
 static void __exit esdm_cdev_exit(void)
 {
+	misc_deregister(&esdm_cdev_pr_dev);
 	misc_deregister(&esdm_cdev_urandom_dev);
 	misc_deregister(&esdm_cdev_random_dev);
 	esdm_cdev_proc_fini();

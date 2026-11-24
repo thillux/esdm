@@ -1026,7 +1026,7 @@
 
               with subtest("devices and proc files with the ESDM running"):
                   machine.succeed("modprobe esdm_cdev")
-                  for dev in ["esdm_random", "esdm_urandom"]:
+                  for dev in ["esdm_random", "esdm_urandom", "esdm_pr"]:
                       machine.succeed(f"test -c /dev/{dev}")
                       mode = machine.succeed(f"stat -c %a /dev/{dev}").strip()
                       assert mode == "666", f"/dev/{dev} has mode {mode}"
@@ -1040,6 +1040,7 @@
                   machine.succeed("${check} reads sync")
                   machine.succeed("${check} nonblock")
                   machine.succeed("${check} poll")
+                  machine.succeed("${check} pr")
                   machine.succeed("${check} writes")
 
               with subtest("throughput, informational"):
@@ -1226,6 +1227,7 @@
                   machine.wait_until_fails("pgrep -f 'esdm-cdev-check [b]lock'", 30)
                   machine.succeed("rmmod esdm_cdev")
                   machine.fail("test -e /dev/esdm_random")
+                  machine.fail("test -e /dev/esdm_pr")
                   machine.fail("test -e /proc/esdm")
 
               with subtest("no oops, BUG or WARN"):

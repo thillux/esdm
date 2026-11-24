@@ -20,8 +20,8 @@
  */
 
 /*
- * The checks of kernel/esdm_cdev: /dev/esdm_random, /dev/esdm_urandom and
- * /proc/esdm, served by the ESDM over its EGD socket. One subcommand per
+ * The checks of kernel/esdm_cdev: /dev/esdm_random, /dev/esdm_urandom,
+ * /dev/esdm_pr and /proc/esdm, served by the ESDM over its EGD socket. One subcommand per
  * check, which prints what it found and exits with 0 when that is what the
  * module promises, with a FAIL line and 1 when it is not:
  *
@@ -73,6 +73,7 @@
 
 #define CDEV_RANDOM "/dev/esdm_random"
 #define CDEV_URANDOM "/dev/esdm_urandom"
+#define CDEV_PR "/dev/esdm_pr"
 #define CDEV_PROC "/proc/esdm"
 
 static const char *const cdev_devs[] = { CDEV_RANDOM, CDEV_URANDOM };
@@ -589,6 +590,70 @@ static void cmd_nonblock(int argc, char *argv[])
 	}
 
 	printf("nonblock ok\n");
+}
+
+/*
+ * pr: /dev/esdm_pr serves the prediction resistance DRNG without O_SYNC.
+ * Blocking reads of up to 64 bytes are random and differ. With O_NONBLOCK, a
+ * read gives data or EAGAIN, never another error - QEMU aborts on one -,
+ * and poll() reports the device readable again within a second: 256 bytes
+ * come together in at most 30 seconds.
+ */
+static void cmd_pr(int argc, char *argv[])
+{
+	static const size_t sizes[] = { 1, 32, 64 };
+	uint8_t first[64], second[64], data[64];
+	struct pollfd pfd;
+	size_t i, total = 0;
+	time_t end;
+	char what[64];
+
+	(void)argc;
+	(void)argv;
+
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		read_exact_or_fail(CDEV_PR, first, sizes[i], 0);
+		read_exact_or_fail(CDEV_PR, second, sizes[i], 0);
+		snprintf(what, sizeof(what), "%s %zu", CDEV_PR, sizes[i]);
+		check_random(first, sizes[i], what);
+		check_random(second, sizes[i], what);
+		if (sizes[i] >= 32 && !memcmp(first, second, sizes[i]))
+			fail("%s: two reads of %zu bytes are equal", CDEV_PR,
+			     sizes[i]);
+		printf("%s: %zu bytes ok\n", CDEV_PR, sizes[i]);
+	}
+
+	pfd.fd = open_or_fail(CDEV_PR, O_RDONLY | O_NONBLOCK);
+	pfd.events = POLLIN;
+	end = time(NULL) + 30;
+	while (total < 256) {
+		ssize_t rc;
+		int err;
+
+		if (time(NULL) > end)
+			fail("%s O_NONBLOCK: %zu of 256 bytes in 30 s", CDEV_PR,
+			     total);
+
+		rc = esdm_ppoll_ms(&pfd, 1, 1000);
+		if (rc < 0)
+			fail("%s: poll: %s", CDEV_PR, strerror(errno));
+		if (!rc)
+			fail("%s: not readable for a second", CDEV_PR);
+
+		rc = read(pfd.fd, data, sizeof(data));
+		err = errno;
+		if (rc < 0 && err != EAGAIN)
+			fail("%s O_NONBLOCK: read gave %s, want data or EAGAIN",
+			     CDEV_PR, strerror(err));
+		if (rc > 0) {
+			snprintf(what, sizeof(what), "%s O_NONBLOCK", CDEV_PR);
+			check_random(data, (size_t)rc, what);
+			total += (size_t)rc;
+		}
+	}
+	close(pfd.fd);
+
+	printf("pr ok\n");
 }
 
 /*
@@ -2336,7 +2401,8 @@ static void cmd_backoff(int argc, char *argv[])
  * unreachable: with the ESDM not reachable, nothing is served from elsewhere.
  * /dev/esdm_urandom fails with ENOTCONN, as the module cannot connect, and
  * /dev/esdm_random waits - with O_NONBLOCK, EAGAIN - and is not readable for
- * poll(). Writes, the ioctls and the files of /proc/esdm fail with ENOTCONN.
+ * poll(). /dev/esdm_pr waits as well, with O_NONBLOCK EAGAIN and nothing
+ * else. Writes, the ioctls and the files of /proc/esdm fail with ENOTCONN.
  */
 static void cmd_unreachable(int argc, char *argv[])
 {
@@ -2360,6 +2426,8 @@ static void cmd_unreachable(int argc, char *argv[])
 
 	read_eagain(CDEV_RANDOM, 0, CDEV_RANDOM);
 	read_blocks(CDEV_RANDOM, 0, CDEV_RANDOM, 0, 1);
+	read_eagain(CDEV_PR, 0, CDEV_PR);
+	read_blocks(CDEV_PR, 0, CDEV_PR, 0, 1);
 	fd = open_or_fail(CDEV_RANDOM, O_RDWR);
 	poll_writable_only(fd, "with the ESDM unreachable");
 	close(fd);
@@ -2414,6 +2482,7 @@ static const struct check {
 	{ "reads", "[sync]", 0, 1, NEED_MODULE, cmd_reads },
 	{ "nonblock", "", 0, 0, NEED_MODULE, cmd_nonblock },
 	{ "poll", "", 0, 0, NEED_MODULE, cmd_poll },
+	{ "pr", "", 0, 0, NEED_MODULE, cmd_pr },
 	{ "writes", "", 0, 0, NEED_MODULE, cmd_writes },
 	{ "ioctl-priv", "", 0, 0, NEED_MODULE | NEED_CAP_SYS_ADMIN,
 	  cmd_ioctl_priv },

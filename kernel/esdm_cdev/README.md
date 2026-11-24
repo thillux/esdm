@@ -50,7 +50,7 @@ time - a read of up to 64 KiB, or a write of as much.
 
 ## The Devices
 
-Both devices are world readable and writable, as the kernel's are.
+All three devices are world readable and writable, as the kernel's are.
 
 * `/dev/esdm_random` reads from the ESDM's DRNG once the ESDM is operational -
   its DRNG fully seeded - and waits for that before. A reader with `O_NONBLOCK`
@@ -66,8 +66,17 @@ Both devices are world readable and writable, as the kernel's are.
   delivered, as the CUSE frontend does. Without `O_NONBLOCK` a read waits for
   the rest; with it, the read returns what was there, or `EAGAIN`. `O_DSYNC`
   alone does not select it.
-* Data written to either device is mixed into the ESDM's auxiliary pool
-  without being credited with entropy, as a write to the kernel's devices is.
+* `/dev/esdm_pr` always reads from the prediction resistance DRNG, as the other
+  two do with `O_SYNC`: for readers that cannot open with `O_SYNC`, such as the
+  virtio-rng backends of QEMU (`rng-random`) and Cloud Hypervisor (`--rng`),
+  which so feed a guest with the NTG.1 output of an `ais2031_ntg1` build. A
+  blocking read waits for the rest, also while the ESDM cannot be reached. A
+  read with `O_NONBLOCK` returns data or `EAGAIN` and no other error, as QEMU
+  aborts on any other; `poll()` reports the device readable once the ESDM is
+  operational, but not for 50 ms after a read found no prediction resistant
+  data, so that a reader polling it does not spin.
+* Data written to any device is mixed into the ESDM's auxiliary pool without
+  being credited with entropy, as a write to the kernel's devices is.
 
 `/dev/esdm_random` reads from the fully seeded DRNG rather than from the
 prediction resistance one: that is what the kernel's `/dev/random` is since
