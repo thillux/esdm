@@ -952,6 +952,10 @@
                   "journalctl -b -u esdm-server.service | grep -q 'EGD server: serving'", 30
               )
               machine.succeed("esdm-tool --wait-until-seeded 60")
+              # sshd died on the connection without the ESDM; its restart
+              # waits for esdm-wait-until-fully-seeded.
+              machine.wait_for_unit("sshd.service")
+              machine.wait_for_open_port(22)
               out = machine.succeed(
                   f"ssh {opts} -o KexAlgorithms=ecdh-sha2-nistp256 "
                   "root@localhost 'echo recovered'"
