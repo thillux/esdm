@@ -149,6 +149,22 @@ static int peer_cmd_entropy_count(struct egd_peer_conn *conn)
 	return peer_write_all(conn->fd, response, sizeof(response));
 }
 
+/*
+ * The state of an operational ESDM, with one field more than the protocol
+ * defines, as a newer server would append it.
+ */
+static int peer_cmd_get_state(struct egd_peer_conn *conn)
+{
+	uint8_t response[1 + 4 * (ESDM_EGD_STATE_NUM_FIELDS + 1)] = { 0 };
+
+	response[0] = ESDM_EGD_STATE_NUM_FIELDS + 1;
+	response[1 + 4 * ESDM_EGD_STATE_FLAGS + 3] =
+		ESDM_EGD_STATE_FLAG_OPERATIONAL |
+		ESDM_EGD_STATE_FLAG_FULLY_SEEDED;
+
+	return peer_write_all(conn->fd, response, sizeof(response));
+}
+
 static int peer_cmd_read_nonblock(struct egd_peer_conn *conn)
 {
 	uint8_t requested, delivered;
@@ -330,6 +346,9 @@ static void *peer_conn_thread(void *arg)
 			break;
 		case ESDM_EGD_CMD_GET_PID:
 			ret = peer_cmd_get_pid(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_GET_STATE:
+			ret = peer_cmd_get_state(conn);
 			break;
 		default:
 			printf("EGD peer: unknown command 0x%02x\n", cmd);

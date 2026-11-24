@@ -111,6 +111,16 @@ Use this only where a short answer is acceptable \- a seed consumer wants
 .BI "int esdm_egd_client_entropy_count(struct esdm_egd_client *" client ", uint32_t *" entropy_bits ");"
 Entropy the ESDM currently holds, in bits.
 .TP
+.BI "int esdm_egd_client_get_state_flags(struct esdm_egd_client *" client ", uint32_t *" flags ");"
+State of the ESDM as the
+.B ESDM_EGD_STATE_FLAG_*
+bits of
+.IR esdm_egd_protocol.h :
+.B ESDM_EGD_STATE_FLAG_OPERATIONAL
+while the ESDM serves reads,
+.B ESDM_EGD_STATE_FLAG_FULLY_SEEDED
+while all its DRNGs are fully seeded.
+.TP
 .BI "int esdm_egd_client_write_entropy(struct esdm_egd_client *" client ", const uint8_t *" buf ", size_t " buflen ", uint32_t " entropy_bits ");"
 Insert at most
 .B ESDM_EGD_MAX_TRANSFER

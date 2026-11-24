@@ -172,6 +172,19 @@ int esdm_egd_client_entropy_count(struct esdm_egd_client *client,
 				  uint32_t *entropy_bits);
 
 /**
+ * @brief Query the state of the ESDM
+ *
+ * @param [in] client Client to use
+ * @param [out] flags ESDM_EGD_STATE_FLAG_* of esdm_egd_protocol.h, e.g.
+ *		      ESDM_EGD_STATE_FLAG_OPERATIONAL while the ESDM serves
+ *		      reads
+ *
+ * @return 0 on success, < 0 on error
+ */
+int esdm_egd_client_get_state_flags(struct esdm_egd_client *client,
+				    uint32_t *flags);
+
+/**
  * @brief Insert data into the ESDM's auxiliary pool
  *
  * The protocol allows attaching an entropy claim to the data, which the ESDM

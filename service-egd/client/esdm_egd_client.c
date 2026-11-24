@@ -863,6 +863,50 @@ int esdm_egd_client_entropy_count(struct esdm_egd_client *client,
 				      entropy_bits);
 }
 
+static int esdm_egd_client_state_flags_op(struct esdm_egd_client *client,
+					  void *arg)
+{
+	const uint8_t request = ESDM_EGD_CMD_ESDM_GET_STATE;
+	uint32_t *flags = arg;
+	uint8_t num, field[4];
+	unsigned int i;
+	int ret;
+
+	ret = esdm_egd_client_write_all_locked(client, &request,
+					       sizeof(request));
+	if (ret)
+		return ret;
+
+	ret = esdm_egd_client_read_all_locked(client, &num, sizeof(num));
+	if (ret)
+		return ret;
+	if (num <= ESDM_EGD_STATE_FLAGS)
+		return -EPROTO;
+
+	/* Fields are only ever appended: all are read to keep the stream. */
+	for (i = 0; i < num; i++) {
+		ret = esdm_egd_client_read_all_locked(client, field,
+						      sizeof(field));
+		if (ret)
+			return ret;
+		if (i == ESDM_EGD_STATE_FLAGS)
+			*flags = ptr_to_be32(field);
+	}
+
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_state_flags(struct esdm_egd_client *client,
+				    uint32_t *flags)
+{
+	if (flags == NULL)
+		return -EINVAL;
+
+	return esdm_egd_client_invoke(client, esdm_egd_client_state_flags_op,
+				      flags);
+}
+
 struct esdm_egd_write_op {
 	const uint8_t *buf;
 	uint8_t buflen;

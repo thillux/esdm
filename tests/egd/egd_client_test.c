@@ -228,6 +228,43 @@ static int test_entropy_count(void)
 	return ret;
 }
 
+/*
+ * The state flags come first; the fields a client does not know are read and
+ * skipped, so that the next answer is still in sync.
+ */
+static int test_get_state_flags(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	uint32_t flags = 0, bits = 0;
+	int ret = 0;
+
+	if (egd_peer_start(&peer, test_socket("state"), EGD_PEER_NORMAL))
+		return 1;
+
+	if (esdm_egd_client_alloc(&client, test_socket("state"),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(peer);
+		return 1;
+	}
+
+	CHECK(esdm_egd_client_get_state_flags(client, &flags) == 0,
+	      "the state query failed");
+	CHECK(flags == (ESDM_EGD_STATE_FLAG_OPERATIONAL |
+			ESDM_EGD_STATE_FLAG_FULLY_SEEDED),
+	      "flags 0x%x", flags);
+	CHECK(esdm_egd_client_get_state_flags(client, NULL) == -EINVAL,
+	      "no flags pointer was accepted");
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0 &&
+		      bits == EGD_PEER_ENTROPY_BITS,
+	      "the answer after the state is out of sync");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
 /* The PID arrives as a string, without a terminating NUL. */
 static int test_get_pid(void)
 {
@@ -835,6 +872,7 @@ int main(int argc, char *argv[])
 		{ "non-blocking read", test_nonblocking_read },
 		{ "overlong answer", test_nonblocking_overlong },
 		{ "entropy count", test_entropy_count },
+		{ "state flags", test_get_state_flags },
 		{ "PID request", test_get_pid },
 		{ "entropy insertion", test_write_entropy },
 		{ "argument checks", test_arguments },
