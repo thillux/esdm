@@ -4,6 +4,9 @@ Changes 1.2.4
 
 * esdm-server: the eBPF unit snippet grants CAP_PERFMON, which it misspelled
 
+* esdm_rpc_client.pc requires libprotobuf-c, whose header esdm_rpc_client.h
+includes
+
 * Add an optional EGD (Entropy Gathering Daemon) protocol interface to the
 esdm-server, enabled by starting esdm-server-egd.socket or with
 --egd_socket <path>, which serves legacy entropy consumers such as libgcrypt's

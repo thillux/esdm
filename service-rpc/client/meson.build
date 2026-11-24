@@ -38,7 +38,8 @@ esdm_rpc_client_lib = both_libraries('esdm_rpc_client',
 	soversion: version_array[0],
 	install: true
 	)
-pkgconfig.generate(esdm_rpc_client_lib)
+# esdm_rpc_client.h includes protobuf-c.h: its users need its flags.
+pkgconfig.generate(esdm_rpc_client_lib, requires: protobuf_c_dep)
 
 include_user_files += files([
 	'esdm_rpc_client.h'
