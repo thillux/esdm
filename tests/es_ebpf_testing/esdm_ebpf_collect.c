@@ -41,10 +41,14 @@
  * DAMAGE.
  */
 
+/* sched_setaffinity(2) is a GNU extension: before the first include */
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <getopt.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -72,6 +76,8 @@
 #pragma GCC diagnostic pop
 
 #define ESDM_COLLECT_RB_SIZE (16 * 1024 * 1024)
+/* Drain interval: the ring buffer holds the records of far more */
+#define ESDM_COLLECT_INTERVAL_NS (50 * 1000 * 1000)
 
 /*
  * Returned by handle_record() once the requested number of events was
@@ -126,6 +132,32 @@ static int handle_record(void *ctx, void *data, size_t size)
 	}
 
 	cctx->deltas++;
+
+	return 0;
+}
+
+/*
+ * Every raw record wakes this process up, and each of its context switches is
+ * an event of the scheduler source: on the assessed CPU, the collection would
+ * record its own wakeup loop instead of the noise source. Keep off that CPU.
+ */
+static int leave_cpu(unsigned int cpu)
+{
+	cpu_set_t set;
+
+	if (cpu >= CPU_SETSIZE)
+		return 0;
+
+	CPU_ZERO(&set);
+	if (sched_getaffinity(0, sizeof(set), &set))
+		return -errno;
+
+	CPU_CLR(cpu, &set);
+	if (!CPU_COUNT(&set))
+		return -EINVAL;
+
+	if (sched_setaffinity(0, sizeof(set), &set))
+		return -errno;
 
 	return 0;
 }
@@ -271,6 +303,18 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	if (cctx.only_cpu >= 0) {
+		int err = leave_cpu((unsigned int)cctx.only_cpu);
+
+		/* The interrupt source sees no events of the collector */
+		if (err && !strcmp(source, "sched")) {
+			fprintf(stderr,
+				"Cannot leave CPU %d: %s - its deltas would include this collector\n",
+				cctx.only_cpu, strerror(-err));
+			return 1;
+		}
+	}
+
 	nr_cpus_ret = libbpf_num_possible_cpus();
 	if (nr_cpus_ret < 1) {
 		fprintf(stderr,
@@ -390,14 +434,21 @@ int main(int argc, char *argv[])
 			"Collecting %llu raw %s deltas of all CPUs into %s ...\n",
 			cctx.limit, source, outfile);
 
+	/*
+	 * Drain the ring buffer on a timer instead of waiting for its wakeups:
+	 * every record would wake the collector, and its context switches are
+	 * events of the scheduler source that produce the next records.
+	 */
 	start = time(NULL);
 	while (!stop_requested && cctx.deltas < cctx.limit) {
-		int poll_ret = ring_buffer__poll(rb, 200);
+		static const struct timespec interval = {
+			.tv_nsec = ESDM_COLLECT_INTERVAL_NS
+		};
+		int consumed = ring_buffer__consume(rb);
 
-		if (poll_ret == ESDM_COLLECT_DONE)
+		if (consumed == ESDM_COLLECT_DONE || consumed < 0)
 			break;
-		if (poll_ret < 0 && errno != EINTR)
-			break;
+		nanosleep(&interval, NULL);
 	}
 
 	{

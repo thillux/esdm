@@ -37,7 +37,10 @@ and the ESDM server itself never records raw data.
             --source sched --cpu 0 --events 1000000 --out sched_idle_cpu0.txt
 
    The output is one decimal time delta per line: the time between two
-   successive events of that CPU. Without `--cpu` the deltas of all CPUs go
+   successive events of that CPU. The collector drains the ring buffer every
+   50 ms instead of being woken up for every record, and it moves itself off
+   the CPU it assesses: its own context switches are scheduler events. The
+   scheduler source therefore needs a second CPU to collect. Without `--cpu` the deltas of all CPUs go
    into one stream in arrival order, which is convenient for a quick look but
    mixes independent noise sources and cannot be split again - do not assess
    it.
