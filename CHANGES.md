@@ -2,6 +2,8 @@ Changes 1.2.4
 * esdm-server: no core dumps with --memlock and in its systemd unit
 (RLIMIT_CORE 0, LimitCORE=0), as the privilege drop resets the dumpable flag
 
+* esdm-server: the eBPF unit snippet grants CAP_PERFMON, which it misspelled
+
 * Add an optional EGD (Entropy Gathering Daemon) protocol interface to the
 esdm-server, enabled by starting esdm-server-egd.socket or with
 --egd_socket <path>, which serves legacy entropy consumers such as libgcrypt's

@@ -60,11 +60,11 @@ if get_option('es_sched_ebpf').enabled() or get_option('es_irq_ebpf').enabled()
 	# bpf(2) and perf_event_open(2) syscalls are not part of
 	# @system-service and must be allowed explicitly; the capability
 	# check is satisfied by CAP_SYS_ADMIN which is already in the
-	# bounding set, CAP_BPF/CAP_PERF_MON are added for environments
+	# bounding set, CAP_BPF/CAP_PERFMON are added for environments
 	# starting the server as a non-root user with ambient capabilities.
 	server_conf_data.set('EBPF_UNIT_SNIPPET', '''
 # EBPF ENTROPY SOURCES BEGIN
-CapabilityBoundingSet=CAP_BPF CAP_PERF_MON
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON
 SystemCallFilter=bpf perf_event_open
 # EBPF ENTROPY SOURCES END
 '''
