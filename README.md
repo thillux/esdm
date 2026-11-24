@@ -100,7 +100,7 @@ is enabled during compile time:
   distribution or from the
   [libfuse Github website](https://github.com/libfuse/libfuse/).
 
-* Botan >= 3.0: If the Botan backend for cryptographic operations shall be used
+* Botan >= 3.2: If the Botan backend for cryptographic operations shall be used
   and is enabled as a compile time option get Botan either from your distribution
   or from the
   [botan Github website](https://github.com/randombit/botan).

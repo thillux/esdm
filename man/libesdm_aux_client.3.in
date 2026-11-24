@@ -37,6 +37,8 @@ Detach from the semaphore.
 .BI "int esdm_aux_timedwait_for_need_entropy(struct timespec *" ts ");"
 Wait until the daemon asks for entropy, or until the absolute deadline
 .I ts
+on
+.B CLOCK_MONOTONIC
 expires. This is a thin wrapper around
 .BR sem_clockwait (3):
 .I ts
@@ -60,7 +62,7 @@ if (esdm_aux_init_wait_for_need_entropy())
 for (;;) {
 	struct timespec ts;
 
-	clock_gettime(CLOCK_REALTIME, &ts);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
 	ts.tv_sec += 60;
 
 	if (esdm_aux_timedwait_for_need_entropy(&ts) == 0) {
