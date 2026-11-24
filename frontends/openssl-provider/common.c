@@ -23,6 +23,7 @@
 #include <openssl/evp.h>
 #include <openssl/params.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -349,6 +350,22 @@ static const OSSL_PARAM *esdm_rand_gettable_ctx_params(void *ctx __unused,
 	return known_gettable_ctx_params;
 }
 
+/*
+ * What RAND_status() reports: ready only while the ESDM is fully seeded. A
+ * request waits for that state, the query does not.
+ */
+static int esdm_rand_state(void)
+{
+	bool fully_seeded = false;
+	int ret;
+
+	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+	if (ret)
+		return EVP_RAND_STATE_ERROR;
+	return fully_seeded ? EVP_RAND_STATE_READY :
+			      EVP_RAND_STATE_UNINITIALISED;
+}
+
 static int esdm_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
 {
 	OSSL_PARAM *p;
@@ -365,7 +382,7 @@ static int esdm_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
 		return 0;
 
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_STATE);
-	if (p != NULL && !OSSL_PARAM_set_int(p, EVP_RAND_STATE_READY))
+	if (p != NULL && !OSSL_PARAM_set_int(p, esdm_rand_state()))
 		return 0;
 
 	return 1;

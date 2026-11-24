@@ -1,4 +1,9 @@
 Changes 1.2.4
+* OpenSSL providers: RAND_status() reports the state of the ESDM - ready while
+it is fully seeded (RPC) or operational (EGD), not ready before, an error while
+it cannot be reached - instead of always ready. libesdm_egd_client gains
+esdm_egd_client_get_state_flags() for the state of the EGD providers
+
 * esdm-server: no core dumps with --memlock and in its systemd unit
 (RLIMIT_CORE 0, LimitCORE=0), as the privilege drop resets the dumpable flag
 

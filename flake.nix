@@ -856,6 +856,12 @@
                 # apart.
                 systemd.services.sshd.environment.OPENSSL_CONF = "${egdConf}";
                 systemd.services.sshd-keygen.environment.OPENSSL_CONF = "${egdConf}";
+                # OpenSSH exits unless RAND_status() says ready, which the
+                # provider does only once the ESDM is seeded.
+                systemd.services.sshd.requires = [ "esdm-wait-until-fully-seeded.service" ];
+                systemd.services.sshd.after = [ "esdm-wait-until-fully-seeded.service" ];
+                systemd.services.sshd-keygen.requires = [ "esdm-wait-until-fully-seeded.service" ];
+                systemd.services.sshd-keygen.after = [ "esdm-wait-until-fully-seeded.service" ];
 
                 environment.systemPackages = [
                   esdm

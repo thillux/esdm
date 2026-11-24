@@ -51,6 +51,7 @@
 
 #include "config.h"
 #include "esdm_egd_client.h"
+#include "esdm_egd_protocol.h"
 #include "esdm_logger.h"
 #include "helper.h"
 #include "prov_error.h"
@@ -443,7 +444,23 @@ esdm_egd_rand_gettable_ctx_params(void *ctx __unused, void *provctx __unused)
 	return known_gettable_ctx_params;
 }
 
-static int esdm_egd_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
+/*
+ * What RAND_status() reports: ready only while the ESDM is operational. A
+ * request waits for that state, the query does not.
+ */
+static int esdm_egd_rand_state(struct esdm_egd_rand_ctx *rand)
+{
+	uint32_t flags;
+
+	if (rand == NULL ||
+	    esdm_egd_client_get_state_flags(rand->prov->client, &flags))
+		return EVP_RAND_STATE_ERROR;
+	return (flags & ESDM_EGD_STATE_FLAG_OPERATIONAL) ?
+		       EVP_RAND_STATE_READY :
+		       EVP_RAND_STATE_UNINITIALISED;
+}
+
+static int esdm_egd_rand_get_ctx_params(void *ctx, OSSL_PARAM params[])
 {
 	OSSL_PARAM *p;
 
@@ -464,7 +481,7 @@ static int esdm_egd_rand_get_ctx_params(void *ctx __unused, OSSL_PARAM params[])
 		return 0;
 
 	p = OSSL_PARAM_locate(params, OSSL_RAND_PARAM_STATE);
-	if (p != NULL && !OSSL_PARAM_set_int(p, EVP_RAND_STATE_READY))
+	if (p != NULL && !OSSL_PARAM_set_int(p, esdm_egd_rand_state(ctx)))
 		return 0;
 
 	return 1;

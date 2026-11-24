@@ -143,6 +143,14 @@ The reported security strength is 256 bits and the maximum request size is 256
 bytes, which is the granularity OpenSSL's own DRBG chain uses as well; larger
 consumer requests are split by OpenSSL.
 .PP
+The state reported to
+.BR RAND_status (3)
+is ready only while the ESDM is fully seeded (RPC providers) or operational
+(EGD providers), uninitialized before and an error while the ESDM cannot be
+reached. A request waits for the ESDM regardless; a program that checks
+.BR RAND_status ()
+first and gives up, as OpenSSH does, has to start once the ESDM is seeded.
+.PP
 A provider that cannot reach the ESDM fails the request rather than falling
 back to another source \- otherwise pinning OpenSSL to the ESDM would be
 advisory rather than binding.
