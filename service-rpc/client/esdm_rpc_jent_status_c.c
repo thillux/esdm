@@ -49,7 +49,12 @@ static void esdm_rpcc_jent_status_cb(const StatusResponse *response,
 		return;
 	}
 
-	snprintf(buffer->buf, buffer->buflen, "%s", response->buffer);
+	/* A document cut short is no JSON: report it, as the server does */
+	if (snprintf(buffer->buf, buffer->buflen, "%s", response->buffer) >=
+	    (int)buffer->buflen) {
+		buffer->buf[0] = '\0';
+		buffer->ret = -EMSGSIZE;
+	}
 }
 
 DSO_PUBLIC
@@ -66,7 +71,7 @@ int esdm_rpcc_jent_status_int(char *buf, size_t buflen, void *int_data)
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	msg.maxlen = ESDM_RPC_MAX_DATA;
+	msg.maxlen = ESDM_RPC_MAX_STATUS;
 	unpriv_access__rpc_jent_status(&rpc_conn->service, &msg,
 				       esdm_rpcc_jent_status_cb, &buffer);
 

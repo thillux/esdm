@@ -75,7 +75,7 @@ static int esdm_rpcc_drng_status_json_one(uint32_t node, bool pr, char *buf,
 
 	CKINT(esdm_rpcc_get_unpriv_service(&rpc_conn, int_data));
 
-	msg.maxlen = ESDM_RPC_MAX_DATA;
+	msg.maxlen = ESDM_RPC_MAX_STATUS;
 	msg.node = node;
 	msg.prediction_resistance = pr;
 	unpriv_access__rpc_drng_status_json(&rpc_conn->service, &msg,

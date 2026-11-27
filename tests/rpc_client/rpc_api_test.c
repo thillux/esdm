@@ -131,6 +131,10 @@ static void test_jent_status(void)
 	memset(buf, 0, sizeof(buf));
 	esdm_invoke(esdm_rpcc_jent_status(buf, sizeof(buf)));
 	CHECK_EQ(ret, 0);
+
+	/* A buffer too small for the document */
+	esdm_invoke(esdm_rpcc_jent_status(buf, 2));
+	CHECK_EQ(ret, -EMSGSIZE);
 }
 
 static void test_get_ent_lvl(void)
@@ -311,6 +315,11 @@ static void test_rnd_add_entropy(void)
 	esdm_invoke(esdm_rpcc_rnd_add_entropy(data, sizeof(data),
 					      sizeof(data) * 8));
 	CHECK_EQ(ret, 0);
+
+	/* More entropy than the data has bits */
+	esdm_invoke(esdm_rpcc_rnd_add_entropy(data, sizeof(data),
+					      sizeof(data) * 8 + 1));
+	CHECK_EQ(ret, -EINVAL);
 }
 
 static void test_rnd_reseed_crng(void)

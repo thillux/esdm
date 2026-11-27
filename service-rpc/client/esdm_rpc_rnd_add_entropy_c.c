@@ -53,6 +53,14 @@ int esdm_rpcc_rnd_add_entropy_int(const uint8_t *entropy_buf,
 	struct esdm_rnd_add_entropy_buf buffer;
 	int ret = 0;
 
+	/*
+	 * What the server refuses; a larger count on a full buffer would not
+	 * even fit into a message.
+	 */
+	if (entropy_buf_len > ESDM_RPC_MAX_DATA ||
+	    entropy_cnt > entropy_buf_len * 8)
+		return -EINVAL;
+
 	CKINT(esdm_rpcc_get_priv_service(&rpc_conn, int_data));
 
 	buffer.ret = -ETIMEDOUT;

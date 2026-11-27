@@ -38,12 +38,12 @@ void esdm_rpc_drng_status_json(UnprivAccess_Service *service,
 	(void)service;
 
 	if (request == NULL) {
-		response.ret = -(int32_t)ESDM_RPC_MAX_DATA;
+		response.ret = -EFAULT;
 		closure(&response, closure_data);
 		return;
 	}
 
-	alloc_size = min_uint32(request->maxlen, ESDM_RPC_MAX_DATA);
+	alloc_size = min_uint32(request->maxlen, ESDM_RPC_MAX_STATUS);
 
 	/*
 	 * At least one byte, so the buffer is never allocated empty and is

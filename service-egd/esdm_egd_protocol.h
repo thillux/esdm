@@ -173,7 +173,7 @@
 
 /* The ESDM is operational: the reads of 0x01 and 0x02 are served */
 #define ESDM_EGD_STATE_FLAG_OPERATIONAL (1U << 0)
-/* All DRNGs are fully seeded */
+/* The initial DRNG is fully seeded, see esdm_state_fully_seeded() */
 #define ESDM_EGD_STATE_FLAG_FULLY_SEEDED (1U << 1)
 
 /* Largest status report of ESDM_EGD_CMD_ESDM_STATUS and _STATUS_JSON */

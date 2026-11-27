@@ -68,7 +68,7 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 	GetRandomBytesRequest msg = GET_RANDOM_BYTES_REQUEST__INIT;
 	esdm_rpc_client_connection_t *rpc_conn = NULL;
 	struct esdm_get_random_bytes_pr_buf buffer;
-	size_t maxbuflen = buflen, orig_buflen = buflen;
+	size_t orig_buflen = buflen;
 	unsigned int polls = 0;
 	ssize_t ret = 0;
 
@@ -85,8 +85,7 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 		 * even with slow entropy sources. This prevents running
 		 * into client timeouts for larger requests.
 		 */
-		msg.len = min_size(ESDM_RPC_MAX_PR_REQUEST_SIZE,
-				   min_size(maxbuflen, buflen));
+		msg.len = min_size(ESDM_RPC_MAX_PR_REQUEST_SIZE, buflen);
 
 		unpriv_access__rpc_get_random_bytes_pr(
 			&rpc_conn->service, &msg,
@@ -104,29 +103,10 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 			goto out;
 
 		/*
-		 * maxbuflen is larger than ESDM_RPC_MAX_PR_REQUEST_SIZE in this case
-		 * and skipped in the check above. Keep this for compatibility with
-		 * server code or if ESDM_RPC_MAX_PR_REQUEST_SIZE is changed to a
-		 * larger value in the future.
+		 * No size negotiation as in the other calls: the limit is a
+		 * constant of the protocol, never exceeded above.
 		 */
-		if (buffer.ret < -255) {
-			size_t new_max = (size_t)(-buffer.ret);
-
-			/*
-			 * The server signals the largest size it can serve by
-			 * returning its negated value, asking us to retry with a
-			 * smaller request. Only honor it if it actually shrinks
-			 * the request; a buggy or hostile peer returning a
-			 * non-shrinking value must not be able to spin this loop
-			 * forever.
-			 */
-			if (new_max >= maxbuflen) {
-				ret = -EPROTO;
-				goto out;
-			}
-			maxbuflen = new_max;
-			continue;
-		} else if (buffer.ret == -EAGAIN) {
+		if (buffer.ret == -EAGAIN) {
 			/*
 			 * Wait without holding the pooled connection. An empty
 			 * answer fails in the callback, so it cannot spin.

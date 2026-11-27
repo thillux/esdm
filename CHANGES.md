@@ -1,4 +1,20 @@
 Changes 1.2.4
+* RPC: RpcRndAddEntropy refuses a claim of more entropy than the data has
+bits with -EINVAL, as the other interfaces do; RpcGetRandomBytesPr answers a
+request above its limit with -EINVAL instead of -32, which read as -EPIPE; the
+status calls answer a missing request with -EFAULT and render at most
+ESDM_RPC_MAX_STATUS bytes, so that the answer always fits into a message;
+RpcJentStatus allocates what was asked for, and its client function reports
+-EMSGSIZE for a buffer too small
+
+* esdm_get_seed() returns -EAGAIN when a DRNG lost its seed level during the
+call, and a blocking call waits again: it returned 0 with the buffer length
+set, and the RPC call a zeroed buffer of that length
+
+* CUSE: RNDADDTOENTCNT refuses a negative count with EINVAL, and it and
+RNDADDENTROPY report the error when the request reached neither the ESDM nor
+the device of the kernel, instead of success
+
 * A seed operation of a DRNG that fails no longer counts: the emergency
 reseeding credited the next injection with the entropy collected for the failed
 one, which could mark a DRNG fully seeded with less entropy than required

@@ -41,7 +41,9 @@ void esdm_rpc_rnd_add_entropy(PrivAccess_Service *service,
 		closure(&response, closure_data);
 
 	} else {
-		if (request->randval.len > ESDM_RPC_MAX_DATA) {
+		/* No more entropy than the data has bits */
+		if (request->randval.len > ESDM_RPC_MAX_DATA ||
+		    request->entcnt > request->randval.len * 8) {
 			response.ret = -EINVAL;
 		} else {
 			response.ret =

@@ -389,6 +389,7 @@ static void test_ioctl_addentropy_rejected(void)
 	uint8_t raw[sizeof(struct rand_pool_info) + 32] = { 0 };
 	struct rand_pool_info *rpi = (struct rand_pool_info *)raw;
 	const size_t datalen = 32;
+	int negative = -1;
 
 	rpi->buf_size = -1;
 	rpi->entropy_count = 8;
@@ -408,6 +409,14 @@ static void test_ioctl_addentropy_rejected(void)
 	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
 	CHECK_EQ(reply.kind, REPLY_ERR);
 	CHECK_EQ(reply.err, EINVAL);
+
+	/* A negative count, refused before any privilege is raised */
+	caller_is_root(true);
+	ioctl_call(RNDADDTOENTCNT, &negative, sizeof(negative), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	CHECK_EQ(reply.err, EINVAL);
+	CHECK_EQ(raise_calls, 0);
+	caller_is_root(false);
 }
 
 /*
@@ -935,6 +944,12 @@ static void test_privileged_ioctls(void)
 	ioctl_call(RNDRESEEDCRNG, NULL, 0, 0, -1);
 	CHECK(reply.kind == REPLY_ERR || reply.kind == REPLY_IOCTL,
 	      "RNDRESEEDCRNG without a fallback was not answered");
+
+	/* Entropy that reached neither the ESDM nor the kernel is no success */
+	ioctl_call(RNDADDTOENTCNT, &bits, sizeof(bits), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
+	ioctl_call(RNDADDENTROPY, raw, sizeof(raw), 0, -1);
+	CHECK_EQ(reply.kind, REPLY_ERR);
 
 	if (fd >= 0)
 		close(fd);

@@ -33,12 +33,13 @@ void esdm_rpc_jent_status(UnprivAccess_Service *service,
 			  void *closure_data)
 {
 	StatusResponse response = STATUS_RESPONSE__INIT;
+	size_t alloc_size;
 	char *status;
 	int ret;
 	(void)service;
 
 	if (request == NULL) {
-		response.ret = -(int32_t)ESDM_RPC_MAX_DATA;
+		response.ret = -EFAULT;
 		closure(&response, closure_data);
 		return;
 	}
@@ -50,15 +51,18 @@ void esdm_rpc_jent_status(UnprivAccess_Service *service,
 	 * buffer would otherwise leak uninitialized process heap to the
 	 * unprivileged client and could be read out of bounds.
 	 */
-	status = calloc(1, ESDM_RPC_MAX_DATA);
+	alloc_size = min_uint32(request->maxlen, ESDM_RPC_MAX_STATUS);
+	if (!alloc_size)
+		alloc_size = 1;
+
+	status = calloc(1, alloc_size);
 	if (!status) {
 		response.ret = -ENOMEM;
 		closure(&response, closure_data);
 		return;
 	}
 
-	ret = esdm_jent_status(status,
-			       min_uint32(request->maxlen, ESDM_RPC_MAX_DATA));
+	ret = esdm_jent_status(status, alloc_size);
 	if (ret < 0) {
 		/* Propagate the error; leave response.buffer at its "" default. */
 		response.ret = ret;

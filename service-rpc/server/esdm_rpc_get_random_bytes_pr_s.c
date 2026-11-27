@@ -79,8 +79,15 @@ void esdm_rpc_get_random_bytes_pr(UnprivAccess_Service *service,
 	uint8_t rndval[ESDM_RPC_MAX_DATA];
 	(void)service;
 
-	if (request == NULL || request->len > ESDM_RPC_MAX_PR_REQUEST_SIZE) {
-		response.ret = -ESDM_RPC_MAX_PR_REQUEST_SIZE;
+	if (request == NULL) {
+		response.ret = -EFAULT;
+		closure(&response, closure_data);
+	} else if (request->len > ESDM_RPC_MAX_PR_REQUEST_SIZE) {
+		/*
+		 * Not the negated limit of the other calls: it is below 256
+		 * and would read as an errno.
+		 */
+		response.ret = -EINVAL;
 		closure(&response, closure_data);
 	} else {
 		response.ret = (int)esdm_rpcs_pr_get(rndval, request->len,

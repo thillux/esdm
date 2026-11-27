@@ -183,15 +183,14 @@ enum esdm_get_seed_flags {
  *	struct entropy_buf seed;
  * } __attribute((__packed__));
  *
- * As struct entropy_buf is not known outsize of the ESDM, the ESDM fills
- * seedlen first with the size of struct entropy_buf. If the caller-provided
- * buffer @param buf is smaller than uint64_t, then -EINVAL is returned
- * and @param buf is not touched. If it is uint64_t or larger but smaller
- * than the size of the structure above, -EMSGSIZE is returned and seedlen
- * is filled with the size of the buffer. Finally, if @param buf is large
- * enough to hold all data, it is filled with the seed data and the seedlen
- * is set to sizeof(struct entropy_buf). The entropy rate is returned with
- * the variable entropy_rate and provides the value in bits.
+ * As struct entropy_buf is not known outside of the ESDM, the ESDM fills
+ * seedlen first with the size of the whole structure above. If the
+ * caller-provided buffer @param buf is smaller than uint64_t, then -EINVAL is
+ * returned and @param buf is not touched. If it is uint64_t or larger but
+ * smaller than the structure above, -EMSGSIZE is returned and only seedlen is
+ * filled. Finally, if @param buf is large enough to hold all data, it is
+ * filled with the seed data. The entropy rate is returned with the variable
+ * entropy_rate and provides the value in bits.
  *
  * The seed buffer is the data that should be handed to the caller's DRNG as
  * seed data.
@@ -204,8 +203,10 @@ enum esdm_get_seed_flags {
  * @param [in] flags Flags field to adjust the behavior
  *
  * @return -EINVAL or -EMSGSIZE indicating the buffer is too small, -EAGAIN when
- *	   the call would block, but NONBLOCK is specified, > 0 the size of
- *	   the filled buffer.
+ *	   the call would block, but NONBLOCK is specified, when another call
+ *	   is in flight or when a DRNG needs the entropy for its own seeding,
+ *	   -EOPNOTSUPP after a failed self test or in a forked process, > 0 the
+ *	   size of the filled buffer (seedlen).
  */
 ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 		      enum esdm_get_seed_flags flags);
@@ -442,7 +443,10 @@ int esdm_drg3_compliant(void);
 int esdm_drg4_compliant(void);
 
 /**
- * @brief Indicator whether at least one DRNG is fully seeded
+ * @brief Indicator whether the initial DRNG is fully seeded
+ *
+ * Every request falls back on the initial DRNG; the DRNGs of the nodes may
+ * still be seeding.
  *
  * @return 1 if fully seeded, 0 if not fully seeded
  */

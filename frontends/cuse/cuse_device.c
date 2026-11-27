@@ -19,6 +19,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <limits.h>
 #include <linux/random.h>
 #include <poll.h>
 #include <semaphore.h>
@@ -705,6 +706,12 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 		} else {
 			ent_count_bits = *(uint32_t *)in_buf;
 
+			/* The argument is an int: as the kernel and esdm_cdev */
+			if (ent_count_bits > INT_MAX) {
+				fuse_reply_err(req, EINVAL);
+				return;
+			}
+
 			/*
 			 * This operation requires privileges. Thus, raise the
 			 * privilege level to the same level as the caller has.
@@ -721,9 +728,8 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * -ETIMEDOUT: the request reached the ESDM, which may
 			 * have credited it, and must not count twice.
 			 */
-			if (ret && ret != -ETIMEDOUT) {
-				if (backend_fd >= 0 &&
-				    ioctl(backend_fd, RNDADDTOENTCNT,
+			if (ret && ret != -ETIMEDOUT && backend_fd >= 0) {
+				if (ioctl(backend_fd, RNDADDTOENTCNT,
 					  &ent_count_bits) == -1)
 					ret = -errno;
 				else
@@ -760,7 +766,7 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			 * Reject a negative entropy_count (which would otherwise
 			 * become a huge value once cast to uint32_t) and any
 			 * claim of more entropy bits than the supplied buffer
-			 * can hold, mirroring the kernel's RNDADDENTROPY check.
+			 * can hold - stricter than the kernel, which takes it.
 			 */
 			fuse_reply_err(req, EINVAL);
 		} else {
@@ -780,9 +786,8 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 				(uint32_t)rpi->entropy_count, req));
 
 			/* In case of an error, update the kernel, as above */
-			if (ret && ret != -ETIMEDOUT) {
-				if (backend_fd >= 0 &&
-				    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
+			if (ret && ret != -ETIMEDOUT && backend_fd >= 0) {
+				if (ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
 					ret = -errno;
 				else
 					ret = 0;

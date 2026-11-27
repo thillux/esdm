@@ -2517,16 +2517,21 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 	if (mutex_w_trylock(&esdm_get_seed_lock) != 0)
 		return -EAGAIN;
 
-	CKINT(esdm_drng_sleep_while_not_all_nodes_seeded(
-		flags & ESDM_GET_SEED_NONBLOCK));
-
 	/*
-	 * If an ESDM DRNG becomes unseeded, give this DRNG precedence. The
-	 * entropy sources lock themselves, so the collection below runs next
-	 * to the seedings of the DRNGs.
+	 * If an ESDM DRNG becomes unseeded, give this DRNG precedence: wait
+	 * once more, or have the caller try again. The entropy sources lock
+	 * themselves, so the collection below runs next to the seedings of
+	 * the DRNGs.
 	 */
+	do {
+		CKINT(esdm_drng_sleep_while_not_all_nodes_seeded(
+			flags & ESDM_GET_SEED_NONBLOCK));
+	} while (!esdm_pool_all_nodes_seeded_get() &&
+		 !(flags & ESDM_GET_SEED_NONBLOCK) &&
+		 !atomic_load(&esdm_drng_mgr_terminate));
+
 	if (!esdm_pool_all_nodes_seeded_get()) {
-		buflen = 0;
+		ret = -EAGAIN;
 		goto out;
 	}
 

@@ -255,6 +255,12 @@ extern PrivAccess_Service priv_access_service;
 	(ESDM_RPC_MAX_INTERNAL_MSG_SIZE - ESDM_RPC_MAX_INTERNAL_MSG_HEADER_SIZE)
 
 /*
+ * Largest status text including its NUL: a StatusResponse spends up to 15
+ * bytes on its two field headers and a negative return code.
+ */
+#define ESDM_RPC_MAX_STATUS (ESDM_RPC_MAX_DATA - 8)
+
+/*
  * Scratch buffer size for unpacking a received protobuf message with the
  * esdm_rpc_alloc() bump allocator instead of malloc()/free() on every call.
  * It must hold the unpacked message struct plus the largest possible

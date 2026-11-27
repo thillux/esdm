@@ -15,8 +15,8 @@ import "common.proto";
 /**
  * @brief Request to change the entropy estimator of the ES manager
  *
- * @param entcnt Entropy value in bits to set to (value is capped to maximum
- *		 possible entropy value)
+ * @param entcnt Entropy value in bits to add (the estimate is capped to the
+ *		 maximum possible entropy value)
  */
 message RndAddToEntCntRequest {
 	uint32 entcnt = 1;
@@ -30,8 +30,9 @@ message RndAddToEntCntRequest {
  *	  pool's entropy estimate accordingly
  *
  * @param randval Buffer with the entropy data
- * @param entcnt Entropy value in bits to set to (value is capped to maximum
- *		 possible entropy value)
+ * @param entcnt Entropy value in bits credited to the data; more than 8 bits
+ *		 per byte of randval is refused with -EINVAL (the estimate is
+ *		 capped to the maximum possible entropy value)
  */
 message RndAddEntropyRequest {
 	bytes randval = 1;
@@ -54,7 +55,7 @@ message SetWriteWakeupThreshRequest {
  ******************************************************************************/
 
 /**
- * @brief Request to set the available write wakeup threshold
+ * @brief Request to set the minimum number of seconds between two reseeds
  */
 message SetMinReseedSecsRequest {
 	uint32 seconds = 1;

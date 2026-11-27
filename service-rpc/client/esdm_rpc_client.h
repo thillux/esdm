@@ -398,7 +398,7 @@ ssize_t esdm_rpcc_get_random_bytes_full_int(uint8_t *buf, size_t buflen,
 					    void *int_data);
 
 /**
- * @brief RPC-version of esdm_rpcc_get_random_bytes_full_timeout
+ * @brief esdm_rpcc_get_random_bytes_full with a timeout
  *
  * This call uses the unprivileged RPC endpoint of the ESDM server. It therefore
  * can be invoked by any user.
