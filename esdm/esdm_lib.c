@@ -24,6 +24,7 @@
 #include "esdm_config_internal.h"
 #include "esdm_crypto.h"
 #include "esdm_drng_mgr.h"
+#include "esdm_es_events.h"
 #include "esdm_es_mgr.h"
 #include "esdm_logger.h"
 #include "esdm_node.h"
@@ -154,6 +155,9 @@ void esdm_fini(void)
 	 */
 	esdm_selftest_periodic_stop();
 
+	/* No kernel event resets or reseeds what is torn down below */
+	esdm_es_events_stop();
+
 	/* Finalize the entropy source manager and all its entropy sources. */
 	esdm_es_mgr_finalize();
 
@@ -193,6 +197,13 @@ int esdm_init_monitor(void (*priv_init_completion)(void))
 	 * came up is repeated on its interval from here on.
 	 */
 	esdm_selftest_periodic_start();
+
+	/*
+	 * The system events of the kernel module esdm_es, if it is loaded:
+	 * here, as the device is opened with the privileges that
+	 * priv_init_completion() ends.
+	 */
+	esdm_es_events_start();
 
 	return esdm_es_mgr_monitor_initialize(priv_init_completion);
 }

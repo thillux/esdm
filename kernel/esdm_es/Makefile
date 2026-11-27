@@ -5,6 +5,10 @@ KERNEL_DIR?=/lib/modules/$(shell uname -r)/build
 # 0001-*.patch, the interrupt ES the interrupt hooks of 0002-*.patch. Each
 # allocates its event rings, one per possible CPU, when the module is loaded.
 #
+# With neither of them, the module only reports VM generation changes to the
+# ESDM (ESDM_VM_GENERATION): it then needs no kernel patch, no DRBG and no
+# high-resolution timer, and builds against a stock kernel.
+#
 BUILD_ES_SCHED?=0
 BUILD_ES_IRQ?=1
 BUILD_TESTING?=0
@@ -27,10 +31,18 @@ ccflags-y += -I$(src) -I$(src)/../shared -I$(src)/../../esdm/drng	\
 	     -I$(src)/../../esdm/crypto -I$(src)/../../common
 
 obj-m				+= esdm_es.o
-esdm_es-y			= esdm_es_mgr.o esdm_es_timer_common.o 	\
-				  esdm_es_ring.o esdm_es_drbg.o		\
-				  esdm_drbg_kcapi.o esdm_xdrbg_shared.o	\
-				  esdm_health.o
+esdm_es-y			= esdm_es_mgr.o
+
+#
+# What the entropy sources share: the time source, the event rings, the DRBG
+# and the health tests
+#
+ifneq ($(BUILD_ES_SCHED)$(BUILD_ES_IRQ),00)
+CFLAGS_esdm_es_mgr.o		+= -DESDM_ES_ANY
+esdm_es-y			+= esdm_es_timer_common.o esdm_es_ring.o \
+				   esdm_es_drbg.o esdm_drbg_kcapi.o	\
+				   esdm_xdrbg_shared.o esdm_health.o
+endif
 
 #
 # Scheduler-based Entropy source
@@ -60,6 +72,9 @@ endif
 # are created.
 #
 ifeq ($(BUILD_TESTING), 1)
+ifeq ($(BUILD_ES_SCHED)$(BUILD_ES_IRQ),00)
+$(error BUILD_TESTING=1 needs an entropy source: BUILD_ES_IRQ=1 or BUILD_ES_SCHED=1)
+endif
 CFLAGS_esdm_es_mgr.o		+= -DESDM_TESTING
 CFLAGS_esdm_testing.o		= -DESDM_TESTING
 esdm_es-y			+= esdm_testing.o

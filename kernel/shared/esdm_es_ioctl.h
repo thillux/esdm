@@ -89,6 +89,38 @@
 #define ESDM_IRQ_STATUS_JSON _IOR(ESDMIO, 0x0a, char[500])
 #define ESDM_SCHED_STATUS_JSON _IOR(ESDMIO, 0x0b, char[500])
 
+/*
+ * System events the module reports to the ESDM, each as the number of times
+ * it occurred since the module was loaded:
+ *
+ * ESDM_ES_EVENT_VM_GENERATION: the VM generation changed - a snapshot was
+ *	restored or a clone started -, as the kernel announces it to random.c
+ *	(CONFIG_VMGENID). Every state that was in memory before exists a
+ *	second time: the ESDM discards its entropy and seeds its DRNGs anew.
+ * ESDM_ES_EVENT_SUSPEND: the system is about to suspend or hibernate.
+ * ESDM_ES_EVENT_RESUME: the system resumed from suspend or hibernation, or
+ *	was restored from a hibernation image: the ESDM reseeds its DRNGs.
+ * ESDM_ES_EVENT_SHUTDOWN: the system restarts, halts or powers off.
+ *
+ * ESDM_ES_EVENTS reads ESDM_ES_EVENTS_WORDS 32-bit words: a bit mask of the
+ * events this kernel reports - bit n for event n; without CONFIG_VMGENID, the
+ * VM generation is not among them - followed by the count of each event. The
+ * module increments a count after it reset its own entropy sources for the
+ * event, so entropy read after a new count was collected after the event.
+ *
+ * The IOCTL does not depend on the entropy sources the module is built with,
+ * and works with none of them. poll() reports the descriptor readable while
+ * a count differs from the one this IOCTL last returned on the descriptor - a
+ * descriptor that never read them starts out with the counts at its open.
+ */
+#define ESDM_ES_EVENT_VM_GENERATION 0
+#define ESDM_ES_EVENT_SUSPEND 1
+#define ESDM_ES_EVENT_RESUME 2
+#define ESDM_ES_EVENT_SHUTDOWN 3
+#define ESDM_ES_EVENT_LAST 4
+#define ESDM_ES_EVENTS_WORDS (1 + ESDM_ES_EVENT_LAST)
+#define ESDM_ES_EVENTS _IOR(ESDMIO, 0x0c, __u32[ESDM_ES_EVENTS_WORDS])
+
 /* Size of the buffer the JSON status IOCTLs report into */
 #define ESDM_STATUS_JSON_BUFLEN 500
 

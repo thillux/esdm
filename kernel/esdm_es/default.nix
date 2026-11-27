@@ -12,6 +12,10 @@
   # Turn the warnings of the extra set into errors, for the builds that check
   # the module against every kernel rather than install it.
   werror ? false,
+  # The entropy sources to build. With neither, the module only reports system
+  # events to the ESDM and needs no kernel patch.
+  buildIrq ? true,
+  buildSched ? true,
 }:
 
 stdenv.mkDerivation rec {
@@ -62,8 +66,8 @@ stdenv.mkDerivation rec {
     "KERNEL_DIR=${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
     "INSTALL_MOD_PATH=${placeholder "out"}"
     "BUILD_TESTING=${if enableTesting then "1" else "0"}"
-    "BUILD_ES_IRQ=1"
-    "BUILD_ES_SCHED=1"
+    "BUILD_ES_IRQ=${if buildIrq then "1" else "0"}"
+    "BUILD_ES_SCHED=${if buildSched then "1" else "0"}"
     # Every warning of the extra set, which the module builds without
     "W=1"
   ]

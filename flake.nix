@@ -970,6 +970,102 @@
         # kernels - the module needs no kernel patches -, one check per kernel
         # like the live_* and ebpf_* ones: the per kernel builds below only
         # show that it compiles there, this that it works there.
+        # VM check of the system events the kernel module esdm_es reports to
+        # the ESDM (ESDM_ES_EVENTS): the module built without any entropy
+        # source, which needs no kernel patch and so runs on the stock
+        # kernels, an ESDM server reading its events, and a suspend to idle
+        # that the RTC ends. The server has to log the suspend and the resume
+        # and reseed its DRNGs after the resume. A VM generation change cannot
+        # be provoked from inside the guest: tests/esdm/esdm_es_events_test.c
+        # covers what the server does with it.
+        mkEsdmEsEventsCheck =
+          kernel:
+          let
+            esdm = self.packages.${system}.esdm;
+          in
+          pkgs.testers.nixosTest {
+            name = "esdm_es system events";
+
+            nodes.machine =
+              { config, ... }:
+              {
+                boot.kernelPackages = kernel;
+                boot.extraModulePackages = [
+                  (config.boot.kernelPackages.callPackage ./kernel/esdm_es {
+                    buildIrq = false;
+                    buildSched = false;
+                  })
+                ];
+                # Before the server starts, which opens the device once
+                boot.kernelModules = [ "esdm_es" ];
+
+                services.esdm = {
+                  enable = true;
+                  enableLinuxCompatServices = false;
+                  package = esdm;
+                };
+
+                environment.systemPackages = [
+                  esdm
+                  pkgs.jq
+                  pkgs.util-linux
+                ];
+
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                };
+              };
+
+            testScript = ''
+              def generations():
+                  out = machine.succeed(
+                      "esdm-tool --drng-status-json | jq '[.[] | select(.type != \"prediction resistance\") | .seed_generation] | add'"
+                  )
+                  return int(out.strip())
+
+              def logged(what):
+                  machine.wait_until_succeeds(
+                      f"journalctl -b -u esdm-server.service | grep -q 'Kernel reports {what}'",
+                      60,
+                  )
+
+              machine.wait_for_unit("multi-user.target")
+              machine.wait_for_unit("esdm-server.service")
+
+              # The module without entropy sources, and the device it serves
+              machine.succeed("lsmod | grep -q '^esdm_es '")
+              machine.succeed("dmesg | grep -q 'reporting system events only'")
+              machine.succeed("test -c /dev/esdm_es")
+              machine.succeed("esdm-tool --wait-until-seeded 60")
+
+              # Nothing reported so far
+              machine.fail(
+                  "journalctl -b -u esdm-server.service | grep -q 'Kernel reports'"
+              )
+              before = generations()
+
+              # Suspend to idle, ended by the RTC after 3 seconds. The exit
+              # status does not count: a wakeup that arrives while the
+              # system still suspends aborts the suspend, which rtcwake
+              # reports as a write error - the kernel announced the suspend
+              # and the resume all the same, which is what is checked.
+              machine.execute("rtcwake -m freeze -s 3")
+
+              logged("suspend")
+              logged("resume")
+
+              # The resume has every DRNG reseed before its next output
+              machine.succeed("esdm-tool -r 32 >/dev/null")
+              machine.wait_until_succeeds("true", 5)
+              after = generations()
+              assert after > before, f"no reseed after the resume: {before} -> {after}"
+
+              # The server still serves
+              machine.succeed("esdm-tool --is-fully-seeded")
+            '';
+          };
+
         mkEsdmCdevCheck =
           kernel:
           let
@@ -1313,6 +1409,9 @@
           // lib.mapAttrs' (name: kernel: lib.nameValuePair "ebpf_${name}" (mkEbpfCheck kernel)) stockKernels
           // lib.mapAttrs' (
             name: kernel: lib.nameValuePair "cdev_${name}" (mkEsdmCdevCheck kernel)
+          ) stockKernels
+          // lib.mapAttrs' (
+            name: kernel: lib.nameValuePair "events_${name}" (mkEsdmEsEventsCheck kernel)
           ) stockKernels
           // {
             # Only for the rolling kernel - see mkEbpfRawCheck on why this is
@@ -2488,6 +2587,21 @@
             }
           )
         ) kernels
+        # The same module without any entropy source, which only reports
+        # system events to the ESDM (ESDM_ES_EVENTS), e.g.
+        # esdm_es_events_6_6: against the stock kernels, as it needs no patch.
+        // lib.mapAttrs' (
+          name: kernel:
+          lib.nameValuePair "esdm_es_events_${name}" (
+            pkgs.callPackage ./kernel/esdm_es {
+              inherit (pkgs) lib;
+              inherit (kernel) kernel kernelModuleMakeFlags;
+              buildIrq = false;
+              buildSched = false;
+              werror = true;
+            }
+          )
+        ) stockKernels
         # One esdm_cdev module build per defined kernel, e.g. esdm_cdev_6_1 /
         # esdm_cdev_latest, with the warnings of W=1 as errors. Against the
         # stock kernels: the module needs no kernel patches.

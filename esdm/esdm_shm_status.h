@@ -28,6 +28,7 @@ extern "C" {
 
 void esdm_shm_status_set_operational(bool enabled);
 void esdm_shm_status_set_need_entropy(void);
+void esdm_shm_status_suspend(void);
 
 int esdm_shm_status_init(void);
 void esdm_shm_status_exit(void);

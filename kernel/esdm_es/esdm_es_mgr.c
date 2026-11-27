@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
+#include <linux/poll.h>
 #include <linux/random.h>
 #include <linux/suspend.h>
 #include <linux/reboot.h>
@@ -78,13 +79,77 @@ void esdm_reset_state(enum esdm_internal_es es)
 struct esdm_es_file {
 	struct esdm_es_conf irq;
 	struct esdm_es_conf sched;
+	/* Event counts ESDM_ES_EVENTS last returned, see esdm_cdev_poll() */
+	atomic_t events_seen[ESDM_ES_EVENT_LAST];
 };
 
-/* Module init: allocate memory, register the device file */
+/*
+ * The system events reported to the ESDM, each counted since the module was
+ * loaded, and those waiting for the next one. Not tied to an entropy source:
+ * a module built without any still reports them.
+ */
+static atomic_t esdm_es_events[ESDM_ES_EVENT_LAST];
+static DECLARE_WAIT_QUEUE_HEAD(esdm_es_events_wait);
+
+#if IS_ENABLED(CONFIG_VMGENID)
+#define ESDM_ES_EVENTS_VMGENID BIT(ESDM_ES_EVENT_VM_GENERATION)
+#else
+#define ESDM_ES_EVENTS_VMGENID 0
+#endif
+#define ESDM_ES_EVENTS_SUPPORTED                                              \
+	(ESDM_ES_EVENTS_VMGENID | BIT(ESDM_ES_EVENT_SUSPEND) |                \
+	 BIT(ESDM_ES_EVENT_RESUME) | BIT(ESDM_ES_EVENT_SHUTDOWN))
+
+/* Called after the entropy sources were reset for the event */
+static void esdm_es_event(unsigned int event)
+{
+	atomic_inc(&esdm_es_events[event]);
+	wake_up_interruptible_poll(&esdm_es_events_wait,
+				   EPOLLIN | EPOLLRDNORM);
+}
+
+static long esdm_cdev_events(struct esdm_es_file *f, void __user *argp)
+{
+	u32 words[ESDM_ES_EVENTS_WORDS];
+	unsigned int i;
+
+	words[0] = ESDM_ES_EVENTS_SUPPORTED;
+
+	/*
+	 * Marked as seen before the copy: an event in between leaves the
+	 * descriptor readable, and a failed copy has the caller ask again.
+	 */
+	for (i = 0; i < ESDM_ES_EVENT_LAST; i++) {
+		int count = atomic_read(&esdm_es_events[i]);
+
+		atomic_set(&f->events_seen[i], count);
+		words[1 + i] = (u32)count;
+	}
+
+	return copy_to_user(argp, words, sizeof(words)) ? -EFAULT : 0;
+}
+
+static __poll_t esdm_cdev_poll(struct file *file, poll_table *wait)
+{
+	struct esdm_es_file *f = file->private_data;
+	unsigned int i;
+
+	poll_wait(file, &esdm_es_events_wait, wait);
+
+	for (i = 0; i < ESDM_ES_EVENT_LAST; i++) {
+		if (atomic_read(&esdm_es_events[i]) !=
+		    atomic_read(&f->events_seen[i]))
+			return EPOLLIN | EPOLLRDNORM;
+	}
+
+	return 0;
+}
+
 static int esdm_cdev_open(struct inode *inode, struct file *file)
 {
 	struct esdm_es_file *f;
 	unsigned m = iminor(inode);
+	unsigned int i;
 	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -104,6 +169,9 @@ static int esdm_cdev_open(struct inode *inode, struct file *file)
 
 	esdm_es_mgr_irq_conf_init(&f->irq);
 	esdm_es_mgr_sched_conf_init(&f->sched);
+	for (i = 0; i < ESDM_ES_EVENT_LAST; i++)
+		atomic_set(&f->events_seen[i],
+			   atomic_read(&esdm_es_events[i]));
 	file->private_data = f;
 
 	return 0;
@@ -134,6 +202,9 @@ static long esdm_cdev_ioctl(struct file *filp, unsigned int cmd,
 	 * restriction of the access to the IOCTLs to root, but the calling
 	 * service can drop its privileges after opening the device.
 	 */
+	if (cmd == ESDM_ES_EVENTS)
+		return esdm_cdev_events(f, argp);
+
 	switch (cmd) {
 #ifdef ESDM_ES_IRQ
 	case ESDM_IRQ_AVAIL_ENTROPY:
@@ -189,6 +260,7 @@ static const struct file_operations esdm_cdev_fops = {
 	.open = esdm_cdev_open,
 	.release = esdm_cdev_release,
 	.unlocked_ioctl = esdm_cdev_ioctl,
+	.poll = esdm_cdev_poll,
 	/*
 	 * All IOCTL arguments point to u32 values, char arrays or struct
 	 * entropy_buf (u8 array and u32), which have the same layout for
@@ -288,6 +360,8 @@ static int esdm_es_mgr_reboot_notifier(struct notifier_block *nb,
 	esdm_es_mgr_irq_reset();
 	esdm_es_mgr_sched_reset();
 
+	esdm_es_event(ESDM_ES_EVENT_SHUTDOWN);
+
 	return NOTIFY_OK;
 }
 
@@ -310,6 +384,8 @@ static int esdm_es_mgr_vmgenid_notifier(struct notifier_block *nb,
 	esdm_es_mgr_irq_reset();
 	esdm_es_mgr_sched_reset();
 
+	esdm_es_event(ESDM_ES_EVENT_VM_GENERATION);
+
 	return NOTIFY_OK;
 }
 
@@ -327,6 +403,21 @@ static int esdm_es_mgr_power_notifier(struct notifier_block *nb,
 	esdm_es_mgr_irq_reset();
 	esdm_es_mgr_sched_reset();
 
+	switch (action) {
+	case PM_HIBERNATION_PREPARE:
+	case PM_SUSPEND_PREPARE:
+		esdm_es_event(ESDM_ES_EVENT_SUSPEND);
+		break;
+	case PM_POST_HIBERNATION:
+	case PM_POST_SUSPEND:
+	case PM_POST_RESTORE:
+		esdm_es_event(ESDM_ES_EVENT_RESUME);
+		break;
+	default:
+		/* PM_RESTORE_PREPARE: the image to restore replaces this one */
+		break;
+	}
+
 	return NOTIFY_OK;
 }
 
@@ -342,7 +433,10 @@ static struct notifier_block esdm_es_mgr_notifier_power = {
  */
 static int __init esdm_es_mgr_init(void)
 {
-	int ret = esdm_init_time_source();
+	int ret;
+
+#ifdef ESDM_ES_ANY
+	ret = esdm_init_time_source();
 	if (ret) {
 		pr_warn("esdm_init_time_source() failed\n");
 		goto out_time;
@@ -353,6 +447,9 @@ static int __init esdm_es_mgr_init(void)
 		pr_warn("esdm_drbg_selftest() failed\n");
 		goto out_time;
 	}
+#else
+	pr_info("No entropy source built in: reporting system events only\n");
+#endif
 
 	ret = esdm_es_mgr_irq_init();
 	if (ret) {
@@ -392,9 +489,11 @@ out_sched:
 out_irq:
 	esdm_es_mgr_irq_exit();
 out_time:
+#ifdef ESDM_ES_ANY
 	/* as in esdm_es_mgr_exit(), drain messages the hooks queued */
 	esdm_health_exit();
 	esdm_time_source_exit();
+#endif
 	return ret;
 }
 
@@ -416,8 +515,10 @@ static void __exit esdm_es_mgr_exit(void)
 	 * deferred health-test or GCD messages can be queued. Drain any still
 	 * pending before the module text is freed.
 	 */
+#ifdef ESDM_ES_ANY
 	esdm_health_exit();
 	esdm_time_source_exit();
+#endif
 }
 
 module_init(esdm_es_mgr_init);

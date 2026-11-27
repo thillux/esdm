@@ -74,6 +74,26 @@ Specific options can be set in the corresponding `Makefile` allowing
 selectively disabling either entropy source. This generates a kernel module
 `esdm_es.ko` that can now be inserted into the kernel at any time.
 
+## System events
+
+Besides the entropy sources, the module tells the ESDM about four events of
+the system, each counted since the module was loaded: a changed VM generation
+(a snapshot restored, a clone started - with `CONFIG_VMGENID`), suspend,
+resume and shutdown. The ESDM reads the counts with the IOCTL
+`ESDM_ES_EVENTS` (`kernel/shared/esdm_es_ioctl.h`) and waits for the next
+event with `poll()` on `/dev/esdm_es`. After a VM generation change it drops
+its credited entropy and seeds every DRNG anew, after a resume it reseeds
+every DRNG, and on a suspend and a shutdown it notifies those waiting on its
+status segment.
+
+This part does not depend on the entropy sources. Built with neither of them,
+
+    make BUILD_ES_IRQ=0 BUILD_ES_SCHED=0
+
+the module only reports the events: it then needs none of the kernel patches
+above, no DRBG and no high-resolution timer, and builds against an unmodified
+kernel.
+
 ## Usage
 
 It is strongly advised to insert the kernel mode as early as possible into the

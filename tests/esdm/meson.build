@@ -236,6 +236,17 @@ if get_option('esdm-server').enabled()
 	test('ESDM reseed of node DRNGs without a worker',
 		esdm_reseed_no_worker_test, suite: 'core')
 
+	esdm_es_events_test = executable(
+		'esdm_es_events_test',
+		[ esdm_ipc_ns, 'esdm_es_events_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM system events of the kernel module',
+		esdm_es_events_test, timeout: 120, suite: 'core')
+
 	esdm_aux_xdrbg_test = executable(
 		'esdm_aux_xdrbg_test',
 		[ esdm_ipc_ns, 'esdm_aux_xdrbg_test.c' ],

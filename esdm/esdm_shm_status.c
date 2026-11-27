@@ -197,6 +197,16 @@ static void esdm_shm_status_set_suspend(void)
 	esdm_shm_wake_all();
 }
 
+/*
+ * The suspend notification from a thread, as the kernel module esdm_es reports
+ * a suspend or a shutdown - the signal handler below is the one for
+ * esdm-server-signal-helper.
+ */
+void esdm_shm_status_suspend(void)
+{
+	esdm_shm_status_set_suspend();
+}
+
 static void esdm_shm_status_server_exit(void)
 {
 	/* The exit notification is the same as the suspend notification */
