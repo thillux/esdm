@@ -7,6 +7,13 @@ one, which could mark a DRNG fully seeded with less entropy than required
 every other DRNG: before its initial full seed, it served as much as the
 fresh entropy of a request allowed
 
+* A process forked from one that runs the ESDM gets no output: a fork copied
+every DRNG state into the child, which handed out the same bits as the parent
+until a reseed. In the child, every call for random data or a seed now fails
+with -EOPNOTSUPP, the copied states of the builtin DRNGs are cleared, and
+esdm_fini() returns at once; a process that needs the ESDM in its children
+initializes it after the fork
+
 * esdm_get_random_bytes_full() waits again when the ESDM stopped since its
 wait, as the initial DRNG does at its reseed threshold, instead of failing
 with -EOPNOTSUPP

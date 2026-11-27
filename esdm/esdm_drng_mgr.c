@@ -327,9 +327,96 @@ out:
 }
 
 /* Initialize the default DRNG during start time and perform its seeding */
+/*
+ * A fork copies the DRNG states into the child, which would hand out the same
+ * bits as the parent until a reseed - and has none of the threads that seed.
+ * A forked process therefore gets no output at all. The handler only records
+ * the fork: nothing else is safe in the child of a threaded process, whose
+ * locks may be held by threads that do not exist there.
+ */
+static atomic_bool esdm_drng_mgr_forked = false;
+static pthread_once_t esdm_drng_mgr_atfork_once = PTHREAD_ONCE_INIT;
+
+/* Its release is a wipe and free(), which the child of a fork may call */
+static bool esdm_drng_cb_builtin(const struct esdm_drng_cb *cb)
+{
+#ifdef ESDM_DRNG_HASH_DRBG
+	if (cb == &esdm_builtin_hash_drbg_cb)
+		return true;
+#endif
+#ifdef ESDM_DRNG_CHACHA20
+	if (cb == &esdm_builtin_chacha20_cb)
+		return true;
+#endif
+	(void)cb;
+	return false;
+}
+
+/*
+ * Clear the copy of a DRNG state the child got, without its lock. The state
+ * of another crypto library stays: releasing it calls into a library whose
+ * locks may be held, and a child hanging in fork() is worse than a copy it
+ * can never output.
+ */
+static void esdm_drng_wipe_forked(struct esdm_drng *drng)
+{
+	if (!drng)
+		return;
+
+	atomic_store(&drng->fully_seeded, false);
+	if (!drng->drng || !esdm_drng_cb_builtin(drng->drng_cb))
+		return;
+
+	drng->drng_cb->drng_dealloc(drng->drng);
+	drng->drng = NULL;
+}
+
+static void esdm_drng_mgr_atfork_child(void)
+{
+	struct esdm_drng **drngs = esdm_drng_instances_unlocked();
+	uint32_t node;
+
+	/* First: from here on no path hands out or touches a state */
+	atomic_store(&esdm_drng_mgr_forked, true);
+
+	for (node = 0; drngs && node < esdm_drng_node_count_get(); node++)
+		esdm_drng_wipe_forked(drngs[node]);
+	esdm_drng_wipe_forked(&esdm_drng_init);
+	esdm_drng_wipe_forked(&esdm_drng_pr);
+}
+
+bool esdm_drng_mgr_forked_process(void)
+{
+	return atomic_load(&esdm_drng_mgr_forked);
+}
+
+static void esdm_drng_mgr_atfork_register(void)
+{
+	if (pthread_atfork(NULL, NULL, esdm_drng_mgr_atfork_child))
+		esdm_logger(LOGGER_ERR, LOGGER_C_DRNG,
+			    "Cannot register the fork handler\n");
+}
+
+/* Checked before any lock is taken: the child may have inherited it held */
+static int esdm_drng_mgr_check_forked(void)
+{
+	static atomic_bool logged = false;
+
+	if (!atomic_load(&esdm_drng_mgr_forked))
+		return 0;
+
+	if (!atomic_exchange(&logged, true))
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_DRNG,
+			"The ESDM is not usable in a forked process - initialize it after the fork\n");
+	return -EOPNOTSUPP;
+}
+
 int esdm_drng_mgr_initialize(void)
 {
 	int ret;
+
+	pthread_once(&esdm_drng_mgr_atfork_once, esdm_drng_mgr_atfork_register);
 
 	/*
 	 * If the esdm_avail is not 0, either the DRNG is initialized, or the
@@ -2148,8 +2235,20 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 	return processed;
 }
 
+static ssize_t esdm_drng_get_sleep_live(uint8_t *outbuf, size_t outbuflen,
+					bool pr, bool nonblock);
+
 static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr,
 				   bool nonblock)
+{
+	int ret = esdm_drng_mgr_check_forked();
+
+	return ret ? ret : esdm_drng_get_sleep_live(outbuf, outbuflen, pr,
+						   nonblock);
+}
+
+static ssize_t esdm_drng_get_sleep_live(uint8_t *outbuf, size_t outbuflen,
+					bool pr, bool nonblock)
 {
 	struct esdm_drng **esdm_drng = esdm_drng_get_instances();
 	struct esdm_drng *drng = &esdm_drng_init;
@@ -2333,6 +2432,9 @@ static void esdm_drng_try_seed(void)
 
 static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 {
+	if (esdm_drng_mgr_check_forked())
+		return -EOPNOTSUPP;
+
 	/* Nothing seeds after a failed self test: nothing to wait for */
 	if (esdm_selftest_crypto_failed())
 		return -EOPNOTSUPP;
@@ -2354,6 +2456,9 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 
 static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 {
+	if (esdm_drng_mgr_check_forked())
+		return -EOPNOTSUPP;
+
 	/* See esdm_drng_sleep_while_not_all_nodes_seeded() */
 	if (esdm_selftest_crypto_failed())
 		return -EOPNOTSUPP;
@@ -2388,6 +2493,9 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 	BUILD_BUG_ON(sizeof(buflen) < ESDM_KCAPI_ALIGN);
 	if (nbytes < sizeof(buflen))
 		return -EINVAL;
+
+	if (esdm_drng_mgr_check_forked())
+		return -EOPNOTSUPP;
 
 	/* Write buffer size into first word */
 	buf[0] = buflen;

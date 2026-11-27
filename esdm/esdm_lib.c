@@ -134,6 +134,13 @@ DSO_PUBLIC
 void esdm_fini(void)
 {
 	/*
+	 * Nothing to stop in a forked process: the threads joined below do
+	 * not exist there, and the locks taken may be held by them.
+	 */
+	if (esdm_drng_mgr_forked_process())
+		return;
+
+	/*
 	 * Stop the asynchronous reseed worker before the entropy source manager
 	 * joins the threads: the worker waits between its passes and only this
 	 * request gets it out of that wait, so joining it without asking first

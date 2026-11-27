@@ -199,6 +199,9 @@ void esdm_drng_mgr_finalize(void);
  */
 bool esdm_drng_mgr_terminating(void);
 
+/* Is this a process forked from one that initialized the ESDM? */
+bool esdm_drng_mgr_forked_process(void);
+
 /**
  * @brief Put the asynchronous reseed worker on duty
  *

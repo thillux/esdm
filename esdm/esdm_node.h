@@ -28,6 +28,7 @@
 #ifdef ESDM_NODE
 struct esdm_drng **esdm_drng_get_instances(void);
 void esdm_drng_put_instances(void);
+struct esdm_drng **esdm_drng_instances_unlocked(void);
 void esdm_drngs_node_alloc(void);
 void esdm_node_fini(void);
 uint32_t esdm_drng_node_count_get(void);
@@ -42,6 +43,10 @@ static inline struct esdm_drng **esdm_drng_get_instances(void)
 }
 static inline void esdm_drng_put_instances(void)
 {
+}
+static inline struct esdm_drng **esdm_drng_instances_unlocked(void)
+{
+	return NULL;
 }
 static inline void esdm_drngs_node_alloc(void)
 {

@@ -52,6 +52,14 @@ if get_option('esdm-server').enabled()
 		dependencies: dependencies_server,
 	)
 
+	esdm_fork_test = executable(
+		'esdm_fork_test',
+		[ esdm_ipc_ns, 'esdm_fork_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_lib,
+		dependencies: dependencies_server,
+	)
+
 	esdm_get_random_bytes_test = executable(
 		'esdm_get_random_bytes_test',
 		[ esdm_ipc_ns, 'esdm_get_random_bytes_test.c' ],
@@ -137,6 +145,7 @@ if get_option('esdm-server').enabled()
 	test('ESDM API call esdm_version', esdm_version_test, suite: 'core')
 	test('ESDM API call esdm_get_random_bytes_full', esdm_get_random_bytes_full_test,
 		suite: 'core')
+	test('ESDM in a forked process', esdm_fork_test, suite: 'core')
 	test('ESDM API call esdm_get_random_bytes', esdm_get_random_bytes_test,
 		suite: 'core')
 	test('ESDM DRNG manager max w/o reseed - 1 DRNG', esdm_drng_mgr_max_wo_reseed_test,

@@ -63,6 +63,12 @@ void esdm_drng_put_instances(void)
 	mutex_reader_unlock(&esdm_node_cleanup_lock);
 }
 
+/* For the child of a fork only, which is alone and must not take locks */
+struct esdm_drng **esdm_drng_instances_unlocked(void)
+{
+	return atomic_load(&esdm_drng);
+}
+
 /*
  * Release the array of @nodes entries, its allocated size: the config may
  * have changed since, see esdm_config_max_nodes_set().

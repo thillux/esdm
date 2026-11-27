@@ -61,6 +61,21 @@ privileges has completed, which is the point at which a daemon may drop them.
 Terminate the entropy sources and the DRNG manager and release all resources.
 This also stops a monitor started with
 .BR esdm_init_monitor ().
+.PP
+The ESDM does not survive a
+.BR fork (2):
+the child holds a copy of every DRNG state and none of the threads that seed
+them. In a process forked after
+.BR esdm_init (),
+every call that returns random data or a seed fails with
+.BR \-EOPNOTSUPP ,
+the copied states of the builtin DRNGs are cleared, and
+.BR esdm_fini ()
+returns at once, also after another
+.BR esdm_init ()
+there. A process that needs random data in its children initializes the ESDM
+in each child after the fork, not before it, or reaches a server over the RPC
+client library.
 .SH OBTAINING RANDOM DATA
 .TP
 .BI "ssize_t esdm_get_random_bytes(uint8_t *" buf ", size_t " nbytes ");"
