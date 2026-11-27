@@ -71,6 +71,32 @@ forwarding before it reaps the daemon, so that no signal reaches the PID once
 it is reused; the CUSE daemons install their handlers before the fork and no
 longer lose a termination signal during their start
 
+* Kernel module esdm_es: a request overlapping a health test failure, or the
+completion of the window a failure fell into, no longer credits events the
+reset of that failure is about to discard - a change of the startup test
+counts as in progress until its reset is done, and the request checks the
+startup test again before it compares the ring generation at its end
+
+* Kernel module esdm_es: the module reports system events to the ESDM - a
+changed VM generation (snapshot restored, clone started), suspend, resume and
+shutdown - with the IOCTL ESDM_ES_EVENTS and poll() on /dev/esdm_es. The ESDM
+reads them in a thread of its own: after a VM generation change it drops all
+credited entropy and seeds every DRNG anew, after a resume it reseeds every
+DRNG, on a suspend and a shutdown it raises the suspend notification of the
+status segment. Built without entropy source (BUILD_ES_IRQ=0
+BUILD_ES_SCHED=0), the module only reports the events and needs no kernel
+patch. esdm-server-signal-helper remains for systems without the module
+
+* Kernel module esdm_cdev: a blocking read no longer sleeps on when a read's
+answer from before the ESDM turned operational clears the operational flag
+after the watcher set it and stopped - clearing the flag kicks the watcher
+while somebody waits
+
+* esdm-server-signal-helper: --resume reseeds every DRNG through the
+privileged RPC interface, as the RNDRESEEDCRNG ioctl does, instead of writing
+a byte without entropy, which triggered no reseed; the exit status follows the
+mode that ran and no longer a leftover errno, and a call without mode fails
+
 * OpenSSL providers: RAND_status() reports the state of the ESDM - ready while
 it is fully seeded (RPC) or operational (EGD), not ready before, an error while
 it cannot be reached - instead of always ready. libesdm_egd_client gains
