@@ -126,6 +126,20 @@ struct esdm_rpc_client_connection {
 };
 
 /**
+ * @brief esdm_rpcc_get_unpriv_service() waiting no longer than a deadline
+ *
+ * A caller with a deadline of its own must not wait past it for a connection
+ * that another thread holds for a whole request or more.
+ *
+ * @param [in] abstime CLOCK_MONOTONIC deadline of the wait
+ * @return 0 on success, -ETIMEDOUT if the deadline passed first, < 0 on other
+ *	   errors as esdm_rpcc_get_unpriv_service()
+ */
+int esdm_rpcc_get_unpriv_service_timed(esdm_rpc_client_connection_t **rpc_conn,
+				       void *int_data,
+				       const struct timespec *abstime);
+
+/**
  * @brief Reason why the last RPC on this connection produced no response
  *
  * The RPC wrappers pre-set their closure result to -ETIMEDOUT and only learn

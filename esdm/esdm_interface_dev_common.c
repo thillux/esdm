@@ -44,5 +44,10 @@ void esdm_writer_wakeup(void)
 /* Is the DRNG seed level too low? */
 bool esdm_need_entropy(void)
 {
-	return (esdm_get_aux_ent() < esdm_write_wakeup_bits);
+	/*
+	 * Capped when read as well: force_fips switching the oversampling on
+	 * lowers what the pools hold below a threshold capped before.
+	 */
+	return (esdm_get_aux_ent() <
+		min_uint32(esdm_write_wakeup_bits, esdm_avail_poolsize_aux()));
 }

@@ -822,6 +822,19 @@ static void test_poll_registration(void)
 		      esdm_cuse_poll_list->poll_events == (POLLIN | POLLOUT),
 	      "the events of the replaced registration were dropped");
 
+	/*
+	 * A poll without a handle - nobody waited on the file when the kernel
+	 * sent it - is answered but leaves the registration of a waiter alone:
+	 * a NULL handle could not wake it.
+	 */
+	reply_reset();
+	fi.poll_events = POLLIN;
+	esdm_cuse_poll(TEST_REQ, &fi, NULL);
+	CHECK_EQ(reply.kind, REPLY_POLL);
+	CHECK_EQ(destroy_calls, 0);
+	CHECK(esdm_cuse_poll_list && esdm_cuse_poll_list->ph == TEST_PH,
+	      "a poll without a handle replaced the registration of a waiter");
+
 	/* The release takes it with it */
 	reply_reset();
 	esdm_cuse_release(TEST_REQ, &fi);
@@ -934,9 +947,9 @@ static void test_privileged_ioctls(void)
  *
  * Both are machine-global names, so this test creates them in an IPC namespace
  * of its own (see tests/test_ipc_ns.c). What matters is that a segment nobody
- * is attached to any more is treated as a leftover and replaced rather than
- * trusted - it is what a crashed server leaves behind, and its contents would
- * otherwise be reported as the current state.
+ * is attached to is used as found, never removed: it may be the one a starting
+ * server is about to attach, and a segment without the ready version is one no
+ * server publishes to, for which poll() follows the kernel's device.
  */
 static void test_shm_status(void)
 {
@@ -952,16 +965,22 @@ static void test_shm_status(void)
 	CHECK(esdm_cuse_shm_status_avail() != 0,
 	      "an attached status segment is not reported as available");
 
-	/* Detaching and attaching again finds it as the leftover it now is */
+	/* Detaching and attaching again finds the same segment, no new one */
 	esdm_cuse_shm_status_close_shm();
 	CHECK(esdm_cuse_shm_status == NULL,
 	      "the status segment was not detached");
 	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
 	CHECK(esdm_cuse_shm_status != NULL,
 	      "the status segment was not attached again");
-	CHECK_EQ(esdm_cuse_shm_status->version, 0);
+	CHECK_EQ(esdm_cuse_shm_status->version, ESDM_SHM_STATUS_VERSION);
 
-	/* A fresh segment, so the version has to be put back into it */
+	/*
+	 * Without the ready version no server publishes: reads and writes use
+	 * the kernel's device, here none, so they fail at once and do not wait.
+	 */
+	esdm_cuse_shm_status->version = 0;
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
 	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
 
 	/*
@@ -977,6 +996,12 @@ static void test_shm_status(void)
 	atomic_store(&esdm_cuse_shm_status->need_entropy, true);
 	esdm_cuse_get_pollmask(&mask);
 	CHECK_EQ(mask, POLLOUT | POLLWRNORM);
+
+	/* /dev/urandom reads the kernel device until the ESDM is operational */
+	esdm_cuse_fallback(-1, true);
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
+	esdm_cuse_fallback(-1, false);
 
 	atomic_store(&esdm_cuse_shm_status->need_entropy, false);
 	atomic_store(&esdm_cuse_shm_status->suspend_trigger, true);

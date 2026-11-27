@@ -47,17 +47,41 @@ int linux_isolate_namespace_keep_mounts(void);
  * @return 1 if it does, 0 if not, < 0 where that cannot be told.
  */
 int linux_task_has_cap_sys_admin(pid_t pid);
+/* Room for every signal linux_term_signals() returns */
+#define LINUX_TERM_SIGNALS_MAX 64
+
+/**
+ * @brief The asynchronous signals that terminate a process by default.
+ *
+ * What a daemon handles to shut down cleanly and its PID namespace supervisor
+ * forwards. Not the synchronous faults, which a handler returning would only
+ * raise again, nor SIGPIPE, the control mechanism of Protobuf-C-RPC.
+ *
+ * @param [out] sigs Array of LINUX_TERM_SIGNALS_MAX entries to fill.
+ *
+ * @return Number of signals written.
+ */
+unsigned int linux_term_signals(int *sigs);
+
 /**
  * @brief Fork the daemon into an isolating PID namespace.
  *
  * The calling process becomes a pure supervisor that forwards signals and
  * mirrors the daemon's exit status; only the child returns from this call.
  *
+ * @param [in] fwd_signals Signals the supervisor forwards to the daemon -
+ *	       every signal the daemon handles, as the supervisor dies from
+ *	       one it does not forward. The daemon must install its handlers
+ *	       for them before this call: the kernel drops a signal sent to a
+ *	       PID namespace init from outside that has no handler for it.
+ * @param [in] nr_fwd_signals Number of entries in fwd_signals.
  * @param [in] supervisor_exit_cb Optional callback (may be NULL) the
  *	       supervisor invokes - with its retained privileges - after the
  *	       daemon terminated and before it exits itself.
  */
-int linux_isolate_namespace_prefork(void (*supervisor_exit_cb)(void));
+int linux_isolate_namespace_prefork(const int *fwd_signals,
+				    unsigned int nr_fwd_signals,
+				    void (*supervisor_exit_cb)(void));
 int linux_personalization_string(char **ptr, size_t *length);
 
 #ifdef __cplusplus

@@ -57,6 +57,12 @@ enum esdm_selftest_state esdm_selftest_crypto_state(void);
 bool esdm_selftest_crypto_passed(void);
 
 /**
+ * @brief Did a self test of the crypto implementations fail? Unlike
+ *	  !esdm_selftest_crypto_passed(), false before the tests ran.
+ */
+bool esdm_selftest_crypto_failed(void);
+
+/**
  * @brief Name of the crypto self test state, for reporting
  */
 const char *esdm_selftest_crypto_state_name(void);

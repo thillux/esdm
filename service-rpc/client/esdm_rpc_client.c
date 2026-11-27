@@ -635,7 +635,12 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 
 			ret = -errno;
 			esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC,
-				    "Read failed: %s\n", strerror(errno));
+				    "Read failed: %s\n", strerror(-ret));
+			/*
+			 * The request is in flight: drop the socket so that a
+			 * late answer cannot pass for the next one.
+			 */
+			reset_conn_socket(rpc_conn);
 			break;
 		}
 
@@ -790,6 +795,9 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 
 		msg = ERR_PTR(-EINTR);
 		closure(msg, closure_data);
+
+		/* esdm_client_invoke() knows the method: may it run twice? */
+		ret = -EINTR;
 	} else if (ret != -EAGAIN && ret != -ECONNRESET) {
 		/* Those two are asked again by esdm_client_invoke() */
 		ProtobufCMessage *msg;
@@ -943,6 +951,17 @@ static void esdm_client_invoke(ProtobufCService *service,
 		/* Receive data */
 		ret = esdm_rpc_client_read_handler(
 			rpc_conn, tbuf, method->output, closure, closure_data);
+
+		/*
+		 * Interrupted after the write, the closure got -EINTR. The
+		 * server may have run the request: one that must not run twice
+		 * fails as on a lost answer rather than invite a repetition.
+		 */
+		if (ret == -EINTR) {
+			ret = esdm_rpcc_resendable(method) ? 0 : -ETIMEDOUT;
+			break;
+		}
+
 		/* EAGAIN is ok here, since sockets are non-blocking now */
 		if (ret < 0 && ret != -EAGAIN && ret != -ECONNRESET) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
@@ -1394,10 +1413,11 @@ static int esdm_rpcc_claim_service(esdm_rpc_client_connection_t *rpc_conn_p,
 	return 0;
 }
 
+/* @abstime: CLOCK_MONOTONIC bound of the wait for a busy connection, or NULL */
 static int esdm_rpcc_get_service(
 	_Atomic(esdm_rpc_client_connection_t *) *rpc_conn_array_ptr,
 	uint32_t *num_conn_ptr, esdm_rpc_client_connection_t **ret_rpc_conn,
-	void *int_data)
+	void *int_data, const struct timespec *abstime)
 {
 	esdm_rpc_client_connection_t *rpc_conn_array, *rpc_conn_p;
 	uint32_t node, num_conn;
@@ -1464,8 +1484,17 @@ static int esdm_rpcc_get_service(
 	atomic_fetch_add(&rpc_conn_p->waiters, 1);
 	mutex_reader_unlock(&esdm_rpcc_conn_lock);
 
-	mutex_w_lock(&rpc_conn_p->ref_cnt);
-	ret = esdm_rpcc_claim_service(rpc_conn_p, ret_rpc_conn, int_data);
+	if (!abstime) {
+		mutex_w_lock(&rpc_conn_p->ref_cnt);
+		ret = esdm_rpcc_claim_service(rpc_conn_p, ret_rpc_conn,
+					      int_data);
+	} else if (!mutex_w_timedlock(&rpc_conn_p->ref_cnt, abstime)) {
+		ret = esdm_rpcc_claim_service(rpc_conn_p, ret_rpc_conn,
+					      int_data);
+	} else {
+		*ret_rpc_conn = NULL;
+		ret = -ETIMEDOUT;
+	}
 
 	/* Last access - the connection may be torn down right after */
 	atomic_fetch_sub(&rpc_conn_p->waiters, 1);
@@ -1498,7 +1527,16 @@ int esdm_rpcc_get_unpriv_service(esdm_rpc_client_connection_t **rpc_conn,
 				 void *int_data)
 {
 	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
-				     rpc_conn, int_data);
+				     rpc_conn, int_data, NULL);
+}
+
+/* Documented with its declaration in esdm_rpc_client_internal.h */
+int esdm_rpcc_get_unpriv_service_timed(esdm_rpc_client_connection_t **rpc_conn,
+				       void *int_data,
+				       const struct timespec *abstime)
+{
+	return esdm_rpcc_get_service(&unpriv_rpc_conn, &unpriv_rpc_conn_num,
+				     rpc_conn, int_data, abstime);
 }
 
 DSO_PUBLIC
@@ -1545,7 +1583,7 @@ int esdm_rpcc_get_priv_service(esdm_rpc_client_connection_t **rpc_conn,
 			       void *int_data)
 {
 	return esdm_rpcc_get_service(&priv_rpc_conn, &priv_rpc_conn_num,
-				     rpc_conn, int_data);
+				     rpc_conn, int_data, NULL);
 }
 
 DSO_PUBLIC

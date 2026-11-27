@@ -98,16 +98,18 @@ static bool signal_resume(void)
 {
 	int ret = -1;
 
-	if (esdm_rpcc_init_unpriv_service(NULL) != 0)
+	/*
+	 * Reseed every DRNG after a resume, as the RNDRESEEDCRNG ioctl does:
+	 * a written byte without entropy only stirs the auxiliary pool and
+	 * triggers nothing. The call is privileged; the unit runs as root.
+	 */
+	if (esdm_rpcc_init_priv_service(NULL) != 0)
 		return false;
 	fprintf(stdout, "Signal resume to ESDM\n");
 
-	/* write empty byte array to trigger reseed after resume */
-	unsigned char dummy_data[1] = { 0 };
+	esdm_invoke(esdm_rpcc_rnd_reseed_crng());
 
-	esdm_invoke(esdm_rpcc_write_data(dummy_data, sizeof(dummy_data)));
-
-	esdm_rpcc_fini_unpriv_service();
+	esdm_rpcc_fini_priv_service();
 
 	return ret == 0;
 }
@@ -173,17 +175,23 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (suspend && !signal_suspend(pidfile_path)) {
-		fprintf(stderr, "Failure during suspend signaling\n");
-		ret = EXIT_FAILURE;
-	} else if (resume && !signal_resume()) {
-		fprintf(stderr, "Failure during resume signaling\n");
-		ret = EXIT_FAILURE;
-	} else if (help) {
-		usage();
-		ret = EXIT_FAILURE;
-	} else if (errno) {
-		perror("Unknown mode or error:");
+	/*
+	 * The mode that ran decides the exit status - not errno, which a
+	 * successful run may leave set from any library call.
+	 */
+	if (suspend) {
+		if (!signal_suspend(pidfile_path)) {
+			fprintf(stderr, "Failure during suspend signaling\n");
+			ret = EXIT_FAILURE;
+		}
+	} else if (resume) {
+		if (!signal_resume()) {
+			fprintf(stderr, "Failure during resume signaling\n");
+			ret = EXIT_FAILURE;
+		}
+	} else {
+		if (!help)
+			fprintf(stderr, "No mode given\n");
 		usage();
 		ret = EXIT_FAILURE;
 	}

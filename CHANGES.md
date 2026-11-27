@@ -1,4 +1,69 @@
 Changes 1.2.4
+* A seed operation of a DRNG that fails no longer counts: the emergency
+reseeding credited the next injection with the entropy collected for the failed
+one, which could mark a DRNG fully seeded with less entropy than required
+
+* The prediction resistance DRNG serves only once it was fully seeded, like
+every other DRNG: before its initial full seed, it served as much as the
+fresh entropy of a request allowed
+
+* esdm_get_random_bytes_full() waits again when the ESDM stopped since its
+wait, as the initial DRNG does at its reseed threshold, instead of failing
+with -EOPNOTSUPP
+
+* A self test failing during a request stops it: the verdict is checked
+before every generated chunk and before esdm_get_seed() hands out its seed,
+not only on entry
+
+* Self tests: a recorded failure also stops the seedings and the reseed
+worker, and callers waiting for the ESDM to turn operational return
+-EOPNOTSUPP instead of waiting for good; the self test of the auxiliary pool
+reads its state under the pool lock
+
+* Auxiliary pool: an insert picks its pool by the raw entropy count the cap
+applies to, an extraction reads the oversampling once, and the write wakeup
+threshold is capped when it is read - a force_fips change at run time credits
+no more than the output holds and wakes no writer with every pool full
+
+* Status in shared memory: the need for entropy is published under a lock,
+the semaphores stay binary, an aux client passes a wakeup on while entropy is
+needed and ignores one left over, the version is published after the state,
+and the initialization reads the operational state under the lock it changes
+under; readers no longer remove a segment they find; esdm-server ignores
+SIGUSR1 until its handler is installed
+
+* CUSE: a poll without notification handle keeps the registration of a
+waiting poller, reads honor O_NONBLOCK, up to 1024 workers serve requests
+instead of 10 with libfuse 3.12 or later, poll follows the kernel device the
+reads fall back to, a /dev/urandom read stops waiting for a reseed once the
+ESDM is no longer operational, and an RNDADDENTROPY or RNDADDTOENTCNT the
+ESDM may have credited is not credited to the kernel as well
+
+* RPC client: an interrupted request that must not run twice returns
+-ETIMEDOUT rather than -EINTR, so that esdm_invoke() does not repeat it; a
+failed read closes the connection; esdm_rpcc_get_random_bytes_full_timeout()
+waits for a busy connection no longer than its deadline
+
+* RPC server: a failing eventfd() no longer leaves started workers on freed
+memory, and a failure of the unprivileged interface ends the server; a reply
+that cannot be sent closes the connection, so a pipelining client gets no
+other request's answer; a termination signal while the unprivileged workers
+start no longer deadlocks the shutdown; a failing accept() for want of
+descriptors no longer spins a worker
+
+* EGD server: a client sending without pause no longer holds the worker - it
+reads one buffer of a client's input per round; a failing accept() for want
+of descriptors no longer spins the worker; both listeners in one round no
+longer exceed the connection limit
+
+* --pid_namespace: the supervisors of esdm-server and the CUSE daemons forward
+the same set of termination signals - one not forwarded killed the supervisor
+and left the daemon unsupervised - and the daemon drops those it does not
+handle; a supervisor survives an inherited SIG_IGN of SIGCHLD and stops
+forwarding before it reaps the daemon, so that no signal reaches the PID once
+it is reused; the CUSE daemons install their handlers before the fork and no
+longer lose a termination signal during their start
+
 * OpenSSL providers: RAND_status() reports the state of the ESDM - ready while
 it is fully seeded (RPC) or operational (EGD), not ready before, an error while
 it cannot be reached - instead of always ready. libesdm_egd_client gains

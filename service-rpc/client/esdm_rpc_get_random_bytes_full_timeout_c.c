@@ -107,7 +107,8 @@ static int esdm_rpcc_timeout_interrupt(void *data)
 static int esdm_rpcc_timeout_get(esdm_rpc_client_connection_t **rpc_conn,
 				 struct esdm_rpcc_timeout_int *t)
 {
-	int ret = esdm_rpcc_get_unpriv_service(rpc_conn, t);
+	/* Waiting for a busy connection is waiting, too */
+	int ret = esdm_rpcc_get_unpriv_service_timed(rpc_conn, t, &t->deadline);
 
 	if (ret)
 		return ret;
@@ -147,6 +148,11 @@ ssize_t esdm_rpcc_get_random_bytes_full_timeout_int(uint8_t *buf, size_t buflen,
 	ssize_t ret = 0;
 
 	CKNULL(ts, -EINVAL);
+	/* The deadline also bounds a mutex_w_timedlock(): keep it valid */
+	if (ts->tv_nsec < 0) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	CKINT(clock_gettime(CLOCK_MONOTONIC, &timeout.deadline));
 	timeout.deadline.tv_sec += ts->tv_sec;

@@ -20,8 +20,14 @@
 #ifndef CUSE_DEVICE_H
 #define CUSE_DEVICE_H
 
+/* The loop configuration needs the 3.12 API, see frontends/cuse/meson.build */
+#ifdef ESDM_FUSE_LOOP_CONFIG
+#define FUSE_USE_VERSION 312
+#else
 #define FUSE_USE_VERSION 31
+#endif
 #define _FILE_OFFSET_BITS 64
+#include <stdbool.h>
 #include <fuse3/fuse.h>
 #include <fuse3/cuse_lowlevel.h>
 
@@ -47,6 +53,13 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 		    struct fuse_pollhandle *ph);
 void esdm_cuse_release(fuse_req_t req, struct fuse_file_info *fi);
+
+/*
+ * The kernel's device reads and writes fall back to, which poll() then
+ * follows; nonop_fallback: reads use it also while the ESDM is not operational
+ * (/dev/urandom).
+ */
+void esdm_cuse_fallback(int fallback_fd, bool nonop_fallback);
 int main_common(const char *devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv);
 

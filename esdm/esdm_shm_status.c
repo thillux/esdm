@@ -30,6 +30,7 @@
 
 #include "esdm.h"
 #include "esdm_config.h"
+#include "esdm_drng_mgr.h"
 #include "esdm_es_mgr.h"
 #include "esdm_interface_dev_common.h"
 #include "esdm_rpc_server.h"
@@ -37,6 +38,7 @@
 #include "esdm_shm_status.h"
 #include "helper.h"
 #include "esdm_logger.h"
+#include "mutex_w.h"
 #include "ret_checkers.h"
 #include "visibility.h"
 
@@ -52,11 +54,29 @@
  */
 static struct esdm_shm_status *_Atomic esdm_shm_status = NULL;
 static int esdm_shmid = -1;
-static sem_t *esdm_semid_random = SEM_FAILED;
-static sem_t *esdm_semid_urandom = SEM_FAILED;
+
+/*
+ * A semaphore readers wait on. Its posts are combined: a caller finding
+ * another one posting (req) leaves its notification to that one, which looks
+ * again after its post. Posts thus never race, and as nothing blocks, the
+ * suspend signal handler takes part too.
+ */
+struct esdm_shm_sem {
+	sem_t *sem;
+	atomic_uint req;
+};
+
+static struct esdm_shm_sem esdm_semid_random = { SEM_FAILED, 0 };
+static struct esdm_shm_sem esdm_semid_urandom = { SEM_FAILED, 0 };
 
 /* Level-triggered semaphore when the ESDM needs entropy */
-static sem_t *esdm_semid_need_entropy_level = SEM_FAILED;
+static struct esdm_shm_sem esdm_semid_need_entropy_level = { SEM_FAILED, 0 };
+
+/*
+ * Serializes esdm_shm_status_set_need_entropy(): concurrent callers would
+ * store an older evaluation last, leaving a stale flag until the next call.
+ */
+static DEFINE_MUTEX_W_UNLOCKED(esdm_shm_need_lock);
 
 /*
  * in_signal_handler is set to prevent calling non-async-signal-safe
@@ -64,37 +84,49 @@ static sem_t *esdm_semid_need_entropy_level = SEM_FAILED;
  */
 static volatile sig_atomic_t in_signal_handler = 0;
 
-static void _esdm_shm_status_up(sem_t *sem)
+static void _esdm_shm_status_up(struct esdm_shm_sem *s)
 {
-	int semval = 0;
+	sem_t *sem = s->sem;
+	unsigned int req;
+	int semval;
 
 	if (sem == SEM_FAILED)
 		return;
 
-	/*
-	 * The purpose of the semaphore is to notify clients. If one
-	 * notification is sent out, a client must answer. We do not increment
-	 * the semaphore again if the client did not "consume" the notification.
-	 * The reason is that "consuming" a notification implies that the
-	 * event is not present any more for others. Hence the semaphore shall
-	 * only toggle between 0 and 1.
-	 */
-	sem_getvalue(sem, &semval);
-	if (semval > 0)
+	/* Another caller posts: it looks again after its post */
+	if (atomic_fetch_add(&s->req, 1))
 		return;
 
-	if (sem_post(sem)) {
-		/* esdm_logger is not async-signal-safe, skip in signal context */
-		if (!in_signal_handler)
-			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
-				    "Cannot unlock semaphore\n");
-	}
+	do {
+		req = atomic_load(&s->req);
+		semval = 0;
+
+		/*
+		 * The purpose of the semaphore is to notify clients. If one
+		 * notification is sent out, a client must answer. We do not
+		 * increment the semaphore again if the client did not
+		 * "consume" the notification. The reason is that "consuming" a
+		 * notification implies that the event is not present any more
+		 * for others. Hence the semaphore shall only toggle between 0
+		 * and 1.
+		 */
+		sem_getvalue(sem, &semval);
+		if (semval <= 0 && sem_post(sem)) {
+			/*
+			 * esdm_logger is not async-signal-safe, skip in signal
+			 * context
+			 */
+			if (!in_signal_handler)
+				esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+					    "Cannot unlock semaphore\n");
+		}
+	} while (!atomic_compare_exchange_strong(&s->req, &req, 0));
 }
 
 static void esdm_shm_status_up(void)
 {
-	_esdm_shm_status_up(esdm_semid_random);
-	_esdm_shm_status_up(esdm_semid_urandom);
+	_esdm_shm_status_up(&esdm_semid_random);
+	_esdm_shm_status_up(&esdm_semid_urandom);
 }
 
 /*
@@ -107,7 +139,7 @@ static void esdm_shm_status_up(void)
 static void esdm_shm_wake_all(void)
 {
 	esdm_shm_status_up();
-	_esdm_shm_status_up(esdm_semid_need_entropy_level);
+	_esdm_shm_status_up(&esdm_semid_need_entropy_level);
 }
 
 void esdm_shm_status_set_operational(bool enabled)
@@ -131,6 +163,8 @@ void esdm_shm_status_set_need_entropy(void)
 	if (!status)
 		return;
 
+	mutex_w_lock(&esdm_shm_need_lock);
+
 	curr = atomic_load(&status->need_entropy);
 
 	new = esdm_need_entropy();
@@ -145,7 +179,9 @@ void esdm_shm_status_set_need_entropy(void)
 	 * as long as entropy is required.
 	 */
 	if (new)
-		_esdm_shm_status_up(esdm_semid_need_entropy_level);
+		_esdm_shm_status_up(&esdm_semid_need_entropy_level);
+
+	mutex_w_unlock(&esdm_shm_need_lock);
 }
 
 static void esdm_shm_status_set_suspend(void)
@@ -197,12 +233,12 @@ static void esdm_shm_status_install_signal_suspend(void)
 			    strerror(errno));
 }
 
-static void _esdm_shm_status_delete_sem(sem_t **sem)
+static void _esdm_shm_status_delete_sem(struct esdm_shm_sem *s)
 {
-	if (*sem != SEM_FAILED) {
-		sem_t *tmp = *sem;
+	if (s->sem != SEM_FAILED) {
+		sem_t *tmp = s->sem;
 
-		*sem = SEM_FAILED;
+		s->sem = SEM_FAILED;
 		sem_close(tmp);
 	}
 }
@@ -271,8 +307,10 @@ void esdm_shm_status_cleanup_ipc(void)
 	esdm_shm_status_unlink_sem(ESDM_SEM_NEED_ENTROPY_LEVEL);
 }
 
-static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
+static int esdm_shm_status_create_sem(const char *semname,
+				      struct esdm_shm_sem *s)
 {
+	bool existed = false;
 	sem_t *tmp;
 	int errsv;
 
@@ -282,9 +320,7 @@ static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
 			tmp = sem_open(semname, O_CREAT, 0644, 0);
 			if (tmp == SEM_FAILED)
 				goto err;
-
-			/* Re-synchronize */
-			sem_post(tmp);
+			existed = true;
 		} else {
 			goto err;
 		}
@@ -293,7 +329,11 @@ static int esdm_shm_status_create_sem(const char *semname, sem_t **sem)
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 		    "ESDM change indicator semaphore %s initialized\n",
 		    semname);
-	*sem = tmp;
+	s->sem = tmp;
+
+	/* Re-synchronize, unless a notification is still pending */
+	if (existed)
+		_esdm_shm_status_up(s);
 
 	return 0;
 
@@ -415,6 +455,7 @@ static int esdm_shm_status_create_shm(void)
 
 int esdm_shm_status_init(void)
 {
+	struct esdm_drng *drng = esdm_drng_init_instance();
 	int ret = esdm_shm_status_create_shm();
 
 	if (ret)
@@ -457,23 +498,43 @@ int esdm_shm_status_init(void)
 	esdm_shm_status->unpriv_threads = esdm_config_online_nodes();
 
 	/*
-	 * Publish the version last, after a barrier, so a reader that observes
-	 * the ready version is guaranteed to also see the populated
-	 * info/infolen/unpriv_threads written above.
+	 * Under the initial DRNG's lock, which the operational state changes
+	 * under (esdm_init_ops()): a seeding thread publishing a newer state
+	 * between the read and the store would be overwritten for good.
 	 */
-	atomic_thread_fence(memory_order_seq_cst);
-	esdm_shm_status->version = ESDM_SHM_STATUS_VERSION;
-
+	mutex_w_lock(&drng->lock);
 	esdm_shm_status_set_operational(esdm_state_operational());
+	mutex_w_unlock(&drng->lock);
 	esdm_shm_status_set_need_entropy();
 	esdm_shm_status_install_signal_suspend();
 	atomic_store(&esdm_shm_status->suspend_trigger, false);
+
+	/*
+	 * Publish the version last, after a barrier, so a reader that observes
+	 * the ready version is guaranteed to also see the populated
+	 * info/infolen/unpriv_threads and the state of this server, not that of
+	 * a predecessor whose segment it took over.
+	 */
+	atomic_thread_fence(memory_order_seq_cst);
+	esdm_shm_status->version = ESDM_SHM_STATUS_VERSION;
 
 	return 0;
 }
 
 static void esdm_shm_status_exit_common(bool cleanup_ipc)
 {
+	struct esdm_shm_status *status = esdm_shm_status;
+
+	/*
+	 * Withdraw the version before the wakeup: readers take a segment
+	 * without it as one no server publishes to, and the CUSE daemons then
+	 * follow the kernel's device their calls fall back to.
+	 */
+	if (status) {
+		status->version = 0;
+		atomic_thread_fence(memory_order_seq_cst);
+	}
+
 	/* Notify the client to inform that the server exists */
 	esdm_shm_status_server_exit();
 	esdm_shm_status_delete_shm();

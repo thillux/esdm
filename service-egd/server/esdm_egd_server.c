@@ -65,7 +65,7 @@
  * it, connections stay queued in the listen backlog. Generous because such
  * consumers are typically idle long running daemons and nothing is preallocated
  * for them. Serving this many needs a RLIMIT_NOFILE above it; an accept failing
- * for want of a descriptor merely leaves the client queued.
+ * for want of a descriptor leaves the client queued, see esdm_egd_accept().
  */
 #define ESDM_EGD_MAX_CONNECTIONS 2048
 
@@ -1496,55 +1496,54 @@ int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
  */
 static int esdm_egd_read(struct esdm_egd_conn *conn)
 {
-	/* A client streaming input keeps it here: not past a stop request */
-	while (!atomic_load(&esdm_egd_exit)) {
-		ssize_t received;
-		int ret;
+	ssize_t received;
+	int ret;
 
-		/*
-		 * Client gone: process its input without waiting for EOF from
-		 * recv(), so a parked or deferred read cannot strand it.
-		 */
-		if (conn->hangup && conn->in_len) {
-			ret = esdm_egd_process(conn);
-			if (ret)
-				return ret;
-		}
-
-		/*
-		 * While a request is deferred or parked, a response is on its
-		 * way out or the buffer is full, do not read further: the
-		 * pending data stays in the socket buffer, which applies
-		 * backpressure to the client instead of requiring unbounded
-		 * buffering here.
-		 */
-		if (conn->deferred || conn->parked ||
-		    esdm_egd_out_pending(conn) || conn->in_len >= sizeof(conn->in))
-			return 0;
-
-		/* recv() for symmetry with the send() of the response. */
-		received = recv(conn->fd, conn->in + conn->in_len,
-				sizeof(conn->in) - conn->in_len, 0);
-		if (received == 0) {
-			/* Orderly shutdown by the client. */
-			return -EPIPE;
-		}
-		if (received < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				return 0;
-			return -errno;
-		}
-
-		conn->in_len += (size_t)received;
-
+	/*
+	 * Client gone: process its input without waiting for EOF from recv(),
+	 * so a parked or deferred read cannot strand it.
+	 */
+	if (conn->hangup && conn->in_len) {
 		ret = esdm_egd_process(conn);
 		if (ret)
 			return ret;
 	}
 
-	return 0;
+	/*
+	 * While a request is deferred or parked, a response is on its way out
+	 * or the buffer is full, do not read further: the pending data stays in
+	 * the socket buffer, which applies backpressure to the client instead
+	 * of requiring unbounded buffering here.
+	 */
+	if (conn->deferred || conn->parked || esdm_egd_out_pending(conn) ||
+	    conn->in_len >= sizeof(conn->in))
+		return 0;
+
+	/*
+	 * One recv() per event: the descriptor is level-triggered, so epoll
+	 * reports what is left in the next round, after the other clients.
+	 * Reading until EAGAIN let a client sending faster than the worker
+	 * processes hold the worker for good. recv() for symmetry with the
+	 * send() of the response.
+	 */
+	do {
+		received = recv(conn->fd, conn->in + conn->in_len,
+				sizeof(conn->in) - conn->in_len, 0);
+	} while (received < 0 && errno == EINTR);
+
+	if (received == 0) {
+		/* Orderly shutdown by the client, all its input processed */
+		return -EPIPE;
+	}
+	if (received < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return 0;
+		return -errno;
+	}
+
+	conn->in_len += (size_t)received;
+
+	return esdm_egd_process(conn);
 }
 
 static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
@@ -1565,9 +1564,14 @@ static void esdm_egd_release_conn(struct esdm_egd_conn *conn)
 	free(conn);
 }
 
-/* Accept one client and register it with the event loop. */
+/*
+ * Accept one client and register it with the event loop. @stalled tells that
+ * the client stays queued for want of descriptors or memory: the listener
+ * remains readable, and armed it would spin the worker.
+ */
 static struct esdm_egd_conn *
-esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener)
+esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener,
+		bool *stalled)
 {
 	struct esdm_egd_conn *conn;
 	struct ucred cred;
@@ -1576,8 +1580,11 @@ esdm_egd_accept(int epfd, const struct esdm_egd_listener *listener)
 	int fd = accept4(listener->listening_fd, NULL, NULL,
 			 SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-	if (fd < 0)
+	if (fd < 0) {
+		*stalled = (errno == EMFILE || errno == ENFILE ||
+			    errno == ENOBUFS || errno == ENOMEM);
 		return NULL;
+	}
 
 	conn = calloc(1, sizeof(struct esdm_egd_conn));
 	if (!conn) {
@@ -1648,6 +1655,11 @@ static int esdm_egd_handler(void __unused *args)
 	 * report it readable over and over and spin the worker.
 	 */
 	bool listen_armed = true;
+	/*
+	 * An accept failed for want of resources: the listeners stay disarmed
+	 * until this time or until a connection is closed.
+	 */
+	uint64_t accept_retry_at = 0;
 	int epfd = -1;
 	int ret = 0;
 
@@ -1700,7 +1712,10 @@ static int esdm_egd_handler(void __unused *args)
 	}
 
 	while (atomic_load(&esdm_egd_exit) == 0) {
-		bool want_armed = (num_connections < ESDM_EGD_MAX_CONNECTIONS);
+		bool want_armed =
+			(num_connections < ESDM_EGD_MAX_CONNECTIONS) &&
+			(!accept_retry_at ||
+			 esdm_egd_now_ms() >= accept_retry_at);
 		int nfds, i;
 
 		if (want_armed != listen_armed) {
@@ -1756,10 +1771,25 @@ static int esdm_egd_handler(void __unused *args)
 			    events[i].data.ptr <
 				    (void *)&esdm_egd_listeners[ARRAY_SIZE(
 					    esdm_egd_listeners)]) {
-				conn = esdm_egd_accept(epfd,
-						       events[i].data.ptr);
-				if (!conn)
+				bool stalled = false;
+
+				/*
+				 * Both listeners may report in one batch: the
+				 * limit is checked for each, the client stays
+				 * queued and the listeners are disarmed next.
+				 */
+				if (num_connections >= ESDM_EGD_MAX_CONNECTIONS)
 					continue;
+
+				conn = esdm_egd_accept(epfd, events[i].data.ptr,
+						       &stalled);
+				if (!conn) {
+					if (stalled)
+						accept_retry_at =
+							esdm_egd_now_ms() +
+							ESDM_EGD_IDLE_POLL_MS;
+					continue;
+				}
 
 				TAILQ_INSERT_TAIL(&conn_list, conn, tailq);
 				num_connections++;
@@ -1780,16 +1810,10 @@ static int esdm_egd_handler(void __unused *args)
 
 			/*
 			 * EPOLLRDHUP only signals that the client will not send
-			 * any more data - it may still be waiting for what it
-			 * asked for before, be that a response on its way out or
-			 * a request that has yet to find its entropy, deferred
-			 * or parked. Close only once nothing is owed to it any
-			 * more.
+			 * any more data - its requests may still be unread, and
+			 * it may be waiting for what it asked for. It is closed
+			 * once esdm_egd_read() receives the end of its input.
 			 */
-			if (!ret && (events[i].events & EPOLLRDHUP) &&
-			    !conn->deferred && !conn->parked &&
-			    !esdm_egd_out_pending(conn))
-				ret = -EPIPE;
 
 			if (ret) {
 				esdm_logger(
@@ -1800,6 +1824,8 @@ static int esdm_egd_handler(void __unused *args)
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
 				num_connections--;
+				/* A descriptor became free */
+				accept_retry_at = 0;
 				continue;
 			}
 
@@ -1843,6 +1869,7 @@ static int esdm_egd_handler(void __unused *args)
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
 				num_connections--;
+				accept_retry_at = 0;
 				continue;
 			}
 
@@ -1864,6 +1891,7 @@ static int esdm_egd_handler(void __unused *args)
 				TAILQ_REMOVE(&conn_list, conn, tailq);
 				esdm_egd_release_conn(conn);
 				num_connections--;
+				accept_retry_at = 0;
 				continue;
 			}
 

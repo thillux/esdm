@@ -497,7 +497,7 @@ at a different location.
 ''')
 
 ################################################################################
-# PKCS#11 Entropy Source configuration options
+# PKCS#11 and PC/SC Entropy Source configuration options
 ################################################################################
 
 option('es_pkcs11', type: 'feature', value: 'disabled',
@@ -569,6 +569,10 @@ enforces the limit that this value must be in the range between 0 and 256.
 When configuring this value to 0, the kernel jitter entropy source will provide
 256 bits of data without being credited to contain entropy.
 ''')
+
+################################################################################
+# External Entropy Source configuration options
+################################################################################
 
 option('es_ext', type: 'feature', value: 'enabled',
        description: '''Enable the external entropy source.

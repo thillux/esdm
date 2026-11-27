@@ -73,6 +73,11 @@ bool esdm_selftest_crypto_passed(void)
 	return (esdm_selftest_crypto_state() == esdm_selftest_passed);
 }
 
+bool esdm_selftest_crypto_failed(void)
+{
+	return (esdm_selftest_crypto_state() == esdm_selftest_failed);
+}
+
 const char *esdm_selftest_crypto_state_name(void)
 {
 	switch (esdm_selftest_crypto_state()) {
@@ -99,6 +104,9 @@ static void esdm_selftest_record(int ret)
 				LOGGER_ERR, LOGGER_C_DRNG,
 				"Self test failed (%d) - the ESDM stops handing out random bits\n",
 				ret);
+
+			/* Now, not after its wait: the reseed worker leaves */
+			esdm_drng_mgr_reseed_worker_notify();
 		}
 		return;
 	}

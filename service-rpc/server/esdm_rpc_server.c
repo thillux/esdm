@@ -138,6 +138,12 @@ static atomic_int esdm_rpc_init_state =
 	esdm_rpcs_state_uninitialized;
 /* Why the unprivileged interface failed - see esdm_rpcs_state_unpriv_failed */
 static atomic_int esdm_rpcs_unpriv_init_ret = 0;
+/*
+ * esdm_rpcs_unpriv_init() has not returned yet. esdm_rpc_server_fini() waits
+ * for it before joining the pool: the join flags the worker slots that thread
+ * may still wait for in thread_start(), and waits for that thread.
+ */
+static atomic_bool esdm_rpcs_unpriv_running = false;
 static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 
 static atomic_int server_exit = 0;
@@ -220,51 +226,52 @@ static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
 		return -EINVAL;
 
 	do {
+		int err;
+
 		retries++;
 		ret = write(rpc_conn->child_fd, data, len);
+		if (ret >= 0)
+			break;
+
+		err = errno;
 		/* we use non-blocking sockets */
-		if (ret < 0 && errno == EAGAIN) {
+		if (err == EAGAIN) {
 			/* Wait a short moment for writeability, but not forever */
 			struct pollfd pfd = { .fd = rpc_conn->child_fd,
 					      .events = POLLOUT };
 			int poll_ret = esdm_ppoll_ms(&pfd, 1, TIMEOUT_MS);
 
-			/* early check for writeable */
-			if (poll_ret > 0 && pfd.revents & POLLOUT) {
+			/* writeable again, or a signal: retry */
+			if ((poll_ret > 0 && pfd.revents & POLLOUT) ||
+			    (poll_ret < 0 && errno == EINTR))
 				continue;
-			}
 
-			/* signal? */
-			if (poll_ret < 0 && errno == EINTR) {
-				continue;
-			}
-
-			/* connection lost? */
-			if (poll_ret > 0 && pfd.revents & (POLLERR | POLLHUP)) {
-				ret = -EPIPE;
-				break;
-			}
-
-			/* timeout or error: fall through */
-			if (poll_ret <= 0) {
-				ret = (poll_ret == 0) ? -ETIMEDOUT : -errno;
-			}
-		};
-
-		if (ret < 0) {
-			int errsv = errno;
-
-			esdm_logger(
-				LOGGER_VERBOSE, LOGGER_C_RPC,
-				"Writing of data to file descriptor %d failed: %s\n",
-				rpc_conn->child_fd, strerror(errsv));
-
-			if (errsv == EPIPE)
-				rpc_conn->broken = true;
-
-			return -errsv;
+			/*
+			 * The connection is lost, the client does not read or
+			 * the poll failed - the EAGAIN of the write says none
+			 * of that.
+			 */
+			if (poll_ret > 0)
+				err = EPIPE;
+			else
+				err = poll_ret ? errno : ETIMEDOUT;
 		}
-	} while (ret < 0 && retries <= ESDM_MAX_RX_TX_RETRIES);
+
+		esdm_logger(
+			LOGGER_VERBOSE, LOGGER_C_RPC,
+			"Writing of data to file descriptor %d failed: %s\n",
+			rpc_conn->child_fd, strerror(err));
+
+		return -err;
+	} while (retries <= ESDM_MAX_RX_TX_RETRIES);
+
+	/* Writeable again and again, but never with room for the message */
+	if (ret < 0) {
+		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
+			    "Writing of data to file descriptor %d timed out\n",
+			    rpc_conn->child_fd);
+		return -ETIMEDOUT;
+	}
 
 	/*
 	 * SOCK_SEQPACKET guarantees atomic messages - a short write is a
@@ -454,6 +461,11 @@ static void esdm_rpcs_response_closure(const ProtobufCMessage *message,
 	if (ret) {
 		esdm_logger(LOGGER_DEBUG, LOGGER_C_ANY,
 			    "Failed to serialize response: %d\n", ret);
+		/*
+		 * Whatever kept the reply from the client, it waits for one
+		 * that never comes and would take the next reply for it.
+		 */
+		rpc_conn->broken = true;
 	}
 
 	return;
@@ -510,7 +522,7 @@ out:
 	if (tlh.consumed)
 		memset_secure(unpack_buf, 0, tlh.consumed);
 
-	/* Pick up the error from esdm_rpcs_write_data */
+	/* The reply was lost, see esdm_rpcs_response_closure() */
 	if (rpc_conn->broken)
 		ret = -EPIPE;
 
@@ -663,11 +675,29 @@ static bool esdm_time_after(struct timespec *curr, struct timespec *timeout)
 	return false;
 }
 
+/*
+ * How long the listener stays disarmed after an accept failed for want of a
+ * descriptor or memory: the pending client keeps it readable, and accepting
+ * again at once would spin the worker.
+ */
+#define ESDM_RPCS_ACCEPT_RETRY_MS 250
+
+static uint64_t esdm_rpcs_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(ESDM_CLOCK_COARSE, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
 /* Worker side bookkeeping of the connections of one worker */
 struct esdm_rpcs_worker {
 	struct esdm_rpcs *proto;
 	struct esdm_rpcs_connection_list conns;
 	size_t num_connections;
+	/* Re-arm the listener at this time or once a connection closed, or 0 */
+	uint64_t accept_retry_at;
 	int epfd;
 };
 
@@ -685,6 +715,8 @@ static void esdm_rpcs_close_conn(struct esdm_rpcs_worker *worker,
 	TAILQ_REMOVE(&worker->conns, rpc_conn, tailq);
 	esdm_rpcs_release_conn(rpc_conn);
 	--worker->num_connections;
+	/* A descriptor became free */
+	worker->accept_retry_at = 0;
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC, "num connections: %zu\n",
 		    worker->num_connections);
 }
@@ -692,8 +724,9 @@ static void esdm_rpcs_close_conn(struct esdm_rpcs_worker *worker,
 /*
  * Accept one connection.
  *
- * @return 0 if the listener can stay armed (connection taken, turned away or
- *	   another worker was faster), a negative error is fatal for the worker
+ * @return 0 if the worker goes on (connection taken, turned away, another
+ *	   worker was faster, or retried later for want of resources), a
+ *	   negative error is fatal for the worker
  */
 static int esdm_rpcs_accept(struct esdm_rpcs_worker *worker)
 {
@@ -704,8 +737,14 @@ static int esdm_rpcs_accept(struct esdm_rpcs_worker *worker)
 
 	fd = accept4(proto->server_listening_fd, NULL, NULL,
 		     SOCK_NONBLOCK | SOCK_CLOEXEC);
-	if (fd < 0)
+	if (fd < 0) {
+		/* The client stays queued, see ESDM_RPCS_ACCEPT_RETRY_MS */
+		if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
+		    errno == ENOMEM)
+			worker->accept_retry_at =
+				esdm_rpcs_now_ms() + ESDM_RPCS_ACCEPT_RETRY_MS;
 		return 0;
+	}
 
 	rpc_conn = calloc(1, sizeof(struct esdm_rpcs_connection));
 	if (rpc_conn == NULL) {
@@ -874,16 +913,28 @@ static int esdm_rpcs_handler(void *args)
 	}
 
 	while (atomic_load(&server_exit) == 0) {
-		int nfds;
+		int nfds, timeout = -1;
+
+		/* Wake up for the accept retry, no descriptor event comes */
+		if (worker.accept_retry_at) {
+			uint64_t now = esdm_rpcs_now_ms();
+
+			if (now >= worker.accept_retry_at)
+				worker.accept_retry_at = 0;
+			else
+				timeout = (int)(worker.accept_retry_at - now);
+		}
 
 		/*
 		 * Reconcile the listening FD's armed state with the current
-		 * connection count before blocking. Disarm at the cap so a
+		 * connection count before blocking. Disarm at the cap, or until
+		 * an accept that failed for want of resources is retried, so a
 		 * pending connection cannot busy-spin epoll_wait; re-arm once a
 		 * slot frees up so new connections are served again.
 		 */
 		bool want_armed = worker.num_connections <
-				  ESDM_RPCS_MAX_CONN_PER_WORKER;
+					  ESDM_RPCS_MAX_CONN_PER_WORKER &&
+				  !worker.accept_retry_at;
 		if (want_armed != listen_armed) {
 			struct epoll_event lev = {
 				.events = want_armed ? EPOLLIN : 0,
@@ -896,7 +947,7 @@ static int esdm_rpcs_handler(void *args)
 		}
 
 		nfds = epoll_wait(worker.epfd, events, ESDM_RPCS_MAX_EVENTS,
-				  -1);
+				  timeout);
 		/* signal? */
 		if (nfds < 0 && errno == EINTR) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
@@ -1000,7 +1051,7 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 {
 	struct esdm_rpc_thread *threads = NULL;
 	size_t num_threads = 0;
-	int ret = 0;
+	int ret = 0, tret;
 	uint32_t t;
 
 	if (proto->server_listening_fd < 0)
@@ -1027,10 +1078,15 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		    "Using %zu %sprivileged RPC worker threads\n", num_threads,
 		    proto->privileged ? "" : "un");
 
+	for (t = 0; t < num_threads; ++t)
+		threads[t].eventfd = -1;
+
+	/*
+	 * Every eventfd before the first worker: a worker uses its entry of
+	 * threads and the caller's proto until it is joined, so once one runs,
+	 * this function must not return before the exit.
+	 */
 	for (t = 0; t < num_threads; ++t) {
-		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
-			    "Starting %sprivileged RPC worker thread %u\n",
-			    proto->privileged ? "" : "un", t);
 		threads[t].proto = proto;
 		threads[t].id = t;
 		threads[t].eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -1038,7 +1094,22 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 			ret = -errno;
 			goto out;
 		}
-		thread_start(esdm_rpcs_handler, &threads[t], 0, NULL);
+	}
+
+	for (t = 0; t < num_threads; ++t) {
+		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
+			    "Starting %sprivileged RPC worker thread %u\n",
+			    proto->privileged ? "" : "un", t);
+		ret = thread_start(esdm_rpcs_handler, &threads[t], 0, NULL);
+		if (ret) {
+			/* An interface short of workers ends the server */
+			esdm_logger(
+				LOGGER_ERR, LOGGER_C_RPC,
+				"Starting RPC worker thread %u failed: %d\n", t,
+				ret);
+			esdm_rpc_server_signal_exit();
+			break;
+		}
 		esdm_logger(LOGGER_STATUS, LOGGER_C_RPC,
 			    "Started %sprivileged RPC worker thread %u\n",
 			    proto->privileged ? "" : "un", t);
@@ -1053,15 +1124,17 @@ static int esdm_rpcs_workerloop(struct esdm_rpcs *proto)
 		(void)v;
 	}
 
-	ret = thread_wait(true);
-
-	for (t = 0; t < num_threads; ++t) {
-		close(threads[t].eventfd);
-		threads[t].eventfd = -1;
-	}
+	/* A failed start stays the result */
+	tret = thread_wait(true);
+	if (!ret)
+		ret = tret;
 
 out:
 	if (threads != NULL) {
+		for (t = 0; t < num_threads; ++t) {
+			if (threads[t].eventfd >= 0)
+				close(threads[t].eventfd);
+		}
 		free(threads);
 		threads = NULL;
 	}
@@ -1338,9 +1411,7 @@ static int esdm_rpcs_unpriv_init(void *args)
 		    ESDM_RPC_UNPRIV_SOCKET);
 
 	/* Server handing unprivileged interface in current thread */
-	CKINT(esdm_rpcs_workerloop(&unpriv_proto));
-
-	return 0;
+	ret = esdm_rpcs_workerloop(&unpriv_proto);
 
 out:
 	eesdm_rpcs_stop(&unpriv_proto);
@@ -1352,7 +1423,17 @@ out:
 		atomic_store(&esdm_rpc_init_state,
 			     esdm_rpcs_state_unpriv_failed);
 		thread_wake_all(&esdm_rpc_thread_init_wait);
+	} else if (ret) {
+		/*
+		 * Failed while serving: end the server rather than run without
+		 * this interface - esdm_rpcs_interfaces_init() returns ret.
+		 */
+		atomic_store(&esdm_rpcs_unpriv_init_ret, ret);
+		esdm_rpc_server_signal_exit();
 	}
+
+	atomic_store(&esdm_rpcs_unpriv_running, false);
+	thread_wake_all(&esdm_rpc_thread_init_wait);
 
 	return ret;
 }
@@ -1440,10 +1521,19 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	 */
 	CKINT(esdm_egd_server_socket_init());
 
-	/* Spawn the thread handling the unprivileged interface */
-	CKINT_LOG(thread_start(esdm_rpcs_unpriv_init, NULL,
-			       ESDM_THREAD_RPC_UNPRIV_GROUP, NULL),
-		  "Starting server thread failed\n");
+	/*
+	 * Spawn the thread handling the unprivileged interface, marked as
+	 * running before so that esdm_rpc_server_fini() cannot miss it.
+	 */
+	atomic_store(&esdm_rpcs_unpriv_running, true);
+	ret = thread_start(esdm_rpcs_unpriv_init, NULL,
+			   ESDM_THREAD_RPC_UNPRIV_GROUP, NULL);
+	if (ret < 0) {
+		atomic_store(&esdm_rpcs_unpriv_running, false);
+		esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
+			    "Starting server thread failed\n");
+		goto out;
+	}
 
 	if (atomic_load(&server_exit) != 0) {
 		goto out;
@@ -1492,7 +1582,8 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	/* Server handing privileged interface in current thread */
 	CKINT(esdm_rpcs_workerloop(&priv_proto));
 
-	return 0;
+	/* Set if a failure of the unprivileged interface ended the server */
+	return atomic_load(&esdm_rpcs_unpriv_init_ret);
 
 out:
 	eesdm_rpcs_stop(&priv_proto);
@@ -1604,6 +1695,10 @@ void esdm_rpc_server_signal_exit(void)
 void esdm_rpc_server_fini(void)
 {
 	esdm_rpc_server_signal_exit();
+
+	/* Before any join, see esdm_rpcs_unpriv_running; it leaves on exit */
+	thread_wait_event(&esdm_rpc_thread_init_wait,
+			  !atomic_load(&esdm_rpcs_unpriv_running));
 
 	/*
 	 * Terminate the EGD worker before the ESDM is finalized - it is a

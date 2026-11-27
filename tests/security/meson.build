@@ -36,7 +36,7 @@ if get_option('esdm-server').enabled()
 				'at start up, periodically and on demand. After ' +
 				'a failed self test the ESDM hands out neither ' +
 				'random nor seed data, and the periodic self ' +
-				'test worker stops.',
+				'test worker and the reseed worker stop.',
 		},
 		# Waits up to 90 seconds for the Jitter RNG to seed the ESDM
 		# before it counts that as a failure, which a slow sanitizer

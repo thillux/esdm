@@ -431,9 +431,15 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	 * as implementing it correctly without loosing entropy is not trivial.
 	 */
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
-		uint32_t unused_ent =
-			esdm_get_digestsize() -
-			esdm_aux_avail_entropy_pool(&esdm_pools[i]);
+		/*
+		 * The room by the raw count, which the cap applies to: the
+		 * available entropy is less the oversampling, so a full pool
+		 * would look to have room and one holding little look empty.
+		 */
+		uint32_t count = min_uint32(
+			esdm_get_digestsize(),
+			atomic_read_u32(&esdm_pools[i].aux_entropy_bits));
+		uint32_t unused_ent = esdm_get_digestsize() - count;
 
 		/* Find the pool with the maximum capacity. */
 		if (max_entropy_capacity < unused_ent) {
@@ -484,6 +490,13 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 	uint8_t alpha[ESDM_AUX_XDRBG_ALPHA_LEN];
 	uint32_t collected_ent_bits, returned_ent_bits,
 		unused_bits = 0, digestsize_bits, requested_bits_osr;
+#ifndef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
+	/*
+	 * Read once: force_fips may switch it meanwhile, and a discount less
+	 * than the oversampling taken would credit more than the output holds.
+	 */
+	const uint32_t osr_bits = esdm_compress_osr();
+#endif
 
 	if (!esdm_xdrbg_seed_initialized(&pool->xdrbg))
 		return 0;
@@ -502,7 +515,7 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 #ifdef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
 	requested_bits_osr = requested_bits;
 #else
-	requested_bits_osr = requested_bits + esdm_compress_osr();
+	requested_bits_osr = requested_bits + osr_bits;
 #endif
 
 	/* Cap entropy with entropy counter from aux pool and the used digest */
@@ -524,7 +537,9 @@ static uint32_t esdm_aux_get_pool(struct esdm_pool *pool, uint8_t *outbuf,
 #ifdef ESDM_AUX_INPUT_HAS_FULL_ENTROPY
 	returned_ent_bits = collected_ent_bits;
 #else
-	returned_ent_bits = esdm_reduce_by_osr(collected_ent_bits);
+	returned_ent_bits = (collected_ent_bits >= osr_bits) ?
+				    (collected_ent_bits - osr_bits) :
+				    0;
 #endif
 
 	esdm_logger(
@@ -596,7 +611,13 @@ static void esdm_aux_get_backtrack(struct entropy_es *eb_es,
 	 * handle the situation where there is no entropy.
 	 */
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; ++i) {
-		/* Ensure aux pool level lookup, extraction and backtracking op are atomic */
+		/*
+		 * Lookup, extraction and backtracking are atomic for a pool
+		 * that satisfies the request: its lock is kept. The pool with
+		 * the most entropy is locked again below and may have changed
+		 * in between - its extraction credits what it finds, never
+		 * more.
+		 */
 		mutex_w_lock(&esdm_pools[i].lock);
 
 		uint32_t avail_ent =
@@ -692,7 +713,20 @@ static int esdm_aux_selftest(void)
 		     ESDM_DRNG_SECURITY_STRENGTH_BITS);
 
 	for (i = 0; i < ESDM_NUM_AUX_POOLS; i++) {
-		if (!esdm_pools[i].xdrbg.xof) {
+		struct esdm_pool *pool = &esdm_pools[i];
+		bool has_xof;
+
+		/*
+		 * Under the lock, briefly: esdm_aux_init() in esdm_reinit()
+		 * replaces the context under it, NULL in between.
+		 */
+		if (pool->lock_initialized)
+			mutex_w_lock(&pool->lock);
+		has_xof = !!pool->xdrbg.xof;
+		if (pool->lock_initialized)
+			mutex_w_unlock(&pool->lock);
+
+		if (!has_xof) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_ES,
 				    "Auxiliary ES: pool %u has no XDRBG\n", i);
 			return -EFAULT;

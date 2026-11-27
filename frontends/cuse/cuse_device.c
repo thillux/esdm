@@ -93,38 +93,19 @@ static int esdm_cuse_shm_status_create_shm(void)
 				 S_IRUSR | S_IRGRP | S_IROTH);
 	create_shm = (errno == ENOENT) ? 1 : 0;
 
-	/* Check whether the SHM segment is stale */
-	if (esdm_cuse_shmid >= 0) {
-		struct shmid_ds buf;
-
-		if (shmctl(esdm_cuse_shmid, IPC_STAT, &buf) < 0) {
-			errsv = errno;
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-			}
-			return -errsv;
-		}
-
-		/*
-		 * Ownership is not enforced here: a client cannot know the
-		 * server's uid (it may run unprivileged), so rejecting on owner
-		 * would break legitimate cross-uid deployments and could strand
-		 * a client whose segment the server later re-creates. The server
-		 * evicts any foreign-owned segment on startup, which is the
-		 * authoritative defense against a planted status segment.
-		 */
-
-		/* SHM exists, but has no attachments -> stale */
-		if (buf.shm_nattch == 0) {
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-				esdm_cuse_shmid = -1;
-				create_shm = 1;
-			}
-		}
-	}
+	/*
+	 * An existing segment is used as found, never removed: one without
+	 * attachment may be the one a starting server is about to attach, and
+	 * removing it would leave this client on a segment nobody writes. The
+	 * server takes over a stale segment of its own.
+	 *
+	 * Ownership is not enforced here: a client cannot know the server's
+	 * uid (it may run unprivileged), so rejecting on owner would break
+	 * legitimate cross-uid deployments and could strand a client whose
+	 * segment the server later re-creates. The server evicts any
+	 * foreign-owned segment on startup, which is the authoritative defense
+	 * against a planted status segment.
+	 */
 
 	if (esdm_cuse_shmid < 0) {
 		if (create_shm) {
@@ -179,6 +160,8 @@ static atomic_bool esdm_cuse_poll_checker_ready = false;
  * current value; pointer-sized loads/stores are atomic on supported platforms.
  */
 static struct fuse_session *volatile esdm_cuse_session;
+/* A termination signal arrived before the session was published */
+static volatile sig_atomic_t esdm_cuse_exit_requested;
 static sem_t *esdm_cuse_semid = SEM_FAILED;
 static const char *esdm_sem_name = NULL;
 
@@ -192,9 +175,14 @@ static void esdm_cuse_shm_status_down(void)
 		return;
 	}
 
-	/* Wait and block until the SHM-Segment becomes available */
-	while (!esdm_cuse_shm_status_avail())
+	/*
+	 * No server publishes its status: poll() follows the kernel's device
+	 * meanwhile, which posts nothing, so look again every second.
+	 */
+	if (!esdm_cuse_shm_status_avail()) {
 		nanosleep(&ts, NULL);
+		return;
+	}
 
 	/* The server is terminating, do not block any more */
 	if (atomic_load(&esdm_cuse_poll_thread_shutdown))
@@ -294,28 +282,25 @@ static void esdm_cuse_sig_handler(int sig)
 	 * async-signal-safe and several could self-deadlock against an
 	 * interrupted worker (e.g. holding the malloc arena or a mutex).
 	 */
+	esdm_cuse_exit_requested = 1;
 	if (se)
 		fuse_session_exit(se);
 }
 
+/*
+ * Only the asynchronous termination signals of linux_term_signals() get the
+ * graceful handler: it makes the FUSE loop return so teardown (incl.
+ * bind-unmount) runs in normal context. Synchronous fault signals (SIGSEGV/
+ * SIGBUS/SIGILL/SIGFPE/SIGABRT/SIGSYS/SIGTRAP) are deliberately left at their
+ * default disposition - a "set flag and return" handler would loop forever on
+ * the faulting instruction, and running teardown from a fault context is
+ * unsafe; a core dump is more useful there.
+ */
 static int esdm_cuse_install_sig_handler(void)
 {
-	/*
-	 * Only asynchronous termination signals get the graceful handler: it
-	 * makes the FUSE loop return so teardown (incl. bind-unmount) runs in
-	 * normal context. Synchronous fault signals (SIGSEGV/SIGBUS/SIGILL/
-	 * SIGFPE/SIGABRT/SIGSYS/SIGTRAP) are deliberately left at their default
-	 * disposition - a "set flag and return" handler would loop forever on
-	 * the faulting instruction, and running teardown from a fault context is
-	 * unsafe; a core dump is more useful there.
-	 */
-	static const int term_signals[] = {
-		SIGHUP,	  SIGINT,  SIGQUIT,   SIGTERM, SIGALRM,
-		SIGIO,	  SIGPOLL, SIGPROF,   SIGPWR,  SIGUSR1,
-		SIGUSR2,  SIGVTALRM, SIGXCPU, SIGXFSZ,
-	};
+	int term_signals[LINUX_TERM_SIGNALS_MAX];
+	unsigned int i, nr_term_signals = linux_term_signals(term_signals);
 	struct sigaction sa;
-	size_t i;
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 		    "Install termination signal handler\n");
@@ -332,7 +317,7 @@ static int esdm_cuse_install_sig_handler(void)
 	 */
 	sa.sa_flags = 0;
 
-	for (i = 0; i < sizeof(term_signals) / sizeof(term_signals[0]); i++)
+	for (i = 0; i < nr_term_signals; i++)
 		sigaction(term_signals[i], &sa, NULL);
 
 	return 0;
@@ -500,7 +485,6 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 	size_t read_bytes = 0;
 	unsigned int polls = 0;
 	ssize_t ret = 0;
-	bool wait;
 
 	(void)off;
 
@@ -528,7 +512,6 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		get = esdm_rpcc_get_random_bytes_pr_noblock_int;
 	else if (get == esdm_rpcc_get_random_bytes_full_int)
 		get = esdm_rpcc_get_random_bytes_full_noblock_int;
-	wait = get != esdm_rpcc_get_random_bytes_int;
 
 	/*
 	 * fuse automatically chunks requests, e.g. for a 1MB read
@@ -543,14 +526,18 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 		esdm_cuse_unpriv_call_end();
 
 		/*
-		 * /dev/urandom: the ESDM is operational, but every DRNG awaits
-		 * its reseed - wait for that as /dev/random does.
+		 * Nothing at hand: /dev/random before the ESDM is operational,
+		 * or every DRNG awaits its reseed - wait for that. /dev/urandom
+		 * keeps its getter, whose -EOPNOTSUPP reads the kernel's device
+		 * below once the ESDM is not operational any more.
 		 */
-		if (ret == -EAGAIN && !wait) {
-			get = esdm_rpcc_get_random_bytes_full_noblock_int;
-			wait = true;
-		}
 		if (ret == -EAGAIN) {
+			/* As the kernel's device, never wait with O_NONBLOCK */
+			if (fi->flags & O_NONBLOCK) {
+				if (read_bytes)
+					break;
+				goto out;
+			}
 			if (fuse_req_interrupted(req)) {
 				ret = -EINTR;
 				goto out;
@@ -590,8 +577,11 @@ void esdm_cuse_read_internal(fuse_req_t req, size_t size, off_t off,
 			goto out;
 		read_bytes += (size_t)ret;
 	}
-	/* The reply frees req, also when it fails: no second one below */
-	fuse_reply_buf(req, (const char *)tmpbuf_p, size);
+	/*
+	 * Short only with O_NONBLOCK. The reply frees req, also when it fails:
+	 * no second one below.
+	 */
+	fuse_reply_buf(req, (const char *)tmpbuf_p, read_bytes);
 	ret = 0;
 
 out:
@@ -726,8 +716,12 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 			esdm_cuse_raise_privilege_transient();
 			esdm_invoke(esdm_rpcc_rnd_add_to_ent_cnt_int(
 				ent_count_bits, req));
-			/* In case of an error, update the kernel */
-			if (ret) {
+			/*
+			 * In case of an error, update the kernel - not after
+			 * -ETIMEDOUT: the request reached the ESDM, which may
+			 * have credited it, and must not count twice.
+			 */
+			if (ret && ret != -ETIMEDOUT) {
 				if (backend_fd >= 0 &&
 				    ioctl(backend_fd, RNDADDTOENTCNT,
 					  &ent_count_bits) == -1)
@@ -785,8 +779,8 @@ void esdm_cuse_ioctl(int backend_fd, fuse_req_t req, unsigned long cmd,
 				(size_t)rpi->buf_size,
 				(uint32_t)rpi->entropy_count, req));
 
-			/* In case of an error, update the kernel */
-			if (ret) {
+			/* In case of an error, update the kernel, as above */
+			if (ret && ret != -ETIMEDOUT) {
 				if (backend_fd >= 0 &&
 				    ioctl(backend_fd, RNDADDENTROPY, rpi) == -1)
 					ret = -errno;
@@ -987,6 +981,30 @@ static uint32_t esdm_cuse_poll_remove_fh(uint64_t fh, bool notify)
 	return events;
 }
 
+/* The kernel device reads and writes fall back to - esdm_cuse_fallback() */
+static int esdm_cuse_fallback_fd = -1;
+static bool esdm_cuse_nonop_fallback = false;
+
+void esdm_cuse_fallback(int fallback_fd, bool nonop_fallback)
+{
+	esdm_cuse_fallback_fd = fallback_fd;
+	esdm_cuse_nonop_fallback = nonop_fallback;
+}
+
+/* What poll() reports for the kernel's device */
+static unsigned int esdm_cuse_fallback_pollmask(unsigned int events)
+{
+	int fd = esdm_test_fallback_fd(esdm_cuse_fallback_fd);
+	struct pollfd pfd = { .fd = fd, .events = (short)events };
+
+	/* Without one, reads and writes fail at once: they do not wait */
+	if (pfd.fd < 0)
+		return events;
+	if (poll(&pfd, 1, 0) <= 0)
+		return 0;
+	return (unsigned int)pfd.revents & events;
+}
+
 static void esdm_cuse_get_pollmask(unsigned int *outmask)
 {
 #define ESDM_POLL_READER (POLLIN | POLLRDNORM)
@@ -1002,10 +1020,22 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 	if (!esdm_cuse_shm_status)
 		return;
 
-	if (atomic_load(&esdm_cuse_shm_status->operational))
-		*outmask |= ESDM_POLL_READER;
-	if (atomic_load(&esdm_cuse_shm_status->need_entropy))
-		*outmask |= ESDM_POLL_WRITER;
+	if (!esdm_cuse_shm_status_avail()) {
+		/*
+		 * No server publishes its status: reads and writes use the
+		 * kernel's device, so poll() follows it.
+		 */
+		*outmask = esdm_cuse_fallback_pollmask(ESDM_POLL_READER |
+						       ESDM_POLL_WRITER);
+	} else {
+		if (atomic_load(&esdm_cuse_shm_status->operational))
+			*outmask |= ESDM_POLL_READER;
+		else if (esdm_cuse_nonop_fallback)
+			*outmask |=
+				esdm_cuse_fallback_pollmask(ESDM_POLL_READER);
+		if (atomic_load(&esdm_cuse_shm_status->need_entropy))
+			*outmask |= ESDM_POLL_WRITER;
+	}
 
 	/*
 	 * Simply wake the poller no matter what it waits for. This one-shot
@@ -1054,6 +1084,14 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 	mask = sysmask;
 	esdm_cuse_set_pollmask(fi->poll_events, &mask);
 	fuse_reply_poll(req, mask);
+
+	/*
+	 * The kernel sends no handle when nobody waited on the file. Such a
+	 * poll must not replace the registration of a waiter that registered
+	 * meanwhile: a NULL handle wakes nobody.
+	 */
+	if (!ph)
+		return;
 
 	/* cleanup first, as we may have an interrupted poll/select */
 	mutex_w_lock(&esdm_cuse_ph_lock);
@@ -1319,6 +1357,38 @@ static int esdm_cuse_process_arg(void *data, const char *arg, int key,
 	}
 }
 
+/*
+ * How many worker threads libfuse may start to serve the device. A read
+ * waiting for the ESDM holds its worker, and every other request, an interrupt
+ * or a privileged ioctl included, waits for a free one: the default of libfuse
+ * 3.12, 10, let as many blocking readers stall the device. Workers are started
+ * on demand, so the limit only bounds what a flood of such readers costs; idle
+ * ones beyond ESDM_CUSE_IDLE_THREADS end again.
+ */
+#define ESDM_CUSE_MAX_THREADS 1024
+#define ESDM_CUSE_IDLE_THREADS 10
+
+static int esdm_cuse_session_loop(struct fuse_session *se)
+{
+#ifdef ESDM_FUSE_LOOP_CONFIG
+	struct fuse_loop_config *cfg = fuse_loop_cfg_create();
+	int ret;
+
+	if (!cfg)
+		return -ENOMEM;
+
+	fuse_loop_cfg_set_max_threads(cfg, ESDM_CUSE_MAX_THREADS);
+	fuse_loop_cfg_set_idle_threads(cfg, ESDM_CUSE_IDLE_THREADS);
+	ret = fuse_session_loop_mt(se, cfg);
+	fuse_loop_cfg_destroy(cfg);
+
+	return ret;
+#else
+	/* Before 3.12, libfuse starts a worker whenever none is idle */
+	return fuse_session_loop_mt(se, 0);
+#endif
+}
+
 int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
@@ -1406,9 +1476,20 @@ int main_common(const char *_devname, const char *target, const char *semname,
 	CKINT_LOG(esdm_rpcc_init_priv_service(esdm_cuse_interrupt),
 		  "Initialization of dispatcher failed\n");
 
+	/*
+	 * Before the PID namespace below: its init only receives the signals
+	 * it has a handler for.
+	 */
+	esdm_cuse_install_sig_handler();
+
 	/* Enter PID namespace (opt-in via --pid_namespace) */
-	if (param.pid_namespace)
-		CKINT(linux_isolate_namespace_prefork(NULL));
+	if (param.pid_namespace) {
+		int fwd_signals[LINUX_TERM_SIGNALS_MAX];
+		unsigned int nr_fwd_signals = linux_term_signals(fwd_signals);
+
+		CKINT(linux_isolate_namespace_prefork(fwd_signals,
+						      nr_fwd_signals, NULL));
+	}
 
 	/*
 	 * Before any thread exists, as unshare() moves the calling thread
@@ -1431,8 +1512,6 @@ int main_common(const char *_devname, const char *target, const char *semname,
 	ci.dev_info_argv = dev_info_argv;
 	ci.flags = CUSE_UNRESTRICTED_IOCTL;
 
-	esdm_cuse_install_sig_handler();
-
 	/*
 	 * Open-code cuse_lowlevel_main() so the session handle is reachable by
 	 * the signal handler (via esdm_cuse_session), which exits the loop
@@ -1449,9 +1528,11 @@ int main_common(const char *_devname, const char *target, const char *semname,
 			ret = 1;
 		} else {
 			esdm_cuse_session = se;
+			if (esdm_cuse_exit_requested)
+				fuse_session_exit(se);
 
 			if (multithreaded)
-				ret = fuse_session_loop_mt(se, 0);
+				ret = esdm_cuse_session_loop(se);
 			else
 				ret = fuse_session_loop(se);
 

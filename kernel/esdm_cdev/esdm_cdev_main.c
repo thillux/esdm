@@ -94,13 +94,25 @@ static unsigned int esdm_cdev_watch_ms = ESDM_CDEV_WATCH_MS;
 static unsigned long esdm_cdev_watch_next;
 static bool esdm_cdev_stopping;
 
+static void esdm_cdev_watch_kick(void);
+
 static void esdm_cdev_set_operational(bool operational)
 {
-	if (atomic_xchg(&esdm_cdev_operational, operational) == operational ||
-	    !operational)
+	if (atomic_xchg(&esdm_cdev_operational, operational) == operational)
 		return;
 
-	wake_up_interruptible_all(&esdm_cdev_wait);
+	if (operational) {
+		wake_up_interruptible_all(&esdm_cdev_wait);
+		return;
+	}
+
+	/*
+	 * A read's answer from before the ESDM turned operational may clear
+	 * the flag after the watcher set it and stopped: without a kick, the
+	 * waiters would sleep on.
+	 */
+	if (atomic_read(&esdm_cdev_waiters) || wq_has_sleeper(&esdm_cdev_wait))
+		esdm_cdev_watch_kick();
 }
 
 /*

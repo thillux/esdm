@@ -126,10 +126,10 @@ ssize_t esdm_rpcc_get_random_bytes_pr_int(uint8_t *buf, size_t buflen,
 			}
 			maxbuflen = new_max;
 			continue;
-		} else if (buffer.ret == -EAGAIN || buffer.ret == 0) {
+		} else if (buffer.ret == -EAGAIN) {
 			/*
-			 * Wait on an empty answer as on -EAGAIN so it cannot
-			 * spin, without holding the pooled connection.
+			 * Wait without holding the pooled connection. An empty
+			 * answer fails in the callback, so it cannot spin.
 			 */
 			esdm_rpcc_put_unpriv_service(rpc_conn);
 			rpc_conn = NULL;

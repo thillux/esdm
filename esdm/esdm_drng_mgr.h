@@ -229,6 +229,12 @@ bool esdm_drng_mgr_reseed_worker_next_pass(uint64_t *secs);
  * @brief Stop the asynchronous reseed worker
  */
 void esdm_drng_mgr_reseed_worker_stop(void);
+
+/**
+ * @brief Have the reseed worker look at its stop condition now rather than
+ *	  after its wait - a failed self test ends it
+ */
+void esdm_drng_mgr_reseed_worker_notify(void);
 bool esdm_get_available(void);
 void esdm_drng_reset(struct esdm_drng *drng);
 

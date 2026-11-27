@@ -167,6 +167,13 @@ static int esdm_selftest_security_test(void)
 			esdm_selftest_periodic_running()))
 		goto err;
 
+	TEST_STEP("start the reseed worker");
+	esdm_drng_mgr_reseed_worker_start();
+	TEST_REQUIRE("the reseed worker is on duty");
+	if (!TEST_CHECK(esdm_drng_mgr_reseed_worker_running(), "%d",
+			esdm_drng_mgr_reseed_worker_running()))
+		goto err;
+
 	/* The interval is one second in a test mode build */
 	TEST_RUNUNTIL(
 		"wait 100 ms until two more self test passes ran, at most 200 times");
@@ -225,6 +232,15 @@ static int esdm_selftest_security_test(void)
 	TEST_REQUIRE("the periodic self test worker left");
 	if (!TEST_CHECK(!esdm_selftest_periodic_running(), "%d",
 			!esdm_selftest_periodic_running()))
+		goto err;
+
+	/* Nothing is seeded with the implementations that failed */
+	TEST_RUNUNTIL(
+		"wait 100 ms until the reseed worker left, at most 200 times");
+	ESDM_SEC_WAIT_FOR(!esdm_drng_mgr_reseed_worker_running());
+	TEST_REQUIRE("the reseed worker left");
+	if (!TEST_CHECK(!esdm_drng_mgr_reseed_worker_running(), "%d",
+			!esdm_drng_mgr_reseed_worker_running()))
 		goto err;
 
 out:

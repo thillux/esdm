@@ -1,10 +1,8 @@
 name: Documentation
 
-# The design document and the slide deck from their Typst sources in
-# doc/typst (nix build .#esdm-doc): the PDFs and the HTML are the artifact
-# esdm-doc of the run. A published release also gets them as release
-# assets, and its HTML goes to GitHub Pages, which so shows the latest
-# release (Pages must be enabled with the source "GitHub Actions").
+# Builds the design document, the slide deck and the poster from their Typst
+# sources in doc/typst (nix build .#esdm-doc) and checks the identifiers they
+# name. Nothing is uploaded.
 
 on:
   push:
@@ -20,8 +18,6 @@ on:
       - flake.nix
       - flake.lock
       - .github/workflows/doc.yml
-  release:
-    types: [ published ]
   workflow_dispatch:
 
 permissions:
@@ -59,60 +55,11 @@ jobs:
         run: |
           nix develop .#doc -c python3 doc/tools/check_identifiers.py
 
+      - name: Check that the option reference is current
+        run: |
+          nix develop .#doc -c python3 doc/tools/gen_meson_options.py --check
+
       - name: Build the documentation
         if: ${{ !cancelled() }}
         run: |
           nix build --print-build-logs .#esdm-doc
-          mkdir -p out
-          cp -r result/share/doc/esdm/. out/
-          chmod -R u+w out
-
-      - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
-        with:
-          name: esdm-doc
-          path: out/
-          if-no-files-found: error
-
-      - uses: actions/upload-pages-artifact@v5
-        if: ${{ github.event_name == 'release' }}
-        with:
-          path: out/html
-
-  # The only job that may write: the release assets.
-  release:
-    name: release assets
-    if: ${{ github.event_name == 'release' }}
-    needs: doc
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: esdm-doc
-          path: out
-
-      - name: Attach the documentation to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          tar -C out -czf "esdm-doc-html-$TAG.tar.gz" html
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            out/*.pdf "esdm-doc-html-$TAG.tar.gz"
-
-  pages:
-    name: GitHub Pages
-    if: ${{ github.event_name == 'release' }}
-    needs: doc
-    runs-on: ubuntu-26.04
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - id: deploy
-        uses: actions/deploy-pages@v5

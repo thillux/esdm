@@ -583,8 +583,9 @@ ssize_t esdm_rpcc_get_seed_int(uint8_t *buf, size_t buflen, unsigned int flags,
  * @param [in] data_buf Buffer with data
  * @param [in] data_buf_len Length of data buffer
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-ETIMEDOUT also where an interrupt
+ *	    cut the request short once it was sent: the server may have run
+ *	    it, so do not simply repeat it)
  */
 int esdm_rpcc_write_data(const uint8_t *data_buf, size_t data_buf_len);
 
@@ -631,8 +632,9 @@ int esdm_rpcc_rnd_get_ent_cnt_int(unsigned int *entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-ETIMEDOUT also where an interrupt
+ *	    cut the request short once it was sent: the server may have run
+ *	    it, so do not simply repeat it)
  */
 int esdm_rpcc_rnd_add_to_ent_cnt(unsigned int entcnt);
 
@@ -653,8 +655,9 @@ int esdm_rpcc_rnd_add_to_ent_cnt_int(unsigned int entcnt, void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-ETIMEDOUT also where an interrupt
+ *	    cut the request short once it was sent: the server may have run
+ *	    it, so do not simply repeat it)
  */
 int esdm_rpcc_rnd_add_entropy(const uint8_t *entropy_buf,
 			      size_t entropy_buf_len, uint32_t entropy_cnt);
@@ -678,8 +681,9 @@ int esdm_rpcc_rnd_add_entropy_int(const uint8_t *entropy_buf,
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-ETIMEDOUT also where an interrupt
+ *	    cut the request short once it was sent: the server may have run
+ *	    it, so do not simply repeat it)
  */
 int esdm_rpcc_rnd_clear_pool(void);
 
@@ -704,8 +708,9 @@ int esdm_rpcc_rnd_clear_pool_int(void *int_data);
  *
  * See random(4) for documentation.
  *
- * @return: 0 on success, < 0 on error (-EINTR means connection was interrupted
- *	    and the caller may try again)
+ * @return: 0 on success, < 0 on error (-ETIMEDOUT also where an interrupt
+ *	    cut the request short once it was sent: the server may have run
+ *	    it, so do not simply repeat it)
  */
 int esdm_rpcc_rnd_reseed_crng(void);
 
@@ -867,8 +872,9 @@ struct esdm_rpcc_selftest_result {
  * 	reported or with the undone states if nothing was received.
  * @return: 0 if every self test passed and the ESDM hands out random bits, < 0
  * 	otherwise - the error of the failing test, -EOPNOTSUPP where an earlier self
- * 	test failed and still holds the output back, -EINTR where the connection was
- * 	interrupted and the caller may try again
+ * 	test failed and still holds the output back, -ETIMEDOUT also where an
+ * 	interrupt cut the request short once it was sent (the tests may have
+ * 	run)
  */
 int esdm_rpcc_selftest(struct esdm_rpcc_selftest_result *result);
 

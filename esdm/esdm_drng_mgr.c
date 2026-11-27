@@ -769,6 +769,13 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 		(drng != &esdm_drng_pr && !atomic_load(&drng->fully_seeded));
 	bool forced = atomic_load(&drng->force_reseed) | do_full_init;
 
+	/*
+	 * A failed self test is final: the implementations that failed seed
+	 * no DRNG, and the entropy sources are not drained for no output.
+	 */
+	if (esdm_selftest_crypto_failed())
+		return 0;
+
 	for_each_esdm_es (i)
 		collected_seedbuf.entropy_es[i].e_bits = 0;
 
@@ -856,12 +863,23 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 					  &collected_seedbuf) &&
 			(!pr || do_full_init ||
 			 collected_entropy >= requested_bits);
-		if (esdm_drng_inject(drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
+		/* Nor after a self test failed during the collection */
+		if (!esdm_selftest_crypto_failed() &&
+		    esdm_drng_inject(drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
 				     (uint8_t *)&addtl, sizeof(addtl),
 				     fully_seeded, drng_type)) {
 			seeded = true;
 			injected_entropy += seed_entropy;
 			reached = fully_seeded;
+		} else {
+			/*
+			 * What a failed injection collected is not in the DRNG:
+			 * it must not count towards the next injection.
+			 */
+			collected_entropy -= seed_entropy;
+			for_each_esdm_es (i)
+				collected_seedbuf.entropy_es[i].e_bits -=
+					seedbuf.entropy_es[i].e_bits;
 		}
 		if (lock)
 			mutex_w_unlock(&drng->lock);
@@ -885,7 +903,8 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 	 */
 	} while (forced && !reached &&
 		 num_es_delivered >= es_delivered_threshold &&
-		 !atomic_load(&esdm_drng_mgr_terminate));
+		 !atomic_load(&esdm_drng_mgr_terminate) &&
+		 !esdm_selftest_crypto_failed());
 
 	/*
 	 * The emergency reseeding above can inject more than once, but the
@@ -960,6 +979,10 @@ static void esdm_drng_reseed_seed_locked(struct esdm_drng *drng)
 	uint32_t entropy;
 	bool fully_seeded;
 
+	/* Nothing seeds after a failed self test - see esdm_drng_seed_es() */
+	if (esdm_selftest_crypto_failed())
+		return;
+
 	if (drng == &esdm_drng_pr || !atomic_load(&drng->fully_seeded)) {
 		esdm_drng_seed(drng);
 		return;
@@ -990,7 +1013,9 @@ static void esdm_drng_reseed_seed_locked(struct esdm_drng *drng)
 	/* One that left the fully seeded state meanwhile needs more */
 	fully_seeded = esdm_fully_seeded(!atomic_load(&drng->fully_seeded),
 					 entropy, &seedbuf);
-	if (esdm_drng_inject(drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
+	/* Nor after a self test failed during the collection */
+	if (!esdm_selftest_crypto_failed() &&
+	    esdm_drng_inject(drng, (uint8_t *)&seedbuf, sizeof(seedbuf),
 			     (uint8_t *)&addtl, sizeof(addtl), fully_seeded,
 			     "regular")) {
 		atomic_fetch_add(&drng->seed_generation, 1);
@@ -1310,8 +1335,13 @@ static atomic_bool esdm_drng_reseed_worker_terminate = false;
 /* Is the worker to stop what it is doing and leave? */
 static bool esdm_drng_reseed_stop(void)
 {
+	/*
+	 * A failed self test is not recovered from, so the worker leaves like
+	 * the periodic self test worker: nothing is seeded any more.
+	 */
 	return atomic_load(&esdm_drng_mgr_terminate) ||
-	       atomic_load(&esdm_drng_reseed_worker_terminate);
+	       atomic_load(&esdm_drng_reseed_worker_terminate) ||
+	       esdm_selftest_crypto_failed();
 }
 
 bool esdm_drng_mgr_reseed_worker_running(void)
@@ -1344,6 +1374,11 @@ void esdm_drng_mgr_reseed_worker_stop(void)
 	atomic_store(&esdm_drng_reseed_wakeup_pending, true);
 	/* Under the lock of the queue - see esdm_drng_reseed_worker_run() */
 	thread_wake_all_locked(&esdm_drng_reseed_wait);
+}
+
+void esdm_drng_mgr_reseed_worker_notify(void)
+{
+	esdm_drng_reseed_notify();
 }
 
 /*
@@ -1941,6 +1976,16 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			injected = esdm_drng_seed_es(drng, "regular", false);
 
 			/*
+			 * Like every DRNG, it serves only once fully seeded:
+			 * until then, each request tries the initial full seed
+			 * again.
+			 */
+			if (!atomic_load(&drng->initiated)) {
+				mutex_w_unlock(&drng->lock);
+				break;
+			}
+
+			/*
 			 * Output at most the fresh entropy less the 64 bits of
 			 * oversampling of SP800-90C 6.5.2 RBG3(RS), capped at
 			 * the security strength. Stop below a full byte:
@@ -2019,6 +2064,16 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		 * would dereference a NULL DRNG state on the shutdown path.
 		 */
 		if (!drng->drng) {
+			mutex_w_unlock(&drng->lock);
+			return processed ? processed : -EOPNOTSUPP;
+		}
+
+		/*
+		 * Nor after a self test failed since the check at the entry: a
+		 * large request, or one waiting for its reseed, would otherwise
+		 * outlast a failure recorded meanwhile.
+		 */
+		if (!esdm_selftest_crypto_passed()) {
 			mutex_w_unlock(&drng->lock);
 			return processed ? processed : -EOPNOTSUPP;
 		}
@@ -2278,6 +2333,10 @@ static void esdm_drng_try_seed(void)
 
 static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 {
+	/* Nothing seeds after a failed self test: nothing to wait for */
+	if (esdm_selftest_crypto_failed())
+		return -EOPNOTSUPP;
+
 	if (nonblock) {
 		esdm_drng_try_seed();
 		return esdm_pool_all_nodes_seeded_get() ? 0 : -EAGAIN;
@@ -2288,12 +2347,17 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 		return 0;
 	thread_wait_event(&esdm_init_wait,
 			  esdm_pool_all_nodes_seeded_get() ||
-				  atomic_load(&esdm_drng_mgr_terminate));
-	return 0;
+				  atomic_load(&esdm_drng_mgr_terminate) ||
+				  esdm_selftest_crypto_failed());
+	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
 }
 
 static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 {
+	/* See esdm_drng_sleep_while_not_all_nodes_seeded() */
+	if (esdm_selftest_crypto_failed())
+		return -EOPNOTSUPP;
+
 	if (nonblock) {
 		esdm_drng_try_seed();
 		return esdm_state_operational() ? 0 : -EAGAIN;
@@ -2304,8 +2368,9 @@ static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 		return 0;
 	thread_wait_event(&esdm_init_wait,
 			  esdm_state_operational() ||
-				  atomic_load(&esdm_drng_mgr_terminate));
-	return 0;
+				  atomic_load(&esdm_drng_mgr_terminate) ||
+				  esdm_selftest_crypto_failed());
+	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
 }
 
 DSO_PUBLIC
@@ -2386,6 +2451,16 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 			break;
 
 		nanosleep(&poll_ts, NULL);
+	}
+
+	/*
+	 * The collection may have waited for entropy: a self test failing
+	 * meanwhile holds the seed back as well, wiped.
+	 */
+	if (!esdm_selftest_crypto_passed()) {
+		memset_secure(eb, 0, sizeof(*eb));
+		ret = -EOPNOTSUPP;
+		goto out;
 	}
 
 	/* Write collected entropy size into second word */
@@ -2471,11 +2546,22 @@ ssize_t esdm_get_random_bytes_full(uint8_t *buf, size_t nbytes)
 	 * which reseeds first where its threshold is reached.
 	 */
 	for (;;) {
-		ssize_t ret;
+		ssize_t ret = esdm_drng_sleep_while_nonoperational(0);
 
-		esdm_drng_sleep_while_nonoperational(0);
+		if (ret < 0)
+			return done ? (ssize_t)done : ret;
+
 		ret = esdm_drng_get_sleep(buf + done, nbytes - done, false,
 					  false);
+		/*
+		 * The ESDM stopped since the wait above, as the initial DRNG
+		 * does at its reseed threshold: wait again rather than fail a
+		 * blocking request. A failed self test ends the next wait.
+		 */
+		if (ret == -EOPNOTSUPP && esdm_get_available() &&
+		    !atomic_load(&esdm_drng_mgr_terminate) &&
+		    esdm_selftest_crypto_passed())
+			continue;
 		if (ret < 0)
 			return done ? (ssize_t)done : ret;
 

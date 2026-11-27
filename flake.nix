@@ -1324,6 +1324,29 @@
 
             # Nor is the EGD OpenSSL provider kernel specific.
             egd_openssh = mkEgdOpensshCheck;
+
+            # The TLA+ models of tests/tla, model checked with TLC by
+            # tests/tla/check.sh, without the configurations marked slow.
+            # pcal translates a model in place, so they run from a copy.
+            tla =
+              pkgs.runCommand "esdm-tla"
+                {
+                  nativeBuildInputs = [ pkgs.tlaplus18 ];
+                  src = ./tests/tla;
+                }
+                ''
+                  cp -r $src tla
+                  chmod -R u+w tla
+                  export HOME=$TMPDIR
+                  w=''${NIX_BUILD_CORES:-0}
+                  [ "$w" -gt 0 ] || w=auto
+                  TLC_WORKERS=$w sh tla/check.sh >check.log 2>&1 || {
+                    cat check.log
+                    exit 1
+                  }
+                  cat check.log
+                  install -Dm644 check.log $out/check.log
+                '';
           };
 
         packages =
@@ -2285,7 +2308,6 @@
           #
           #   nix build .#esdm-doc
           #   xdg-open result/share/doc/esdm/esdm-a4.pdf
-          #   xdg-open result/share/doc/esdm/html/index.html
           esdm-doc = pkgs.stdenvNoCC.mkDerivation rec {
             pname = "esdm-doc";
             inherit (self.packages.${system}.esdm) version;

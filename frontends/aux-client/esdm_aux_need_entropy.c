@@ -74,42 +74,23 @@ static int esdm_cuse_shm_status_create_shm(void)
 				 S_IRUSR | S_IRGRP | S_IROTH);
 	create_shm = (errno == ENOENT) ? 1 : 0;
 
-	/* Check whether the SHM segment is stale */
-	if (esdm_cuse_shmid >= 0) {
-		struct shmid_ds buf;
-
-		if (shmctl(esdm_cuse_shmid, IPC_STAT, &buf) < 0) {
-			errsv = errno;
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-			}
-			return -errsv;
-		}
-
-		/*
-		 * Ownership is not enforced here: a client cannot know the
-		 * server's uid (it may run unprivileged), so rejecting on owner
-		 * would break legitimate cross-uid deployments and could strand
-		 * a client whose segment the server later re-creates. The primary
-		 * defense against a planted status segment is server-side: the
-		 * server evicts any foreign-owned segment when it (re)creates the
-		 * segment. Note this only covers segments planted before the
-		 * server runs its create path; a client that attaches while no
-		 * server is running has no way to authenticate the segment, so it
-		 * relies on the version gate and the server's eventual eviction.
-		 */
-
-		/* SHM exists, but has no attachments -> stale */
-		if (buf.shm_nattch == 0) {
-			esdm_cuse_shm_status_close_shm();
-			if (esdm_cuse_shmid >= 0) {
-				shmctl(esdm_cuse_shmid, IPC_RMID, NULL);
-				esdm_cuse_shmid = -1;
-				create_shm = 1;
-			}
-		}
-	}
+	/*
+	 * An existing segment is used as found, never removed: one without
+	 * attachment may be the one a starting server is about to attach, and
+	 * removing it would leave this client on a segment nobody writes. The
+	 * server takes over a stale segment of its own.
+	 *
+	 * Ownership is not enforced here: a client cannot know the server's
+	 * uid (it may run unprivileged), so rejecting on owner would break
+	 * legitimate cross-uid deployments and could strand a client whose
+	 * segment the server later re-creates. The primary defense against a
+	 * planted status segment is server-side: the server evicts any
+	 * foreign-owned segment when it (re)creates the segment. Note this only
+	 * covers segments planted before the server runs its create path; a
+	 * client that attaches while no server is running has no way to
+	 * authenticate the segment, so it relies on the version gate and the
+	 * server's eventual eviction.
+	 */
 
 	if (esdm_cuse_shmid < 0) {
 		if (create_shm) {
@@ -162,40 +143,63 @@ static int esdm_cuse_shm_status_down(struct timespec *ts)
 		return -1;
 	}
 
-	/*
-	 * Wait for a server to publish its status in the SHM segment, but no
-	 * longer than the caller allowed: an unbounded wait would make the
-	 * documented timeout unreachable while no server runs, which is exactly
-	 * when a caller needs it. @ts is the absolute CLOCK_MONOTONIC deadline
-	 * of the sem_clockwait() below, so the same deadline applies here and
-	 * the timeout is reported the same way.
-	 */
-	while (!esdm_cuse_shm_status_avail()) {
-		struct timespec now;
+	for (;;) {
+		int val = 0;
 
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (now.tv_sec > ts->tv_sec ||
-		    (now.tv_sec == ts->tv_sec && now.tv_nsec >= ts->tv_nsec)) {
-			errno = ETIMEDOUT;
-			return -1;
+		/*
+		 * Wait for a server to publish its status in the SHM segment,
+		 * but no longer than the caller allowed: an unbounded wait
+		 * would make the documented timeout unreachable while no server
+		 * runs, which is exactly when a caller needs it. @ts is the
+		 * absolute CLOCK_MONOTONIC deadline of the sem_clockwait()
+		 * below, so the same deadline applies here and the timeout is
+		 * reported the same way.
+		 */
+		while (!esdm_cuse_shm_status_avail()) {
+			struct timespec now;
+
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (now.tv_sec > ts->tv_sec ||
+			    (now.tv_sec == ts->tv_sec &&
+			     now.tv_nsec >= ts->tv_nsec)) {
+				errno = ETIMEDOUT;
+				return -1;
+			}
+
+			nanosleep(&ts_init, NULL);
 		}
 
-		nanosleep(&ts_init, NULL);
+		/*
+		 * If the ESDM server already indicates it needs entropy, return
+		 * immediately.
+		 */
+		if (atomic_load(&esdm_cuse_shm_status->need_entropy))
+			return 0;
+
+		/*
+		 * sem_timedwait uses CLOCK_REALTIME, which is subject to
+		 * clock adjustments, use sem_clockwait instead here.
+		 */
+		if (sem_clockwait(esdm_semid_need_entropy_level,
+				  CLOCK_MONOTONIC, ts))
+			return -1;
+
+		/*
+		 * One post wakes one waiter: pass it on while the need lasts,
+		 * so that every waiting client wakes.
+		 */
+		if (atomic_load(&esdm_cuse_shm_status->need_entropy)) {
+			sem_getvalue(esdm_semid_need_entropy_level, &val);
+			if (!val)
+				sem_post(esdm_semid_need_entropy_level);
+			return 0;
+		}
+
+		/*
+		 * Woken without a need: by a post left from a need that ended,
+		 * or by a suspend. Wait on.
+		 */
 	}
-
-	/*
-	 * If the ESDM server already indicates it needs entropy, return
-	 * immediately.
-	 */
-	if (atomic_load(&esdm_cuse_shm_status->need_entropy))
-		return 0;
-
-	/*
-	 * sem_timedwait uses CLOCK_REALTIME, which is subject to
-	 * clock adjustments, use sem_clockwait instead here.
-	 */
-	return sem_clockwait(esdm_semid_need_entropy_level, CLOCK_MONOTONIC,
-			     ts);
 }
 
 static void esdm_cuse_shm_status_close_sem(void)

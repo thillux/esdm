@@ -572,6 +572,14 @@ static void install_term(void)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGQUIT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
+
+	/*
+	 * esdm-server-signal-helper sends the suspend trigger to whoever the
+	 * PID file names, and its default action would end the server until
+	 * esdm_shm_status_init() installs the handler.
+	 */
+	sa.sa_handler = SIG_IGN;
+	sigaction(SIGUSR1, &sa, NULL);
 }
 
 static void create_pid_file(const char *pid_file)
@@ -758,10 +766,11 @@ int main(int argc, char *argv[])
 #endif
 	}
 
+	/* Before the PID file names this process, see install_term() */
+	install_term();
+
 	if (pidfile && strlen(pidfile))
 		create_pid_file(pidfile);
-
-	install_term();
 
 	/*
 	 * Fork into an isolating PID namespace (opt-in via --pid_namespace):
@@ -783,8 +792,20 @@ int main(int argc, char *argv[])
 	 * the root-owned sockets, SHM segment and semaphores - nor the PID
 	 * file - itself.
 	 */
-	if (pid_namespace)
-		CKINT(linux_isolate_namespace_prefork(supervisor_exit));
+	if (pid_namespace) {
+		/*
+		 * The daemon handles the termination signals of install_term()
+		 * and SIGUSR1, the suspend trigger handled once libesdm is
+		 * initialized. As namespace init it drops the others, which
+		 * unforwarded would kill the supervisor and leave the daemon
+		 * unsupervised.
+		 */
+		int fwd_signals[LINUX_TERM_SIGNALS_MAX];
+		unsigned int nr_fwd_signals = linux_term_signals(fwd_signals);
+
+		CKINT(linux_isolate_namespace_prefork(
+			fwd_signals, nr_fwd_signals, supervisor_exit));
+	}
 
 	/*
 	 * The IPC cleanup at shutdown only succeeds with privileges retained,

@@ -316,7 +316,7 @@ static void test_suspend_lock_of_another(void)
 static void test_resume_without_server(void)
 {
 	/*
-	 * No server is running under this test, so the unprivileged service
+	 * No server is running under this test, so the privileged service
 	 * cannot be reached and resume signalling has to fail rather than
 	 * report a reseed that never happened.
 	 */
@@ -384,6 +384,35 @@ static void test_cli_suspend_with_pid(void)
 	}
 }
 
+static void test_cli_errno_left_set(void)
+{
+	char *argv[] = { (char *)"esdm-server-signal-helper", (char *)"--pid",
+			 pidfile_path, (char *)"--suspend", NULL };
+	struct fake_server server;
+
+	/*
+	 * A successful run may leave errno set from any library call, as the
+	 * terminal check of stdio does: the exit status must not depend on it.
+	 */
+	if (!fake_server_start(&server, "", 0)) {
+		CHECK(0, "cannot start the server stand-in");
+		return;
+	}
+	optind = 0;
+	errno = ENOTTY;
+	CHECK_EQ(esdm_signal_helper_main_unused(4, argv), EXIT_SUCCESS);
+	CHECK(fake_server_stop(&server, 5000),
+	      "--suspend with errno set did not deliver SIGUSR1");
+}
+
+static void test_cli_no_mode(void)
+{
+	char *argv[] = { (char *)"esdm-server-signal-helper", NULL };
+
+	/* Nothing to signal is an error, whatever errno holds */
+	CHECK_EQ(run_main(1, argv), EXIT_FAILURE);
+}
+
 static void test_cli_suspend_bad_pidfile(void)
 {
 	char *argv[] = { (char *)"esdm-server-signal-helper", (char *)"--pid",
@@ -444,6 +473,8 @@ int main(int argc, char *argv[])
 	test_cli_suspend_without_pid();
 	test_cli_suspend_with_pid();
 	test_cli_suspend_bad_pidfile();
+	test_cli_errno_left_set();
+	test_cli_no_mode();
 	test_cli_resume();
 
 	unlink(pidfile_path);
