@@ -145,19 +145,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	f = fopen(argv[1], "r");
-	if (!f) {
-		printf("File %s cannot be opened for read\n", argv[1]);
-		return 1;
-	}
-
-	fd = open(argv[2], O_CREAT | O_WRONLY | O_EXCL, 0777);
-	if (fd < 0) {
-		printf("File %s cannot be opened for write\n", argv[2]);
-		fclose(f);
-		return 1;
-	}
-
+	/* Validate the mask before the output file is created */
 	count = (uint32_t)strtoul(argv[3], NULL, 10);
 	rc = hextolong(argv[4], &mask);
 
@@ -169,6 +157,19 @@ int main(int argc, char *argv[])
 
 	if (bitcount(mask) > 8) {
 		printf("SP800-90B tool only supports up to 8 bits. Check the mask value");
+		return 1;
+	}
+
+	f = fopen(argv[1], "r");
+	if (!f) {
+		printf("File %s cannot be opened for read\n", argv[1]);
+		return 1;
+	}
+
+	fd = open(argv[2], O_CREAT | O_WRONLY | O_EXCL, 0777);
+	if (fd < 0) {
+		printf("File %s cannot be opened for write\n", argv[2]);
+		fclose(f);
 		return 1;
 	}
 
@@ -206,7 +207,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("Processed %d items from %s samples with mask [0x%016llx] significant bits [%d]\n",
-	       i, argv[0], (unsigned long long)mask, bitcount(mask));
+	       i, argv[1], (unsigned long long)mask, bitcount(mask));
 
 	printf("Constant 0s in sample: \n%s\n", printbits(unchanged0s, 0));
 	printf("Constant 1s in sample: \n%s\n", printbits(unchanged1s, 1));

@@ -95,7 +95,7 @@ The seedings scale with the CPUs there are for the collectors, at the memory
 of one collector each.
 .TP
 .BR \-S ", " \-\-syslog
-Log to syslog instead of standard output and standard error.
+Log to syslog instead of standard error.
 .TP
 .BR \-P ", " \-\-raise_sched_priority
 Raise the scheduling priority (lower the nice level) of the daemon.
@@ -106,17 +106,24 @@ core dumps. Keeping seed material out of swap and out of crash dumps is the
 point of this option.
 .TP
 .BR \-M ", " \-\-small_memory
-Reduce the memory footprint: 1 MiB thread stacks and a single DRNG node
-instead of one per CPU node.
+Reduce the memory footprint: 2 MiB thread stacks, a single DRNG node instead
+of one per CPU node and, with glibc, a single malloc arena that returns freed
+memory early.
 .TP
 .B \-\-keep_ipc
 Do not remove the RPC sockets, the status shared memory segment and the
 semaphores on shutdown. This lets running CUSE clients survive a restart of
-the daemon.
+the daemon. It only matters with
+.BR \-\-pid_namespace ,
+whose supervisor removes them: without it the daemon, having dropped its
+privileges, leaves them in place anyway.
 .TP
 .B \-\-pid_namespace
 Fork the daemon into an isolating PID namespace. The starting process remains
-as its supervisor.
+as its privileged supervisor and removes the IPC objects once the daemon ended,
+unless
+.B \-\-keep_ipc
+is given.
 .TP
 .BR \-e ", " \-\-egd_socket " \fIPATH\fR"
 Additionally serve the EGD protocol on the UNIX domain socket

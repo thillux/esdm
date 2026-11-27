@@ -15,6 +15,11 @@ administrative or diagnostic operations.
 Options that change the state of the daemon go through the privileged RPC
 interface and therefore require root; they are marked as such below. All other
 operations work for any user that may access the unprivileged RPC socket.
+.PP
+Log messages, the output of
+.B \-\-status
+among them, go to standard error; data \- JSON documents, random numbers, seeds,
+benchmark results \- to standard output.
 .SH OPTIONS
 .SS General
 .TP
@@ -28,7 +33,7 @@ Increase logging verbosity. May be given repeatedly.
 Decrease logging verbosity. May be given repeatedly.
 .TP
 .B \-\-use\-syslog
-Log to syslog instead of standard output and standard error.
+Log to syslog instead of standard error.
 .SS Status
 .TP
 .BR \-s ", " \-\-status
@@ -67,9 +72,10 @@ Exit successfully if the ESDM is fully seeded, i.e. ready to hand out random
 data.
 .TP
 .B \-\-is\-running
-Exit successfully if an
+Exit successfully if both RPC sockets exist and the ESDM serves a request for
+random bytes. It fails for a running
 .BR esdm\-server (8)
-is reachable.
+that is not operational yet as well.
 .TP
 .BR \-e ", " \-\-entropy\-count
 Print the number of entropy bits accounted for in the auxiliary pool.
@@ -80,7 +86,9 @@ Print the number of entropy bits accounted for in the internal state.
 .BR \-w ", " \-\-wait\-until\-seeded " \fITRIES\fR"
 Poll the seeding state once per second, at most
 .I TRIES
-times, and exit as soon as the ESDM is fully seeded. Useful in service units
+times, and exit as soon as the ESDM is fully seeded. A negative
+.I TRIES
+waits without limit. Useful in service units
 that must not start before random data of full quality is available.
 .SS Obtaining random data
 .TP
@@ -113,10 +121,17 @@ milliseconds instead of blocking indefinitely.
 .B \-\-allow\-unseeded
 Let
 .B \-\-get\-random
+use the request that does not wait: it fails at once while the ESDM is not
+operational, instead of waiting for it. No data of an unseeded ESDM is handed
+out. With
+.BR \-\-get\-seed ,
+the entropy of an initial seed is asked for instead of that of a reseed. The
+last of
+.BR \-\-use\-pr ,
+.B \-\-timeout\-msec
 and
-.B \-\-get\-seed
-proceed even though the ESDM is not fully seeded yet. The data is then not of
-full quality.
+.B \-\-allow\-unseeded
+given applies.
 .SS Administration
 .TP
 .BR \-W ", " \-\-write\-to\-aux\-pool " \fIDATA\fR"
@@ -126,8 +141,9 @@ into the auxiliary pool. The argument is the data itself, not a byte count.
 Requires root.
 .TP
 .BR \-B ", " \-\-write\-entropy\-bits " \fIBITS\fR"
-Number of entropy bits the preceding write to the auxiliary pool is credited
-with.
+Number of entropy bits the write of
+.B \-\-write\-to\-aux\-pool
+is credited with, given before or after it. Default: 0.
 .TP
 .B \-\-clear\-pool
 Clear the entropy pool. Intended for testing. Requires root.
@@ -201,7 +217,7 @@ Run the delay stress test on all cores, using processes.
 Run the delay stress test on all cores, using threads.
 .TP
 .BR \-\-stress\-duration " \fISECS\fR"
-Timeout of the stress tests. Default: 65.0.
+Duration of the stress tests in whole seconds. Default: 65.
 .TP
 .BR \-\-stress\-request\-size " \fIBYTES\fR"
 Buffer size used by the stress tests. Default: 4.
@@ -217,31 +233,62 @@ Stress the init/fini reference counting of the RPC client library from several
 threads.
 .TP
 .B \-\-endless\-stress
-Run an endless stress test. Together with
+Write 64 bytes credited with 512 bits of entropy into the auxiliary pool and
+read 64 bytes from the prediction\-resistance generator, in a loop that ends
+at the first failure. Together with
 .B \-\-continue\-on\-failure
-the
+the loop goes on, so that the
 .BR esdm\-server (8)
-may be stopped and started while it runs.
+may be stopped and started while it runs. The data is credited with entropy it
+does not have:
+.B do not use it in production.
+Requires root.
 .TP
 .B \-\-continue\-on\-failure
 Do not abort the test on the first failure.
+.SS FIPS integrity reference value
+.TP
+.BR \-F ", " \-\-fips\-targetfile " \fIPATH\fR"
+.TQ
+.BR \-C ", " \-\-fips\-checkfile " \fICHECK\fR"
+Given together: write the HMAC SHA\-256 of the file
+.I PATH
+as hex digits into
+.IR CHECK ,
+which must not exist;
+.B \-
+writes to standard output. The integrity test of a build with the meson option
+.B fips140
+reads the value from
+.RI . NAME .hmac
+next to the file
+.IR NAME .
+Without
+.BR fips140 ,
+the command fails.
 .SS Testing helpers
 The following options exist to study the behaviour of the auxiliary pool. They
 seed the ESDM from the operating system RNG, which defeats the entropy
 accounting of the ESDM.
 .B Do not use them in production.
-All of them require root.
+All of them require root. They only work in a build with the meson option
+.BR esdm\-aux\-client ;
+without it, the usage is printed.
 .TP
 .B \-\-seed\-via\-os
-Single\-shot seeding of the auxiliary pool via
-.BR getentropy (3)/ getrandom (2).
+Single\-shot seeding of the auxiliary pool: 64 bytes of
+.BR getentropy (3),
+credited with 512 bits.
 .TP
 .B \-\-reseed\-via\-os
-Automatic reseeding of the auxiliary pool from the same source.
+The same whenever the ESDM reports that it needs entropy, or after 100
+seconds, until a failure.
 .TP
 .BR \-\-reseed\-delay\-ms " \fIMSEC\fR"
-Delay inserted before each reseed, to emulate the latency of a smartcard or a
-TPM.
+Delay inserted before each write of
+.BR \-\-reseed\-via\-os ,
+to emulate the latency of a smartcard or a TPM. Less than one second: a larger
+value is cut to that.
 .SH EXIT STATUS
 .B esdm\-tool
 exits with status 0 on success. The query options
@@ -249,7 +296,20 @@ exits with status 0 on success. The query options
 .BR \-\-is\-running ,
 .BR \-\-wait\-until\-seeded )
 report their answer through the exit status and are meant to be used in
-scripts and service units.
+scripts and service units. Status 1 is returned when a command fails, after
+.B \-\-help
+or without a command, for an invalid argument, and for a command requiring
+root when run by another user.
+.PP
+.BR \-\-status ,
+.BR \-\-status\-json ,
+.BR \-\-jent\-status ,
+.BR \-\-stress\-delay ,
+.BR \-\-stress\-thread ,
+.B \-\-stress\-process
+and
+.B \-\-endless\-stress
+exit with status 0 even when they fail.
 .SH EXAMPLES
 Wait up to a minute for the ESDM to become fully seeded, then draw 32 raw
 random bytes:

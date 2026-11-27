@@ -178,6 +178,14 @@ fake EGD server.
 inserts all of the data, which carries no entropy claim, and credits it after
 that in one go, with no more than the data has bits.
 .TP
+.BI write\-notop " log"
+Against a
+.B notop
+fake EGD server: a
+.BR write ()
+of either device by root inserts all of the data and sends nothing else, no
+credit.
+.TP
 .BI addtoentcnt\-signal " log"
 Needs CAP_SYS_ADMIN; against a
 .B notop
@@ -195,6 +203,24 @@ of
 reports it readable only when a read with
 .B O_NONBLOCK
 gets data \- that is, not at all.
+.TP
+.BI block\-notop " log"
+Against a
+.B notop
+fake EGD server: the reads of either device, also with
+.BR O_SYNC ,
+wait for the ESDM. A signal with
+.B SA_RESTART
+has them restarted, one without ends them with EINTR and no data; with
+.BR O_NONBLOCK ,
+they give EAGAIN.
+.TP
+.B proc\-notop
+Against a
+.B notop
+fake EGD server: the files of
+.I /proc/esdm
+hold what the fake server reports.
 .TP
 .BI backoff " log seconds"
 Against a

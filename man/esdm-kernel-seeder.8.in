@@ -8,8 +8,11 @@ esdm\-kernel\-seeder \- periodically seed the Linux kernel RNG from the ESDM
 .B esdm\-kernel\-seeder
 draws random data from
 .BR esdm\-server (8)
-over the unprivileged RPC interface and inserts it into the Linux kernel RNG,
-crediting it with entropy. It fills the role an
+over the unprivileged RPC interface and inserts it into the Linux kernel RNG.
+Each insertion is 64 bytes, credited with the number of bits the build was
+configured with (meson option
+.BR linux\-reseed\-entropy\-count ,
+0 by default). It fills the role an
 .BR rngd (8)
 has for the kernel, but with the ESDM as the source.
 .PP
@@ -40,19 +43,24 @@ unit.
 Print a usage summary and exit.
 .TP
 .BR \-i ", " \-\-interval " \fISECS\fR"
-Seconds between two seeding operations. A non\-numeric argument is rejected.
+Seconds between two seeding operations. Defaults to the meson option
+.BR linux\-reseed\-interval ,
+120 by default. A non\-numeric argument is rejected.
 .TP
 .BR \-v ", " \-\-verbosity
 Increase the logging verbosity. May be given repeatedly.
 .TP
 .BR \-s ", " \-\-syslog
-Log to syslog instead of standard output and standard error.
+Log to syslog instead of standard error.
 .TP
 .BR \-p ", " \-\-force\-pr
 Draw the data from the prediction\-resistance generator of the ESDM, and force
-a reseed of the kernel CRNG right after every insertion. This mode is selected
-automatically when the ESDM was built for the AIS 20/31 NTG.1 seeding
-strategy.
+a reseed of the kernel CRNG right after every insertion. This mode is always
+on when the ESDM was built for the AIS 20/31 NTG.1 seeding strategy (meson
+option
+.BR ais2031_ntg1 )
+or with an NTG.1 Jitter RNG entropy source (meson option
+.BR es_jent_ntg1 ).
 .SH SIGNALS
 .TP
 .BR SIGTERM ", " SIGINT ", " SIGQUIT ", " SIGHUP

@@ -36,7 +36,8 @@ records raw data.
 Entropy source to collect from.
 .TP
 .BR \-o ", " \-\-out " \fIFILE\fR"
-Output file, one delta per line.
+Output file, one delta per line. It must not exist \- an existing file is not
+overwritten.
 .TP
 .BR \-e ", " \-\-events " \fIN\fR"
 Stop after

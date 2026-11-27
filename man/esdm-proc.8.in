@@ -65,7 +65,7 @@ Perform automatic SELinux relabeling of the served files, so that they carry
 the same context as the kernel files they replace.
 .TP
 .B \-\-syslog
-Log via syslog.
+Log to syslog instead of standard error.
 .SH EXAMPLES
 Mount over the kernel directory the way the shipped service unit does:
 .PP

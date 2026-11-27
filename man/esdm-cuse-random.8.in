@@ -73,25 +73,39 @@ accepted in addition to the ones listed below.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
-Print a usage summary and exit.
+Print a usage summary and exit with status 1; libfuse adds a complaint about
+the option
+.BR \-ho .
 .TP
-.BR \-M ", " \-\-maj= \fIMAJ\fR
-Major number of the device to create.
+.BR \-M " \fIMAJ\fR, " \-\-maj= \fIMAJ\fR
+.TQ
+.BR \-m " \fIMIN\fR, " \-\-min= \fIMIN\fR
+Accepted, but without effect: the kernel assigns the device numbers.
 .TP
-.BR \-m ", " \-\-min= \fIMIN\fR
-Minor number of the device to create.
-.TP
-.BR \-n ", " \-\-name= \fINAME\fR
+.BR \-n " \fINAME\fR, " \-\-name= \fINAME\fR
 Name of the device to create below
 .IR /dev .
-Mandatory.
+Defaults to
+.B esdm
+for
+.B esdm\-cuse\-random
+and to
+.B uesdm
+for
+.BR esdm\-cuse\-urandom .
 .TP
-.BR \-v ", " \-\-verbosity= \fINUM\fR
-Logging verbosity level.
+.BR \-v " \fINUM\fR, " \-\-verbosity= \fINUM\fR
+Logging verbosity level. Defaults to 1.
 .TP
 .BR \-u ", " \-\-username " \fIUSER\fR"
 Unprivileged user to switch to once the device exists. Defaults to
 .BR nobody .
+The long form takes the user as the next word only, not after
+.BR = .
+.TP
+.BI \-\-disable_fallback= N
+Test mode builds only: with 1, never serve from the kernel device (see
+.BR NOTES ).
 .TP
 .B \-\-pid_namespace
 Fork the daemon into an isolating PID namespace.
@@ -107,7 +121,7 @@ Run in the foreground.
 Disable multi\-threaded operation.
 .TP
 .BR \-S ", " \-\-syslog
-Log via syslog.
+Log to syslog instead of standard error.
 .SH FILES
 .TP
 .I /dev/esdm

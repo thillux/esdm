@@ -200,7 +200,7 @@ static int esdm_rpcs_linux_insert_entropy(struct rand_pool_info *rpi,
 
 static void usage(void)
 {
-	printf("esdm-kernel-seeder [-i --interval SECS] [-h --help] [-v --verbosity] [-p --force-pr]\n");
+	printf("esdm-kernel-seeder [-i --interval SECS] [-h --help] [-v --verbosity] [-s --syslog] [-p --force-pr]\n");
 }
 
 static int handle_reseeding(int64_t seeding_interval_secs)

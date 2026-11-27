@@ -1300,7 +1300,7 @@ static const char *usage =
 	"    --min=MIN|-m MIN        device minor number\n"
 	"    --name=NAME|-n NAME     device name (mandatory)\n"
 	"    --verbosity=NUM|-v NUM  verbosity level\n"
-	"    --username=USER|-u USER unprivileged user name (default: \"nobody\")\n"
+	"    --username USER|-u USER unprivileged user name (default: \"nobody\")\n"
 	"    --pid_namespace         fork the daemon into an isolating PID namespace\n"
 	"    -d   -o debug           enable debug output (implies -f)\n"
 	"    -f                      foreground operation\n"
