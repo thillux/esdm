@@ -61,6 +61,15 @@ privileges has completed, which is the point at which a daemon may drop them.
 Terminate the entropy sources and the DRNG manager and release all resources.
 This also stops a monitor started with
 .BR esdm_init_monitor ().
+The call is final: after it, every call that returns random data or a seed
+fails with
+.BR \-EOPNOTSUPP ,
+a call that waited for the ESDM to be seeded at that time included, and
+.BR esdm_init ()
+and
+.BR esdm_reinit ()
+fail with
+.BR \-ESHUTDOWN .
 .PP
 The ESDM does not survive a
 .BR fork (2):

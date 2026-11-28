@@ -1118,7 +1118,11 @@ the child.]
 the #ac("RPC") calls pass on (section @sec:if-rpc-u): `-EAGAIN` from a
 `_noblock` variant that would have to wait, `-EOPNOTSUPP` while the
 #ac("ESDM") gives no output, `-EMSGSIZE` for a status or seed that does not
-fit. `esdm_init` fails with `-ESHUTDOWN` after `esdm_fini`.]
+fit. After `esdm_fini`, `esdm_init` and `esdm_reinit` fail with `-ESHUTDOWN`,
+and the functions that generate random numbers or seed data return
+`-EOPNOTSUPP` (`esdm_drng_mgr_check_finalized` in `esdm/esdm_drng_mgr.c`),
+also one that waited for the #ac("ESDM") to be seeded when `esdm_fini`
+ran.]
 
 == OpenSSL Providers <sec:if-ossl>
 

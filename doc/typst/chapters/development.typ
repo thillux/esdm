@@ -237,7 +237,10 @@ that seed. In the child, every call for random data or a seed fails with
 cleared and `esdm_fini()` returns at once; states held by another crypto
 library and the entropy still in the pools stay in the memory of the child,
 but are never output. A process therefore initializes the #ac("ESDM") after
-its fork, as `esdm-server` does.
+its fork, as `esdm-server` does. `esdm_fini()` is final as well: after it,
+every call for random data or a seed fails with `-EOPNOTSUPP`, a call that
+waited for the #ac("ESDM") to be seeded at that time included, and
+`esdm_init()` fails with `-ESHUTDOWN`.
 
 == Using the ESDM from Rust and Python <sec:using-languages>
 

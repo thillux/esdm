@@ -2,6 +2,12 @@ Changes 1.2.4
 * The CUSE daemons and libesdm_aux_client attach the status shared memory
 segment read-only: a reader cannot change what the server and the other readers
 see, and a process of another user than the owner of the segment can attach it
+* Every output call of libesdm returns -EOPNOTSUPP after esdm_fini(), as the
+documentation states: esdm_get_random_bytes_pr() returned 0,
+esdm_get_random_bytes_pr_noblock() -EAGAIN, and esdm_get_seed() collected from
+the entropy sources that esdm_fini() had shut down and returned what they
+delivered. A call that waits when esdm_fini() runs returns -EOPNOTSUPP as well;
+the blocking esdm_get_seed() returned -EAGAIN there
 
 * The two interfaces of the server are build options: esdm-server-rpc and
 esdm-server-egd, both enabled by default, of which a server needs at least one.

@@ -47,11 +47,13 @@
 (* - Of the entropy source self tests only the one of the auxiliary pool   *)
 (*   is modelled: whether its XOF context is there, which esdm_aux_init()  *)
 (*   replaces in esdm_reinit().                                            *)
+(* - esdm_fini() releases the DRNG state under the DRNG lock, after it set  *)
+(*   esdm_drng_mgr_terminate; esdm_drng_get() checks for the state under   *)
+(*   that lock. The entropy sources are shut down before either: what a    *)
+(*   call begun after the flag was set collects, it collects from them.    *)
 (* - Not modelled: the seeding state beyond operational, the request and   *)
-(*   reseed logic of EsdmReseed, the release of the DRNG state in          *)
-(*   esdm_fini() and the check for it in esdm_drng_get(), the reseed       *)
-(*   worker's own stop request, the shared memory status and the log       *)
-(*   messages.                                                             *)
+(*   reseed logic of EsdmReseed, the reseed worker's own stop request, the *)
+(*   shared memory status and the log messages.                            *)
 (* - Every thread but the worker and the environment is bounded, and the   *)
 (*   environment acts a bounded number of times unless a worker is on      *)
 (*   duty: the interval passes once per self test pass, the                *)
@@ -89,6 +91,8 @@ CONSTANTS
     GateSeeding,  \* a recorded failure stops the seedings and the reseed
                   \* worker
     WaitGate,     \* ... and ends the wait for the ESDM to become operational
+    FiniGate,     \* the output calls check esdm_drng_mgr_terminate: after
+                  \* esdm_fini() they return -EOPNOTSUPP
     EsLocked      \* esdm_aux_selftest() reads under the pool lock
 
 NoProc == "none"
@@ -109,6 +113,7 @@ variables
     slot = FALSE,           \* the worker's thread slot is in use
     terminate = FALSE,      \* esdm_selftest_worker_terminate
     mgrTerminate = FALSE,   \* esdm_drng_mgr_terminate
+    released = FALSE,       \* drng->drng released by esdm_fini()
     due = TRUE,             \* esdm_selftest_due(), no pass recorded yet
     avail = FALSE,          \* esdm_get_available()
     operational = FALSE,    \* esdm_state_operational()
@@ -251,21 +256,27 @@ in4: if (InitMonitor) call start();
 \* A request: esdm_get_random_bytes_full() where Blocking, with
 \* esdm_drng_get_sleep() and esdm_drng_get(). late and failLk are ghosts: the
 \* chunk was generated without a passed verdict; the verdict as it was one
-\* step before the check that follows.
+\* step before the check that follows; fin: the call began after esdm_fini()
+\* set esdm_drng_mgr_terminate.
 fair process (r \in Req)
-    variables nr = 0, c = 0, ret = "none", late = FALSE, failLk = FALSE;
+    variables nr = 0, c = 0, ret = "none", late = FALSE, failLk = FALSE,
+              fin = FALSE;
 {
 rq0: while (nr < MaxReq) {
          nr := nr + 1;
          failLk := (Blocking /\ result = "failed");
+         fin := mgrTerminate;
 wt0:     if (Blocking) {
              \* esdm_drng_sleep_while_nonoperational(): nothing seeds after
-             \* a failure, nothing to wait for
-wt1:         if (WaitGate /\ result = "failed") goto rq0;
-             \* esdm_force_fully_seeded()
+             \* a failure or after esdm_fini(), nothing to wait for
+wt1:         if ((WaitGate /\ result = "failed") \/ (FiniGate /\ mgrTerminate))
+                 goto rq0;
+             \* esdm_force_fully_seeded(), which seeds nothing while all
+             \* DRNGs are seeded
 wt2:         await writer = NoProc;
              readers := readers \cup {self};
-             if (failLk) viol := viol \cup {"Wait"};
+             viol := viol \cup (IF failLk THEN {"Wait"} ELSE {})
+                          \cup (IF fin /\ ~operational THEN {"Fini"} ELSE {});
 wt3:         call seed();
 wt4:         readers := readers \ {self};
 wt5:         if (~operational) {
@@ -273,9 +284,13 @@ wt5:         if (~operational) {
 wt6:             await operational \/ mgrTerminate
                        \/ (WaitGate /\ result = "failed");
                  failLk := (result = "failed");
-wt7:             if (WaitGate /\ result = "failed") goto rq0;
+                 \* a wait that esdm_fini() ended returns -EOPNOTSUPP too
+wt7:             if ((WaitGate /\ result = "failed")
+                     \/ (FiniGate /\ mgrTerminate)) goto rq0;
              };
          };
+         \* esdm_drng_get_sleep(): -EOPNOTSUPP after esdm_fini()
+rqf:     if (FiniGate /\ mgrTerminate) goto rq0;
          \* esdm_drng_get_instances()
 rq1:     await writer = NoProc;
          readers := readers \cup {self};
@@ -299,14 +314,16 @@ rq4:     while (c > 0) {
              await drngLock = NoProc;
              drngLock := self;
              failLk := (result # "passed");
-             \* the check under the lock
-rq4a:        if (GateEachChunk /\ result # "passed") {
+             \* the checks under the lock: the state esdm_fini() releases,
+             \* the verdict
+rq4a:        if (released \/ (GateEachChunk /\ result # "passed")) {
                  c := 0;
                  drngLock := NoProc;
                  goto rq5;
              };
              \* drng_generate()
-rq4b:        if (failLk) viol := viol \cup {"Generate"};
+rq4b:        viol := viol \cup (IF failLk THEN {"Generate"} ELSE {})
+                          \cup (IF fin THEN {"Fini"} ELSE {});
              late := (result # "passed");
              \* the check after it: the chunk is wiped; the lock released
 rq4c:        drngLock := NoProc;
@@ -333,17 +350,21 @@ rq6:     if (ret = "notsupp" /\ ~mgrTerminate /\ result = "passed") {
 }
 
 \* esdm_get_seed(); gLate is a ghost: called after a recorded failure, then
-\* collected without a passed verdict
+\* collected without a passed verdict; gFin: called after esdm_fini() set
+\* esdm_drng_mgr_terminate
 fair process (g \in SeedCallers)
-    variables gLate = FALSE;
+    variables gLate = FALSE, gFin = FALSE;
 {
 gs0: gLate := (result = "failed");
-gs1: if (result # "passed") goto Done;
+     gFin := mgrTerminate;
+gs1: if (result # "passed" \/ (FiniGate /\ mgrTerminate)) goto Done;
      \* the collection, esdm_get_seed_buffers()
-gs2: if (gLate) viol := viol \cup {"Entry"};
+gs2: viol := viol \cup (IF gLate THEN {"Entry"} ELSE {})
+                  \cup (IF gFin THEN {"Fini"} ELSE {});
      gLate := (result # "passed");
-     \* the check after it: the seed is wiped
-gs3: if (GateEachChunk /\ result # "passed") goto Done;
+     \* the check after it: the seed is wiped, also once esdm_fini() ran
+gs3: if ((GateEachChunk /\ result # "passed") \/ (FiniGate /\ mgrTerminate))
+         goto Done;
      \* the seed is handed out
 gs4: viol := viol \cup (IF gLate THEN {"Output"} ELSE {})
                   \cup (IF result # "passed" THEN {"OutputLate"} ELSE {});
@@ -402,8 +423,11 @@ fi0: await pc["init"] = "Done";
      \* esdm_es_mgr_finalize(): thread_wait_all() joins the worker
 fi1: await ~slot;
      joined := TRUE;
-     \* esdm_drng_mgr_finalize()
+     \* esdm_drng_mgr_finalize(): the flag, then esdm_drng_dealloc_common()
+     \* under the DRNG lock
 fi2: mgrTerminate := TRUE;
+fi2a: await drngLock = NoProc;
+     released := TRUE;
      \* esdm_node_fini(): the DRNGs released under their locks
 fi3: await readers = {} /\ writer = NoProc;
      writer := self;
@@ -461,17 +485,17 @@ en0: while (TRUE) {
 
 } *)
 \* BEGIN TRANSLATION
-VARIABLES result, esResult, active, slot, terminate, mgrTerminate, due, avail, 
-          operational, entropy, initFailed, broken, drngLock, readers, writer, 
-          xof, poolLock, failRec, joined, lateWorker, viol, pc, stack, tret, 
-          esFail, failLock, failColl, nr, c, ret, late, failLk, gLate, ns, 
-          failPrev
+VARIABLES result, esResult, active, slot, terminate, mgrTerminate, released, 
+          due, avail, operational, entropy, initFailed, broken, drngLock, 
+          readers, writer, xof, poolLock, failRec, joined, lateWorker, viol, 
+          pc, stack, tret, esFail, failLock, failColl, nr, c, ret, late, 
+          failLk, fin, gLate, gFin, ns, failPrev
 
-vars == << result, esResult, active, slot, terminate, mgrTerminate, due, 
-           avail, operational, entropy, initFailed, broken, drngLock, readers, 
-           writer, xof, poolLock, failRec, joined, lateWorker, viol, pc, 
-           stack, tret, esFail, failLock, failColl, nr, c, ret, late, failLk, 
-           gLate, ns, failPrev >>
+vars == << result, esResult, active, slot, terminate, mgrTerminate, released, 
+           due, avail, operational, entropy, initFailed, broken, drngLock, 
+           readers, writer, xof, poolLock, failRec, joined, lateWorker, viol, 
+           pc, stack, tret, esFail, failLock, failColl, nr, c, ret, late, 
+           failLk, fin, gLate, gFin, ns, failPrev >>
 
 ProcSet == (InitProcs) \cup (Req) \cup (SeedCallers) \cup (OnDemand) \cup (ReseedProcs) \cup (ReinitProcs) \cup (FiniProcs) \cup {"pw"} \cup {"ent"} \cup {"env"}
 
@@ -482,6 +506,7 @@ Init == (* Global variables *)
         /\ slot = FALSE
         /\ terminate = FALSE
         /\ mgrTerminate = FALSE
+        /\ released = FALSE
         /\ due = TRUE
         /\ avail = FALSE
         /\ operational = FALSE
@@ -510,8 +535,10 @@ Init == (* Global variables *)
         /\ ret = [self \in Req |-> "none"]
         /\ late = [self \in Req |-> FALSE]
         /\ failLk = [self \in Req |-> FALSE]
+        /\ fin = [self \in Req |-> FALSE]
         (* Process g *)
         /\ gLate = [self \in SeedCallers |-> FALSE]
+        /\ gFin = [self \in SeedCallers |-> FALSE]
         (* Process rs *)
         /\ ns = [self \in ReseedProcs |-> 0]
         /\ failPrev = [self \in ReseedProcs |-> FALSE]
@@ -532,11 +559,11 @@ cr0(self) == /\ pc[self] = "cr0"
              /\ readers' = (readers \cup {self})
              /\ pc' = [pc EXCEPT ![self] = "cr1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, writer, xof, 
-                             poolLock, failRec, joined, lateWorker, viol, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 cr1(self) == /\ pc[self] = "cr1"
              /\ IF broken
@@ -545,22 +572,24 @@ cr1(self) == /\ pc[self] = "cr1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "cr2"]
                         /\ tret' = tret
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 cr2(self) == /\ pc[self] = "cr2"
              /\ drngLock = NoProc
              /\ tret' = [tret EXCEPT ![self] = broken]
              /\ pc' = [pc EXCEPT ![self] = "cr3"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 cr3(self) == /\ pc[self] = "cr3"
              /\ readers' = readers \ {self}
@@ -576,10 +605,11 @@ cr3(self) == /\ pc[self] = "cr3"
              /\ tret' = [tret EXCEPT ![self] = Head(stack[self]).tret]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << esResult, active, slot, terminate, mgrTerminate, 
-                             due, avail, operational, entropy, initFailed, 
-                             broken, drngLock, writer, xof, poolLock, joined, 
-                             lateWorker, viol, esFail, failLock, failColl, nr, 
-                             c, ret, late, failLk, gLate, ns, failPrev >>
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, writer, xof, 
+                             poolLock, joined, lateWorker, viol, esFail, 
+                             failLock, failColl, nr, c, ret, late, failLk, fin, 
+                             gLate, gFin, ns, failPrev >>
 
 crypto(self) == cr0(self) \/ cr1(self) \/ cr2(self) \/ cr3(self)
 
@@ -590,11 +620,12 @@ es1(self) == /\ pc[self] = "es1"
              /\ esFail' = [esFail EXCEPT ![self] = ~xof]
              /\ pc' = [pc EXCEPT ![self] = "es2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, failLock, failColl, 
+                             nr, c, ret, late, failLk, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 es2(self) == /\ pc[self] = "es2"
              /\ esResult' = IF esFail[self] THEN "failed" ELSE "passed"
@@ -606,11 +637,11 @@ es2(self) == /\ pc[self] = "es2"
              /\ esFail' = [esFail EXCEPT ![self] = Head(stack[self]).esFail]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << result, active, slot, terminate, mgrTerminate, 
-                             due, avail, operational, entropy, initFailed, 
-                             broken, drngLock, readers, writer, xof, poolLock, 
-                             failRec, joined, lateWorker, tret, failLock, 
-                             failColl, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, tret, 
+                             failLock, failColl, nr, c, ret, late, failLk, fin, 
+                             gLate, gFin, ns, failPrev >>
 
 es(self) == es1(self) \/ es2(self)
 
@@ -622,11 +653,12 @@ ru1(self) == /\ pc[self] = "ru1"
              /\ tret' = [tret EXCEPT ![self] = FALSE]
              /\ pc' = [pc EXCEPT ![self] = "cr0"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             esFail, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, esFail, failLock, failColl, nr, 
+                             c, ret, late, failLk, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 ru2(self) == /\ pc[self] = "ru2"
              /\ IF Reinit
@@ -639,22 +671,23 @@ ru2(self) == /\ pc[self] = "ru2"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "ru3"]
                         /\ UNCHANGED << stack, esFail >>
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, failLock, failColl, nr, c, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 ru3(self) == /\ pc[self] = "ru3"
              /\ due' = FALSE
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 run(self) == ru1(self) \/ ru2(self) \/ ru3(self)
 
@@ -665,11 +698,12 @@ ps1(self) == /\ pc[self] = "ps1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "ps3"]
                         /\ stack' = stack
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 ps3(self) == /\ pc[self] = "ps3"
              /\ IF active
@@ -680,11 +714,11 @@ ps3(self) == /\ pc[self] = "ps3"
                         /\ pc' = [pc EXCEPT ![self] = "ps4"]
                         /\ stack' = stack
              /\ UNCHANGED << result, esResult, slot, terminate, mgrTerminate, 
-                             due, avail, operational, entropy, initFailed, 
-                             broken, drngLock, readers, writer, xof, poolLock, 
-                             failRec, joined, lateWorker, viol, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 ps4(self) == /\ pc[self] = "ps4"
              /\ \/ /\ ~slot
@@ -695,22 +729,22 @@ ps4(self) == /\ pc[self] = "ps4"
                    /\ pc' = [pc EXCEPT ![self] = "ps5"]
                    /\ UNCHANGED <<slot, stack>>
              /\ UNCHANGED << result, esResult, active, terminate, mgrTerminate, 
-                             due, avail, operational, entropy, initFailed, 
-                             broken, drngLock, readers, writer, xof, poolLock, 
-                             failRec, joined, lateWorker, viol, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 ps5(self) == /\ pc[self] = "ps5"
              /\ active' = FALSE
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << result, esResult, slot, terminate, mgrTerminate, 
-                             due, avail, operational, entropy, initFailed, 
-                             broken, drngLock, readers, writer, xof, poolLock, 
-                             failRec, joined, lateWorker, viol, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 start(self) == ps1(self) \/ ps3(self) \/ ps4(self) \/ ps5(self)
 
@@ -723,11 +757,11 @@ sd0(self) == /\ pc[self] = "sd0"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "sd1"]
                         /\ UNCHANGED << stack, failLock, failColl >>
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, nr, c, ret, late, 
+                             failLk, fin, gLate, gFin, ns, failPrev >>
 
 sd1(self) == /\ pc[self] = "sd1"
              /\ drngLock = NoProc
@@ -735,22 +769,23 @@ sd1(self) == /\ pc[self] = "sd1"
              /\ failLock' = [failLock EXCEPT ![self] = (result = "failed")]
              /\ pc' = [pc EXCEPT ![self] = "sd2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, readers, writer, xof, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, readers, writer, xof, 
                              poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             failLk, fin, gLate, gFin, ns, failPrev >>
 
 sd2(self) == /\ pc[self] = "sd2"
              /\ IF GateSeeding /\ result = "failed"
                    THEN /\ pc' = [pc EXCEPT ![self] = "sd6"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "sd3"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 sd3(self) == /\ pc[self] = "sd3"
              /\ IF failLock[self]
@@ -760,22 +795,23 @@ sd3(self) == /\ pc[self] = "sd3"
              /\ failColl' = [failColl EXCEPT ![self] = (result = "failed")]
              /\ pc' = [pc EXCEPT ![self] = "sd4"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, stack, 
-                             tret, esFail, failLock, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, stack, tret, esFail, failLock, nr, c, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 sd4(self) == /\ pc[self] = "sd4"
              /\ IF GateSeeding /\ result = "failed"
                    THEN /\ pc' = [pc EXCEPT ![self] = "sd6"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "sd5"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 sd5(self) == /\ pc[self] = "sd5"
              /\ viol' = (viol \cup (IF failColl[self] THEN {"Inject"} ELSE {})
@@ -786,11 +822,11 @@ sd5(self) == /\ pc[self] = "sd5"
                         /\ UNCHANGED operational
              /\ pc' = [pc EXCEPT ![self] = "sd6"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, entropy, initFailed, 
-                             broken, drngLock, readers, writer, xof, poolLock, 
-                             failRec, joined, lateWorker, stack, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, stack, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 sd6(self) == /\ pc[self] = "sd6"
              /\ drngLock' = NoProc
@@ -799,11 +835,11 @@ sd6(self) == /\ pc[self] = "sd6"
              /\ failColl' = [failColl EXCEPT ![self] = Head(stack[self]).failColl]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, readers, writer, xof, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, readers, writer, xof, 
                              poolLock, failRec, joined, lateWorker, viol, tret, 
-                             esFail, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             esFail, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 seed(self) == sd0(self) \/ sd1(self) \/ sd2(self) \/ sd3(self) \/ sd4(self)
                  \/ sd5(self) \/ sd6(self)
@@ -816,11 +852,12 @@ in1(self) == /\ pc[self] = "in1"
              /\ tret' = [tret EXCEPT ![self] = FALSE]
              /\ pc' = [pc EXCEPT ![self] = "cr0"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             esFail, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, esFail, failLock, failColl, nr, 
+                             c, ret, late, failLk, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 in2(self) == /\ pc[self] = "in2"
              /\ IF result # "passed"
@@ -832,11 +869,11 @@ in2(self) == /\ pc[self] = "in2"
                         /\ pc' = [pc EXCEPT ![self] = "in3"]
                         /\ UNCHANGED initFailed
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, entropy, broken, drngLock, 
-                             readers, writer, xof, poolLock, failRec, joined, 
-                             lateWorker, viol, stack, tret, esFail, failLock, 
-                             failColl, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             mgrTerminate, released, due, entropy, broken, 
+                             drngLock, readers, writer, xof, poolLock, failRec, 
+                             joined, lateWorker, viol, stack, tret, esFail, 
+                             failLock, failColl, nr, c, ret, late, failLk, fin, 
+                             gLate, gFin, ns, failPrev >>
 
 in3(self) == /\ pc[self] = "in3"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "run",
@@ -844,11 +881,12 @@ in3(self) == /\ pc[self] = "in3"
                                                   \o stack[self]]
              /\ pc' = [pc EXCEPT ![self] = "ru1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 in4(self) == /\ pc[self] = "in4"
              /\ IF InitMonitor
@@ -859,11 +897,12 @@ in4(self) == /\ pc[self] = "in4"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                         /\ stack' = stack
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 ini(self) == in1(self) \/ in2(self) \/ in3(self) \/ in4(self)
 
@@ -871,52 +910,53 @@ rq0(self) == /\ pc[self] = "rq0"
              /\ IF nr[self] < MaxReq
                    THEN /\ nr' = [nr EXCEPT ![self] = nr[self] + 1]
                         /\ failLk' = [failLk EXCEPT ![self] = (Blocking /\ result = "failed")]
+                        /\ fin' = [fin EXCEPT ![self] = mgrTerminate]
                         /\ pc' = [pc EXCEPT ![self] = "wt0"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                        /\ UNCHANGED << nr, failLk >>
+                        /\ UNCHANGED << nr, failLk, fin >>
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, c, ret, 
-                             late, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, c, ret, late, gLate, gFin, ns, failPrev >>
 
 wt0(self) == /\ pc[self] = "wt0"
              /\ IF Blocking
                    THEN /\ pc' = [pc EXCEPT ![self] = "wt1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "rq1"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "rqf"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 wt1(self) == /\ pc[self] = "wt1"
-             /\ IF WaitGate /\ result = "failed"
+             /\ IF (WaitGate /\ result = "failed") \/ (FiniGate /\ mgrTerminate)
                    THEN /\ pc' = [pc EXCEPT ![self] = "rq0"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "wt2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 wt2(self) == /\ pc[self] = "wt2"
              /\ writer = NoProc
              /\ readers' = (readers \cup {self})
-             /\ IF failLk[self]
-                   THEN /\ viol' = (viol \cup {"Wait"})
-                   ELSE /\ TRUE
-                        /\ viol' = viol
+             /\ viol' = (viol \cup (IF failLk[self] THEN {"Wait"} ELSE {})
+                              \cup (IF fin[self] /\ ~operational THEN {"Fini"} ELSE {}))
              /\ pc' = [pc EXCEPT ![self] = "wt3"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, writer, xof, 
-                             poolLock, failRec, joined, lateWorker, stack, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, stack, 
                              tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 wt3(self) == /\ pc[self] = "wt3"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "seed",
@@ -928,32 +968,33 @@ wt3(self) == /\ pc[self] = "wt3"
              /\ failColl' = [failColl EXCEPT ![self] = FALSE]
              /\ pc' = [pc EXCEPT ![self] = "sd0"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, nr, c, ret, late, 
+                             failLk, fin, gLate, gFin, ns, failPrev >>
 
 wt4(self) == /\ pc[self] = "wt4"
              /\ readers' = readers \ {self}
              /\ pc' = [pc EXCEPT ![self] = "wt5"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, writer, xof, 
-                             poolLock, failRec, joined, lateWorker, viol, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 wt5(self) == /\ pc[self] = "wt5"
              /\ IF ~operational
                    THEN /\ pc' = [pc EXCEPT ![self] = "wt6"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "rq1"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "rqf"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 wt6(self) == /\ pc[self] = "wt6"
              /\ operational \/ mgrTerminate
@@ -961,22 +1002,37 @@ wt6(self) == /\ pc[self] = "wt6"
              /\ failLk' = [failLk EXCEPT ![self] = (result = "failed")]
              /\ pc' = [pc EXCEPT ![self] = "wt7"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 wt7(self) == /\ pc[self] = "wt7"
-             /\ IF WaitGate /\ result = "failed"
+             /\ IF (WaitGate /\ result = "failed")
+                   \/ (FiniGate /\ mgrTerminate)
+                   THEN /\ pc' = [pc EXCEPT ![self] = "rq0"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "rqf"]
+             /\ UNCHANGED << result, esResult, active, slot, terminate, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
+
+rqf(self) == /\ pc[self] = "rqf"
+             /\ IF FiniGate /\ mgrTerminate
                    THEN /\ pc' = [pc EXCEPT ![self] = "rq0"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rq1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 rq1(self) == /\ pc[self] = "rq1"
              /\ writer = NoProc
@@ -989,11 +1045,11 @@ rq1(self) == /\ pc[self] = "rq1"
              /\ failLk' = [failLk EXCEPT ![self] = (result = "failed")]
              /\ pc' = [pc EXCEPT ![self] = "rq2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, writer, xof, 
-                             poolLock, failRec, joined, lateWorker, stack, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, stack, 
                              tret, esFail, failLock, failColl, nr, c, late, 
-                             gLate, ns, failPrev >>
+                             fin, gLate, gFin, ns, failPrev >>
 
 rq2(self) == /\ pc[self] = "rq2"
              /\ IF ~operational
@@ -1002,11 +1058,12 @@ rq2(self) == /\ pc[self] = "rq2"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rq3"]
                         /\ ret' = ret
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, late, failLk, fin, gLate, gFin, 
+                             ns, failPrev >>
 
 rq3(self) == /\ pc[self] = "rq3"
              /\ IF result # "passed"
@@ -1022,11 +1079,11 @@ rq3(self) == /\ pc[self] = "rq3"
                                                              \o stack[self]]
                         /\ pc' = [pc EXCEPT ![self] = "ps1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, tret, 
-                             esFail, failLock, failColl, nr, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, tret, esFail, failLock, failColl, nr, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 rq4(self) == /\ pc[self] = "rq4"
              /\ IF c[self] > 0
@@ -1037,39 +1094,38 @@ rq4(self) == /\ pc[self] = "rq4"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rq5"]
                         /\ UNCHANGED << drngLock, failLk >>
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, readers, writer, xof, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, readers, writer, xof, 
                              poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, gLate, ns, failPrev >>
+                             ret, late, fin, gLate, gFin, ns, failPrev >>
 
 rq4a(self) == /\ pc[self] = "rq4a"
-              /\ IF GateEachChunk /\ result # "passed"
+              /\ IF released \/ (GateEachChunk /\ result # "passed")
                     THEN /\ c' = [c EXCEPT ![self] = 0]
                          /\ drngLock' = NoProc
                          /\ pc' = [pc EXCEPT ![self] = "rq5"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "rq4b"]
                          /\ UNCHANGED << drngLock, c >>
               /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                              mgrTerminate, due, avail, operational, entropy, 
-                              initFailed, broken, readers, writer, xof, 
-                              poolLock, failRec, joined, lateWorker, viol, 
+                              mgrTerminate, released, due, avail, operational, 
+                              entropy, initFailed, broken, readers, writer, 
+                              xof, poolLock, failRec, joined, lateWorker, viol, 
                               stack, tret, esFail, failLock, failColl, nr, ret, 
-                              late, failLk, gLate, ns, failPrev >>
+                              late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 rq4b(self) == /\ pc[self] = "rq4b"
-              /\ IF failLk[self]
-                    THEN /\ viol' = (viol \cup {"Generate"})
-                    ELSE /\ TRUE
-                         /\ viol' = viol
+              /\ viol' = (viol \cup (IF failLk[self] THEN {"Generate"} ELSE {})
+                               \cup (IF fin[self] THEN {"Fini"} ELSE {}))
               /\ late' = [late EXCEPT ![self] = (result # "passed")]
               /\ pc' = [pc EXCEPT ![self] = "rq4c"]
               /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                              mgrTerminate, due, avail, operational, entropy, 
-                              initFailed, broken, drngLock, readers, writer, 
-                              xof, poolLock, failRec, joined, lateWorker, 
-                              stack, tret, esFail, failLock, failColl, nr, c, 
-                              ret, failLk, gLate, ns, failPrev >>
+                              mgrTerminate, released, due, avail, operational, 
+                              entropy, initFailed, broken, drngLock, readers, 
+                              writer, xof, poolLock, failRec, joined, 
+                              lateWorker, stack, tret, esFail, failLock, 
+                              failColl, nr, c, ret, failLk, fin, gLate, gFin, 
+                              ns, failPrev >>
 
 rq4c(self) == /\ pc[self] = "rq4c"
               /\ drngLock' = NoProc
@@ -1079,11 +1135,11 @@ rq4c(self) == /\ pc[self] = "rq4c"
                     ELSE /\ pc' = [pc EXCEPT ![self] = "rq4d"]
                          /\ c' = c
               /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                              mgrTerminate, due, avail, operational, entropy, 
-                              initFailed, broken, readers, writer, xof, 
-                              poolLock, failRec, joined, lateWorker, viol, 
+                              mgrTerminate, released, due, avail, operational, 
+                              entropy, initFailed, broken, readers, writer, 
+                              xof, poolLock, failRec, joined, lateWorker, viol, 
                               stack, tret, esFail, failLock, failColl, nr, ret, 
-                              late, failLk, gLate, ns, failPrev >>
+                              late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 rq4d(self) == /\ pc[self] = "rq4d"
               /\ viol' = (viol \cup (IF late[self] THEN {"Output"} ELSE {})
@@ -1092,21 +1148,22 @@ rq4d(self) == /\ pc[self] = "rq4d"
               /\ c' = [c EXCEPT ![self] = c[self] - 1]
               /\ pc' = [pc EXCEPT ![self] = "rq4"]
               /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                              mgrTerminate, due, avail, operational, entropy, 
-                              initFailed, broken, drngLock, readers, writer, 
-                              xof, poolLock, failRec, joined, lateWorker, 
-                              stack, tret, esFail, failLock, failColl, nr, ret, 
-                              late, failLk, gLate, ns, failPrev >>
+                              mgrTerminate, released, due, avail, operational, 
+                              entropy, initFailed, broken, drngLock, readers, 
+                              writer, xof, poolLock, failRec, joined, 
+                              lateWorker, stack, tret, esFail, failLock, 
+                              failColl, nr, ret, late, failLk, fin, gLate, 
+                              gFin, ns, failPrev >>
 
 rq5(self) == /\ pc[self] = "rq5"
              /\ readers' = readers \ {self}
              /\ pc' = [pc EXCEPT ![self] = "rq6"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, writer, xof, 
-                             poolLock, failRec, joined, lateWorker, viol, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 rq6(self) == /\ pc[self] = "rq6"
              /\ IF ret[self] = "notsupp" /\ ~mgrTerminate /\ result = "passed"
@@ -1116,74 +1173,79 @@ rq6(self) == /\ pc[self] = "rq6"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rq0"]
                         /\ UNCHANGED << ret, failLk >>
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             late, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, late, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 r(self) == rq0(self) \/ wt0(self) \/ wt1(self) \/ wt2(self) \/ wt3(self)
               \/ wt4(self) \/ wt5(self) \/ wt6(self) \/ wt7(self)
-              \/ rq1(self) \/ rq2(self) \/ rq3(self) \/ rq4(self)
-              \/ rq4a(self) \/ rq4b(self) \/ rq4c(self) \/ rq4d(self)
-              \/ rq5(self) \/ rq6(self)
+              \/ rqf(self) \/ rq1(self) \/ rq2(self) \/ rq3(self)
+              \/ rq4(self) \/ rq4a(self) \/ rq4b(self) \/ rq4c(self)
+              \/ rq4d(self) \/ rq5(self) \/ rq6(self)
 
 gs0(self) == /\ pc[self] = "gs0"
              /\ gLate' = [gLate EXCEPT ![self] = (result = "failed")]
+             /\ gFin' = [gFin EXCEPT ![self] = mgrTerminate]
              /\ pc' = [pc EXCEPT ![self] = "gs1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, ns, 
+                             failPrev >>
 
 gs1(self) == /\ pc[self] = "gs1"
-             /\ IF result # "passed"
+             /\ IF result # "passed" \/ (FiniGate /\ mgrTerminate)
                    THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "gs2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 gs2(self) == /\ pc[self] = "gs2"
-             /\ IF gLate[self]
-                   THEN /\ viol' = (viol \cup {"Entry"})
-                   ELSE /\ TRUE
-                        /\ viol' = viol
+             /\ viol' = (viol \cup (IF gLate[self] THEN {"Entry"} ELSE {})
+                              \cup (IF gFin[self] THEN {"Fini"} ELSE {}))
              /\ gLate' = [gLate EXCEPT ![self] = (result # "passed")]
              /\ pc' = [pc EXCEPT ![self] = "gs3"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, stack, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gFin, ns, 
+                             failPrev >>
 
 gs3(self) == /\ pc[self] = "gs3"
-             /\ IF GateEachChunk /\ result # "passed"
+             /\ IF (GateEachChunk /\ result # "passed") \/ (FiniGate /\ mgrTerminate)
                    THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "gs4"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 gs4(self) == /\ pc[self] = "gs4"
              /\ viol' = (viol \cup (IF gLate[self] THEN {"Output"} ELSE {})
                               \cup (IF result # "passed" THEN {"OutputLate"} ELSE {}))
              /\ pc' = [pc EXCEPT ![self] = "Done"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, stack, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 g(self) == gs0(self) \/ gs1(self) \/ gs2(self) \/ gs3(self) \/ gs4(self)
 
@@ -1193,11 +1255,12 @@ od1(self) == /\ pc[self] = "od1"
                                                   \o stack[self]]
              /\ pc' = [pc EXCEPT ![self] = "ru1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 o(self) == od1(self)
 
@@ -1208,11 +1271,12 @@ rs0(self) == /\ pc[self] = "rs0"
                    THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rs1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns >>
 
 rs1(self) == /\ pc[self] = "rs1"
              /\ IF ns[self] < MaxReseeds /\ ~(GateSeeding /\ result = "failed")
@@ -1221,11 +1285,12 @@ rs1(self) == /\ pc[self] = "rs1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                         /\ ns' = ns
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, failPrev >>
 
 rs2(self) == /\ pc[self] = "rs2"
              /\ IF failPrev[self]
@@ -1241,21 +1306,22 @@ rs2(self) == /\ pc[self] = "rs2"
              /\ failColl' = [failColl EXCEPT ![self] = FALSE]
              /\ pc' = [pc EXCEPT ![self] = "sd0"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, tret, 
-                             esFail, nr, c, ret, late, failLk, gLate, ns, 
-                             failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, tret, esFail, nr, c, ret, late, 
+                             failLk, fin, gLate, gFin, ns, failPrev >>
 
 rs3(self) == /\ pc[self] = "rs3"
              /\ failPrev' = [failPrev EXCEPT ![self] = (result = "failed")]
              /\ pc' = [pc EXCEPT ![self] = "rs1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, stack, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns >>
 
 rs(self) == rs0(self) \/ rs1(self) \/ rs2(self) \/ rs3(self)
 
@@ -1271,11 +1337,12 @@ ri0(self) == /\ pc[self] = "ri0"
                         /\ tret' = [tret EXCEPT ![self] = FALSE]
                         /\ pc' = [pc EXCEPT ![self] = "cr0"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             esFail, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, esFail, failLock, failColl, nr, 
+                             c, ret, late, failLk, fin, gLate, gFin, ns, 
+                             failPrev >>
 
 ri1(self) == /\ pc[self] = "ri1"
              /\ poolLock = NoProc
@@ -1283,22 +1350,22 @@ ri1(self) == /\ pc[self] = "ri1"
              /\ xof' = FALSE
              /\ pc' = [pc EXCEPT ![self] = "ri2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             failRec, joined, lateWorker, viol, stack, tret, 
-                             esFail, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, failRec, joined, lateWorker, viol, stack, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 ri2(self) == /\ pc[self] = "ri2"
              /\ xof' = TRUE
              /\ poolLock' = NoProc
              /\ pc' = [pc EXCEPT ![self] = "ri3"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             failRec, joined, lateWorker, viol, stack, tret, 
-                             esFail, failLock, failColl, nr, c, ret, late, 
-                             failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, failRec, joined, lateWorker, viol, stack, 
+                             tret, esFail, failLock, failColl, nr, c, ret, 
+                             late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 ri3(self) == /\ pc[self] = "ri3"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "run",
@@ -1306,11 +1373,12 @@ ri3(self) == /\ pc[self] = "ri3"
                                                   \o stack[self]]
              /\ pc' = [pc EXCEPT ![self] = "ru1"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, joined, lateWorker, viol, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, joined, 
+                             lateWorker, viol, tret, esFail, failLock, 
+                             failColl, nr, c, ret, late, failLk, fin, gLate, 
+                             gFin, ns, failPrev >>
 
 ri(self) == ri0(self) \/ ri1(self) \/ ri2(self) \/ ri3(self)
 
@@ -1318,67 +1386,81 @@ fi0(self) == /\ pc[self] = "fi0"
              /\ pc["init"] = "Done"
              /\ terminate' = TRUE
              /\ pc' = [pc EXCEPT ![self] = "fi1"]
-             /\ UNCHANGED << result, esResult, active, slot, mgrTerminate, due, 
-                             avail, operational, entropy, initFailed, broken, 
-                             drngLock, readers, writer, xof, poolLock, failRec, 
-                             joined, lateWorker, viol, stack, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+             /\ UNCHANGED << result, esResult, active, slot, mgrTerminate, 
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
+                             stack, tret, esFail, failLock, failColl, nr, c, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 fi1(self) == /\ pc[self] = "fi1"
              /\ ~slot
              /\ joined' = TRUE
              /\ pc' = [pc EXCEPT ![self] = "fi2"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, writer, 
-                             xof, poolLock, failRec, lateWorker, viol, stack, 
-                             tret, esFail, failLock, failColl, nr, c, ret, 
-                             late, failLk, gLate, ns, failPrev >>
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             writer, xof, poolLock, failRec, lateWorker, viol, 
+                             stack, tret, esFail, failLock, failColl, nr, c, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 fi2(self) == /\ pc[self] = "fi2"
              /\ mgrTerminate' = TRUE
-             /\ pc' = [pc EXCEPT ![self] = "fi3"]
-             /\ UNCHANGED << result, esResult, active, slot, terminate, due, 
-                             avail, operational, entropy, initFailed, broken, 
-                             drngLock, readers, writer, xof, poolLock, failRec, 
-                             joined, lateWorker, viol, stack, tret, esFail, 
-                             failLock, failColl, nr, c, ret, late, failLk, 
-                             gLate, ns, failPrev >>
+             /\ pc' = [pc EXCEPT ![self] = "fi2a"]
+             /\ UNCHANGED << result, esResult, active, slot, terminate, 
+                             released, due, avail, operational, entropy, 
+                             initFailed, broken, drngLock, readers, writer, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
+                             stack, tret, esFail, failLock, failColl, nr, c, 
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
+
+fi2a(self) == /\ pc[self] = "fi2a"
+              /\ drngLock = NoProc
+              /\ released' = TRUE
+              /\ pc' = [pc EXCEPT ![self] = "fi3"]
+              /\ UNCHANGED << result, esResult, active, slot, terminate, 
+                              mgrTerminate, due, avail, operational, entropy, 
+                              initFailed, broken, drngLock, readers, writer, 
+                              xof, poolLock, failRec, joined, lateWorker, viol, 
+                              stack, tret, esFail, failLock, failColl, nr, c, 
+                              ret, late, failLk, fin, gLate, gFin, ns, 
+                              failPrev >>
 
 fi3(self) == /\ pc[self] = "fi3"
              /\ readers = {} /\ writer = NoProc
              /\ writer' = self
              /\ pc' = [pc EXCEPT ![self] = "fi4"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, xof, 
-                             poolLock, failRec, joined, lateWorker, viol, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
 fi4(self) == /\ pc[self] = "fi4"
              /\ drngLock = NoProc
              /\ writer' = NoProc
              /\ pc' = [pc EXCEPT ![self] = "Done"]
              /\ UNCHANGED << result, esResult, active, slot, terminate, 
-                             mgrTerminate, due, avail, operational, entropy, 
-                             initFailed, broken, drngLock, readers, xof, 
-                             poolLock, failRec, joined, lateWorker, viol, 
+                             mgrTerminate, released, due, avail, operational, 
+                             entropy, initFailed, broken, drngLock, readers, 
+                             xof, poolLock, failRec, joined, lateWorker, viol, 
                              stack, tret, esFail, failLock, failColl, nr, c, 
-                             ret, late, failLk, gLate, ns, failPrev >>
+                             ret, late, failLk, fin, gLate, gFin, ns, failPrev >>
 
-fi(self) == fi0(self) \/ fi1(self) \/ fi2(self) \/ fi3(self) \/ fi4(self)
+fi(self) == fi0(self) \/ fi1(self) \/ fi2(self) \/ fi2a(self) \/ fi3(self)
+               \/ fi4(self)
 
 pw0 == /\ pc["pw"] = "pw0"
        /\ slot
        /\ lateWorker' = terminate
        /\ pc' = [pc EXCEPT !["pw"] = "pw1"]
        /\ UNCHANGED << result, esResult, active, slot, terminate, mgrTerminate, 
-                       due, avail, operational, entropy, initFailed, broken, 
-                       drngLock, readers, writer, xof, poolLock, failRec, 
-                       joined, viol, stack, tret, esFail, failLock, failColl, 
-                       nr, c, ret, late, failLk, gLate, ns, failPrev >>
+                       released, due, avail, operational, entropy, initFailed, 
+                       broken, drngLock, readers, writer, xof, poolLock, 
+                       failRec, joined, viol, stack, tret, esFail, failLock, 
+                       failColl, nr, c, ret, late, failLk, fin, gLate, gFin, 
+                       ns, failPrev >>
 
 pw1 == /\ pc["pw"] = "pw1"
        /\ IF ~terminate
@@ -1397,38 +1479,42 @@ pw1 == /\ pc["pw"] = "pw1"
              ELSE /\ pc' = [pc EXCEPT !["pw"] = "pw4"]
                   /\ UNCHANGED << viol, stack >>
        /\ UNCHANGED << result, esResult, active, slot, terminate, mgrTerminate, 
-                       due, avail, operational, entropy, initFailed, broken, 
-                       drngLock, readers, writer, xof, poolLock, failRec, 
-                       joined, lateWorker, tret, esFail, failLock, failColl, 
-                       nr, c, ret, late, failLk, gLate, ns, failPrev >>
+                       released, due, avail, operational, entropy, initFailed, 
+                       broken, drngLock, readers, writer, xof, poolLock, 
+                       failRec, joined, lateWorker, tret, esFail, failLock, 
+                       failColl, nr, c, ret, late, failLk, fin, gLate, gFin, 
+                       ns, failPrev >>
 
 pw3 == /\ pc["pw"] = "pw3"
        /\ IF result # "passed"
              THEN /\ pc' = [pc EXCEPT !["pw"] = "pw4"]
              ELSE /\ pc' = [pc EXCEPT !["pw"] = "pw1"]
        /\ UNCHANGED << result, esResult, active, slot, terminate, mgrTerminate, 
-                       due, avail, operational, entropy, initFailed, broken, 
-                       drngLock, readers, writer, xof, poolLock, failRec, 
-                       joined, lateWorker, viol, stack, tret, esFail, failLock, 
-                       failColl, nr, c, ret, late, failLk, gLate, ns, failPrev >>
+                       released, due, avail, operational, entropy, initFailed, 
+                       broken, drngLock, readers, writer, xof, poolLock, 
+                       failRec, joined, lateWorker, viol, stack, tret, esFail, 
+                       failLock, failColl, nr, c, ret, late, failLk, fin, 
+                       gLate, gFin, ns, failPrev >>
 
 pw4 == /\ pc["pw"] = "pw4"
        /\ active' = FALSE
        /\ pc' = [pc EXCEPT !["pw"] = "pw5"]
-       /\ UNCHANGED << result, esResult, slot, terminate, mgrTerminate, due, 
-                       avail, operational, entropy, initFailed, broken, 
-                       drngLock, readers, writer, xof, poolLock, failRec, 
-                       joined, lateWorker, viol, stack, tret, esFail, failLock, 
-                       failColl, nr, c, ret, late, failLk, gLate, ns, failPrev >>
+       /\ UNCHANGED << result, esResult, slot, terminate, mgrTerminate, 
+                       released, due, avail, operational, entropy, initFailed, 
+                       broken, drngLock, readers, writer, xof, poolLock, 
+                       failRec, joined, lateWorker, viol, stack, tret, esFail, 
+                       failLock, failColl, nr, c, ret, late, failLk, fin, 
+                       gLate, gFin, ns, failPrev >>
 
 pw5 == /\ pc["pw"] = "pw5"
        /\ slot' = FALSE
        /\ pc' = [pc EXCEPT !["pw"] = "pw0"]
-       /\ UNCHANGED << result, esResult, active, terminate, mgrTerminate, due, 
-                       avail, operational, entropy, initFailed, broken, 
-                       drngLock, readers, writer, xof, poolLock, failRec, 
-                       joined, lateWorker, viol, stack, tret, esFail, failLock, 
-                       failColl, nr, c, ret, late, failLk, gLate, ns, failPrev >>
+       /\ UNCHANGED << result, esResult, active, terminate, mgrTerminate, 
+                       released, due, avail, operational, entropy, initFailed, 
+                       broken, drngLock, readers, writer, xof, poolLock, 
+                       failRec, joined, lateWorker, viol, stack, tret, esFail, 
+                       failLock, failColl, nr, c, ret, late, failLk, fin, 
+                       gLate, gFin, ns, failPrev >>
 
 pw == pw0 \/ pw1 \/ pw3 \/ pw4 \/ pw5
 
@@ -1437,10 +1523,11 @@ ea0 == /\ pc["ent"] = "ea0"
        /\ entropy' = TRUE
        /\ pc' = [pc EXCEPT !["ent"] = "Done"]
        /\ UNCHANGED << result, esResult, active, slot, terminate, mgrTerminate, 
-                       due, avail, operational, initFailed, broken, drngLock, 
-                       readers, writer, xof, poolLock, failRec, joined, 
-                       lateWorker, viol, stack, tret, esFail, failLock, 
-                       failColl, nr, c, ret, late, failLk, gLate, ns, failPrev >>
+                       released, due, avail, operational, initFailed, broken, 
+                       drngLock, readers, writer, xof, poolLock, failRec, 
+                       joined, lateWorker, viol, stack, tret, esFail, failLock, 
+                       failColl, nr, c, ret, late, failLk, fin, gLate, gFin, 
+                       ns, failPrev >>
 
 ea == ea0
 
@@ -1457,10 +1544,11 @@ en0 == /\ pc["env"] = "en0"
              /\ UNCHANGED <<due, broken>>
        /\ pc' = [pc EXCEPT !["env"] = "en0"]
        /\ UNCHANGED << result, esResult, active, slot, terminate, mgrTerminate, 
-                       avail, operational, entropy, initFailed, drngLock, 
-                       readers, writer, xof, poolLock, failRec, joined, 
-                       lateWorker, viol, stack, tret, esFail, failLock, 
-                       failColl, nr, c, ret, late, failLk, gLate, ns, failPrev >>
+                       released, avail, operational, entropy, initFailed, 
+                       drngLock, readers, writer, xof, poolLock, failRec, 
+                       joined, lateWorker, viol, stack, tret, esFail, failLock, 
+                       failColl, nr, c, ret, late, failLk, fin, gLate, gFin, 
+                       ns, failPrev >>
 
 en == en0
 
@@ -1517,7 +1605,7 @@ TypeOK ==
     /\ (writer # NoProc => readers = {})
     /\ viol \subseteq {"Output", "OutputLate", "Generate", "Entry", "Wait",
                        "Collect", "Inject", "InjectLate", "Worker",
-                       "EsSpurious", "LateRun"}
+                       "EsSpurious", "LateRun", "Fini"}
 
 \* Every chunk and every seed handed out was generated or collected while
 \* the crypto self tests stood passed: not before they ran, and not after a
@@ -1537,6 +1625,12 @@ EntryGated == "Entry" \notin viol
 \* A blocking request that found a failure recorded when it began or ended
 \* its wait returns: it starts no seeding and no request.
 WaitGated == "Wait" \notin viol
+
+\* A call that began after esdm_fini() set esdm_drng_mgr_terminate returns
+\* -EOPNOTSUPP: it generates no chunk, and it collects nothing - for a seed
+\* it hands out or for a seeding - from entropy sources that esdm_fini()
+\* shut down before it set the flag.
+FiniGated == "Fini" \notin viol
 
 \* A failure is never lost, to a concurrent passing run or otherwise.
 FailureKept == failRec => result = "failed"

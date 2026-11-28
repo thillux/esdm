@@ -417,6 +417,16 @@ static int esdm_drng_mgr_check_forked(void)
 	return -EOPNOTSUPP;
 }
 
+/*
+ * esdm_fini() is final - see esdm_finalized(): the DRNG states are released
+ * and the entropy sources shut down. An output call serves nothing after it,
+ * and collects nothing from sources that are gone.
+ */
+static int esdm_drng_mgr_check_finalized(void)
+{
+	return atomic_load(&esdm_drng_mgr_terminate) ? -EOPNOTSUPP : 0;
+}
+
 int esdm_drng_mgr_initialize(void)
 {
 	int ret;
@@ -2095,6 +2105,17 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 			injected = esdm_drng_seed_es(drng, "regular", false);
 
 			/*
+			 * esdm_fini() released the state while this request
+			 * waited for the lock: nothing was injected, which is
+			 * not the lack of fresh entropy the checks below are
+			 * for - see the guard further down.
+			 */
+			if (!drng->drng) {
+				mutex_w_unlock(&drng->lock);
+				return processed ? processed : -EOPNOTSUPP;
+			}
+
+			/*
 			 * Like every DRNG, it serves only once fully seeded:
 			 * until then, each request tries the initial full seed
 			 * again.
@@ -2287,6 +2308,9 @@ static ssize_t esdm_drng_get_sleep(uint8_t *outbuf, size_t outbuflen, bool pr,
 				   bool nonblock)
 {
 	int ret = esdm_drng_mgr_check_forked();
+
+	if (!ret)
+		ret = esdm_drng_mgr_check_finalized();
 
 	return ret ? ret : esdm_drng_get_sleep_live(outbuf, outbuflen, pr,
 						   nonblock);
@@ -2492,6 +2516,10 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 	if (esdm_selftest_crypto_failed())
 		return -EOPNOTSUPP;
 
+	/* Nor after esdm_fini(), which shut the entropy sources down */
+	if (esdm_drng_mgr_check_finalized())
+		return -EOPNOTSUPP;
+
 	if (nonblock) {
 		esdm_drng_try_seed();
 		return esdm_pool_all_nodes_seeded_get() ? 0 : -EAGAIN;
@@ -2504,6 +2532,9 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 			  esdm_pool_all_nodes_seeded_get() ||
 				  atomic_load(&esdm_drng_mgr_terminate) ||
 				  esdm_selftest_crypto_failed());
+	/* A wait that esdm_fini() ended is not one a seeding ended */
+	if (esdm_drng_mgr_check_finalized())
+		return -EOPNOTSUPP;
 	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
 }
 
@@ -2513,7 +2544,7 @@ static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 		return -EOPNOTSUPP;
 
 	/* See esdm_drng_sleep_while_not_all_nodes_seeded() */
-	if (esdm_selftest_crypto_failed())
+	if (esdm_selftest_crypto_failed() || esdm_drng_mgr_check_finalized())
 		return -EOPNOTSUPP;
 
 	if (nonblock) {
@@ -2528,6 +2559,9 @@ static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 			  esdm_state_operational() ||
 				  atomic_load(&esdm_drng_mgr_terminate) ||
 				  esdm_selftest_crypto_failed());
+	/* A wait that esdm_fini() ended is not one a seeding ended */
+	if (esdm_drng_mgr_check_finalized())
+		return -EOPNOTSUPP;
 	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
 }
 
@@ -2547,7 +2581,7 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 	if (nbytes < sizeof(buflen))
 		return -EINVAL;
 
-	if (esdm_drng_mgr_check_forked())
+	if (esdm_drng_mgr_check_forked() || esdm_drng_mgr_check_finalized())
 		return -EOPNOTSUPP;
 
 	/* Write buffer size into first word */
@@ -2621,9 +2655,10 @@ ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,
 
 	/*
 	 * The collection may have waited for entropy: a self test failing
-	 * meanwhile holds the seed back as well, wiped.
+	 * meanwhile holds the seed back as well, wiped. So does esdm_fini(),
+	 * which ends the collection: the sources it ran over are shut down.
 	 */
-	if (!esdm_selftest_crypto_passed()) {
+	if (!esdm_selftest_crypto_passed() || esdm_drng_mgr_check_finalized()) {
 		memset_secure(eb, 0, sizeof(*eb));
 		ret = -EOPNOTSUPP;
 		goto out;
@@ -2642,7 +2677,10 @@ ssize_t esdm_get_random_bytes_pr(uint8_t *buf, size_t nbytes)
 {
 	ssize_t ret;
 
-	esdm_drng_sleep_while_nonoperational(0);
+	/* What ends this wait other than the seeding is final: no data follows */
+	ret = esdm_drng_sleep_while_nonoperational(0);
+	if (ret)
+		return ret;
 
 	/*
 	 * We only allow one call in flight which is a precaution that
@@ -2732,8 +2770,11 @@ ssize_t esdm_get_random_bytes_full(uint8_t *buf, size_t nbytes)
 			return done ? (ssize_t)done : ret;
 
 		done += (size_t)ret;
-		if (done >= nbytes || atomic_load(&esdm_drng_mgr_terminate))
+		if (done >= nbytes)
 			return (ssize_t)done;
+		/* esdm_fini() ended the request: what it got, or the error */
+		if (esdm_drng_mgr_check_finalized())
+			return done ? (ssize_t)done : -EOPNOTSUPP;
 	}
 }
 

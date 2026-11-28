@@ -65,6 +65,9 @@ int esdm_init_monitor(void (*priv_init_completion)(void));
 
 /**
  * @brief esdm_fini() - finalize the ESDM library and release all resources
+ *
+ * Final: after it, the calls for random data and for a seed return
+ * -EOPNOTSUPP, also one that waits when it runs.
  */
 void esdm_fini(void);
 
@@ -205,7 +208,8 @@ enum esdm_get_seed_flags {
  * @return -EINVAL or -EMSGSIZE indicating the buffer is too small, -EAGAIN when
  *	   the call would block, but NONBLOCK is specified, when another call
  *	   is in flight or when a DRNG needs the entropy for its own seeding,
- *	   -EOPNOTSUPP after a failed self test or in a forked process, > 0 the
+ *	   -EOPNOTSUPP after a failed self test, after esdm_fini() or in a
+ *	   forked process, > 0 the
  *	   size of the filled buffer (seedlen).
  */
 ssize_t esdm_get_seed(uint64_t *buf, size_t nbytes,

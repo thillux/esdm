@@ -2692,8 +2692,17 @@ and in the flags `esdm_operational`, `esdm_fully_seeded` and
   only leaves the state with all nodes seeded.
 
 - Finalized is absorbing: after `esdm_fini`, `esdm_init` and `esdm_reinit`
-  return `-ESHUTDOWN`. The forked child is absorbing as well: a fork handler
-  marks the child, in which every output call fails (section @sec:vm-clone).
+  return `-ESHUTDOWN`, and every output call, `esdm_get_seed` included,
+  returns `-EOPNOTSUPP` (`esdm_drng_mgr_check_finalized`) without collecting
+  from the entropy sources, which are shut down. `esdm_fini` also ends the
+  calls that wait when it runs – for the operational state, or
+  `esdm_get_seed` for the seed level of all #ac("DRNG") instances: the wait
+  polls its condition every 100 ms, and the call returns `-EOPNOTSUPP`, or
+  the data it had generated before. The server stops its #ac("RPC") handlers
+  and the #ac("EGD") worker before it calls `esdm_fini`, so that no request
+  of a client reaches the finalized library. The forked child is absorbing
+  as well: a fork handler marks the child, in which every output call fails
+  (section @sec:vm-clone).
 
 #par(first-line-indent: 0pt)[Table @tab:sm-calls gives the result of the
 output calls in each state. A failed self test (section @sec:sm-selftest)

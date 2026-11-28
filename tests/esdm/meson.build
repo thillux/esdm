@@ -280,4 +280,21 @@ if get_option('esdm-server').enabled()
 		esdm_lifecycle_test,
 		timeout: 120,
 		suite: 'core')
+
+	esdm_fini_output_test = executable(
+		'esdm_fini_output_test',
+		[ esdm_ipc_ns, 'esdm_fini_output_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM output calls after esdm_fini', esdm_fini_output_test,
+		timeout: 120,
+		suite: 'core')
+	test('ESDM output calls waiting during esdm_fini',
+		esdm_fini_output_test,
+		args : [ 'waiting' ],
+		timeout: 120,
+		suite: 'core')
 endif

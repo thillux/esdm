@@ -723,7 +723,7 @@ largest state space checked.
   table(columns: (0.9fr, 1fr, 1.6fr, 1fr), align: left + horizon,
     table.header([Model], [Code], [Processes], [Configurations]),
     [`EsdmReseed` \ section @sec:fv-reseed], [`esdm/esdm_drng_mgr.c`, `esdm/esdm_es_mgr.c`, `esdm/esdm_es_events.c`], [Requesters of the five output calls, the reseed worker and its tasks, the #ac("ES") monitor, an administrator, the environment], [41, 9 demonstrating; largest 105,996,577 states],
-    [`EsdmSelftest` \ section @sec:fv-selftest], [`esdm/esdm_selftest.c` and its callers], [Initialization, requests with and without blocking, seed callers, the #ac("RPC") self test, the reseed worker, the periodic worker, reinitialization, finalization, the environment], [19, 9 demonstrating; largest 264,807 states],
+    [`EsdmSelftest` \ section @sec:fv-selftest], [`esdm/esdm_selftest.c` and its callers], [Initialization, requests with and without blocking, seed callers, the #ac("RPC") self test, the reseed worker, the periodic worker, reinitialization, finalization, the environment], [23, 11 demonstrating; largest 287,713 states],
     [`EsdmAuxPool` \ section @sec:fv-aux], [`esdm/esdm_es_aux.c`], [Writers with and without entropy, seedings extracting, readers of the need for entropy, reinitialization, the environment], [25, 14 demonstrating; largest 934,668 states],
     [`EsdmShmStatus` \ section @sec:fv-shm-status], [`esdm/esdm_shm_status.c`, its readers], [The publishing threads of the server, the thread setting the threshold, the signal handler and the event thread, server start, exit and restart, the poll checkers of both #ac("CUSE") daemons, aux clients], [40, 16 demonstrating; largest 2,904,036 states],
     [`EsdmCuse` \ section @sec:fv-cuse], [`frontends/cuse/`], [Polling and reading threads, the #ac("FUSE") workers and the kernel, the poll checker, the server], [37, 14 demonstrating; largest 6,218,589 states],
@@ -1078,7 +1078,10 @@ operational; callers of `esdm_get_seed` collect and hand out; the privileged
 #ac("RPC") self test runs `esdm_selftest_run`; the reseed worker and the
 waiting requests seed under the #ac("DRNG") lock; `esdm_reinit` reruns the
 tests and replaces the #ac("XOF") contexts of the auxiliary pool; `esdm_fini`
-stops the worker, joins it and releases the #ac("DRNG", pl: true). The
+stops the worker, joins it, sets the termination flag of the #ac("DRNG")
+manager and releases the #ac("DRNG", pl: true). The output calls check that
+flag (`esdm_drng_mgr_check_finalized`): at their entry, before and after
+their wait, and `esdm_get_seed` again after its collection. The
 environment may break the crypto implementations once at any time, after
 which every self test of them fails.]
 
@@ -1103,8 +1106,12 @@ wait and is not modeled separately. The
 waits of the worker are one wait until a pass is due or the worker is asked
 to leave. The worker has one thread slot, for which `thread_start` waits;
 `thread_start` may fail. Of the entropy source self tests only
-`esdm_aux_selftest` is modeled. The release of the #ac("DRNG") state in
-`esdm_fini` is not modeled. The crypto callbacks are set when a
+`esdm_aux_selftest` is modeled. `esdm_fini` releases the #ac("DRNG") state
+under the #ac("DRNG") lock in a step after the one that sets the termination
+flag, and `esdm_drng_get` checks for the state under that lock; the shutdown
+of the entropy sources, which precedes both, is not a step of its own: what
+a call begun after the flag was set collects, it collects from sources that
+are shut down. The crypto callbacks are set when a
 #ac("DRNG") is allocated and never replaced at run time:
 `esdm_crypto_cb_update` is the lock of `esdm_drngs_node_alloc`.]
 
@@ -1145,6 +1152,10 @@ All processes are weakly fair.]
     [`WaitGated`], [A blocking request that found a failure recorded when it
       began or ended its wait returns without a seeding and without a
       request.],
+    [`FiniGated`], [A call that began after `esdm_fini` set the termination
+      flag of the #ac("DRNG") manager generates no chunk and collects nothing
+      from the entropy sources, neither for a seed it hands out nor for a
+      seeding: it returns `-EOPNOTSUPP`.],
     [`EsVerdictSound`], [An entropy source self test fails only for a broken
       source.],
     [`Progress`], [Every thread but the worker finishes: no deadlock between
@@ -1168,25 +1179,29 @@ All processes are weakly fair.]
 #figure(
   table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
-    [`GateEachChunk`], [The verdict checked before and after every chunk and before a seed is handed out, the implementations breaking], [holds], [79,908],
-    [`GateSeeding`], [Seedings and the reseed worker stopping on a recorded failure], [holds], [29,883],
-    [`Periodic`], [The periodic self tests, one worker repeating its passes], [holds], [42,858],
-    [`ThreadFail`], [`thread_start` failing, requests restarting the worker], [holds], [10,334],
-    [`Fini`], [`esdm_fini` with the worker, a request and the reseed worker; a worker started after the join], [holds], [17,866],
+    [`GateEachChunk`], [The verdict checked before and after every chunk and before a seed is handed out, the implementations breaking], [holds], [83,214],
+    [`GateSeeding`], [Seedings and the reseed worker stopping on a recorded failure], [holds], [31,562],
+    [`Periodic`], [The periodic self tests, one worker repeating its passes], [holds], [46,959],
+    [`ThreadFail`], [`thread_start` failing, requests restarting the worker], [holds], [10,447],
+    [`Fini`], [`esdm_fini` with the worker, a request and the reseed worker; a worker started after the join], [holds], [21,134],
+    [`FiniCalls`], [Two blocking requests and `esdm_get_seed` around `esdm_fini`, without entropy at `esdm_init`], [holds], [84,080],
+    [`FiniCallsSeeded`], [As `FiniCalls`, with requests that do not wait and an #ac("ESDM") that `esdm_init` seeded], [holds], [49,098],
     [`EsLocked`], [The auxiliary pool self test reading under the pool lock], [holds], [303],
-    [`Wait`], [A blocking request waiting for the first seed, a failure recorded meanwhile], [holds], [50,727],
-    [`WaitWorker`], [As `Wait`, the failure recorded by the periodic worker], [holds], [43,900],
-    [`WaitFini`], [A blocking request waiting for a seed that never comes, `esdm_fini` ending the wait], [holds], [5,390],
-    [`TwoRequests` (slow)], [Two requests of two chunks and the #ac("RPC") self test, the implementations breaking], [holds], [264,807],
-    [`Gate`], [Before the fix: a failure recorded while a request generates], [finds `OutputGated`], [5,186],
-    [`GateWindow`], [Before the fix: a failure recorded between the check under the #ac("DRNG") lock and the generation], [finds `OutputGated`], [5,330],
-    [`SeedGate`], [Before the fix: a failure recorded while `esdm_get_seed` collects], [finds `OutputGated`], [1,530],
-    [`ReseedAfterFailure`], [Before the fix: the reseed worker after a failure], [finds `NoCryptoAfterFailure`], [532],
-    [`WaitHang`], [Before the fix: a request waiting for a seeding that a failure stopped], [finds a deadlock], [12,919],
-    [`ReinitRace`], [Before the fix: the #ac("XOF") context replaced during a self test pass], [finds `EsVerdictSound`], [614],
-    [`HandoutWindow`], [Current code: a failure recorded after the check that follows the generation], [finds `NoOutputAfterFailure`], [5,461],
-    [`InjectWindow`], [Current code: a failure recorded after the check before the injection], [finds `NoInjectAfterFailure`], [1,063],
-    [`StartAfterJoin`], [Current code: a request starting the worker after the join in `esdm_fini`], [finds `NoStartAfterJoin`], [663],
+    [`Wait`], [A blocking request waiting for the first seed, a failure recorded meanwhile], [holds], [51,890],
+    [`WaitWorker`], [As `Wait`, the failure recorded by the periodic worker], [holds], [44,732],
+    [`WaitFini`], [A blocking request waiting for a seed that never comes, `esdm_fini` ending the wait], [holds], [5,790],
+    [`TwoRequests` (slow)], [Two requests of two chunks and the #ac("RPC") self test, the implementations breaking], [holds], [287,713],
+    [`Gate`], [Before the fix: a failure recorded while a request generates], [finds `OutputGated`], [5,737],
+    [`GateWindow`], [Before the fix: a failure recorded between the check under the #ac("DRNG") lock and the generation], [finds `OutputGated`], [5,797],
+    [`SeedGate`], [Before the fix: a failure recorded while `esdm_get_seed` collects], [finds `OutputGated`], [1,532],
+    [`ReseedAfterFailure`], [Before the fix: the reseed worker after a failure], [finds `NoCryptoAfterFailure`], [492],
+    [`WaitHang`], [Before the fix: a request waiting for a seeding that a failure stopped], [finds a deadlock], [13,002],
+    [`ReinitRace`], [Before the fix: the #ac("XOF") context replaced during a self test pass], [finds `EsVerdictSound`], [589],
+    [`FiniSeed`], [Before the fix: `esdm_get_seed` called after `esdm_fini`], [finds `FiniGated`], [155],
+    [`FiniRequest`], [Before the fix: a blocking request made after `esdm_fini`], [finds `FiniGated`], [584],
+    [`HandoutWindow`], [Current code: a failure recorded after the check that follows the generation], [finds `NoOutputAfterFailure`], [5,715],
+    [`InjectWindow`], [Current code: a failure recorded after the check before the injection], [finds `NoInjectAfterFailure`], [1,066],
+    [`StartAfterJoin`], [Current code: a request starting the worker after the join in `esdm_fini`], [finds `NoStartAfterJoin`], [799],
   ),
   caption: [Configurations of the self test gate model and their results.
     For a configuration that finds a violation, the number of states is the
@@ -1206,7 +1221,12 @@ three checks of a seeding and of the reseed worker (`GateSeeding`,
 in the loop of the worker (`Fini`, `LateWorkerIdle`), its leaving after a
 failure (`ThreadFail`, a liveness property), the compare and exchange of
 a passing verdict (`GateEachChunk`, `FailureKept`) and the pool lock in
-`esdm_aux_selftest` (`EsLocked`, `EsVerdictSound`). Without the idle step of
+`esdm_aux_selftest` (`EsLocked`, `EsVerdictSound`). The same was done for
+the checks of the termination flag at the entry of the wait (`FiniCalls`),
+of `esdm_drng_get_sleep` (`FiniCallsSeeded`) and of `esdm_get_seed` (both),
+each by `FiniGated`; the checks after the wait and after the collection of
+`esdm_get_seed` concern a call in flight, about which the property states
+nothing. Without the idle step of
 the environment, `GateEachChunk` reports a deadlock: the check is effective
 there.]
 
@@ -1246,6 +1266,19 @@ nothing deadlocks. The findings, all fixed since, are:]
   does not pause, or the #ac("RPC") self test – reported the auxiliary pool
   as failed (`ReinitRace`, `EsVerdictSound`); `esdm_aux_selftest` now reads
   under the lock (`EsLocked`).
+- An output call made after `esdm_fini` was not refused as such. The initial
+  and the node #ac("DRNG", pl: true) generated nothing because their state
+  was released, but a blocking request in an #ac("ESDM") that was not
+  operational, every request for prediction resistance and `esdm_get_seed`
+  first collected from the entropy sources that `esdm_fini` had shut down,
+  and `esdm_get_seed` handed the result out (`FiniSeed`, `FiniRequest`,
+  `FiniGated`). In the test `esdm_fini_output_test`,
+  `esdm_get_random_bytes_pr` returned 0, `esdm_get_random_bytes_pr_noblock`
+  `-EAGAIN` and `esdm_get_seed` the length of a seed buffer. The output calls
+  now check the termination flag of the #ac("DRNG") manager at their entry
+  and around their waits and return `-EOPNOTSUPP` (`FiniCalls`,
+  `FiniCallsSeeded`). The model has no request for prediction resistance;
+  the test covers that call.
 
 #paragraph[Limits][Three configurations expect a violation in the current
 code and state what the gate does not deliver. The verdict is read from an
@@ -3602,6 +3635,7 @@ statement of the behavior was wrong.
     [The auxiliary pool self test reads the #ac("XOF") context unlocked], [Self test], [low], [fixed],
     [A self test failing during a generation does not hold back its output], [Self test], [low], [fixed],
     [A chunk that passed its last check is returned after a later failure], [Self test], [informational], [by design],
+    [Output calls made after `esdm_fini` collect from the entropy sources that are shut down; `esdm_get_seed` hands the result out], [Self test], [low], [fixed],
     [Pool selection mixes the oversampled and the raw count], [Auxiliary pool], [low], [fixed],
     [The oversampling read twice during an extraction], [Auxiliary pool], [low], [fixed],
     [The write wakeup threshold capped only when set], [Auxiliary pool], [low], [fixed],
