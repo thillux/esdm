@@ -165,6 +165,31 @@
   #more[“Design Rationale and Alternatives”]
 ]
 
+#slide(title: [The ESDM is a toolkit: a system takes the subset it
+  needs])[
+  #let cfg(name, parts, serves) = card(name, height: 196pt)[
+    #parts
+    #place(bottom + left)[#text(weight: "semibold")[Serves:] #serves]
+  ]
+  #grid(columns: (1fr, 1fr, 1fr, 1fr), column-gutter: 12pt,
+    cfg[Server with RPC clients][`esdm-server`, `esdm-tool`, an OpenSSL
+      provider. No kernel module.][applications through OpenSSL.],
+    cfg[Server and `esdm_cdev`][`esdm-server` with the EGD interface
+      alone and one kernel module.][readers of `/dev/esdm_random`, e.g. a
+      hypervisor.],
+    cfg[Linux interfaces][Server, CUSE daemons, `esdm-proc`, the
+      `getrandom` library.][unmodified software.],
+    cfg[Library only][`libesdm` linked into one program, no
+      server.][that program.],
+  )
+  #v(12pt)
+  #set text(size: t-small)
+  Only the generator is mandatory. Every frontend, entropy source, kernel
+  module, library and tool can be left out; an interface exists only where
+  its component is built, installed and started.
+  #more[“Interfaces of a Deployment”]
+]
+
 #slide(title: [Entropy sources fill a seed buffer that seeds the DRNG
   instances])[
   #pic("big-picture.svg")
@@ -204,6 +229,28 @@
     [- The frontends are clients as well: CUSE daemons, `esdm-proc`,
        `esdm-kernel-seeder`],
   )
+]
+
+#slide(title: [The server is built with both socket interfaces, or with
+  one])[
+  #cols(widths: (1fr, 1fr), valign: top,
+    card([Without EGD: `-Desdm-server-egd=disabled`], height: 196pt)[
+      - The server contains no EGD code and refuses `--egd_socket`
+      - No EGD client library, socket units or EGD-based OpenSSL modules
+      - Everything else as in the default build
+    ],
+    card([Without RPC: `-Desdm-server-rpc=disabled`], height: 196pt)[
+      - The server opens no RPC socket and always serves the EGD socket
+      - `esdm-tool` works over EGD: status, random numbers, seeding state,
+        pool and reseed commands
+      - What needs RPC is not built: CUSE daemons, `getrandom` library,
+        kernel seeder
+    ],
+  )
+  #v(12pt)
+  #set text(size: t-small)
+  A disabled interface is not part of the build: no code in the server, no
+  client library, no units, no tests. The default build has both.
 ]
 
 #slide(title: [Four output paths decide what a caller receives])[
@@ -619,6 +666,27 @@
     draws on the duplicated state
 ]
 
+#slide(title: [The kernel module `esdm_es` is needed for two things, and
+  only for them])[
+  #cols(widths: (1fr, 1fr), valign: top,
+    card([Its entropy sources], height: 210pt)[
+      - Where the other sources do not suffice, or a second assessed
+        non-physical source is required next to the Jitter RNG (NTG.1)
+      - Where entropy is wanted before user space starts
+      - Price: a patched kernel. On a stock kernel the eBPF sources
+        observe the same events
+    ],
+    card([The system events], height: 210pt)[
+      - On a virtual machine that may be cloned or restored: nothing else
+        tells the server that its state exists twice
+      - Suspend and resume alone: the units of the signal helper suffice
+      - Built without its entropy sources, the module needs no kernel
+        patch
+    ],
+  )
+  #more[“When the Kernel Module esdm_es Is Needed”]
+]
+
 #slide(title: [A fork ends the output of the ESDM in the child process])[
   #stack(spacing: 15pt,
     step(1)[Fork][A process that embeds `libesdm.so` would hand a copy of
@@ -735,7 +803,8 @@
   else])[
   #grid(columns: (1fr, 1fr), column-gutter: gap, row-gutter: 20pt,
     step(1)[Start as root][Optionally fork into a PID namespace; a root
-      supervisor stays outside.],
+      supervisor stays outside, forwards signals, and the daemon ends
+      with it.],
     step(4)[Initialize the ESDM][The entropy sources that need privileges –
       eBPF, `/dev/esdm_es` – and the status memory.],
     step(2)[Lock the memory][With `--memlock`: all memory locked, the

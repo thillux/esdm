@@ -97,7 +97,7 @@
     stat[4][output paths: full, plain, prediction resistance, seed],
     stat[5][crypto backends: builtin, OpenSSL, Botan, GnuTLS, leancrypto],
     stat[6][kinds of interfaces, from the device files to OpenSSL providers],
-    stat[12][TLA+ models of the concurrent parts, 160 configurations],
+    stat[12][TLA+ models of the concurrent parts, checked in CI],
   ))
 
 // ---------------------------------------------------------------- footer
@@ -157,7 +157,10 @@
         namespaces and the privileged sources, then drops its privileges
         for good.
       - Clients reach it over two RPC sockets, the privileged one for
-        root only, or over the minimal EGD protocol.
+        root only, or over the minimal EGD protocol. The server is built
+        with both interfaces or with one of them.
+      - With `--pid_namespace` a root supervisor forwards the signals; the
+        daemon ends with it.
     ],
     panel[DRNG Instance][
       #fig("drng-states.svg", 100%)[States of a DRNG instance]
@@ -177,8 +180,8 @@
       #iface[EGD sockets][one byte of command, one of length: for
         sandboxes, OpenSSL, libgcrypt]
       #iface[OpenSSL providers][RAND and seed source, over RPC or EGD]
-      #iface[`esdm_cdev`][kernel devices `/dev/esdm_random` and
-        `/dev/esdm_urandom`]
+      #iface[`esdm_cdev`][kernel devices `/dev/esdm_random`,
+        `/dev/esdm_urandom` and `/dev/esdm_pr`]
       #v(2mm)
       #block(width: 100%, fill: accent-faint, radius: 6pt,
         inset: (x: 16pt, y: 12pt))[#icon("warning", fill: source-strong)
@@ -230,8 +233,11 @@
       nix flake check
       ```
       #v(2mm)
+      - A toolkit: only the generator is mandatory. Take the server
+        with one client library, or replace every random number interface
+        of Linux.
       - Kernel modules are optional: `esdm_es` for the timing sources and
-        the system events, `esdm_cdev` for the devices.
+        the system events (VM clones), `esdm_cdev` for the devices.
       - Linux 6.1 or later.
     ],
   )
