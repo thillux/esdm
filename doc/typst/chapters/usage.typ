@@ -25,9 +25,7 @@ server; the resume helper makes it reseed its #ac("DRNG", pl: true) after the
 resume. `esdm-linux-compat.target` starts the #ac("CUSE") daemons that serve
 `/dev/random` and `/dev/urandom`, the `esdm-proc` daemon serving
 `/proc/sys/kernel/random` and `esdm-kernel-seeder`. The latter seeds the kernel
-#ac("RNG") from the #ac("ESDM"). This seeding is required when the #ac("ESDM")
-runs the interrupt entropy source, which deprives the kernel #ac("RNG") of its
-main entropy input, and is advisable in every other configuration.
+#ac("RNG") from the #ac("ESDM") (section @sec:usage-kernel-rng).
 
 Figure @fig:systemd-units shows how the units relate. The sockets activate
 `esdm-server.service`, so it starts on the first request as well as at
@@ -58,6 +56,41 @@ meson setup build -Desdm-server-rpc-path-unprivileged=/var/run \
 
 With `-Dsystemd=enabled`, the default, the #ac("ESDM") server supports socket
 activation.
+
+== The Random Number Generator of the Kernel <sec:usage-kernel-rng>
+
+The #ac("ESDM") does not replace the random number generator of the kernel
+for the kernel itself. With the #ac("ESDM") installed, the consumers in user
+space obtain their random numbers, and in particular their key material,
+from the #ac("ESDM"): through the replaced devices and `getrandom()`, the
+OpenSSL providers, the #ac("EGD") interface or the client libraries (chapter
+@sec:integrations). The generation of keys can thereby be moved out of the
+kernel altogether. A TLS library, an SSH daemon and the key exchange daemon
+of a VPN generate their keys in user space, and for IPsec the daemon
+hands the negotiated keys to the kernel.
+
+The kernel keeps using its own generator for what it generates itself:
+values that need not be secret but must not repeat or be predictable, such
+as the #ac("IV", pl: true) of AES-CBC that the XFRM stack generates for the
+packets of IPsec, sequence numbers and the randomization of addresses. Code
+in the kernel cannot call the #ac("ESDM").
+
+The generator of the kernel should therefore be seeded as well as the
+system permits, and `esdm-kernel-seeder` does that from the #ac("ESDM")
+(section @sec:tool-esdm-kernel-seeder): it writes 64 bytes from the full
+path of the #ac("ESDM") into the kernel when it starts and then at the
+interval it is given, 10 seconds in the delivered unit. The kernel mixes the
+data in in every case; it credits them with the entropy the meson option
+`linux-reseed-entropy-count` states, which is 0 by default, so that the
+kernel's own accounting is unchanged unless the integrator decides
+otherwise. The seeding is required when the #ac("ESDM") runs the interrupt
+entropy source of `esdm_es`, which deprives the generator of the kernel of
+its main entropy input, and it is advisable in every other configuration:
+the kernel then never holds less than what its own sources gave it, and
+with a seeded #ac("ESDM") it holds the output of a generator that all
+configured entropy sources seeded. A build without the #ac("RPC") interface
+has no kernel seeder (section @sec:if-deployment); the kernel then relies on
+its own sources.
 
 == Holding Back the Boot Until the ESDM Is Seeded <sec:usage-boot-gate>
 

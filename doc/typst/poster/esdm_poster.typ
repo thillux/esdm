@@ -81,7 +81,8 @@
     text(size: 132pt, weight: "semibold", fill: background,
       tracking: -1.5pt)[Entropy Source and DRNG Manager],
     text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
-      user space – every entropy source chosen, credited and reported],
+      user space – a toolkit to tailor for FIPS 140-3, SP 800-90 and
+      AIS 20/31, every entropy source chosen, credited and reported],
   )
   place(bottom, dy: -18mm, grid(columns: (1fr, auto),
     text(size: 30pt, weight: "semibold", fill: on-navy, tracking: 3pt,
@@ -233,12 +234,13 @@
       nix flake check
       ```
       #v(2mm)
-      - A toolkit: only the generator is mandatory. Take the server
-        with one client library, or replace every random number interface
-        of Linux.
-      - Kernel modules are optional: `esdm_es` for the timing sources and
-        the system events (VM clones), `esdm_cdev` for the devices.
-      - Linux 6.1 or later.
+      - A toolkit for regulated environments: components, entropy
+        sources, rates and seeding strategy are configured per system.
+      - Upstream integrations: OpenSSL, hypervisors, unmodified software.
+      - Key generation moves out of the kernel; IVs and nonces stay there
+        (AES-CBC in IPsec). The kernel seeder seeds the kernel RNG.
+      - Optional kernel modules `esdm_es` and `esdm_cdev`; Linux 6.1 or
+        later.
     ],
   )
 })

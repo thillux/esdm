@@ -576,9 +576,11 @@ Man page: `esdm-proc`(8).
 == esdm-kernel-seeder <sec:tool-esdm-kernel-seeder>
 
 `esdm-kernel-seeder` seeds the kernel #ac("RNG") from the #ac("ESDM"), as
-`rngd` does from other sources. This seeding is required when the #ac("ESDM")
-runs the interrupt entropy source, which deprives the kernel #ac("RNG") of its
-main input (section @sec:usage-systemd). Each insertion is 64 bytes from the
+`rngd` does from other sources. The kernel keeps using its own generator for
+what it generates itself, so that it should be seeded as well as the system
+permits (section @sec:usage-kernel-rng). The seeding is required when the
+#ac("ESDM") runs the interrupt entropy source, which deprives the kernel
+#ac("RNG") of its main input. Each insertion is 64 bytes from the
 full path of the #ac("ESDM"), credited with the `linux-reseed-entropy-count`
 bits of the build, 0 by default. It hands them to the #ac("CUSE") device
 `/dev/esdm`, which passes them on to the kernel, if that device exists, and

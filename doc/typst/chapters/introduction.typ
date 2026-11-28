@@ -22,6 +22,31 @@ This document addresses the three audiences of #ac("SP") 800-90C @sp80090c:
 #par(first-line-indent: 0pt)[Section @sec:document-structure tells each of
 them where to start.]
 
+The #ac("ESDM") has three purposes. It is a random number generator for
+Linux that manages its entropy sources and #ac("DRNG", pl: true) in user
+space. It is a toolkit for random number generation in regulated
+environments: its components, entropy sources, entropy rates, seeding
+strategy and output paths are selected and configured, so that an integrator
+tailors a random number generator to the requirements of #ac("FIPS") 140-3
+and #ac("SP") 800-90 of #ac("NIST") or of #ac("AIS") 20/31 of the #ac("BSI"),
+and to the system it runs on. And it provides, in its upstream source tree,
+the integration for the most common consumers of random numbers, so that
+these need no code of their own: the OpenSSL providers, the devices for a
+hypervisor that passes random numbers to its guests, the replacements of
+`/dev/random` and `getrandom()` for unmodified software, and the #ac("EGD")
+interface for libgcrypt and sandboxed services. With these, the generation
+of all keys of a system can be moved out of the kernel: the consumers in
+user space – a TLS library, an SSH daemon, the key exchange daemon of a
+VPN – obtain their key material from the #ac("ESDM"). What stays
+with the random number generator of the kernel are the values the kernel
+generates itself, which need not be secret, such as the #ac("IV", pl: true)
+of AES-CBC that the XFRM stack generates for IPsec. As the kernel thus keeps
+using its own generator, the #ac("ESDM") also seeds it, with
+`esdm-kernel-seeder` (section @sec:usage-kernel-rng). Chapter
+@sec:configurations states which configuration meets which requirement, section
+@sec:if-deployment which components a system needs, and chapter
+@sec:integrations how each consumer is connected.
+
 The #ac("ESDM") originated from the
 #link("https://www.chronox.de/lrng")[#ac("LRNG")] patch series. Managing
 entropy sources inside the confines of a kernel has its limitations, and it
@@ -138,7 +163,14 @@ goal without evidence is marked as such.]
 The #ac("ESDM") relieves users of managing the #ac("DRNG") and its seeding
 status. It also has these properties:
 
-- A toolkit, not a fixed system
+- A toolkit for regulated environments, not a fixed system
+
+  - The #ac("ESDM") is built and configured for the requirements at hand:
+    build options select the configurations for #ac("SP") 800-90C,
+    #ac("FIPS") 140-3 and the classes NTG.1, DRG.3 and DRG.4 of #ac("AIS")
+    20/31; each entropy source is enabled and credited individually; the
+    output path determines what a caller receives (chapter
+    @sec:configurations).
 
   - The #ac("ESDM") consists of a generator and of optional components
     around it: frontends, entropy sources, kernel modules, client libraries

@@ -129,11 +129,15 @@
     stat[4][output paths: full, plain, prediction resistance, seed],
     stat[5][crypto backends: builtin, OpenSSL, Botan, GnuTLS, leancrypto],
   )
-  #v(22pt)
-  - A drop-in replacement of `/dev/random`, `/dev/urandom`, `getrandom()` and
-    `getentropy()`
-  - The LRNG kernel patch series converted into user space: after its
-    start-up, the ESDM runs without privileges
+  #v(12pt)
+  #set text(size: 18pt)
+  - A drop-in replacement of `/dev/random`, `/dev/urandom` and `getrandom()`
+  - A toolkit for regulated environments: tailored and configured for
+    FIPS 140-3, SP 800-90 and AIS 20/31
+  - An upstream integration for the common consumers: OpenSSL, hypervisors
+  - Key generation moves out of the kernel; IV and nonce generation stays,
+    e.g. for AES-CBC in IPsec with XFRM
+  - The LRNG patch series in user space: unprivileged after start-up
 ]
 
 #slide(title: [Design Goals])[
@@ -144,7 +148,9 @@
   - Entropy is conditioned with cryptographic operations only: a hash,
     XDRBG-256, a DRBG
   - Every entropy source is selected, credited and reported individually
-  - Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31
+  - A toolkit: components, entropy sources, rates and seeding strategy are
+    selected per system, with configurations for SP 800-90C, FIPS 140-3 and
+    AIS 20/31
 ]
 
 #slide(title: [Comparison with the Alternatives])[
