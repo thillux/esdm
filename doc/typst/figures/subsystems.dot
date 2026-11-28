@@ -1,0 +1,62 @@
+// Design chapter, section "Subsystems and Modules": the subsystems of table
+// tab:subsystems, grouped by where they run, and the interfaces between
+// them. An arrow points from the caller or client to what it uses.
+digraph subsystems {
+  graph [rankdir=TB, nodesep=0.22, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF", compound=true, newrank=true];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  subgraph cluster_clients {
+    label="Other processes"; labeljust=l; fontsize=10; fontcolor="#475569";
+    style="rounded,dashed"; color="#94A3B8";
+    frontend [label="SS-FRONTEND\nCUSE daemons, esdm-proc,\ngetrandom library, OpenSSL\nproviders, seeder, tools"];
+    esext [label="SS-ESEXT\nexternal entropy\nsource providers"];
+  }
+
+  subgraph cluster_server {
+    label="esdm-server"; labeljust=l; fontsize=10; fontcolor="#475569";
+    style="rounded"; color="#334155";
+    server [label="SS-SERVER\nstart-up, namespaces,\nprivilege drop, supervisor"];
+    rpc [label="SS-RPC\nRPC server\n(and client library)"];
+    egd [label="SS-EGD\nEGD server\n(and client library)"];
+    core [label="SS-CORE\nES manager, DRNG manager,\nconfiguration, status, self tests",
+          fillcolor="#DBEAFE", penwidth=2.2];
+    es [label="SS-ES\nentropy sources,\none module each", fillcolor="#F1F5F9"];
+    crypto [label="SS-CRYPTO\nDRNG, hash, XOF:\nbuiltin or a crypto library",
+            fillcolor="#F1F5F9"];
+    {rank=same; rpc; egd; server;}
+    {rank=same; es; crypto;}
+  }
+
+  subgraph cluster_kernel {
+    label="Linux kernel"; labeljust=l; fontsize=10; fontcolor="#475569";
+    style="rounded"; color="#334155";
+    kmodes [label="SS-KMOD-ES\nesdm_es: interrupt and scheduler\nentropy sources, system events",
+            fillcolor="#E9C08F"];
+    kmodcdev [label="SS-KMOD-CDEV\nesdm_cdev:\ncharacter devices", fillcolor="#E9C08F"];
+  }
+
+  common [label="SS-COMMON: logging, threads, locks, buffers, integrity test – linked into every subsystem in user space",
+          shape=box, style="filled", fillcolor="#F8FAFC", color="#94A3B8",
+          fontcolor="#475569", fontsize=9];
+
+  frontend -> rpc [label=" RPC sockets "];
+  frontend -> egd [label=" EGD sockets "];
+  frontend -> core [label=" status segment,\n semaphores ", style=dashed];
+  server -> core [label=" starts "];
+  server -> rpc [arrowhead=none, style=dotted];
+  rpc -> core [label=" esdm.h "];
+  egd -> core [label=" esdm.h "];
+  core -> es [label=" struct\n esdm_es_cb "];
+  core -> crypto [label=" crypto\n callbacks "];
+  es -> esext [label=" provider\n socket ", constraint=false];
+  es -> kmodes [label=" /dev/esdm_es "];
+  core -> kmodes [label=" system\n events ", style=dashed];
+  kmodcdev -> egd [label=" EGD socket ", constraint=false];
+  kmodes -> common [style=invis];
+  kmodcdev -> common [style=invis];
+}

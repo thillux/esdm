@@ -4,15 +4,16 @@
 ' esdm/esdm_es_aux.c); user space inserts three buffers. The colours of the
 ' seed buffer are those of figure big-picture.
 skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontColor #0F172A
 skinparam defaultFontSize 12
 skinparam shadowing false
-skinparam ArrowColor #000000
-skinparam ActivityBorderColor #000000
-skinparam ActivityBackgroundColor #EC9BA4
+skinparam ArrowColor #475569
+skinparam ActivityBorderColor #334155
+skinparam ActivityBackgroundColor #DBEAFE
 skinparam ActivityDiamondBackgroundColor #FFFFFF
-skinparam ActivityDiamondBorderColor #000000
-skinparam NoteBackgroundColor #EC9BA4
-skinparam NoteBorderColor #000000
+skinparam ActivityDiamondBorderColor #334155
+skinparam NoteBackgroundColor #DBEAFE
+skinparam NoteBorderColor #334155
 
 :ESDM lib start; <<#FFFFFF>>
 :SHAKE256 Init;
@@ -44,7 +45,7 @@ repeat
   :V' || A = SHAKE256 Final (512 bits + |A|);
   note right #FFFFFF
     A to the seed buffer
-    |<#FFB66C>   |<#66FFFF>   |<#FFDBB6>   |<#B3FFFF>   |<#FFFFA6>   |<#AFD095>   |<#FF4000>   |<#6B5E9B>   |<#8FB0D9>   |<#E6E64C>   |<#A0A0A0>   |<#EC9BA4>   |<#E8F2A1> |
+    |<#E9C08F>   |<#E9C08F>   |<#F8E1C3>   |<#F8E1C3>   |<#F1F5F9>   |<#F1F5F9>   |<#F1F5F9>   |<#F1F5F9>   |<#F1F5F9>   |<#F1F5F9>   |<#F1F5F9>   |<#DBEAFE>   |<#94A3B8> |
   end note
   :SHAKE256 Init, absorb V';
 repeat while (...)

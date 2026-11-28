@@ -1,0 +1,38 @@
+// Testing chapter: what runs where, one column per runner; invisible edges
+// stack each column.
+digraph testing {
+  graph [rankdir=TB, nodesep=0.3, ranksep=0.12, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05", width=2.3];
+  edge [style=invis];
+
+  subgraph cluster_ci {
+    label="GitHub Actions:\nevery push and pull request"; fontsize=12;
+    style="rounded,filled"; color="#94A3B8"; fillcolor="#F1F5F9";
+    node [fillcolor="#DBEAFE"];
+    suite [label="meson test\n21 suites, about 160 tests"];
+    asan [label="ASan + UBSan,\nesdm-tool stress run"];
+    codeql [label="CodeQL"];
+    kmod [label="Kernel modules, W=1 -Werror\nper supported kernel"];
+    vm1 [label="VM tests live, ebpf, cdev\nper supported kernel"];
+  }
+  subgraph cluster_nix {
+    label="nix flake check, nix build:\nalso the VM tests and modules of CI"; fontsize=12;
+    style="rounded,filled"; color="#94A3B8"; fillcolor="#F8FAFC";
+    vm2 [label="VM tests egd_gnupg,\negd_openssh, ebpf_raw"];
+    tsan [label="TSan"];
+    sec [label="Security report"];
+    cov [label="Coverage: gcovr,\nalso as root in a VM"];
+  }
+  subgraph cluster_dev {
+    label="By hand:\nalso meson test"; fontsize=12;
+    style="rounded,filled"; color="#94A3B8"; fillcolor="#FFFFFF";
+    fuzz [label="libFuzzer harnesses"];
+    secs [label="Security suite"];
+  }
+  suite -> asan -> codeql -> kmod -> vm1;
+  vm2 -> tsan -> sec -> cov;
+  fuzz -> secs;
+}

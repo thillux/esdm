@@ -1,0 +1,21 @@
+// Hardening chapter: what esdm-server does with its privileges at start-up
+// and when it gives them up.
+digraph startup {
+  graph [rankdir=TB, nodesep=0.2, ranksep=0.22, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05", width=3.6];
+  edge [color="#475569", arrowsize=0.6];
+
+  root [label="Start as root", fillcolor="#F1F5F9"];
+  pidns [label="--pid_namespace: fork into a PID namespace,\na root supervisor stays outside", style="rounded,dashed"];
+  lock [label="--memlock: lock all memory,\nnot dumpable"];
+  ns [label="Own mount, cgroup and network namespaces,\nbefore any thread exists"];
+  init [label="Initialize the ESDM: entropy sources needing\nprivileges (eBPF, /dev/esdm_es), status memory"];
+  socks [label="Bind the sockets: privileged 0600,\nunprivileged and EGD 0666"];
+  drop [label="Drop privileges for good:\nsetgroups, setgid, setuid to nobody", fillcolor="#DBEAFE"];
+  serve [label="Start the RPC and EGD workers, serve", fillcolor="#DBEAFE"];
+
+  root -> pidns -> lock -> ns -> init -> socks -> drop -> serve;
+}

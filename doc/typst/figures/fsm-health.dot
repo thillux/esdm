@@ -1,0 +1,25 @@
+// Chapter 2: the SP 800-90B startup test of an entropy source of the kernel
+// module (sp80090b_startup_blocks).
+digraph health {
+  graph [rankdir=TB, nodesep=0.55, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=13, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.14,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+  start [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+  s2 [label="Startup, 2 windows left\nno entropy delivered"];
+  s1 [label="Startup, 1 window left\nno entropy delivered"];
+  passed [label="Passed\nentropy delivered", fillcolor="#DBEAFE"];
+  s3 [label="Failure window\n3 windows left\nno entropy delivered", fillcolor="#F1F5F9"];
+
+  start -> s2 [label="module loaded,\nFIPS mode"];
+  s2 -> s1 [label="APT window\ncompletes"];
+  s1 -> passed [label="APT window\ncompletes"];
+  passed -> s3 [label="RCT or APT failure:\nrings reset", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+  s2 -> s3 [label="failure", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+  s1 -> s3 [label="failure", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+  s3 -> s3 [label="further\nfailure"];
+  s3 -> s2 [label="window of the failure\ncompletes: rings reset"];
+}

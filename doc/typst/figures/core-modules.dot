@@ -1,0 +1,66 @@
+// Design chapter, section "Subsystems and Modules": the modules of the core
+// subsystem SS-CORE of table tab:modules and the main calls between them.
+// An arrow points from the caller to the module it calls.
+digraph modules {
+  graph [rankdir=TB, nodesep=0.25, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF", newrank=true];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  api [label="esdm.h\ncalled by SS-RPC, SS-EGD, SS-SERVER", shape=box,
+       style="filled", fillcolor="#F8FAFC", color="#94A3B8",
+       fontcolor="#475569"];
+
+  subgraph cluster_core {
+    label="SS-CORE"; labeljust=l; fontsize=10; fontcolor="#475569";
+    style="rounded"; color="#334155";
+    lib [label="M-LIB\ninitialization,\nfinalization"];
+    info [label="M-INFO\nstatus as JSON\nand text"];
+    events [label="M-EVENTS\nsystem events"];
+    drngmgr [label="M-DRNGMGR\nDRNG instances, seeding,\nreseed worker, output",
+             fillcolor="#DBEAFE", penwidth=2.2];
+    node_ [label="M-NODE\nDRNG instances\nper node", fillcolor="#DBEAFE"];
+    esmgr [label="M-ESMGR\nentropy sources, seed buffers,\nseeding state, monitor",
+           fillcolor="#DBEAFE", penwidth=2.2];
+    aux [label="M-AUX\nauxiliary pools", fillcolor="#DBEAFE"];
+    selftest [label="M-SELFTEST\nself tests, verdict,\nintegrity test"];
+    shm [label="M-SHM\nstatus segment,\nsemaphores"];
+    config [label="M-CONFIG\nentropy rates,\nlimits, switches"];
+    {rank=same; lib; info; events;}
+    {rank=same; drngmgr; node_;}
+    {rank=same; esmgr; aux;}
+    {rank=same; selftest; shm; config;}
+  }
+
+  ses [label="SS-ES\nentropy sources", fillcolor="#F1F5F9"];
+  scrypto [label="SS-CRYPTO\nDRNG, hash, XOF", fillcolor="#F1F5F9"];
+  kmod [label="SS-KMOD-ES\n/dev/esdm_es", fillcolor="#E9C08F"];
+  readers [label="Readers of the status:\nCUSE daemons, auxiliary client",
+           style="rounded,dashed"];
+  {rank=same; ses; scrypto; kmod; readers;}
+
+  api -> lib; api -> drngmgr [label=" output,\n seeds "]; api -> info;
+  api -> aux [label=" writes "];
+  lib -> drngmgr [label=" starts "];
+  lib -> selftest; lib -> shm;
+  events -> drngmgr [label=" forced\n reseed "];
+  events -> shm [label=" suspend "];
+  events -> kmod [label=" reads "];
+  info -> drngmgr; info -> esmgr;
+  drngmgr -> node_;
+  drngmgr -> esmgr [label=" seed\n buffers "];
+  drngmgr -> selftest [label=" verdict "];
+  drngmgr -> scrypto [label=" esdm_drng_cb "];
+  esmgr -> aux [label=" as a source "];
+  esmgr -> ses [label=" esdm_es_cb "];
+  esmgr -> shm [label=" operational "];
+  esmgr -> config;
+  aux -> shm [label=" need for\n entropy "];
+  aux -> scrypto [label=" XOF "];
+  selftest -> scrypto;
+  drngmgr -> config;
+  shm -> readers [style=dashed, label=" shared\n memory "];
+}

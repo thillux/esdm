@@ -1,0 +1,40 @@
+// Chapter 2: the delivery state of an entropy source read from a device
+// (HWRAND, TPM 2.0) and of an external entropy source.
+digraph delivery {
+  graph [rankdir=TB, nodesep=0.5, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF", compound=true];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=13, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.14,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+
+  subgraph cluster_dev {
+    label="HWRAND, TPM 2.0"; fontname="Source Sans 3"; fontsize=12;
+    color="#CBD5E1"; style="rounded";
+    dstart [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+    absent [label="Absent\nno credit"];
+    ok [label="Delivering\ncredited", fillcolor="#DBEAFE"];
+    dfailed [label="Failed\nnot read, no credit", fillcolor="#F1F5F9"];
+    dstart -> absent;
+    absent -> ok [label="device opened"];
+    ok -> dfailed [label="read error or\nno data in 2 s", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+    dfailed -> ok [label="probe read succeeds\n(every 10 s)"];
+  }
+  subgraph cluster_ext {
+    label="External entropy source"; fontname="Source Sans 3"; fontsize=12;
+    color="#CBD5E1"; style="rounded";
+    estart [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+    disc [label="Disconnected\nno credit"];
+    untested [label="Connected, untested\nno credit"];
+    credited [label="Credited", fillcolor="#DBEAFE"];
+    efailed [label="Read or self test failed\nno credit", fillcolor="#F1F5F9"];
+    estart -> disc;
+    disc -> untested [label="connect, peer accepted\n(retry after 5 s)"];
+    untested -> credited [label="self test passes"];
+    untested -> efailed [label="self test fails", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+    credited -> efailed [label="read reports\nan error", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+    efailed -> credited [label="delivers again,\nself test passes"];
+    credited -> disc [label="timeout (2 s),\nprotocol error"];
+  }
+}

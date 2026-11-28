@@ -1,0 +1,37 @@
+// Chapter 5: a DRT.1 DRNG tree across host and guest. The host ESDM is the
+// initial randomness source, the guest DRNGs are the roots.
+digraph drt1 {
+  graph [rankdir=TB, nodesep=0.25, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  subgraph cluster_host {
+    label="Host – one operator, one security boundary"; fontsize=10;
+    style="rounded,filled"; color="#CBD5E1"; fillcolor="#F1F5F9";
+    hes [label="Entropy sources\n(2 × 240 bits at start-up)", fillcolor="#E9C08F"];
+    hesdm [label="ESDM, ais2031_ntg1 or es_jent_ntg1\nprediction resistance path: NTG.1",
+           fillcolor="#DBEAFE"];
+    cdev [label="/dev/esdm_pr\n(esdm_cdev)"];
+    vmm [label="QEMU rng-random\nCloud Hypervisor --rng"];
+    hes -> hesdm -> cdev -> vmm;
+  }
+
+  subgraph cluster_guest {
+    label="Guest"; fontsize=10; style="rounded,filled"; color="#CBD5E1";
+    fillcolor="#F1F5F9";
+    hwrng [label="/dev/hwrng (virtio-rng)\nHWRAND, es_hwrand_entropy_rate=256"];
+    groot [label="Guest ESDM DRNGs\nroots of the tree", fillcolor="#DBEAFE"];
+    c1 [label="DRNG of a consumer\nchild"];
+    c2 [label="DRNG of a consumer\nchild"];
+    hwrng -> groot;
+    groot -> c1 [label=" seeds ≥ 256 bits"];
+    groot -> c2;
+    {rank=same; c1; c2;}
+  }
+
+  vmm -> hwrng [label=" virtio-rng"];
+}

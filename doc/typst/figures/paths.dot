@@ -1,0 +1,34 @@
+// Chapter 5: the interfaces, the four paths that serve them and the DRNG
+// instances behind the paths. Fills by role, as in all figures.
+digraph paths {
+  graph [rankdir=TB, nodesep=0.2, ranksep=0.4, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+
+  subgraph cluster_if {
+    label="Interfaces"; fontsize=12; style="rounded,filled";
+    color="#CBD5E1"; fillcolor="#F1F5F9";
+    random [label="/dev/random\ngetrandom(0)\nRPC _full\nEGD 0x01, 0x02"];
+    urandom [label="/dev/urandom\nGRND_INSECURE\nRPC plain\nEGD 0xe2"];
+    pr [label="O_SYNC, /dev/esdm_pr\nGRND_RANDOM\nRPC _pr\nEGD PR socket"];
+    seed [label="GRND_SEED\nRPC _get_seed"];
+  }
+
+  full [label="Full\nwaits until\noperational", fillcolor="#DBEAFE"];
+  plain [label="Plain\nfails before\noperational", fillcolor="#DBEAFE"];
+  prp [label="Prediction resistance\nreseed before\nevery chunk", fillcolor="#DBEAFE"];
+  seedp [label="Seed\nentropy for\nthe caller", fillcolor="#DBEAFE"];
+
+  nodes [label="Node DRNGs, initial DRNG"];
+  prdrng [label="PR DRNG\n≤ fresh entropy per chunk"];
+  es [label="Entropy sources", fillcolor="#E9C08F"];
+
+  random -> full; urandom -> plain; pr -> prp; seed -> seedp;
+  full -> nodes; plain -> nodes; prp -> prdrng; seedp -> es;
+  nodes -> es [label=" reseed"];
+  prdrng -> es [label=" every chunk"];
+}

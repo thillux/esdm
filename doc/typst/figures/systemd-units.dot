@@ -1,0 +1,41 @@
+// Chapter 6: the systemd units of the ESDM and how they relate. Solid:
+// requires; dashed: wants; dotted: a socket activating its service.
+digraph units {
+  graph [rankdir=LR, nodesep=0.18, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=10, fontcolor="#475569"];
+
+  basic [label="basic.target", shape=box, style="filled", fillcolor="#F1F5F9"];
+  sockets [label="sockets.target", shape=box, style="filled", fillcolor="#F1F5F9"];
+  sleep [label="sleep.target", shape=box, style="filled", fillcolor="#F1F5F9"];
+
+  rpc [label="esdm-server-priv.socket\nesdm-server-unpriv.socket"];
+  egd [label="esdm-server-egd.socket\nesdm-server-egd-pr.socket\n(optional)", style="rounded,dashed"];
+  server [label="esdm-server.service", fillcolor="#DBEAFE"];
+  compat [label="esdm-linux-compat.target", fillcolor="#F1F5F9"];
+  cuse [label="esdm-cuse-random.service\nesdm-cuse-urandom.service"];
+  proc [label="esdm-proc.service"];
+  seeder [label="esdm-kernel-seeder.service"];
+  helpers [label="esdm-server-suspend.service\nesdm-server-resume.service"];
+  wait [label="esdm-wait-until-\nfully-seeded.service"];
+
+  sockets -> rpc [style=dashed];
+  sockets -> egd [style=dashed];
+  rpc -> server [style=dotted, label=" activates"];
+  egd -> server [style=dotted];
+  server -> rpc [constraint=false];
+  basic -> server [style=dashed];
+  basic -> compat [style=dashed];
+  basic -> wait [style=dashed];
+  compat -> cuse; compat -> proc; compat -> seeder;
+  cuse -> server [style=dashed, constraint=false];
+  proc -> server [style=dashed, constraint=false];
+  seeder -> server [style=dashed, constraint=false];
+  wait -> server [style=dashed, constraint=false];
+  sleep -> helpers [style=dashed];
+  helpers -> server [style=dashed, constraint=false];
+}

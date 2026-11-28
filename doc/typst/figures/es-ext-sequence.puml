@@ -1,0 +1,40 @@
+@startuml
+' Chapter 2: one connection of the ESDM server to the provider of the
+' external entropy source (esdm/esdm_es_extsock.c, es-ext/es_ext.proto)
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontColor #0F172A
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam SequenceLifeLineBorderColor #94A3B8
+skinparam SequenceGroupBorderColor #334155
+skinparam SequenceGroupBackgroundColor #F1F5F9
+skinparam SequenceGroupHeaderFontColor #0F172A
+skinparam ParticipantBorderColor #334155
+skinparam ParticipantBackgroundColor #DBEAFE
+skinparam NoteBackgroundColor #FFFFFF
+skinparam NoteBorderColor #334155
+hide footbox
+
+participant "ESDM server\nExternalSocket entropy source" as E
+participant "Provider\nlibesdm_es_ext" as P #F1F5F9
+
+E -> P : connect(), SO_PEERCRED:\nroot or es_ext_peer_uid
+E -> P : INFO
+P --> E : entropy rate declared, name
+E -> P : SELFTEST
+P --> E : status 0
+group each seeding, 2 s at most
+  E -> P : GET_ENTROPY, 1 to 512 bytes
+  P --> E : data, entropy ≤ 8 bits per byte
+end
+group ES monitor, every round
+  E -> P : STATUS, up to 1024 bytes
+  P --> E : JSON object within 500 ms
+end
+note over E, P
+  An error, a timeout or a protocol violation closes
+  the connection; the next one starts with INFO and
+  SELFTEST again, at most every 5 s after a failure.
+end note
+@enduml

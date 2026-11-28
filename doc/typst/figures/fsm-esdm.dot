@@ -1,0 +1,29 @@
+// Chapter 2: the states of the ESDM as a whole (esdm_avail, esdm_state).
+digraph esdm {
+  graph [rankdir=TB, nodesep=0.55, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=13, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.14,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+  start [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+  loaded [label="Loaded\nesdm_avail = 0"];
+  available [label="Available, not operational\nDRNGs allocated, no output"];
+  operational [label="Operational\ninitial DRNG fully seeded", fillcolor="#DBEAFE"];
+  allseeded [label="Operational,\nall node DRNGs fully seeded", fillcolor="#DBEAFE"];
+  finalized [label="Finalized\nno new initialization", fillcolor="#F1F5F9"];
+  forked [label="Forked child\nno output", fillcolor="#F1F5F9"];
+
+  start -> loaded;
+  loaded -> available [label="esdm_init:\nallocation, crypto self test"];
+  available -> loaded [label="allocation or\nself test fails", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+  available -> operational [label="initial DRNG\nfully seeded"];
+  operational -> allseeded [label="last node DRNG\nfully seeded"];
+  allseeded -> operational [label="a node DRNG\nloses its seed"];
+  operational -> available [label="initial DRNG loses its seed,\nesdm_reset"];
+  allseeded -> available [label="esdm_reset"];
+  available -> finalized [label="esdm_fini"];
+  operational -> finalized [label="esdm_fini"];
+  allseeded -> forked [label="fork (any state),\nin the child"];
+}

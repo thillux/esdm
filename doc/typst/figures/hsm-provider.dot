@@ -1,0 +1,37 @@
+// Integrations chapter: HSMs, smart cards, key management systems and REST
+// services feed the ESDM as its external entropy source through a provider
+// process; esdm-server reads one provider.
+digraph hsm {
+  graph [rankdir=LR, nodesep=0.22, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=10, fontcolor="#475569"];
+
+  hsm [label="HSM, YubiKey,\nNitrokey HSM (PKCS#11)", fillcolor="#F1F5F9"];
+  card [label="Smart card, OpenPGP card\n(PC/SC)", fillcolor="#F1F5F9"];
+  kms [label="Key management system\n(KMIP)", fillcolor="#F1F5F9"];
+  rest [label="Vendor service\n(REST)", fillcolor="#F1F5F9"];
+
+  subgraph cluster_host {
+    label="Host"; fontsize=12; style="rounded,filled"; color="#CBD5E1";
+    fillcolor="#FFFFFF";
+    p11 [label="esdm-es-pkcs11\n(ships with the ESDM)"];
+    pcsc [label="esdm-es-pcsc\n(ships with the ESDM)"];
+    pk [label="KMIP provider\nbackground fetch, buffer"];
+    pr [label="REST provider\nbackground fetch, buffer"];
+    server [label="esdm-server --es_ext\none of the providers\ncredit ≤ es_ext_entropy_rate",
+            fillcolor="#DBEAFE"];
+  }
+
+  hsm -> p11 [label=" C_GenerateRandom"];
+  card -> pcsc [label=" GET CHALLENGE"];
+  kms -> pk [label=" RNG Retrieve, TLS"];
+  rest -> pr [label=" HTTPS"];
+  p11 -> server [label=" Unix socket"];
+  pcsc -> server [style=dashed];
+  pk -> server [style=dashed];
+  pr -> server [style=dashed];
+}

@@ -1,0 +1,35 @@
+// Integrations chapter: how the libraries reach the ESDM and the one gate
+// all their output passes.
+digraph integrations {
+  graph [rankdir=TB, nodesep=0.25, ranksep=0.35, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+
+  ossl [label="OpenSSL 3\nRPC providers"];
+  botan [label="Botan 3.7+\nBotan::ESDM_RNG"];
+  osslegd [label="OpenSSL 3, also sandboxed\nEGD providers"];
+  gcrypt [label="libgcrypt, GnuPG\nrndegd"];
+
+  rpcc [label="libesdm_rpc_client\nrepeats until complete", fillcolor="#F1F5F9"];
+  egdc [label="libesdm_egd_client\nwaits 2 × 30 s", fillcolor="#F1F5F9"];
+
+  subgraph cluster_server {
+    label="esdm-server"; fontsize=12; style="rounded,filled";
+    color="#94A3B8"; fillcolor="#F8FAFC";
+    rpcs [label="RPC workers\nnot operational: -EAGAIN"];
+    egds [label="EGD worker\n0x01 empty, 0x02 held back"];
+    gate [label="Gate\noperational and\nself tests passed", fillcolor="#DBEAFE"];
+    drng [label="DRNGs", fillcolor="#DBEAFE"];
+  }
+
+  ossl -> rpcc; botan -> rpcc;
+  osslegd -> egdc;
+  rpcc -> rpcs [label="unprivileged\nRPC socket"];
+  egdc -> egds [label="EGD socket,\nPR socket"];
+  gcrypt -> egds [label="blocks without\ntimeout"];
+  rpcs -> gate; egds -> gate; gate -> drng;
+}

@@ -1,0 +1,50 @@
+// Chapter 5: the ESDM in the terms of SP 800-90C - SP 800-90B entropy
+// sources, the constructions of the full and the prediction resistance path,
+// and the RBGC tree the prediction resistance path seeds.
+digraph rbg {
+  graph [rankdir=TB, nodesep=0.25, ranksep=0.4, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  subgraph cluster_es {
+    label="SP 800-90B entropy sources: noise source, health tests,\nconditioning component";
+    fontsize=10; style="rounded"; color="#CBD5E1";
+    irq [label="Interrupts, scheduler\n(esdm_es, eBPF)\nnon-physical", fillcolor="#E9C08F"];
+    jent [label="Jitter RNG\n\nnon-physical", fillcolor="#F1F5F9"];
+    phys [label="CPU, TPM 2.0, HWRAND,\nes_ext token\nphysical if so assessed", fillcolor="#F1F5F9"];
+    {rank=same; irq; jent; phys;}
+  }
+
+  subgraph cluster_esdm {
+    label="ESDM: one RBG security boundary"; fontsize=10;
+    style="rounded,filled"; color="#CBD5E1"; fillcolor="#F1F5F9";
+    tn [label="Seed buffer T_n (Get_entropy_bitstring)\nMethod 1: physical only, Method 2: all"];
+    nodes [label="Node DRNGs, initial DRNG\nreseed with s = 256 bits\nRBG2(P) or RBG2(NP)", fillcolor="#DBEAFE"];
+    pr [label="Prediction resistance DRNG\ns + 64 = 320 bits before ≤ s bits\nRBG3(RS) or RBG2(NP) with PR", fillcolor="#DBEAFE"];
+    tn -> nodes; tn -> pr;
+    {rank=same; nodes; pr;}
+  }
+
+  ifull [label="Full and plain paths\n/dev/random, getrandom(0), RPC _full",
+         fillcolor="#2563EB", fontcolor="#FFFFFF"];
+  ipr [label="Prediction resistance path\nGRND_RANDOM, /dev/esdm_pr, RPC _pr",
+       fillcolor="#2563EB", fontcolor="#FFFFFF"];
+
+  subgraph cluster_tree {
+    label="RBGC tree: one computing platform"; fontsize=10;
+    style="rounded,filled"; color="#CBD5E1"; fillcolor="#F1F5F9";
+    root [label="Root RBGC\nDRNG of a caller, OpenSSL primary DRBG"];
+    c1 [label="Non-root RBGC\ne.g. OpenSSL public DRBG"];
+    c2 [label="Non-root RBGC\ne.g. OpenSSL private DRBG"];
+    root -> c1; root -> c2;
+    {rank=same; c1; c2;}
+  }
+
+  irq -> tn; jent -> tn; phys -> tn;
+  nodes -> ifull; pr -> ipr;
+  ipr -> root [label=" initial randomness source:\n 3s/2 = 384 bits, then s bits"];
+}

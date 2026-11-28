@@ -1,0 +1,54 @@
+@startuml
+' Design document, chapter 7: the processes of the ESDM, the kernel modules
+' and the IPC between them. Fills by role, as in all figures: ESDM
+' processing accent-soft, entropy sources source, external parts surface.
+skinparam defaultFontName "Liberation Sans"
+skinparam defaultFontSize 12
+skinparam defaultFontColor #0F172A
+skinparam shadowing false
+skinparam ArrowColor #475569
+skinparam ArrowFontColor #475569
+skinparam ArrowFontSize 11
+skinparam RectangleBorderColor #334155
+skinparam RectangleBackgroundColor #FFFFFF
+skinparam RectangleFontStyle normal
+skinparam nodesep 30
+skinparam ranksep 40
+
+rectangle "Consumer processes" as consumers #F1F5F9 {
+  rectangle "libesdm-getrandom.so\nOpenSSL providers\nlibesdm_rpc_client" as consumer #FFFFFF
+}
+
+rectangle "Frontends: unprivileged after start" as frontends #F1F5F9 {
+  rectangle "esdm-cuse-random\nesdm-cuse-urandom\n(CUSE)" as cuse #FFFFFF
+  rectangle "esdm-proc\n(FUSE)" as proc #FFFFFF
+  rectangle "esdm-kernel-seeder" as seeder #FFFFFF
+}
+
+rectangle "esdm-server: drops its privileges after start" as server #DBEAFE {
+  rectangle "RPC workers\n(unprivileged and\nprivileged socket)" as rpc #FFFFFF
+  rectangle "EGD server\n(EGD sockets)" as egd #FFFFFF
+  rectangle "libesdm\nES manager · DRNG manager\nreseed worker" as lib #DBEAFE
+}
+
+rectangle "es-ext providers\n(PKCS#11, PC/SC, own)" as esext #F1F5F9
+
+rectangle "Linux kernel" as kernel #F1F5F9 {
+  rectangle "esdm_es\ninterrupts, scheduler" as esmod #E9C08F
+  rectangle "esdm_cdev\n/dev/esdm_random, _urandom, _pr" as cdev #FFFFFF
+  rectangle "kernel RNG" as krng #FFFFFF
+}
+
+consumer --> rpc : RPC
+consumer --> egd : EGD
+cuse --> rpc : RPC
+proc --> rpc : RPC
+seeder --> rpc : RPC
+cdev --> egd : EGD
+rpc --> lib
+egd --> lib
+esmod --> lib : /dev/esdm_es
+esext --> lib : socket
+seeder --> krng : RNDADDENTROPY
+lib ..> cuse : status in\nshared memory
+@enduml

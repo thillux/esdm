@@ -1,0 +1,37 @@
+// Chapter 5: which build options give which class, and the path that
+// delivers it.
+digraph options {
+  graph [rankdir=LR, nodesep=0.15, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05"];
+  edge [color="#475569", arrowsize=0.6];
+
+  subgraph cluster_opt {
+    label="Build options"; fontsize=10; style="rounded,filled";
+    color="#CBD5E1"; fillcolor="#F1F5F9";
+    fips [label="fips140\n+ fips=1"];
+    c90 [label="sp80090c"];
+    ntg [label="ais2031_ntg1\nor es_jent_ntg1"];
+    drg3 [label="ais2031_drg3"];
+    drg4 [label="ais2031_drg4\n+ physical sources only"];
+  }
+  subgraph cluster_cls {
+    label="Classes"; fontsize=10; style="rounded,filled"; color="#CBD5E1";
+    fillcolor="#F1F5F9";
+    kfips [label="FIPS 140-3", fillcolor="#DBEAFE"];
+    k90c [label="SP 800-90C", fillcolor="#DBEAFE"];
+    kntg [label="NTG.1", fillcolor="#DBEAFE"];
+    kdrg3 [label="DRG.3", fillcolor="#DBEAFE"];
+    kdrg4 [label="DRG.4", fillcolor="#DBEAFE"];
+    kdrt [label="DRT.1 seed source", fillcolor="#DBEAFE"];
+  }
+  allpaths [label="full, plain and\nprediction resistance paths"];
+  prpath [label="prediction resistance\npath only"];
+
+  fips -> kfips; fips -> k90c; c90 -> k90c; drg4 -> k90c;
+  ntg -> kntg; ntg -> kdrt; drg3 -> kdrg3; drg4 -> kdrg3; drg4 -> kdrg4;
+  kfips -> allpaths; k90c -> allpaths; kdrg3 -> allpaths; kdrg4 -> allpaths;
+  kntg -> prpath; kdrt -> prpath;
+}

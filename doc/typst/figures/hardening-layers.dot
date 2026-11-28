@@ -1,0 +1,40 @@
+// Hardening chapter: the layers around the core of the ESDM and the
+// boundaries its clients and sources cross.
+digraph layers {
+  graph [rankdir=LR, nodesep=0.2, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF", compound=true];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=12, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.1,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+
+  unpriv [label="Clients\n(any user)"];
+  priv [label="Administration\n(root)"];
+  prov [label="External entropy\nsource provider"];
+  kmod [label="esdm_es\nkernel module", fillcolor="#E9C08F"];
+
+  subgraph cluster_build {
+    label="Build: stack protector, FORTIFY_SOURCE=3, CET, stack clash,\nPIE, full RELRO, no executable stack, hidden symbols";
+    fontsize=11; style="rounded,filled"; color="#94A3B8"; fillcolor="#F8FAFC";
+    subgraph cluster_systemd {
+      label="systemd: capability bounding set, ProtectSystem=strict,\nPrivateNetwork, SystemCallFilter, MemoryDenyWriteExecute";
+      fontsize=11; style="rounded,filled"; color="#94A3B8"; fillcolor="#F1F5F9";
+      subgraph cluster_ns {
+        label="Own mount, cgroup and network namespaces\n(PID namespace optional)";
+        fontsize=11; style="rounded,filled"; color="#94A3B8"; fillcolor="#E2E8F0";
+        subgraph cluster_user {
+          label="Unprivileged after start-up (nobody)";
+          fontsize=11; style="rounded,filled"; color="#94A3B8"; fillcolor="#FFFFFF";
+          core [label="ESDM core\nmemory locked, not dumpable,\nsecrets wiped, output only\nafter self tests and seeding",
+                fillcolor="#DBEAFE"];
+        }
+      }
+    }
+  }
+
+  unpriv -> core [lhead=cluster_build, label=" unprivileged socket 0666\n bounded requests"];
+  priv -> core [lhead=cluster_build, label=" privileged socket 0600\n peer must be uid 0"];
+  prov -> core [lhead=cluster_build, label=" socket, peer root\n or es_ext_peer_uid"];
+  kmod -> core [lhead=cluster_build, label=" /dev/esdm_es\n opened with CAP_SYS_ADMIN"];
+}

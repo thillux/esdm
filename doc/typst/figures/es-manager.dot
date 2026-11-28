@@ -1,0 +1,28 @@
+// Chapter 7: how the entropy source manager seeds a DRNG.
+digraph esmgr {
+  graph [rankdir=TB, nodesep=0.2, ranksep=0.35, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  irq [label="Interrupts, scheduler\n(esdm_es, eBPF)", fillcolor="#E9C08F"];
+  jent [label="Jitter RNG", fillcolor="#F1F5F9"];
+  cpu [label="CPU, HWRAND, TPM 2.0,\nkernel RNG, es-ext", fillcolor="#F1F5F9"];
+  aux [label="Auxiliary pool", fillcolor="#DBEAFE"];
+
+  buf [label="Seed buffer\none slot per source:\ndata + credited bits", shape=box3d];
+  sum [label="Sum of the credits", shape=ellipse];
+  decide [label="esdm_fully_seeded()", shape=diamond, fillcolor="#F1F5F9"];
+  drng [label="DRNG\nseed, mark fully seeded", fillcolor="#DBEAFE"];
+  part [label="DRNG\nseed, not fully seeded"];
+
+  {rank=same; irq; jent; cpu; aux;}
+  {rank=same; drng; part;}
+  irq -> buf [label=" get_ent()"]; jent -> buf; cpu -> buf; aux -> buf;
+  buf -> sum -> decide;
+  decide -> drng [label="enough"];
+  decide -> part [label="too little"];
+}

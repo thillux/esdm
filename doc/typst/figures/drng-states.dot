@@ -1,0 +1,22 @@
+// Chapter 7: the states of a DRNG instance and of the ESDM.
+digraph states {
+  graph [rankdir=TB, nodesep=0.9, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=13, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.14,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+
+  start [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+  unseeded [label="Not fully seeded\nno output"];
+  seeded [label="Fully seeded\nserves requests", fillcolor="#DBEAFE"];
+  operational [label="ESDM operational\n(initial DRNG fully seeded)",
+               fillcolor="#DBEAFE"];
+
+  start -> unseeded;
+  unseeded -> seeded [label="seed ≥ 256 bits\n384 with oversampling,\n2 × 240 with NTG.1"];
+  seeded -> seeded [label="reseed: 2^20 generates,\n600 s, reseed threshold,\non demand"];
+  seeded -> unseeded [label="2^30 generates or\ndrng_max_reseed_bits\nwithout a full reseed"];
+  seeded -> operational [label="initial DRNG", style=dashed];
+}

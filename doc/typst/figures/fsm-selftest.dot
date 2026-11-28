@@ -1,0 +1,19 @@
+// Chapter 2: the verdict of the crypto self tests (esdm_selftest_result).
+digraph selftest {
+  graph [rankdir=LR, nodesep=0.5, ranksep=1.1, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=13, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.14,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=11, fontcolor="#475569"];
+  start [shape=point, width=0.12, color="#0F172A", fillcolor="#0F172A"];
+  undone [label="Undone\nno output"];
+  passed [label="Passed\noutput allowed", fillcolor="#DBEAFE"];
+  failed [label="Failed\nno output, no seeding\nfinal", fillcolor="#F1F5F9"];
+  start -> undone;
+  undone -> passed [label="pass"];
+  passed -> passed [label="pass"];
+  undone -> failed [label="failure", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+  passed -> failed [label="failure", style=dashed, color="#B91C1C", fontcolor="#B91C1C"];
+}
