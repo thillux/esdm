@@ -302,13 +302,13 @@
   v(14mm, weak: true)
   points[
     - A guest has few events of its own: the host delivers its entropy.
-    - A host built for NTG.1 seeds the guest with NTG.1 output; host and
-      guest then form one DRT.1 tree.
+    - With the Jitter RNG in its NTG.1 mode, the host seeds the guest
+      with NTG.1 output; both then form one DRT.1 tree.
   ]
   v(10mm, weak: true)
   zone([Host], surface, {
-    tile("server", fill: accent-soft, stroke: accent)[`esdm-server`][NTG.1
-      with the option `ais2031_ntg1`]
+    tile("server", fill: accent-soft, stroke: accent)[`esdm-server`][Jitter
+      RNG in NTG.1 mode: `es_jent_ntg1`]
     link[EGD socket]
     tile("microchip")[`esdm_cdev`: `/dev/esdm_pr`][kernel module, no
       fallback]
