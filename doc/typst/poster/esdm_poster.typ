@@ -3,8 +3,8 @@
 // with the central figure, then three columns - the processes, the DRNG
 // instances and the interfaces - and three more - assurance, extending,
 // building. The body is set at 30 pt, headings at 60 pt, the title at
-// 132 pt. Its claims are those of the design document, its colors those of
-// palette.typ; the QR code is rendered by doc/typst/Makefile with qrencode.
+// 116 pt. Its claims are those of the design document, its colors those of
+// palette.typ.
 
 #import "../palette.typ": *
 #import "../inputs.typ": esdm-version, doc-date
@@ -47,7 +47,7 @@
 })
 
 // A number with what it counts.
-#let stat(number, label) = stack(spacing: 5mm,
+#let stat(number, label) = stack(spacing: 9mm,
   text(size: 104pt, weight: "semibold", fill: accent-text, tracking: -2pt,
     number),
   text(size: 28pt, fill: muted, label))
@@ -70,17 +70,13 @@
   text(fill: muted, body)
 })
 
-#let qr(file, label) = stack(spacing: 10pt,
-  image(figdir + file, width: 92mm),
-  align(center, text(size: 24pt, fill: muted, label)))
-
 // ---------------------------------------------------------------- header
 
-#block(width: 100%, height: 166mm, fill: navy, inset: (x: margin,
-  top: 36mm), {
-  stack(spacing: 11mm,
-    text(size: 132pt, weight: "semibold", fill: background,
-      tracking: -1.5pt)[Entropy Source and DRNG Manager],
+#block(width: 100%, height: 190mm, fill: navy, inset: (x: margin,
+  top: 42mm), {
+  stack(spacing: 27mm,
+    text(size: 116pt, weight: "semibold", fill: background,
+      tracking: -1.5pt)[ESDM: Entropy Source and DRNG Manager],
     text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
       user space – a toolkit for FIPS 140-3, SP 800-90 and AIS 20/31],
   )
@@ -92,7 +88,7 @@
 
 // ---------------------------------------------------------------- numbers
 
-#block(width: 100%, fill: surface, inset: (x: margin, y: 13mm),
+#block(width: 100%, fill: surface, inset: (x: margin, y: 18mm),
   grid(columns: (1fr,) * 5, column-gutter: gutter,
     stat[12][entropy sources, each with an entropy rate of its own],
     stat[4][output paths: full, plain, prediction resistance, seed],
@@ -103,24 +99,15 @@
 
 // ---------------------------------------------------------------- footer
 
-#place(bottom, block(width: 100%, height: 132mm, fill: surface,
-  inset: (x: margin, y: 16mm), grid(columns: (1fr, auto),
-  column-gutter: gutter, align: horizon,
-  {
-    panel-title[Learn More]
-    v(9mm, weak: true)
-    par(justify: false)[The design document in the repository –
-      #box(raw("nix build .#esdm-doc")) – gives the design and the attacker
-      model in chapter 2, the entropy assessments in chapters 3 and 4, the
-      compliant configurations in chapter 5, the model checking in
-      chapter 7 and the manual in chapters 8 to 14.]
-  },
-  qr("qr-repo.svg")[Source code and documentation],
-)))
+#place(bottom, block(width: 100%, height: 34mm, fill: navy,
+  inset: (x: margin), align(horizon, grid(columns: (1fr, auto),
+    text(size: 30pt, fill: on-navy)[Design document and manual:
+      `nix build .#esdm-doc`],
+    text(size: 30pt, fill: on-navy)[https://github.com/smuellerDD/esdm]))))
 
 // ---------------------------------------------------------------- body
 
-#block(inset: (x: margin, top: 14mm), {
+#block(inset: (x: margin, top: 22mm), {
 
   // From the noise to the random numbers
   grid(columns: (1.5fr, 1fr), column-gutter: gutter,
@@ -146,7 +133,7 @@
     ],
   )
 
-  v(11mm)
+  v(30mm)
 
   grid(columns: (1.15fr, 0.9fr, 1fr), column-gutter: gutter,
     panel[Processes][
@@ -189,7 +176,7 @@
     ],
   )
 
-  v(11mm)
+  v(30mm)
 
   grid(columns: (1fr, 1fr, 0.85fr), column-gutter: gutter,
     panel[Assurance][
