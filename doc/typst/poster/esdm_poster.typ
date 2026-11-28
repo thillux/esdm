@@ -1,8 +1,8 @@
 // A0 poster of the ESDM for developers (portrait, 841 x 1189 mm). It reads
 // top down: what the ESDM is, the path from the noise to the random numbers
-// with the central figure, then three columns - the processes, the DRNG
-// instances and the interfaces - and three more - assurance, extending,
-// building. The body is set at 30 pt, headings at 60 pt, the title at
+// with the central figure, the processes and the interfaces, the DRNG
+// instance and the toolkit, and a closing band: compliance and assurance.
+// No row has more than two columns. The body is set at 30 pt, headings at 60 pt, the title at
 // 116 pt. Its claims are those of the design document, its colors those of
 // palette.typ.
 
@@ -89,11 +89,10 @@
 // ---------------------------------------------------------------- numbers
 
 #block(width: 100%, fill: surface, inset: (x: margin, y: 18mm),
-  grid(columns: (1fr,) * 5, column-gutter: gutter,
+  grid(columns: (1fr,) * 4, column-gutter: gutter,
     stat[12][entropy sources, each with an entropy rate of its own],
     stat[4][output paths: full, plain, prediction resistance, seed],
     stat[5][crypto backends: builtin, OpenSSL, Botan, GnuTLS, leancrypto],
-    stat[6][kinds of interfaces, from the device files to OpenSSL providers],
     stat[12][TLA+ models of the concurrent parts, checked in CI],
   ))
 
@@ -109,12 +108,33 @@
         https://github.com/smuellerDD/esdm]))
   }))
 
+// The closing band above the footer: what the ESDM is for and what backs it.
+#place(bottom, dy: -34mm, block(width: 100%, fill: surface,
+  inset: (x: margin, top: 20mm, bottom: 22mm),
+  grid(columns: (1fr, 1fr), column-gutter: gutter,
+    panel[Compliance][
+      - Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31 (NTG.1,
+        DRG.3, DRG.4), each with a worked example.
+      - Entropy rates and seeding strategy are configured per system.
+      - The limits are written down: what the default build does not
+        claim, and what no test covers.
+    ],
+    panel[Assurance][
+      - SP 800-90B assessment of the interrupt and scheduler sources, with
+        the tools to repeat it on the target.
+      - Health tests on the raw timestamps; self tests at start-up and
+        every 10 minutes.
+      - Model checking of the locks, wakeups and state machines; fuzzing
+        and sanitizers in CI.
+    ],
+  )))
+
 // ---------------------------------------------------------------- body
 
 #block(inset: (x: margin, top: 22mm), {
 
   // From the noise to the random numbers
-  grid(columns: (1.5fr, 1fr), column-gutter: gutter,
+  grid(columns: (1fr, 1fr), column-gutter: gutter, align: horizon,
     fig("big-picture.svg", 100%)[Entropy sources fill the seed buffer that
       seeds the DRNG instances.],
     panel[From Noise to Random Numbers][
@@ -137,9 +157,9 @@
     ],
   )
 
-  v(30mm)
+  v(26mm)
 
-  grid(columns: (1.15fr, 0.9fr, 1fr), column-gutter: gutter,
+  grid(columns: (1fr, 1fr), column-gutter: gutter,
     panel[Processes][
       #fig("processes.svg", 100%)[Processes and their IPC]
       #v(3mm)
@@ -147,18 +167,7 @@
         namespaces and the privileged sources, then drops its privileges
         for good.
       - Clients reach it over two RPC sockets, the privileged one for
-        root only, or over the minimal EGD protocol. The server is built
-        with both interfaces or with one of them.
-      - With `--pid_namespace` a root supervisor forwards the signals; the
-        daemon ends with it.
-    ],
-    panel[DRNG Instance][
-      #fig("drng-states.svg", 100%)[States of a DRNG instance]
-      #v(3mm)
-      - A reseed with the current time alone does not count as a full
-        reseed.
-      - A fork ends the output in the child. With the kernel module, a
-        VM clone discards the state and a resume reseeds it.
+        root only, or over the minimal EGD protocol.
     ],
     panel[Interfaces][
       #iface[`/dev/random`, `/dev/urandom`][CUSE daemons mounted over the
@@ -180,56 +189,31 @@
     ],
   )
 
-  v(30mm)
+  v(26mm)
 
-  grid(columns: (1fr, 1fr, 0.85fr), column-gutter: gutter,
-    panel[Assurance][
-      - SP 800-90B assessment of the interrupt and scheduler sources, with
-        the tools to repeat it on the target.
-      - Health tests on the raw timestamps; self tests of every primitive
-        and source at start-up and every 10 minutes.
-      - Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31 (NTG.1,
-        DRG.3, DRG.4), each with a worked example.
-      - Model checking of the locks, wakeups and state machines; fuzzing
-        of the RPC and EGD interfaces; sanitizers in CI.
-      - The limits are written down: what the default build does not
-        claim, and what no test covers.
+  grid(columns: (1fr, 1fr), column-gutter: gutter,
+    panel[DRNG Instance][
+      #fig("drng-states.svg", 62%)[States of a DRNG instance]
     ],
-    panel[Extending][
-      An entropy source of your own is a process served by
-      `libesdm_es_ext`:
-      ```c
-      static const
-      struct esdm_es_ext_plugin src = {
-        .version = ESDM_ES_EXT_PLUGIN_VERSION,
-        .name = "my-noise-source",
-        .get_entropy = my_get_entropy,
-        .selftest = my_selftest,
-      };
-
-      int main(int argc, char *argv[])
-      {
-        return esdm_es_ext_provider_main(
-          &src, argc, argv);
-      }
-      ```
-      A crypto backend fills `struct esdm_drng_cb`.
-    ],
-    panel[Build and Test][
-      ```sh
-      meson setup build \
-        -Dtestmode=enabled
-      meson test -C build
-      nix flake check
-      ```
-      #v(2mm)
-      - A toolkit for regulated environments: components, entropy
-        sources, rates and seeding strategy are configured per system.
-      - Upstream integrations: OpenSSL, hypervisors, unmodified software.
-      - Key generation moves out of the kernel; IVs and nonces stay there
-        (AES-CBC in IPsec). The kernel seeder seeds the kernel RNG.
-      - Optional kernel modules `esdm_es` and `esdm_cdev`; Linux 6.1 or
-        later.
-    ],
+    {
+      panel[Reseeding][
+        - A DRNG instance is reseeded after 2#super[20] requests or 600
+          seconds, and on demand.
+        - A reseed with the current time alone does not count as a full
+          reseed.
+        - A fork ends the output in the child. With the kernel module, a
+          VM clone discards the state and a resume reseeds it.
+      ]
+      v(14mm)
+      panel[Toolkit][
+        - Only the generator is mandatory. Frontends, entropy sources,
+          kernel modules and tools are chosen per system.
+        - Upstream integrations: OpenSSL, hypervisors, unmodified
+          software.
+        - Key generation moves out of the kernel; IVs and nonces stay
+          there (AES-CBC in IPsec). The kernel seeder seeds the kernel
+          RNG.
+      ]
+    },
   )
 })
