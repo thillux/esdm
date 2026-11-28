@@ -1,0 +1,35 @@
+// Slide deck: the system events, who reports them and what the ESDM does
+// (design chapter, section "System Events"). Short lines and a large font:
+// the figure is read from a distance.
+digraph events {
+  graph [rankdir=TB, nodesep=0.22, ranksep=0.42, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=16, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=13, fontcolor="#475569"];
+
+  vmgen [label="VM generation change:\nsnapshot, clone"];
+  resume [label="Resume"];
+  suspend [label="Suspend,\nhibernation"];
+  shutdown [label="Shutdown,\nreboot, halt"];
+
+  report [label="Kernel module esdm_es counts the event;\na thread of esdm-server reads the counts",
+          fillcolor="#E9C08F"];
+
+  reset [label="Credited entropy dropped,\nevery DRNG seeded anew",
+         fillcolor="#DBEAFE"];
+  reseed [label="Every fully seeded DRNG\nreseeds before its next output",
+          fillcolor="#DBEAFE"];
+  wake [label="Waiting CUSE and\nauxiliary clients woken",
+        fillcolor="#DBEAFE"];
+
+  {rank=same; vmgen; resume; suspend; shutdown;}
+  {rank=same; reset; reseed; wake;}
+
+  vmgen -> report; resume -> report; suspend -> report; shutdown -> report;
+  report -> reset [label=" VM generation "];
+  report -> reseed [label=" resume "];
+  report -> wake [label=" suspend, shutdown "];
+}

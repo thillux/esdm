@@ -1,0 +1,31 @@
+// Slide deck: from the C code to a checked model (chapter "Formal
+// Verification", sections "TLA+ and the Tools" and "Modeling Approach").
+// Short lines and a large font: the figure is read from a distance.
+digraph mc {
+  graph [rankdir=LR, nodesep=0.2, ranksep=0.4, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=16, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=13, fontcolor="#475569"];
+
+  code [label="C code\nthreads, locks,\natomic variables", fillcolor="#F1F5F9"];
+  model [label="PlusCal model\nprocess per thread,\nlabel per atomic step"];
+  env [label="Environment\nany entropy credit,\nfailures, signals"];
+  props [label="Properties\ninvariants, progress\nunder fairness"];
+  tlc [label="TLC\nevery interleaving\nof a bounded\nconfiguration",
+       fillcolor="#DBEAFE"];
+  ok [label="No violation\nproperties hold\nwithin the bounds", fillcolor="#DBEAFE"];
+  trace [label="Violation\ntrace of steps named\nafter C functions"];
+
+  {rank=same; model; env; props;}
+  {rank=same; ok; trace;}
+
+  code -> model [label=" by hand "];
+  model -> tlc; env -> tlc; props -> tlc;
+  tlc -> ok;
+  tlc -> trace [style=dashed, color="#B91C1C"];
+  trace -> code [label=" fix ", style=dashed, color="#B91C1C",
+                 fontcolor="#B91C1C", constraint=false];
+}

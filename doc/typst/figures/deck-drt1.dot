@@ -1,0 +1,39 @@
+// Slide deck: a DRT.1 tree across host and guest, the figure
+// drt1-host-guest.dot of chapter "Compliant Configurations" laid out for a
+// slide: the host in the upper row from left to right, the guest in the
+// lower row from right to left. Short lines and a large font: the figure is
+// read from a distance.
+digraph drt1 {
+  graph [rankdir=TB, nodesep=0.35, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=16, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=13, fontcolor="#475569"];
+
+  subgraph cluster_host {
+    label="Host – one operator, one security boundary"; fontsize=14;
+    style="rounded,filled"; color="#CBD5E1"; fillcolor="#F1F5F9";
+    {rank=same; es; host; pr; vmm;}
+    es [label="Entropy sources\n2 × 240 bits\nat start-up", fillcolor="#E9C08F"];
+    host [label="ESDM with ais2031_ntg1\nor es_jent_ntg1:\nNTG.1 output",
+          fillcolor="#DBEAFE"];
+    pr [label="/dev/esdm_pr\nof esdm_cdev"];
+    vmm [label="QEMU or\nCloud Hypervisor"];
+    es -> host -> pr -> vmm;
+  }
+
+  subgraph cluster_guest {
+    label="Guest"; fontsize=14; labelloc=b;
+    style="rounded,filled"; color="#CBD5E1"; fillcolor="#F1F5F9";
+    {rank=same; kids; guest; hwrng;}
+    hwrng [label="/dev/hwrng\ncredited with\n256 bits"];
+    guest [label="DRNGs of the\nguest ESDM:\nroots of the tree", fillcolor="#DBEAFE"];
+    kids [label="DRNGs of the\nconsumers:\nchildren"];
+    kids -> guest [dir=back, label=" seeds ≥ 256 bits "];
+    guest -> hwrng [dir=back];
+  }
+
+  vmm -> hwrng [label="  virtio-rng"];
+}

@@ -1,0 +1,36 @@
+// Slide deck: the security domains and what crosses their boundaries
+// (design chapter, section "Security Domains"). The two domains that hold
+// secrets have a heavier outline. Short lines and a large font: the figure
+// is read from a distance.
+digraph domains {
+  graph [rankdir=LR, nodesep=0.14, ranksep=0.5, fontname="Source Sans 3",
+         bgcolor="#FFFFFF"];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=16, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.05"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=13, fontcolor="#475569"];
+
+  kernel [label="D-KERNEL\nkernel modules,\neBPF programs",
+          fillcolor="#E9C08F", penwidth=2.2];
+  provider [label="D-PROVIDER\nexternal source"];
+  admin [label="D-ADMIN\nprocess of root"];
+  supervisor [label="D-SUPERVISOR\nroot parent"];
+
+  server [label="D-SERVER\nesdm-server,\nunprivileged\n\nDRNG states, pools,\nseed buffers",
+          fillcolor="#DBEAFE", penwidth=2.2];
+
+  frontend [label="D-FRONTEND\nCUSE daemons,\nesdm-proc, seeder"];
+  client [label="D-CLIENT\nany local process"];
+
+  {rank=same; kernel; provider; admin; supervisor;}
+  {rank=same; frontend; client;}
+
+  kernel -> server [label=" seed blocks,\n event counts "];
+  provider -> server [label=" data, capped\n entropy claim "];
+  admin -> server [label=" privileged calls,\n peer is root "];
+  supervisor -> server [label=" signals "];
+  server -> frontend [label=" output, status:\n never state "];
+  server -> client [label=" output, status:\n never state "];
+  client -> server [label=" requests, data\n without credit ", style=dashed, constraint=false];
+}

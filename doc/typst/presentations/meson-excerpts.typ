@@ -42,10 +42,14 @@
   "source; 240 bits of entropy from it are then sufficient.",
 )
 
-// ais2031_drg4: the DRG.4 reseeding limits, meson_options.txt lines 683-701
+// ais2031_drg4: the DRG.4 class, meson_options.txt lines 683-705
 #let meson-drg4 = (
   "option('ais2031_drg4', type: 'boolean', value: false,",
-  "       description:'''German AIS 20/31 3.0 (2024) DRG.4 reseeding limits.",
+  "       description:'''German AIS 20/31 3.0 (2024) DRG.4 class.",
+  "",
+  "DRG.4 satisfies DRG.3: this option applies the entropy source",
+  "oversampling of 'ais2031_drg3' and in addition the request",
+  "size based reseeding limits of DRG.4.",
   "",
   "When enabling this option, the request size based reseeding",
   "limits are capped to the values required by DRG.4.10 of",
@@ -65,7 +69,7 @@
   "''')",
 )
 
-// threading_max_worker_threads: the maximum number of DRNGs, meson_options.txt lines 703-720
+// threading_max_worker_threads: the maximum number of DRNGs, meson_options.txt lines 707-724
 #let meson-threads = (
   "# Option for: THREADING_MAX_WORKER_THREADS",
   "option('threading_max_worker_threads', type: 'integer', min: 1, value: 64,",
@@ -87,7 +91,7 @@
   "''')",
 )
 
-// crypto_backend: the cryptographic backend, meson_options.txt lines 813-824
+// crypto_backend: the cryptographic backend, meson_options.txt lines 818-829
 #let meson-backend = (
   "option('crypto_backend', type: 'combo', value: 'builtin',",
   "       choices: ['builtin',",
@@ -120,7 +124,7 @@
   "''')",
 )
 
-// esdm-server-egd-pr-socket-path: the EGD socket of the prediction resistance DRNG, meson_options.txt lines 918-925
+// esdm-server-egd-pr-socket-path: the EGD socket of the prediction resistance DRNG, meson_options.txt lines 923-930
 #let meson-egd-pr = (
   "option('esdm-server-egd-pr-socket-path', type: 'string', value: '/run/esdm-egd-pr.socket',",
   "       description: '''Path of the optional prediction resistance EGD socket",
