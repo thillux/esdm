@@ -90,9 +90,11 @@
 // =========================================================================
 #title-slide(
   title: [Entropy Source and \ DRNG Manager],
-  subtitle: [...or /dev/random in User Space],
+  subtitle: [... or /dev/random in User Space],
   version: [ESDM #esdm-version],
-  author: [Stephan Müller \ \<smueller\@chronox.de\>],
+  author: grid(columns: (auto, auto), column-gutter: 48pt,
+    [Stephan Müller \ \<smueller\@chronox.de\>],
+    [Markus Theil \ \<theil.markus\@gmail.com\>]),
 )
 
 #slide(title: [Agenda])[

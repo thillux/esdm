@@ -72,7 +72,7 @@
 #let dash = text(fill: faint, "–")
 
 #let setup(body, sections: ()) = {
-  set document(author: "Stephan Müller")
+  set document(author: ("Stephan Müller", "Markus Theil"))
   set page(width: page-width, height: page-height, margin: 0pt,
     fill: background)
   set text(font: sans, size: t-body, lang: "en", fill: ink, hyphenate: false)
@@ -325,7 +325,7 @@
       text(size: 21pt, fill: on-navy-soft, subtitle)
     }
   }))
-  place(top + left, dx: body-x + 8pt, dy: 318pt, block(width: 420pt, {
+  place(top + left, dx: body-x + 8pt, dy: 318pt, block(width: 640pt, {
     set text(top-edge: "cap-height", bottom-edge: "baseline")
     set par(leading: 0.55em)
     if version != none {
