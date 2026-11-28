@@ -85,7 +85,9 @@ and left the daemon unsupervised - and the daemon drops those it does not
 handle; a supervisor survives an inherited SIG_IGN of SIGCHLD and stops
 forwarding before it reaps the daemon, so that no signal reaches the PID once
 it is reused; the CUSE daemons install their handlers before the fork and no
-longer lose a termination signal during their start
+longer lose a termination signal during their start; a supervisor also
+forwards the other signals a process can send it and it can catch (SIGABRT,
+SIGPIPE, the fault signals), from which it died leaving the daemon unsupervised
 
 * Kernel module esdm_es: a request overlapping a health test failure, or the
 completion of the window a failure fell into, no longer credits events the

@@ -9,46 +9,71 @@
 (* Signals are asynchronous. Each process has a mask, a pending set and a  *)
 (* disposition per signal. A pending signal that is not blocked is         *)
 (* delivered before the process takes its next step, also out of a         *)
-(* blocking waitpid(), which SA_RESTART resumes. A handler runs as a frame *)
-(* on top of the interrupted code with its signal blocked; the forwarder's *)
-(* sa_mask is empty, so other signals nest. fork() passes the mask and the *)
-(* dispositions on, not the pending signals. The daemon is the init of the *)
-(* new namespace: a signal it has no handler for is discarded when sent    *)
-(* from the supervisor's namespace, unless blocked, and again when         *)
-(* delivered (SIGNAL_UNKILLABLE), so it dies only by SIGKILL or a fault.   *)
-(* With SIGCHLD ignored the kernel reaps the daemon itself and waitpid()   *)
-(* fails with ECHILD. A reaped PID may be handed out again.                *)
+(* blocking waitid() or waitpid(), which SA_RESTART resumes. A handler     *)
+(* runs as a frame on top of the interrupted code with its signal and its  *)
+(* sa_mask blocked; the forwarder's sa_mask is the forwarded set, so no    *)
+(* forwarder nests in another. fork() passes the mask and the dispositions *)
+(* on, not the pending signals. The daemon is the init of the new          *)
+(* namespace: a signal it has no handler for is discarded when sent from   *)
+(* the supervisor's namespace, unless blocked, and again when delivered    *)
+(* (SIGNAL_UNKILLABLE), so it dies only by SIGKILL or a fault. With        *)
+(* SIGCHLD ignored the kernel reaps the daemon itself and waitid() and     *)
+(* waitpid() fail with ECHILD. A reaped PID may be handed out again.       *)
 (*                                                                         *)
 (* Abstractions:                                                           *)
 (* - "TERM" stands for SIGHUP, SIGINT, SIGQUIT and SIGTERM, which both     *)
-(*   frontends handle and the supervisor forwards; "USR1" for SIGUSR1,     *)
-(*   forwarded, the server's suspend trigger and a CUSE termination        *)
-(*   signal; "USR2" for the CUSE termination signals not forwarded         *)
-(*   (SIGALRM, SIGIO, SIGPROF, SIGPWR, SIGUSR2, SIGVTALRM, SIGXCPU,        *)
-(*   SIGXFSZ), which the server does not handle. "SEGV" is a fault, "KILL" *)
-(*   SIGKILL.                                                              *)
+(*   frontends handle; "USR1" for SIGUSR1, the server's suspend trigger    *)
+(*   and a CUSE termination signal; "USR2" for the other signals of        *)
+(*   linux_term_signals() (SIGALRM, SIGIO, SIGPROF, SIGPWR, SIGUSR2,       *)
+(*   SIGVTALRM, SIGXCPU, SIGXFSZ, SIGSTKFLT, the real-time signals), which *)
+(*   end a CUSE daemon and which the server does not handle; "ABRT" for    *)
+(*   linux_pidns_sent_signals[], the remaining signals a handler can catch *)
+(*   and a process ends by, sent with kill(): SIGABRT, SIGPIPE and the     *)
+(*   fault signals, which no daemon handles. The supervisors of both       *)
+(*   forward all four. "SEGV" is a fault of the daemon, "KILL" SIGKILL.    *)
+(* - The supervisor's handler for "ABRT", linux_pidns_forward_sent(), is   *)
+(*   the forwarder: its branch for a fault the kernel raises for the       *)
+(*   supervisor itself is not modelled, as the supervisor has no faults.   *)
 (* - The daemon is one process with the steps that matter for signals: the *)
-(*   child's sigprocmask() in the prefork, its sigaction()s after it       *)
-(*   (server: esdm_shm_status_install_signal_suspend(), CUSE:              *)
-(*   esdm_cuse_install_sig_handler()), for CUSE the session setup that sets*)
-(*   esdm_cuse_session, then serving. A termination handler makes it exit  *)
-(*   with 0: the server's latches server_exit at any time, the CUSE one    *)
-(*   acts only once the session exists (Latch). The daemon may also exit   *)
-(*   with 1, fault or be killed by SIGKILL at any time.                    *)
+(*   child's sigprocmask() and prctl(PR_SET_PDEATHSIG, SIGTERM) in the     *)
+(*   prefork, its sigaction()s after it (the server's                      *)
+(*   esdm_shm_status_install_signal_suspend(); the CUSE daemons installed  *)
+(*   their handler there before the fix), for CUSE the session setup that  *)
+(*   sets esdm_cuse_session, the privilege drop (the server's              *)
+(*   drop_privileges_permanent(), the CUSE daemons'                        *)
+(*   drop_privileges_transient()), then serving. A termination handler     *)
+(*   makes it exit with 0: the server's latches server_exit at any time,   *)
+(*   the CUSE one esdm_cuse_exit_requested (Latch); without the latch it   *)
+(*   acts only once the session exists. The daemon may also exit with 1,   *)
+(*   fault or be killed by SIGKILL at any time.                            *)
+(* - The parent-death signal: when the supervisor ends while the daemon    *)
+(*   lives and has it set, the kernel sends the daemon SIGTERM, which the  *)
+(*   namespace init receives if it blocks it or has a handler for it. A    *)
+(*   change of the effective user or group ID clears the setting; no code  *)
+(*   sets it again.                                                        *)
+(* - SIGKILL to the supervisor (KillAt) also stands for what else ends it  *)
+(*   and no handler can prevent: the two real-time signals the C library   *)
+(*   keeps for itself, for which sigaction() fails, and a fault of its     *)
+(*   own.                                                                  *)
 (* - A handler's kill() and its return are one step.                       *)
-(* - The caller's signal mask is empty; no disposition is SIG_IGN but      *)
-(*   SIGCHLD's (ChldIgn).                                                  *)
-(* - Not modelled: unshare() and fork() failing, PR_SET_PDEATHSIG (best    *)
-(*   effort, cleared by the privilege drop), stop signals, the threads of  *)
-(*   the daemon, signals sent to the daemon directly, and the supervisor   *)
-(*   dying by SIGKILL.                                                     *)
+(* - The caller's signal mask is empty, so the child's                     *)
+(*   sigprocmask(SIG_SETMASK, &old_mask) and the supervisor's              *)
+(*   sigprocmask(SIG_UNBLOCK, &fwd_set) both leave nothing blocked. No     *)
+(*   disposition is SIG_IGN but SIGCHLD's (ChldIgn) and those of           *)
+(*   PreIgnored: the server's install_term() ignores SIGUSR1 until the     *)
+(*   suspend handler is installed.                                         *)
+(* - Not modelled: unshare() and fork() failing, stop signals, the threads *)
+(*   of the daemon (the parent-death signal is a setting of the thread     *)
+(*   that called prctl(), the main thread, and cleared in every thread by  *)
+(*   the change of the IDs), signals sent to the daemon directly.          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    Sigs,         \* catchable signals sent: "TERM", "USR1", "USR2"
+    Sigs,         \* catchable signals sent: "TERM", "USR1", "USR2", "ABRT"
     Fwd,          \* fwd_signals[], the signals the supervisor forwards
     PreHandlers,  \* handlers the caller installs before the prefork
+    PreIgnored,   \* signals the caller ignores before the prefork
     PostHandlers, \* handlers the daemon installs after it
     TermSigs,     \* handlers that make the daemon terminate
     Latch,        \* a termination handler acts before the daemon serves
@@ -57,6 +82,10 @@ CONSTANTS
     MaxSends,     \* how many
     Fates,        \* how the daemon may end on its own: "exit1", "SEGV", "KILL"
     Checked,      \* signals that must reach the daemon's handler
+    Handled,      \* the same, once the daemon installed their handler
+    FwdDrops,     \* mutation: signals the forwarder does not pass on
+    KillAt,       \* steps of the daemon before which SIGKILL may end the
+                  \* supervisor: values of cpc
     ChldIgn,      \* SIGCHLD is inherited as SIG_IGN
     Unblocked,    \* the code before 9a53de9d: Fwd not blocked across fork()
     FixChld,      \* fix: SIGCHLD to SIG_DFL across fork()
@@ -66,7 +95,7 @@ SDom == Sigs \cup {"SEGV"}
 Faults == {"SEGV", "KILL"}
 DaemonSet == PreHandlers \cup PostHandlers
 SPcs == {"sigprocmask_block", "sigaction_chld", "fork", "store_child",
-         "sigaction", "sigprocmask_setmask", "waitid", "sigprocmask_block2",
+         "sigaction", "sigprocmask_unblock", "waitid", "sigprocmask_block2",
          "clear_child", "waitpid", "supervisor_exit_cb", "signal", "raise",
          "exit_128", "exit", "exit_failure"}
 
@@ -77,7 +106,7 @@ VARIABLES
     slife,    \* "alive", "dead"
     smask,
     spend,
-    sdisp,    \* "DFL", "caller" (inherited daemon handler), "fwd"
+    sdisp,    \* "DFL", "IGN", "caller" (the daemon's handler), "fwd"
     schld,    \* SIGCHLD disposition
     sflag,    \* server_exit set by a caller's handler in the supervisor
     todo,     \* forwarders left to install
@@ -95,6 +124,7 @@ VARIABLES
     chand,    \* signals with a handler
     cstop,    \* a termination handler ran
     cstatus,
+    cpdeath,  \* PR_SET_PDEATHSIG is set
     \* environment
     sent,
     reused,   \* the daemon's PID is another process's now
@@ -106,7 +136,7 @@ VARIABLES
 
 sv == <<spc, sstack, slife, smask, spend, sdisp, schld, sflag, todo, child,
         wst, raised, how, sfinal, cbRuns>>
-cv == <<clife, cpc, cmask, cpend, chand, cstop, cstatus>>
+cv == <<clife, cpc, cmask, cpend, chand, cstop, cstatus, cpdeath>>
 vars == <<sv, cv, sent, reused, owed, stopReq, viol>>
 
 Init ==
@@ -115,7 +145,8 @@ Init ==
     /\ slife = "alive"
     /\ smask = {}
     /\ spend = {}
-    /\ sdisp = [s \in SDom |-> IF s \in PreHandlers THEN "caller" ELSE "DFL"]
+    /\ sdisp = [s \in SDom |-> IF s \in PreHandlers THEN "caller"
+                             ELSE IF s \in PreIgnored THEN "IGN" ELSE "DFL"]
     /\ schld = IF ChldIgn THEN "IGN" ELSE "DFL"
     /\ sflag = FALSE
     /\ todo = Fwd
@@ -132,6 +163,7 @@ Init ==
     /\ chand = {}
     /\ cstop = FALSE
     /\ cstatus = "none"
+    /\ cpdeath = FALSE
     /\ sent = 0
     /\ reused = FALSE
     /\ owed = {}
@@ -159,6 +191,13 @@ Kill(s) ==
                     ELSE viol   \* a zombie: no effect
          /\ UNCHANGED <<cpend, owed>>
 
+\* The supervisor ends: the kernel sends the parent-death signal to a living
+\* daemon that has it set, and the namespace init takes it like any other
+PDeath ==
+    cpend' = IF /\ clife = "alive" /\ cpdeath
+                /\ ("TERM" \in cmask \/ "TERM" \in chand)
+             THEN cpend \cup {"TERM"} ELSE cpend
+
 AfterCb(st) == IF st \in Faults THEN "signal" ELSE "exit"
 
 \* The supervisor's main code runs: no handler active, nothing to deliver
@@ -176,7 +215,7 @@ SExit(st) ==
 -----------------------------------------------------------------------------
 (* Supervisor: linux_isolate_namespace_prefork() from its first sigprocmask *)
 
-\* linux_support.c:99 sigprocmask(SIG_BLOCK, &fwd_set, &old_set)
+\* sigprocmask(SIG_BLOCK, &fwd_set, &old_mask)
 SBlock ==
     /\ SMainOK /\ spc = "sigprocmask_block"
     /\ smask' = IF Unblocked THEN smask ELSE smask \cup Fwd
@@ -185,7 +224,7 @@ SBlock ==
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* fix: sigaction(SIGCHLD, SIG_DFL), restored in the child
+\* fix: sigaction(SIGCHLD, SIG_DFL, &sa_chld), restored in the child
 SChld ==
     /\ SMainOK /\ spc = "sigaction_chld"
     /\ schld' = "DFL"
@@ -194,8 +233,8 @@ SChld ==
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :101 fork(): the child is PID 1 of the namespace, with the supervisor's
-\* mask and handlers and none of its pending signals
+\* fork(): the child is PID 1 of the namespace, with the supervisor's mask
+\* and dispositions and none of its pending signals
 SFork ==
     /\ SMainOK /\ spc = "fork"
     /\ spc' = "store_child"
@@ -205,12 +244,12 @@ SFork ==
     /\ cpend' = {}
     /\ chand' = {s \in Sigs : sdisp[s] = "caller"}
     /\ cstop' = sflag
-    /\ UNCHANGED cstatus
+    /\ UNCHANGED <<cstatus, cpdeath>>
     /\ UNCHANGED <<sstack, slife, smask, spend, sdisp, schld, sflag, todo,
                    child, wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<sent, reused, owed, stopReq, viol>>
 
-\* :137 linux_pidns_child = pid
+\* linux_pidns_child = pid
 SStore ==
     /\ SMainOK /\ spc = "store_child"
     /\ child' = 1
@@ -219,21 +258,22 @@ SStore ==
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :147-148 sigaction(fwd_signals[i], linux_pidns_forward_signal), each
+\* sigaction(fwd_signals[i], &sa, NULL) with linux_pidns_forward_signal(),
+\* sa_mask = fwd_set and SA_RESTART, one signal per step
 SSigaction ==
     /\ SMainOK /\ spc = "sigaction"
     /\ LET s == CHOOSE x \in todo : TRUE IN
        /\ sdisp' = [sdisp EXCEPT ![s] = "fwd"]
        /\ todo' = todo \ {s}
-       /\ spc' = IF todo = {s} THEN "sigprocmask_setmask" ELSE "sigaction"
+       /\ spc' = IF todo = {s} THEN "sigprocmask_unblock" ELSE "sigaction"
     /\ UNCHANGED <<sstack, slife, smask, spend, schld, sflag, child, wst,
                    raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :149 sigprocmask(SIG_SETMASK, &old_set, NULL)
-SSetmask ==
-    /\ SMainOK /\ spc = "sigprocmask_setmask"
-    /\ smask' = {}
+\* sigprocmask(SIG_UNBLOCK, &fwd_set, NULL)
+SUnblock ==
+    /\ SMainOK /\ spc = "sigprocmask_unblock"
+    /\ smask' = smask \ Fwd
     /\ spc' = IF FixReap THEN "waitid" ELSE "waitpid"
     /\ UNCHANGED <<sstack, slife, spend, sdisp, schld, sflag, todo, child,
                    wst, raised, how, sfinal, cbRuns>>
@@ -267,8 +307,8 @@ SClear ==
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :151-160 waitpid(pid, &status, 0) reaps the daemon; ECHILD if the kernel
-\* did, then exit(EXIT_FAILURE)
+\* waitpid(pid, &status, 0) reaps the daemon; ECHILD if the kernel did, then
+\* exit(EXIT_FAILURE)
 SWaitpid ==
     /\ SMainOK /\ spc = "waitpid"
     /\ clife \in {"zombie", "reaped"}
@@ -281,10 +321,10 @@ SWaitpid ==
             /\ UNCHANGED <<clife, wst>>
     /\ UNCHANGED <<sstack, slife, smask, spend, sdisp, schld, sflag, todo,
                    child, raised, how, sfinal, cbRuns>>
-    /\ UNCHANGED <<cpc, cmask, cpend, chand, cstop, cstatus>>
+    /\ UNCHANGED <<cpc, cmask, cpend, chand, cstop, cstatus, cpdeath>>
     /\ UNCHANGED <<sent, reused, owed, stopReq, viol>>
 
-\* :167-168 supervisor_exit_cb(): supervisor_exit(), esdm_rpc_server_cleanup()
+\* supervisor_exit_cb(): supervisor_exit(), esdm_rpc_server_cleanup()
 SCallback ==
     /\ SMainOK /\ spc = "supervisor_exit_cb"
     /\ cbRuns' = cbRuns + 1
@@ -295,16 +335,18 @@ SCallback ==
                    child, wst, raised, how, sfinal>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq>>
 
-\* :178 signal(sig, SIG_DFL), which fails for SIGKILL
+\* signal(sig, SIG_DFL), which fails for SIGKILL, and
+\* sigprocmask(SIG_UNBLOCK) of sig alone
 SSignal ==
     /\ SMainOK /\ spc = "signal"
     /\ sdisp' = IF wst \in SDom THEN [sdisp EXCEPT ![wst] = "DFL"] ELSE sdisp
+    /\ smask' = smask \ {wst}
     /\ spc' = "raise"
-    /\ UNCHANGED <<sstack, slife, smask, spend, schld, sflag, todo, child,
+    /\ UNCHANGED <<sstack, slife, spend, schld, sflag, todo, child,
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :179 raise(sig)
+\* raise(sig)
 SRaise ==
     /\ SMainOK /\ spc = "raise"
     /\ raised' = wst
@@ -320,7 +362,7 @@ SRaise ==
                    cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :181 exit(128 + sig), :184 exit(WEXITSTATUS(status)), :158 exit(EXIT_FAILURE)
+\* exit(128 + sig), exit(WEXITSTATUS(status)), exit(EXIT_FAILURE)
 SExit128 == spc = "exit_128" /\ SExit("exit128")
 SExitStatus == spc = "exit" /\ SExit(wst)
 SExitFailure == spc = "exit_failure" /\ SExit("exit1")
@@ -333,8 +375,8 @@ SDeliver ==
         /\ CASE sdisp[s] = "fwd" ->
                   /\ sstack' = Append(sstack, [pc |-> "fwd_load", sig |-> s,
                                                ch |-> 0, om |-> smask])
-                  /\ smask' = smask \cup {s}
-                  /\ UNCHANGED <<slife, how, sfinal, sflag, owed, viol>>
+                  /\ smask' = smask \cup Fwd \cup {s}
+                  /\ UNCHANGED <<slife, how, sfinal, sflag, cpend, owed, viol>>
              [] sdisp[s] = "caller" ->
                   \* the daemon's handler, run in the supervisor: before
                   \* fork() the server's flag passes to the daemon
@@ -344,10 +386,15 @@ SDeliver ==
                           /\ UNCHANGED viol
                      ELSE /\ Lose(s)
                           /\ UNCHANGED sflag
-                  /\ UNCHANGED <<sstack, smask, slife, how, sfinal>>
+                  /\ UNCHANGED <<sstack, smask, slife, how, sfinal, cpend>>
+             [] sdisp[s] = "IGN" ->
+                  /\ Lose(s)
+                  /\ UNCHANGED <<sstack, smask, slife, how, sfinal, sflag,
+                                 cpend>>
              [] OTHER ->
                   \* SIG_DFL terminates
                   /\ slife' = "dead"
+                  /\ PDeath
                   /\ how' = IF s = raised THEN "raise" ELSE "signal"
                   /\ sfinal' = s
                   /\ viol' = viol
@@ -360,11 +407,12 @@ SDeliver ==
                   /\ owed' = owed \ {s}
                   /\ UNCHANGED <<sstack, smask, sflag>>
     /\ UNCHANGED <<spc, sdisp, schld, todo, child, wst, raised, cbRuns>>
-    /\ UNCHANGED <<cv, sent, reused, stopReq>>
+    /\ UNCHANGED <<clife, cpc, cmask, chand, cstop, cstatus, cpdeath>>
+    /\ UNCHANGED <<sent, reused, stopReq>>
 
 Top == sstack[Len(sstack)]
 
-\* :48 linux_pidns_forward_signal(): child = linux_pidns_child
+\* linux_pidns_forward_signal(): child = linux_pidns_child
 SFwdLoad ==
     /\ slife = "alive" /\ sstack # <<>> /\ spend \ smask = {}
     /\ Top.pc = "fwd_load"
@@ -374,24 +422,25 @@ SFwdLoad ==
                    wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, sent, reused, owed, stopReq, viol>>
 
-\* :50-51 if (child > 0) kill(child, sig), and the handler's return
+\* if (child > 0) kill(child, sig), and the handler's return
 SFwdKill ==
     /\ slife = "alive" /\ sstack # <<>> /\ spend \ smask = {}
     /\ Top.pc = "fwd_kill"
     /\ sstack' = SubSeq(sstack, 1, Len(sstack) - 1)
     /\ smask' = Top.om
-    /\ IF Top.ch # 0 THEN Kill(Top.sig)
+    /\ IF Top.sig \in FwdDrops THEN UNCHANGED <<cpend, owed, viol>>
+       ELSE IF Top.ch # 0 THEN Kill(Top.sig)
        ELSE IF clife \in {"unborn", "alive"}
             THEN Lose(Top.sig) /\ UNCHANGED cpend
             ELSE UNCHANGED <<cpend, owed, viol>>
     /\ UNCHANGED <<spc, slife, spend, sdisp, schld, sflag, todo, child, wst,
                    raised, how, sfinal, cbRuns>>
-    /\ UNCHANGED <<clife, cpc, cmask, chand, cstop, cstatus>>
+    /\ UNCHANGED <<clife, cpc, cmask, chand, cstop, cstatus, cpdeath>>
     /\ UNCHANGED <<sent, reused, stopReq>>
 
 SNext ==
     \/ SDeliver \/ SFwdLoad \/ SFwdKill
-    \/ SBlock \/ SChld \/ SFork \/ SStore \/ SSigaction \/ SSetmask
+    \/ SBlock \/ SChld \/ SFork \/ SStore \/ SSigaction \/ SUnblock
     \/ SWaitid \/ SBlock2 \/ SClear \/ SWaitpid \/ SCallback \/ SSignal
     \/ SRaise \/ SExit128 \/ SExitStatus \/ SExitFailure
 
@@ -405,7 +454,7 @@ CExit(st) ==
     /\ clife' = IF schld = "IGN" /\ slife = "alive" THEN "reaped" ELSE "zombie"
     /\ cstatus' = st
     /\ owed' = {}
-    /\ UNCHANGED <<cpc, cmask, cpend, chand, cstop>>
+    /\ UNCHANGED <<cpc, cmask, cpend, chand, cstop, cpdeath>>
     /\ UNCHANGED <<sv, sent, reused, stopReq, viol>>
 
 \* The kernel delivers a pending signal: to a handler, else it is discarded
@@ -421,28 +470,47 @@ CDeliver ==
            ELSE \* SIG_DFL, or esdm_cuse_sig_handler() without a session
                 /\ Lose(s)
                 /\ UNCHANGED cstop
-    /\ UNCHANGED <<clife, cpc, cmask, chand, cstatus>>
+    /\ UNCHANGED <<clife, cpc, cmask, chand, cstatus, cpdeath>>
     /\ UNCHANGED <<sv, sent, reused, stopReq>>
 
-\* :112 the child's sigprocmask(SIG_SETMASK, &old_set, NULL), :121 prctl()
+\* the child's sigaction(SIGCHLD, &sa_chld, NULL) and
+\* sigprocmask(SIG_SETMASK, &old_mask, NULL)
 CUnmask ==
     /\ CReady /\ cpc = "sigprocmask"
     /\ cmask' = {}
+    /\ cpc' = "prctl"
+    /\ UNCHANGED <<clife, cpend, chand, cstop, cstatus, cpdeath>>
+    /\ UNCHANGED <<sv, sent, reused, owed, stopReq, viol>>
+
+\* the child's prctl(PR_SET_PDEATHSIG, SIGTERM); it has no means to tell
+\* that the supervisor ended before it
+CPrctl ==
+    /\ CReady /\ cpc = "prctl"
+    /\ cpdeath' = TRUE
     /\ cpc' = "sigaction"
-    /\ UNCHANGED <<clife, cpend, chand, cstop, cstatus>>
+    /\ UNCHANGED <<clife, cmask, cpend, chand, cstop, cstatus>>
     /\ UNCHANGED <<sv, sent, reused, owed, stopReq, viol>>
 
 \* the daemon's sigaction()s after the prefork
 CSigaction ==
     /\ CReady /\ cpc = "sigaction"
     /\ chand' = chand \cup PostHandlers
-    /\ cpc' = IF Latch THEN "serve" ELSE "cuse_lowlevel_setup"
-    /\ UNCHANGED <<clife, cmask, cpend, cstop, cstatus>>
+    /\ cpc' = IF Latch THEN "setuid" ELSE "cuse_lowlevel_setup"
+    /\ UNCHANGED <<clife, cmask, cpend, cstop, cstatus, cpdeath>>
     /\ UNCHANGED <<sv, sent, reused, owed, stopReq, viol>>
 
 \* esdm_cuse_session = cuse_lowlevel_setup()
 CSetup ==
     /\ CReady /\ cpc = "cuse_lowlevel_setup"
+    /\ cpc' = "setuid"
+    /\ UNCHANGED <<clife, cmask, cpend, chand, cstop, cstatus, cpdeath>>
+    /\ UNCHANGED <<sv, sent, reused, owed, stopReq, viol>>
+
+\* drop_privileges_permanent() or drop_privileges_transient(): the kernel
+\* clears the parent-death signal with the change of the IDs
+CDrop ==
+    /\ CReady /\ cpc = "setuid"
+    /\ cpdeath' = FALSE
     /\ cpc' = "serve"
     /\ UNCHANGED <<clife, cmask, cpend, chand, cstop, cstatus>>
     /\ UNCHANGED <<sv, sent, reused, owed, stopReq, viol>>
@@ -453,24 +521,43 @@ CStopExit == CReady /\ cstop /\ CExit("exit0")
 \* it fails, faults or is killed by SIGKILL
 CFate == clife = "alive" /\ \E f \in Fates : CExit(f)
 
-CNext == CDeliver \/ CUnmask \/ CSigaction \/ CSetup \/ CStopExit
+CNext ==
+    \/ CDeliver \/ CUnmask \/ CPrctl \/ CSigaction \/ CSetup \/ CDrop
+    \/ CStopExit
 
 -----------------------------------------------------------------------------
 (* Environment *)
 
 \* kill(supervisor, s) by systemd, esdm-server-signal-helper or anybody;
-\* owed to the daemon once the prefork began and while it may live
+\* owed to the daemon once the prefork began and while it may live, a signal
+\* of Handled once the daemon has its handler
 ESend ==
     /\ slife = "alive" /\ sent < MaxSends
     /\ \E s \in SendSigs :
         LET arm == spc # "sigprocmask_block" /\ clife \in {"unborn", "alive"}
+            owe == \/ arm /\ s \in Checked
+                   \/ clife = "alive" /\ s \in Handled /\ s \in chand
         IN /\ spend' = spend \cup {s}
-           /\ owed' = IF arm /\ s \in Checked THEN owed \cup {s} ELSE owed
+           /\ owed' = IF owe THEN owed \cup {s} ELSE owed
            /\ stopReq' = (stopReq \/ (arm /\ s \in TermSigs))
     /\ sent' = sent + 1
     /\ UNCHANGED <<spc, sstack, slife, smask, sdisp, schld, sflag, todo,
                    child, wst, raised, how, sfinal, cbRuns>>
     /\ UNCHANGED <<cv, reused, viol>>
+
+\* SIGKILL to the supervisor while the daemon lives: nothing forwards the
+\* signals it was sent any more
+EKill ==
+    /\ slife = "alive" /\ clife = "alive" /\ cpc \in KillAt
+    /\ slife' = "dead"
+    /\ how' = "signal"
+    /\ sfinal' = "KILL"
+    /\ PDeath
+    /\ owed' = {}
+    /\ UNCHANGED <<spc, sstack, smask, spend, sdisp, schld, sflag, todo,
+                   child, wst, raised, cbRuns>>
+    /\ UNCHANGED <<clife, cpc, cmask, chand, cstop, cstatus, cpdeath>>
+    /\ UNCHANGED <<sent, reused, stopReq, viol>>
 
 \* the reaped PID goes to a new process
 EReuse ==
@@ -478,17 +565,24 @@ EReuse ==
     /\ reused' = TRUE
     /\ UNCHANGED <<sv, cv, sent, owed, stopReq, viol>>
 
-\* Nothing left to do: the supervisor ended, or it waits for a daemon that
-\* serves
+\* The daemon serves and has nothing to act on
+DaemonIdle ==
+    clife = "alive" /\ cpc = "serve" /\ ~cstop /\ cpend \ cmask = {}
+
+\* The final states. Nothing is left to do: the supervisor ended and the
+\* daemon ended, was never forked or serves on without it; or the
+\* supervisor waits for a daemon that serves. Done is enabled in no other
+\* state, so that TLC reports every other state without a successor as a
+\* deadlock.
 Final ==
-    \/ slife = "dead"
-    \/ /\ spc \in {"waitpid", "waitid"} /\ sstack = <<>>
-       /\ spend \ smask = {}
-       /\ clife = "alive" /\ cpc = "serve" /\ ~cstop /\ cpend \ cmask = {}
+    \/ slife = "dead" /\ (clife # "alive" \/ DaemonIdle)
+    \/ /\ slife = "alive" /\ spc \in {"waitpid", "waitid"}
+       /\ sstack = <<>> /\ spend \ smask = {}
+       /\ DaemonIdle
 
 Done == Final /\ UNCHANGED vars
 
-Next == SNext \/ CNext \/ CFate \/ ESend \/ EReuse \/ Done
+Next == SNext \/ CNext \/ CFate \/ ESend \/ EKill \/ EReuse \/ Done
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(SNext) /\ WF_vars(CNext)
 
@@ -499,18 +593,30 @@ TypeOK ==
     /\ spc \in SPcs
     /\ slife \in {"alive", "dead"}
     /\ smask \subseteq SDom /\ spend \subseteq SDom
-    /\ sdisp \in [SDom -> {"DFL", "caller", "fwd"}]
+    /\ sdisp \in [SDom -> {"DFL", "IGN", "caller", "fwd"}]
     /\ child \in {0, 1}
     /\ Len(sstack) <= Cardinality(SDom)
     /\ clife \in {"unborn", "alive", "zombie", "reaped"}
+    /\ cpc \in {"none", "sigprocmask", "prctl", "sigaction",
+                "cuse_lowlevel_setup", "setuid", "serve"}
+    /\ cpdeath \in BOOLEAN
     /\ cmask \subseteq Sigs /\ cpend \subseteq Sigs /\ chand \subseteq Sigs
-    /\ owed \subseteq Checked
+    /\ owed \subseteq Checked \cup Handled
 
 \* A signal of Checked sent to the supervisor once the prefork began
 \* reaches the daemon's handler unless the daemon ends first: no handler
 \* of the supervisor takes it, the supervisor does not die by it, the
 \* kernel does not discard it at the namespace init.
 NoLostSignal == "Lost" \notin viol
+
+\* A signal owed to the daemon is on its way: pending at the supervisor, in
+\* a forwarder or pending at the daemon. A forwarder that returns without
+\* its kill() violates it, as does every other silent drop.
+OwedInFlight ==
+    \A s \in owed :
+        \/ s \in spend
+        \/ \E i \in 1..Len(sstack) : sstack[i].sig = s
+        \/ s \in cpend
 
 \* No kill() goes to the daemon's PID after it was reaped ...
 NoKillAfterReap == "KillAfterReap" \notin viol
@@ -533,8 +639,15 @@ CleanupOnce ==
 \* daemon ...
 NoUnforwardedKill == "UnforwardedKill" \notin viol
 
-\* ... nor does any other signal.
+\* ... nor does any other signal a handler can catch. SIGKILL does: see
+\* OrphanStops.
 NoOrphan == "Orphan" \notin viol
+
+\* Outside the final states the supervisor or the daemon can take a step.
+\* The deadlock check alone does not show a hang of the two while the
+\* environment can still step: a signal left to send, the fate of the
+\* daemon, the reuse of its PID.
+NoHang == Final \/ ENABLED (SNext \/ CNext)
 
 -----------------------------------------------------------------------------
 (* Liveness *)
@@ -544,7 +657,12 @@ SupervisorExits ==
     (slife = "alive" /\ clife \in {"zombie", "reaped"}) ~> (slife = "dead")
 
 \* A signal owed to the daemon reaches it or the daemon ends.
-OwedReaches == \A s \in Checked : (s \in owed) ~> (s \notin owed)
+OwedReaches == \A s \in Checked \cup Handled : (s \in owed) ~> (s \notin owed)
+
+\* A daemon that outlives its supervisor ends: the parent-death signal
+\* stops it. This holds only for a supervisor that ends after the daemon's
+\* prctl() and before its privilege drop.
+OrphanStops == (slife = "dead" /\ clife = "alive") ~> (clife # "alive")
 
 \* A termination signal sent to the supervisor ends both.
 StopEndsBoth ==

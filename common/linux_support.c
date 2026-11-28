@@ -53,6 +53,38 @@ static void linux_pidns_forward_signal(int sig)
 		kill(child, sig);
 }
 
+/*
+ * The signals a handler can catch that end a process by default and are not
+ * among linux_term_signals(). Sent to the supervisor, one would end it and
+ * leave the daemon unsupervised, so the supervisor forwards them as well. The
+ * daemon, as namespace init, drops a signal it has no handler for.
+ */
+static const int linux_pidns_sent_signals[] = {
+	SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGPIPE, SIGSEGV, SIGSYS, SIGTRAP,
+#ifdef SIGEMT
+	SIGEMT,
+#endif
+};
+#define LINUX_PIDNS_SENT_SIGNALS                                              \
+	(sizeof(linux_pidns_sent_signals) / sizeof(linux_pidns_sent_signals[0]))
+
+static void linux_pidns_forward_sent(int sig, siginfo_t *info, void *ucontext)
+{
+	(void)ucontext;
+
+	/*
+	 * Raised by the kernel for a fault of the supervisor itself: take the
+	 * default action once the handler returned.
+	 */
+	if (info->si_code > 0) {
+		signal(sig, SIG_DFL);
+		raise(sig);
+		return;
+	}
+
+	linux_pidns_forward_signal(sig);
+}
+
 unsigned int linux_term_signals(int *sigs)
 {
 	static const int term_signals[] = {
@@ -91,6 +123,8 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	sigemptyset(&fwd_set);
 	for (i = 0; i < nr_fwd_signals; i++)
 		sigaddset(&fwd_set, fwd_signals[i]);
+	for (i = 0; i < LINUX_PIDNS_SENT_SIGNALS; i++)
+		sigaddset(&fwd_set, linux_pidns_sent_signals[i]);
 
 	/*
 	 * Unshare the PID namespace before the first fork and before any
@@ -177,6 +211,11 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	sa.sa_flags = SA_RESTART;
 	for (i = 0; i < nr_fwd_signals; i++)
 		sigaction(fwd_signals[i], &sa, NULL);
+
+	sa.sa_sigaction = linux_pidns_forward_sent;
+	sa.sa_flags = SA_RESTART | SA_SIGINFO;
+	for (i = 0; i < LINUX_PIDNS_SENT_SIGNALS; i++)
+		sigaction(linux_pidns_sent_signals[i], &sa, NULL);
 
 	/* Forward what arrived since the signals were blocked */
 	sigprocmask(SIG_UNBLOCK, &fwd_set, NULL);

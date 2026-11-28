@@ -70,10 +70,15 @@ unsigned int linux_term_signals(int *sigs);
  * mirrors the daemon's exit status; only the child returns from this call.
  *
  * @param [in] fwd_signals Signals the supervisor forwards to the daemon -
- *	       every signal the daemon handles, as the supervisor dies from
- *	       one it does not forward. The daemon must install its handlers
- *	       for them before this call: the kernel drops a signal sent to a
- *	       PID namespace init from outside that has no handler for it.
+ *	       every signal the daemon handles. The daemon must install its
+ *	       handlers for them before this call: the kernel drops a signal
+ *	       sent to a PID namespace init from outside that has no handler
+ *	       for it. The supervisor forwards the remaining signals a handler
+ *	       can catch and a process ends by as well, as it would die from
+ *	       one it does not forward and leave the daemon unsupervised. Only
+ *	       a signal it cannot catch, as SIGKILL, ends it before the daemon:
+ *	       the daemon then receives SIGTERM, unless it changed its user or
+ *	       group ID since, which clears the parent-death signal.
  * @param [in] nr_fwd_signals Number of entries in fwd_signals.
  * @param [in] supervisor_exit_cb Optional callback (may be NULL) the
  *	       supervisor invokes - with its retained privileges - after the
