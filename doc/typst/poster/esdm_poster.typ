@@ -14,8 +14,8 @@
 // left column is the pipeline from the noise to the consumers; the right
 // column, independent of it, says why to use the ESDM: eight claims, each a
 // benefit in one line, then one deployment end to end - a guest of
-// Cloud Hypervisor seeded through esdm_cdev - and the states of a DRNG
-// instance. Its statements are those of the design document,
+// Cloud Hypervisor seeded through esdm_cdev - and the hardware
+// and services that feed the ESDM through a provider process. Its statements are those of the design document,
 // its colors those of palette.typ.
 
 #import "../palette.typ": *
@@ -170,10 +170,10 @@
 
 // ---------------------------------------------------------------- claims
 
-#let claim(sign, title, body) = grid(columns: (30mm, 1fr),
+#let claim(sign, title, body) = grid(columns: (27mm, 1fr),
   column-gutter: 9mm, align: horizon,
-  box(width: 30mm, height: 30mm, radius: 7mm, fill: accent-soft,
-    align(center + horizon, text(size: 60pt, icon(sign,
+  box(width: 27mm, height: 27mm, radius: 6mm, fill: accent-soft,
+    align(center + horizon, text(size: 54pt, icon(sign,
       fill: accent-text)))),
   stack(spacing: 6mm,
     text(size: 46pt, weight: "semibold", title),
@@ -182,7 +182,7 @@
 #let claims = {
   heading-text[Why the ESDM]
   v(14mm, weak: true)
-  stack(spacing: 11mm,
+  stack(spacing: 7mm,
     claim("plug")[Drop-in][No change to the applications],
     claim("microchip")[Stock kernel][No kernel patch; updated like any
       package],
@@ -206,10 +206,10 @@
   heading-text[Example: Entropy for a VM]
   v(14mm, weak: true)
   let part(title, sub, fill: background, stroke: rule) = chip(fill: fill,
-    stroke: stroke, height: 38mm, stack(spacing: 6mm,
+    stroke: stroke, height: 33mm, stack(spacing: 5mm,
       text(weight: "semibold", title),
       text(size: t-small, fill: muted, sub)))
-  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 22mm,
+  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 17mm,
     align: (left, center, left + horizon),
     [],
     grid(columns: 40pt, rows: (1fr, 30pt), align: center,
@@ -218,7 +218,7 @@
         (20pt, 30pt))),
     pad(left: 5mm, text(size: t-small, fill: muted, body)))
   let zone(name, fill, body) = block(width: 100%, fill: fill, radius: 8mm,
-    inset: (x: 10mm, y: 9mm), {
+    inset: (x: 9mm, y: 7mm), {
     text(size: t-small, weight: "semibold", fill: muted, tracking: 2pt,
       upper(name))
     v(7mm, weak: true)
@@ -239,34 +239,33 @@
   })
 }
 
-// ---------------------------------------------------------------- states
+// ---------------------------------------------------------------- devices
 
-// The states of a DRNG instance in one line: the claim "assured".
-#let states = {
-  heading-text[Life of a DRNG Instance]
+// Hardware and services as entropy sources: each is served by a provider
+// process that the server reads as its external entropy source.
+#let devices = {
+  heading-text[HSM, Smart Card, KMS]
   v(14mm, weak: true)
-  let state(title, sub, fill: accent-soft, stroke: accent) = box(
-    width: 100%, height: 66mm, radius: 7mm, fill: fill,
-    stroke: 2.5pt + stroke, align(center + horizon, stack(spacing: 7mm,
+  let part(title, sub, fill: background, stroke: rule, height: 33mm) = chip(
+    fill: fill, stroke: stroke, height: height, stack(spacing: 5mm,
       text(weight: "semibold", title),
-      text(size: t-small, fill: muted, sub))))
-  let arrow(back: false) = align(center + horizon, stack(spacing: 4mm,
-    polygon(fill: accent, stroke: none, (0mm, 3mm), (11mm, 3mm),
-      (11mm, 0mm), (19mm, 5mm), (11mm, 10mm), (11mm, 7mm), (0mm, 7mm)),
-    if back {
-      polygon(fill: accent, stroke: none, (19mm, 3mm), (8mm, 3mm),
-        (8mm, 0mm), (0mm, 5mm), (8mm, 10mm), (8mm, 7mm), (19mm, 7mm))
-    }))
-  grid(columns: (1fr, 21mm, 1fr, 21mm, 1fr), column-gutter: 3mm,
-    state(fill: surface, stroke: ink-soft)[Unseeded][no output],
-    arrow(),
-    state[Seeded][serves],
-    arrow(back: true),
-    state[Reseed due][reseeds first])
-  v(10mm, weak: true)
-  text(size: t-small, fill: muted)[A reseed is due after 2#super[20]
-    requests or 600 s. A reset or a fork ends the output until the next
-    full seed.]
+      if sub != none { text(size: t-small, fill: muted, sub) }))
+  let down = align(center, grid(columns: 40pt, rows: (7mm, 30pt),
+    align: center,
+    rect(width: 9pt, height: 100%, fill: accent, stroke: none),
+    polygon(fill: accent, stroke: none, (0pt, 0pt), (40pt, 0pt),
+      (20pt, 30pt))))
+  grid(columns: (1fr, 1fr, 1fr), column-gutter: 6mm, row-gutter: 4mm,
+    part(fill: surface)[HSM][PKCS\#11],
+    part(fill: surface)[Smart card][PC/SC],
+    part(fill: surface)[KMS][KMIP, REST],
+    down, down, down,
+    grid.cell(colspan: 3, part[Provider process][`esdm-es-pkcs11`,
+      `esdm-es-pcsc` or your own]),
+    grid.cell(colspan: 3, down),
+    grid.cell(colspan: 3, part(fill: accent-soft, stroke: accent)[
+      `esdm-server`][external entropy source, credited as configured]),
+  )
 }
 
 // ---------------------------------------------------------------- body
@@ -281,6 +280,6 @@
     v(1fr)
     example
     v(1fr)
-    states
+    devices
   }),
 ))
