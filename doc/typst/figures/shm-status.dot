@@ -1,0 +1,44 @@
+// Interface specification, section "Status Shared Memory Segment and
+// Semaphores": who writes and who reads the fields of the segment, and
+// which semaphore announces a change to whom.
+digraph shm {
+  graph [rankdir=LR, nodesep=0.16, ranksep=0.45, fontname="Source Sans 3",
+         bgcolor="#FFFFFF", newrank=true];
+  node [shape=box, style="rounded,filled", fontname="Source Sans 3",
+        fontsize=10, color="#334155", fillcolor="#FFFFFF",
+        fontcolor="#0F172A", margin="0.12,0.06"];
+  edge [color="#475569", arrowsize=0.6, fontname="Source Sans 3",
+        fontsize=9, fontcolor="#475569"];
+
+  server [label="esdm-server\n(M-SHM)\n\nthe only writer", fillcolor="#DBEAFE",
+          penwidth=2.2];
+
+  seg [shape=record, style="filled", fillcolor="#F8FAFC",
+       label="{IF-SHM.1  struct esdm_shm_status}|<v> version|<i> info, infolen|<t> unpriv_threads|<o> operational|<n> need_entropy|<s> suspend_gen"];
+
+  semr [label="IF-SHM.2\nposted on a change", shape=ellipse, fillcolor="#F1F5F9"];
+  semu [label="IF-SHM.3\nposted on a change", shape=ellipse, fillcolor="#F1F5F9"];
+  seme [label="IF-SHM.4\nposted while\nentropy is needed", shape=ellipse, fillcolor="#F1F5F9"];
+
+  random [label="esdm-cuse-random\npoll checker, poll(), IOCTL 42"];
+  urandom [label="esdm-cuse-urandom\npoll checker, poll(), IOCTL 42"];
+  auxc [label="libesdm_aux_client\nesdm_aux_timedwait_for_need_entropy()"];
+
+  {rank=same; seg; semr; semu; seme;}
+
+  server -> seg:v [label=" start, exit "];
+  server -> seg:i [label=" start "];
+  server -> seg:o [label=" state changes "];
+  server -> seg:n;
+  server -> seg:s [label=" suspend, exit "];
+  server -> semr [label=" sem_post() ", style=dashed];
+  server -> semu [style=dashed];
+  server -> seme [style=dashed];
+
+  seg:v -> random [label=" all fields "];
+  seg:o -> urandom;
+  seg:n -> auxc [label=" version,\n need_entropy "];
+  semr -> random [label=" sem_wait() ", style=dashed];
+  semu -> urandom [style=dashed];
+  seme -> auxc [label=" sem_clockwait() ", style=dashed];
+}
