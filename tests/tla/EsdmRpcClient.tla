@@ -33,8 +33,18 @@
 (*   esdm_rpcc_conn_lock with the pointer load and released with the       *)
 (*   claim: nothing else touches what they guard in between.               *)
 (* - A request is a tag <<thread, bit>>, the bit flipped per write; the    *)
-(*   server echoes it. The real protocol has no tag (request_id is 0):     *)
-(*   responses are matched by order, which the tag lets us check.          *)
+(*   server echoes it. The tag is a ghost: esdm_rpc_client_pack() sends    *)
+(*   request_id 0, the server echoes request_id and method_index, and      *)
+(*   esdm_rpc_client_read_handler() byte-swaps and logs both and compares  *)
+(*   neither. The client takes the next message of the socket as the       *)
+(*   answer; the tag lets us check that it is the right one.               *)
+(* - ResponseMatch therefore rests on the server: it holds for a server    *)
+(*   that writes at most one response per request it read, in their order. *)
+(*   esdm_rpcs_unpack() does that (one closure per request, the connection *)
+(*   closed when the write fails), and the model's server does unless      *)
+(*   MaxExtra > 0: then it may write an answer twice, which the client     *)
+(*   takes for the answer to its next request. CheckId is a comparison of  *)
+(*   the echoed id the code does not have, to show what it would give.     *)
 (* - The calls: "nb" esdm_rpcc_get_random_bytes(), "full"                 *)
 (*   esdm_rpcc_get_random_bytes_full() and _pr() (same client logic),      *)
 (*   "fullnb" _full_noblock() and _pr_noblock(), "timeout"                 *)
@@ -44,9 +54,18 @@
 (* - An interrupt function is a flag the environment raises in a call; a  *)
 (*   sticky one stays raised until the call returns (CUSE, the timeout     *)
 (*   chain), a one-shot one is cleared when it reports.                    *)
-(* - Locks are pthread mutexes, assumed strongly fair (fair+). The robust  *)
-(*   ones hand a lock whose owner died to the next locker. A thread can   *)
-(*   die (pthread_cancel) only in read(), the point where it matters.     *)
+(* - Fairness: every step is weakly fair, and the wait for the ref_cnt of  *)
+(*   a busy connection (gs4) is strongly fair: a waiter gets the mutex     *)
+(*   although other threads keep taking it in between. That is an          *)
+(*   assumption on pthread_mutex_lock(), which POSIX and glibc do not      *)
+(*   guarantee; WeakSpec is the specification without it. rpc_conn->lock   *)
+(*   needs none: only the owner of ref_cnt takes it.                       *)
+(* - The robust mutexes hand a lock whose owner died to the next locker   *)
+(*   (Robust; FALSE is a plain mutex). A thread can die (pthread_cancel)   *)
+(*   only in read(), the point where it matters.                           *)
+(* - The threads make MaxCalls calls each and end, and the server and the  *)
+(*   environment end with them, so that a state without a successor other  *)
+(*   than the final one is a hang; with Endless they call without end.     *)
 (* - The fix switches ResetOnErr, IntrUnknown and TimedGet are the code as *)
 (*   it is; the configurations that show a finding turn one off.           *)
 (* - Not modelled: the fork handlers, a second init/fini pair (the init    *)
@@ -62,6 +81,7 @@ CONSTANTS
                   \* "timeout", "once"
     Sizes,        \* request sizes in chunks
     MaxCalls,     \* calls per thread
+    Endless,      \* ... or calls without end
     MaxRounds,    \* re-sends of one invoke before its bound passes
     Slices,       \* SO_RCVTIMEO slices of one receive budget
     Drops,        \* the server may lose an answer
@@ -82,7 +102,12 @@ CONSTANTS
     Hog,          \* a caller holds the one connection longer than any
                   \* deadline
     NoReset,      \* mutation: an abandoned request's socket is kept
-    NoOwnerDeadReset \* mutation: EOWNERDEAD on the lock keeps the socket
+    NoOwnerDeadReset, \* mutation: EOWNERDEAD on the lock keeps the socket
+    Robust,       \* the mutexes are robust; FALSE: mutation, plain ones
+    MaxExtra,     \* answers the server writes twice: not what the server
+                  \* does, but nothing the client would notice
+    CheckId       \* NOT in the code: the client compares the echoed
+                  \* request id and drops the socket on another one
 
 Conns == 1..NC
 NoProc == "none"
@@ -127,6 +152,7 @@ variables
     ivr = [t \in Threads |-> "none"],     \* rpc_conn->last_error
     cres = [t \in Threads |-> "none"],    \* buffer.ret, set by the closure
     dead = {},
+    extras = 0,                           \* answers written twice
     \* ghosts: tag bit of the last request, writes of a "once" call and
     \* its runs by the server, the call started while good, properties
     \* violated
@@ -137,7 +163,7 @@ variables
     viol = {};
 
 define {
-    Free == {NoProc} \cup dead
+    Free == {NoProc} \cup (IF Robust THEN dead ELSE {})
     \* esdm_rpcc_interrupted(), with the deadline chained in front
     Intr(t) == intr[t] \/ (kind[t] = "timeout" /\ dl[t])
     AllDone == \A t \in Threads : pc[t] = "Done"
@@ -208,7 +234,8 @@ gs2: while (gi < NC) {
      \* wait for the home node outside the connection lock
 gs3: waiters[node] := waiters[node] + 1;
      rdrs := rdrs \ {self};
-gs4: either {
+     \* strongly fair: see the header
+gs4:+ either {
          await ref[node] \in Free;
          ref[node] := self;
      } or {
@@ -302,7 +329,17 @@ rh:  if (Intr(self)) {
              dead := dead \cup {self};
              goto ivDie;
          } or {
-             if (toCli[held[self]] # <<>>) {
+             if (toCli[held[self]] # <<>>
+                 /\ CheckId
+                 /\ Head(toCli[held[self]])[1] # <<self, bit[self]>>) {
+                 \* not in the code: another id than the one sent
+                 resetSock(held[self]);
+                 cres[self] := "err";
+                 r := "err";
+                 goto ivOut;
+             } else if (toCli[held[self]] # <<>>) {
+                 \* the code: the next message is the answer, the echoed
+                 \* request_id and method_index are not compared
                  if (Head(toCli[held[self]])[1] # <<self, bit[self]>>)
                      viol := viol \cup {"Mismatch"};
                  cres[self] := Head(toCli[held[self]])[2];
@@ -377,15 +414,15 @@ ivOut: ivr[self] := r;
 ivDie: return;
 }
 
-fair+ process (cl \in Threads)
+fair process (cl \in Threads)
     variables calls = 0, n = 0, done = 0, tries = 0, res = "none";
 {
-c0: while (calls < MaxCalls) {
+c0: while (Endless \/ calls < MaxCalls) {
         with (k \in Kinds, s \in Sizes) {
             kind[self] := k;
             n := IF k \in {"fullnb", "once"} THEN 1 ELSE s;
         };
-        calls := calls + 1;
+        calls := IF Endless THEN 0 ELSE calls + 1;
         intr[self] := FALSE;
         dl[self] := FALSE;
         sent[self] := 0;
@@ -486,10 +523,16 @@ sv0: while (~AllDone) {
          either {
              \* esdm_rpcs_read() and the handler's answer
              await sopen[ConnOf(self)] /\ toSrv[ConnOf(self)] # <<>>;
+             \* x: the answer is written twice, see MaxExtra
              with (q = Head(toSrv[ConnOf(self)]),
                    v \in IF good \/ kind[q[1]] = "once"
-                         THEN {"data"} ELSE {"data", "eagain"}) {
-                 toCli[ConnOf(self)] := Append(toCli[ConnOf(self)], <<q, v>>);
+                         THEN {"data"} ELSE {"data", "eagain"},
+                   x \in IF ~good /\ extras < MaxExtra
+                         THEN BOOLEAN ELSE {FALSE}) {
+                 toCli[ConnOf(self)] :=
+                     IF x THEN toCli[ConnOf(self)] \o << <<q, v>>, <<q, v>> >>
+                     ELSE Append(toCli[ConnOf(self)], <<q, v>>);
+                 extras := IF x THEN extras + 1 ELSE extras;
                  run(q);
              };
              toSrv[ConnOf(self)] := Tail(toSrv[ConnOf(self)]);
@@ -545,12 +588,13 @@ en0: while (~AllDone) {
 }
 
 \* a caller that checked out the one connection and keeps it past any
-\* deadline: a slow request, or a call of many
+\* deadline, here until the calls of the threads are over: a slow request,
+\* or a call of many
 process (hg \in HogProcs)
 {
 hg0: await ref[1] \in Free;
      ref[1] := self;
-hg1: await FALSE;
+hg1: await AllDone;
 }
 
 \* esdm_rpcc_fini_service() and esdm_rpcc_release_conns()
@@ -602,11 +646,11 @@ fi8: if (~inUse) freed := TRUE;
 CONSTANT defaultInitValue
 VARIABLES ref, lk, waiters, cstate, destroyed, published, freed, rdrs, wtr, 
           wantW, cfd, sopen, toSrv, toCli, rst, up, restarts, good, held, 
-          kind, intr, dl, gr, ivr, cres, dead, bit, sent, ran, sg, viol, pc, 
-          stack
+          kind, intr, dl, gr, ivr, cres, dead, extras, bit, sent, ran, sg, 
+          viol, pc, stack
 
 (* define statement *)
-Free == {NoProc} \cup dead
+Free == {NoProc} \cup (IF Robust THEN dead ELSE {})
 
 Intr(t) == intr[t] \/ (kind[t] = "timeout" /\ dl[t])
 AllDone == \A t \in Threads : pc[t] = "Done"
@@ -616,9 +660,9 @@ VARIABLES gi, node, once, rounds, resets, sl, wr, r, calls, n, done, tries,
 
 vars == << ref, lk, waiters, cstate, destroyed, published, freed, rdrs, wtr, 
            wantW, cfd, sopen, toSrv, toCli, rst, up, restarts, good, held, 
-           kind, intr, dl, gr, ivr, cres, dead, bit, sent, ran, sg, viol, pc, 
-           stack, gi, node, once, rounds, resets, sl, wr, r, calls, n, done, 
-           tries, res, fc, inUse >>
+           kind, intr, dl, gr, ivr, cres, dead, extras, bit, sent, ran, sg, 
+           viol, pc, stack, gi, node, once, rounds, resets, sl, wr, r, calls, 
+           n, done, tries, res, fc, inUse >>
 
 ProcSet == (Threads) \cup (SrvProcs) \cup {"env"} \cup (HogProcs) \cup (FiniProcs)
 
@@ -649,6 +693,7 @@ Init == (* Global variables *)
         /\ ivr = [t \in Threads |-> "none"]
         /\ cres = [t \in Threads |-> "none"]
         /\ dead = {}
+        /\ extras = 0
         /\ bit = [t \in Threads |-> 0]
         /\ sent = [t \in Threads |-> 0]
         /\ ran = [t \in Threads |-> 0]
@@ -697,9 +742,9 @@ gs0(self) == /\ pc[self] = "gs0"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, once, 
-                             rounds, resets, sl, wr, r, calls, n, done, tries, 
-                             res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             once, rounds, resets, sl, wr, r, calls, n, done, 
+                             tries, res, fc, inUse >>
 
 gs2(self) == /\ pc[self] = "gs2"
              /\ IF gi[self] < NC
@@ -725,8 +770,9 @@ gs2(self) == /\ pc[self] = "gs2"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              wtr, wantW, cfd, sopen, toSrv, toCli, rst, up, 
                              restarts, good, kind, intr, dl, ivr, cres, dead, 
-                             bit, sent, ran, sg, viol, once, rounds, resets, 
-                             sl, wr, r, calls, n, done, tries, res, fc, inUse >>
+                             extras, bit, sent, ran, sg, viol, once, rounds, 
+                             resets, sl, wr, r, calls, n, done, tries, res, fc, 
+                             inUse >>
 
 gs3(self) == /\ pc[self] = "gs3"
              /\ waiters' = [waiters EXCEPT ![node[self]] = waiters[node[self]] + 1]
@@ -735,9 +781,9 @@ gs3(self) == /\ pc[self] = "gs3"
              /\ UNCHANGED << ref, lk, cstate, destroyed, published, freed, wtr, 
                              wantW, cfd, sopen, toSrv, toCli, rst, up, 
                              restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 gs4(self) == /\ pc[self] = "gs4"
              /\ \/ /\ ref[node[self]] \in Free
@@ -751,9 +797,9 @@ gs4(self) == /\ pc[self] = "gs4"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 gs5(self) == /\ pc[self] = "gs5"
              /\ IF cstate[node[self]] = "init"
@@ -767,9 +813,9 @@ gs5(self) == /\ pc[self] = "gs5"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, kind, intr, dl, ivr, cres, 
-                             dead, bit, sent, ran, sg, viol, stack, gi, node, 
-                             once, rounds, resets, sl, wr, r, calls, n, done, 
-                             tries, res, fc, inUse >>
+                             dead, extras, bit, sent, ran, sg, viol, stack, gi, 
+                             node, once, rounds, resets, sl, wr, r, calls, n, 
+                             done, tries, res, fc, inUse >>
 
 gs6(self) == /\ pc[self] = "gs6"
              /\ waiters' = [waiters EXCEPT ![node[self]] = waiters[node[self]] - 1]
@@ -780,9 +826,9 @@ gs6(self) == /\ pc[self] = "gs6"
              /\ UNCHANGED << ref, lk, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, once, 
-                             rounds, resets, sl, wr, r, calls, n, done, tries, 
-                             res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             once, rounds, resets, sl, wr, r, calls, n, done, 
+                             tries, res, fc, inUse >>
 
 getService(self) == gs0(self) \/ gs2(self) \/ gs3(self) \/ gs4(self)
                        \/ gs5(self) \/ gs6(self)
@@ -819,9 +865,10 @@ iv0(self) == /\ pc[self] = "iv0"
                                         /\ pc' = [pc EXCEPT ![self] = "ivOut"]
              /\ UNCHANGED << ref, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, up, restarts, good, held, kind, 
-                             intr, dl, gr, ivr, cres, dead, bit, sent, ran, sg, 
-                             viol, stack, gi, node, once, rounds, resets, sl, 
-                             wr, calls, n, done, tries, res, fc, inUse >>
+                             intr, dl, gr, ivr, cres, dead, extras, bit, sent, 
+                             ran, sg, viol, stack, gi, node, once, rounds, 
+                             resets, sl, wr, calls, n, done, tries, res, fc, 
+                             inUse >>
 
 iv2(self) == /\ pc[self] = "iv2"
              /\ IF Intr(self)
@@ -872,9 +919,9 @@ iv2(self) == /\ pc[self] = "iv2"
                         /\ intr' = intr
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, wantW, up, restarts, good, held, 
-                             kind, dl, gr, ivr, cres, dead, ran, sg, viol, 
-                             stack, gi, node, once, rounds, resets, sl, calls, 
-                             n, done, tries, res, fc, inUse >>
+                             kind, dl, gr, ivr, cres, dead, extras, ran, sg, 
+                             viol, stack, gi, node, once, rounds, resets, sl, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 rh(self) == /\ pc[self] = "rh"
             /\ IF Intr(self)
@@ -900,57 +947,72 @@ rh(self) == /\ pc[self] = "rh"
                              /\ pc' = [pc EXCEPT ![self] = "ivDie"]
                              /\ UNCHANGED <<cfd, sopen, toSrv, toCli, rst, cres, viol, sl, r>>
                           \/ /\ IF toCli[held[self]] # <<>>
-                                   THEN /\ IF Head(toCli[held[self]])[1] # <<self, bit[self]>>
-                                              THEN /\ viol' = (viol \cup {"Mismatch"})
-                                              ELSE /\ TRUE
-                                                   /\ viol' = viol
-                                        /\ cres' = [cres EXCEPT ![self] = Head(toCli[held[self]])[2]]
-                                        /\ toCli' = [toCli EXCEPT ![held[self]] = Tail(toCli[held[self]])]
-                                        /\ r' = [r EXCEPT ![self] = "ok"]
+                                   /\ CheckId
+                                   /\ Head(toCli[held[self]])[1] # <<self, bit[self]>>
+                                   THEN /\ cfd' = [cfd EXCEPT ![(held[self])] = FALSE]
+                                        /\ sopen' = [sopen EXCEPT ![(held[self])] = FALSE]
+                                        /\ toSrv' = [toSrv EXCEPT ![(held[self])] = <<>>]
+                                        /\ toCli' = [toCli EXCEPT ![(held[self])] = <<>>]
+                                        /\ rst' = [rst EXCEPT ![(held[self])] = FALSE]
+                                        /\ cres' = [cres EXCEPT ![self] = "err"]
+                                        /\ r' = [r EXCEPT ![self] = "err"]
                                         /\ pc' = [pc EXCEPT ![self] = "ivOut"]
-                                        /\ UNCHANGED << cfd, sopen, toSrv, rst, 
-                                                        sl >>
-                                   ELSE /\ IF ~sopen[held[self]]
-                                              THEN /\ rst' = [rst EXCEPT ![held[self]] = FALSE]
-                                                   /\ r' = [r EXCEPT ![self] = "reset"]
-                                                   /\ pc' = [pc EXCEPT ![self] = "ivR"]
+                                        /\ UNCHANGED << viol, sl >>
+                                   ELSE /\ IF toCli[held[self]] # <<>>
+                                              THEN /\ IF Head(toCli[held[self]])[1] # <<self, bit[self]>>
+                                                         THEN /\ viol' = (viol \cup {"Mismatch"})
+                                                         ELSE /\ TRUE
+                                                              /\ viol' = viol
+                                                   /\ cres' = [cres EXCEPT ![self] = Head(toCli[held[self]])[2]]
+                                                   /\ toCli' = [toCli EXCEPT ![held[self]] = Tail(toCli[held[self]])]
+                                                   /\ r' = [r EXCEPT ![self] = "ok"]
+                                                   /\ pc' = [pc EXCEPT ![self] = "ivOut"]
                                                    /\ UNCHANGED << cfd, sopen, 
-                                                                   toSrv, 
-                                                                   toCli, cres, 
+                                                                   toSrv, rst, 
                                                                    sl >>
-                                              ELSE /\ ~good \/ toSrv[held[self]] = <<>>
-                                                   /\ \/ /\ sl[self] + 1 < Slices
-                                                         /\ sl' = [sl EXCEPT ![self] = sl[self] + 1]
-                                                         /\ pc' = [pc EXCEPT ![self] = "rh"]
-                                                         /\ UNCHANGED <<cfd, sopen, toSrv, toCli, rst, cres, r>>
-                                                      \/ /\ r' = [r EXCEPT ![self] = "eagain"]
-                                                         /\ pc' = [pc EXCEPT ![self] = "ivR"]
-                                                         /\ UNCHANGED <<cfd, sopen, toSrv, toCli, rst, cres, sl>>
-                                                      \/ /\ ReadErr
-                                                         /\ IF ResetOnErr
-                                                               THEN /\ cfd' = [cfd EXCEPT ![(held[self])] = FALSE]
-                                                                    /\ sopen' = [sopen EXCEPT ![(held[self])] = FALSE]
-                                                                    /\ toSrv' = [toSrv EXCEPT ![(held[self])] = <<>>]
-                                                                    /\ toCli' = [toCli EXCEPT ![(held[self])] = <<>>]
-                                                                    /\ rst' = [rst EXCEPT ![(held[self])] = FALSE]
-                                                               ELSE /\ TRUE
-                                                                    /\ UNCHANGED << cfd, 
-                                                                                    sopen, 
-                                                                                    toSrv, 
-                                                                                    toCli, 
-                                                                                    rst >>
-                                                         /\ cres' = [cres EXCEPT ![self] = "err"]
-                                                         /\ r' = [r EXCEPT ![self] = "err"]
-                                                         /\ pc' = [pc EXCEPT ![self] = "ivOut"]
-                                                         /\ sl' = sl
-                                        /\ viol' = viol
+                                              ELSE /\ IF ~sopen[held[self]]
+                                                         THEN /\ rst' = [rst EXCEPT ![held[self]] = FALSE]
+                                                              /\ r' = [r EXCEPT ![self] = "reset"]
+                                                              /\ pc' = [pc EXCEPT ![self] = "ivR"]
+                                                              /\ UNCHANGED << cfd, 
+                                                                              sopen, 
+                                                                              toSrv, 
+                                                                              toCli, 
+                                                                              cres, 
+                                                                              sl >>
+                                                         ELSE /\ ~good \/ toSrv[held[self]] = <<>>
+                                                              /\ \/ /\ sl[self] + 1 < Slices
+                                                                    /\ sl' = [sl EXCEPT ![self] = sl[self] + 1]
+                                                                    /\ pc' = [pc EXCEPT ![self] = "rh"]
+                                                                    /\ UNCHANGED <<cfd, sopen, toSrv, toCli, rst, cres, r>>
+                                                                 \/ /\ r' = [r EXCEPT ![self] = "eagain"]
+                                                                    /\ pc' = [pc EXCEPT ![self] = "ivR"]
+                                                                    /\ UNCHANGED <<cfd, sopen, toSrv, toCli, rst, cres, sl>>
+                                                                 \/ /\ ReadErr
+                                                                    /\ IF ResetOnErr
+                                                                          THEN /\ cfd' = [cfd EXCEPT ![(held[self])] = FALSE]
+                                                                               /\ sopen' = [sopen EXCEPT ![(held[self])] = FALSE]
+                                                                               /\ toSrv' = [toSrv EXCEPT ![(held[self])] = <<>>]
+                                                                               /\ toCli' = [toCli EXCEPT ![(held[self])] = <<>>]
+                                                                               /\ rst' = [rst EXCEPT ![(held[self])] = FALSE]
+                                                                          ELSE /\ TRUE
+                                                                               /\ UNCHANGED << cfd, 
+                                                                                               sopen, 
+                                                                                               toSrv, 
+                                                                                               toCli, 
+                                                                                               rst >>
+                                                                    /\ cres' = [cres EXCEPT ![self] = "err"]
+                                                                    /\ r' = [r EXCEPT ![self] = "err"]
+                                                                    /\ pc' = [pc EXCEPT ![self] = "ivOut"]
+                                                                    /\ sl' = sl
+                                                   /\ viol' = viol
                              /\ dead' = dead
                        /\ intr' = intr
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, up, restarts, good, held, 
-                            kind, dl, gr, ivr, bit, sent, ran, sg, stack, gi, 
-                            node, once, rounds, resets, wr, calls, n, done, 
-                            tries, res, fc, inUse >>
+                            kind, dl, gr, ivr, extras, bit, sent, ran, sg, 
+                            stack, gi, node, once, rounds, resets, wr, calls, 
+                            n, done, tries, res, fc, inUse >>
 
 ivR(self) == /\ pc[self] = "ivR"
              /\ IF once[self]
@@ -1012,9 +1074,9 @@ ivR(self) == /\ pc[self] = "ivR"
                               /\ UNCHANGED <<rounds, resets, sl, wr>>
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, wantW, up, restarts, good, held, 
-                             kind, intr, dl, gr, ivr, cres, dead, bit, sent, 
-                             ran, sg, viol, stack, gi, node, once, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             kind, intr, dl, gr, ivr, cres, dead, extras, bit, 
+                             sent, ran, sg, viol, stack, gi, node, once, calls, 
+                             n, done, tries, res, fc, inUse >>
 
 ivOut(self) == /\ pc[self] = "ivOut"
                /\ ivr' = [ivr EXCEPT ![self] = r[self]]
@@ -1030,9 +1092,9 @@ ivOut(self) == /\ pc[self] = "ivOut"
                /\ UNCHANGED << ref, waiters, cstate, destroyed, published, 
                                freed, rdrs, wtr, wantW, cfd, sopen, toSrv, 
                                toCli, rst, up, restarts, good, held, kind, 
-                               intr, dl, gr, cres, dead, bit, sent, ran, sg, 
-                               viol, gi, node, calls, n, done, tries, res, fc, 
-                               inUse >>
+                               intr, dl, gr, cres, dead, extras, bit, sent, 
+                               ran, sg, viol, gi, node, calls, n, done, tries, 
+                               res, fc, inUse >>
 
 ivDie(self) == /\ pc[self] = "ivDie"
                /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -1046,20 +1108,20 @@ ivDie(self) == /\ pc[self] = "ivDie"
                /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                                freed, rdrs, wtr, wantW, cfd, sopen, toSrv, 
                                toCli, rst, up, restarts, good, held, kind, 
-                               intr, dl, gr, ivr, cres, dead, bit, sent, ran, 
-                               sg, viol, gi, node, calls, n, done, tries, res, 
-                               fc, inUse >>
+                               intr, dl, gr, ivr, cres, dead, extras, bit, 
+                               sent, ran, sg, viol, gi, node, calls, n, done, 
+                               tries, res, fc, inUse >>
 
 invoke(self) == iv0(self) \/ iv2(self) \/ rh(self) \/ ivR(self)
                    \/ ivOut(self) \/ ivDie(self)
 
 c0(self) == /\ pc[self] = "c0"
-            /\ IF calls[self] < MaxCalls
+            /\ IF Endless \/ calls[self] < MaxCalls
                   THEN /\ \E k \in Kinds:
                             \E s \in Sizes:
                               /\ kind' = [kind EXCEPT ![self] = k]
                               /\ n' = [n EXCEPT ![self] = IF k \in {"fullnb", "once"} THEN 1 ELSE s]
-                       /\ calls' = [calls EXCEPT ![self] = calls[self] + 1]
+                       /\ calls' = [calls EXCEPT ![self] = IF Endless THEN 0 ELSE calls[self] + 1]
                        /\ intr' = [intr EXCEPT ![self] = FALSE]
                        /\ dl' = [dl EXCEPT ![self] = FALSE]
                        /\ sent' = [sent EXCEPT ![self] = 0]
@@ -1071,8 +1133,8 @@ c0(self) == /\ pc[self] = "c0"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, gr, ivr, cres, dead, 
-                            bit, viol, stack, gi, node, once, rounds, resets, 
-                            sl, wr, r, done, tries, res, fc, inUse >>
+                            extras, bit, viol, stack, gi, node, once, rounds, 
+                            resets, sl, wr, r, done, tries, res, fc, inUse >>
 
 c1(self) == /\ pc[self] = "c1"
             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "getService",
@@ -1086,9 +1148,9 @@ c1(self) == /\ pc[self] = "c1"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, gr, 
-                            ivr, cres, dead, bit, sent, ran, sg, viol, once, 
-                            rounds, resets, sl, wr, r, calls, n, done, tries, 
-                            res, fc, inUse >>
+                            ivr, cres, dead, extras, bit, sent, ran, sg, viol, 
+                            once, rounds, resets, sl, wr, r, calls, n, done, 
+                            tries, res, fc, inUse >>
 
 c2(self) == /\ pc[self] = "c2"
             /\ IF gr[self] # "ok"
@@ -1101,9 +1163,9 @@ c2(self) == /\ pc[self] = "c2"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, ivr, 
-                            cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                            node, once, rounds, resets, sl, wr, r, calls, n, 
-                            done, tries, fc, inUse >>
+                            cres, dead, extras, bit, sent, ran, sg, viol, 
+                            stack, gi, node, once, rounds, resets, sl, wr, r, 
+                            calls, n, done, tries, fc, inUse >>
 
 c3(self) == /\ pc[self] = "c3"
             /\ IF done[self] < n[self]
@@ -1137,8 +1199,8 @@ c3(self) == /\ pc[self] = "c3"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, gr, 
-                            ivr, dead, bit, sent, ran, sg, viol, gi, node, 
-                            calls, n, done, tries, fc, inUse >>
+                            ivr, dead, extras, bit, sent, ran, sg, viol, gi, 
+                            node, calls, n, done, tries, fc, inUse >>
 
 c4(self) == /\ pc[self] = "c4"
             /\ LET le == ivr[self] IN
@@ -1184,9 +1246,10 @@ c4(self) == /\ pc[self] = "c4"
                                                                                held >>
             /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                             rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
-                            up, restarts, good, kind, intr, dl, gr, dead, bit, 
-                            sent, ran, sg, viol, stack, gi, node, once, rounds, 
-                            resets, sl, wr, r, calls, n, tries, fc, inUse >>
+                            up, restarts, good, kind, intr, dl, gr, dead, 
+                            extras, bit, sent, ran, sg, viol, stack, gi, node, 
+                            once, rounds, resets, sl, wr, r, calls, n, tries, 
+                            fc, inUse >>
 
 c5(self) == /\ pc[self] = "c5"
             /\ TRUE
@@ -1194,9 +1257,9 @@ c5(self) == /\ pc[self] = "c5"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, gr, 
-                            ivr, cres, dead, bit, sent, ran, sg, viol, stack, 
-                            gi, node, once, rounds, resets, sl, wr, r, calls, 
-                            n, done, tries, res, fc, inUse >>
+                            ivr, cres, dead, extras, bit, sent, ran, sg, viol, 
+                            stack, gi, node, once, rounds, resets, sl, wr, r, 
+                            calls, n, done, tries, res, fc, inUse >>
 
 c6(self) == /\ pc[self] = "c6"
             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "getService",
@@ -1210,9 +1273,9 @@ c6(self) == /\ pc[self] = "c6"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, gr, 
-                            ivr, cres, dead, bit, sent, ran, sg, viol, once, 
-                            rounds, resets, sl, wr, r, calls, n, done, tries, 
-                            res, fc, inUse >>
+                            ivr, cres, dead, extras, bit, sent, ran, sg, viol, 
+                            once, rounds, resets, sl, wr, r, calls, n, done, 
+                            tries, res, fc, inUse >>
 
 c7(self) == /\ pc[self] = "c7"
             /\ IF gr[self] # "ok"
@@ -1225,9 +1288,9 @@ c7(self) == /\ pc[self] = "c7"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, kind, intr, dl, ivr, 
-                            cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                            node, once, rounds, resets, sl, wr, r, calls, n, 
-                            done, tries, fc, inUse >>
+                            cres, dead, extras, bit, sent, ran, sg, viol, 
+                            stack, gi, node, once, rounds, resets, sl, wr, r, 
+                            calls, n, done, tries, fc, inUse >>
 
 c8(self) == /\ pc[self] = "c8"
             /\ ref' = [ref EXCEPT ![held[self]] = NoProc]
@@ -1236,9 +1299,9 @@ c8(self) == /\ pc[self] = "c8"
             /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                             rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                             up, restarts, good, kind, intr, dl, gr, ivr, cres, 
-                            dead, bit, sent, ran, sg, viol, stack, gi, node, 
-                            once, rounds, resets, sl, wr, r, calls, n, done, 
-                            tries, res, fc, inUse >>
+                            dead, extras, bit, sent, ran, sg, viol, stack, gi, 
+                            node, once, rounds, resets, sl, wr, r, calls, n, 
+                            done, tries, res, fc, inUse >>
 
 c9(self) == /\ pc[self] = "c9"
             /\ IF res[self] = "eintr" /\ tries[self] < InvokeRetry
@@ -1261,8 +1324,9 @@ c9(self) == /\ pc[self] = "c9"
             /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                             freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                             rst, up, restarts, good, held, intr, dl, gr, ivr, 
-                            cres, dead, bit, sent, ran, stack, gi, node, once, 
-                            rounds, resets, sl, wr, r, calls, fc, inUse >>
+                            cres, dead, extras, bit, sent, ran, stack, gi, 
+                            node, once, rounds, resets, sl, wr, r, calls, fc, 
+                            inUse >>
 
 cl(self) == c0(self) \/ c1(self) \/ c2(self) \/ c3(self) \/ c4(self)
                \/ c5(self) \/ c6(self) \/ c7(self) \/ c8(self) \/ c9(self)
@@ -1273,15 +1337,19 @@ sv0(self) == /\ pc[self] = "sv0"
                               /\ LET q == Head(toSrv[ConnOf(self)]) IN
                                    \E v \in IF good \/ kind[q[1]] = "once"
                                             THEN {"data"} ELSE {"data", "eagain"}:
-                                     /\ toCli' = [toCli EXCEPT ![ConnOf(self)] = Append(toCli[ConnOf(self)], <<q, v>>)]
-                                     /\ IF kind[q[1]] = "once"
-                                           THEN /\ IF ran[q[1]] > 0
-                                                      THEN /\ viol' = (viol \cup {"RanTwice"})
-                                                      ELSE /\ TRUE
-                                                           /\ viol' = viol
-                                                /\ ran' = [ran EXCEPT ![q[1]] = ran[q[1]] + 1]
-                                           ELSE /\ TRUE
-                                                /\ UNCHANGED << ran, viol >>
+                                     \E x \in IF ~good /\ extras < MaxExtra
+                                              THEN BOOLEAN ELSE {FALSE}:
+                                       /\ toCli' = [toCli EXCEPT ![ConnOf(self)] = IF x THEN toCli[ConnOf(self)] \o << <<q, v>>, <<q, v>> >>
+                                                                                   ELSE Append(toCli[ConnOf(self)], <<q, v>>)]
+                                       /\ extras' = IF x THEN extras + 1 ELSE extras
+                                       /\ IF kind[q[1]] = "once"
+                                             THEN /\ IF ran[q[1]] > 0
+                                                        THEN /\ viol' = (viol \cup {"RanTwice"})
+                                                        ELSE /\ TRUE
+                                                             /\ viol' = viol
+                                                  /\ ran' = [ran EXCEPT ![q[1]] = ran[q[1]] + 1]
+                                             ELSE /\ TRUE
+                                                  /\ UNCHANGED << ran, viol >>
                               /\ toSrv' = [toSrv EXCEPT ![ConnOf(self)] = Tail(toSrv[ConnOf(self)])]
                               /\ UNCHANGED <<sopen, rst>>
                            \/ /\ Drops /\ ~good /\ sopen[ConnOf(self)]
@@ -1295,17 +1363,18 @@ sv0(self) == /\ pc[self] = "sv0"
                                     ELSE /\ TRUE
                                          /\ UNCHANGED << ran, viol >>
                               /\ toSrv' = [toSrv EXCEPT ![ConnOf(self)] = Tail(toSrv[ConnOf(self)])]
-                              /\ UNCHANGED <<sopen, toCli, rst>>
+                              /\ UNCHANGED <<sopen, toCli, rst, extras>>
                            \/ /\ Closes /\ ~good /\ sopen[ConnOf(self)]
                               /\ \E e \in IF toSrv[ConnOf(self)] # <<>> THEN BOOLEAN
                                           ELSE {FALSE}:
                                    rst' = [rst EXCEPT ![ConnOf(self)] = e]
                               /\ sopen' = [sopen EXCEPT ![ConnOf(self)] = FALSE]
                               /\ toSrv' = [toSrv EXCEPT ![ConnOf(self)] = <<>>]
-                              /\ UNCHANGED <<toCli, ran, viol>>
+                              /\ UNCHANGED <<toCli, extras, ran, viol>>
                         /\ pc' = [pc EXCEPT ![self] = "sv0"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                        /\ UNCHANGED << sopen, toSrv, toCli, rst, ran, viol >>
+                        /\ UNCHANGED << sopen, toSrv, toCli, rst, extras, ran, 
+                                        viol >>
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, wantW, cfd, up, restarts, good, 
                              held, kind, intr, dl, gr, ivr, cres, dead, bit, 
@@ -1345,9 +1414,9 @@ en0 == /\ pc["env"] = "en0"
                                   dl >>
        /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, freed, 
                        rdrs, wtr, wantW, cfd, toCli, held, kind, gr, ivr, cres, 
-                       dead, bit, sent, ran, sg, viol, stack, gi, node, once, 
-                       rounds, resets, sl, wr, r, calls, n, done, tries, res, 
-                       fc, inUse >>
+                       dead, extras, bit, sent, ran, sg, viol, stack, gi, node, 
+                       once, rounds, resets, sl, wr, r, calls, n, done, tries, 
+                       res, fc, inUse >>
 
 en == en0
 
@@ -1358,19 +1427,19 @@ hg0(self) == /\ pc[self] = "hg0"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 hg1(self) == /\ pc[self] = "hg1"
-             /\ FALSE
+             /\ AllDone
              /\ pc' = [pc EXCEPT ![self] = "Done"]
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                              rst, up, restarts, good, held, kind, intr, dl, gr, 
-                             ivr, cres, dead, bit, sent, ran, sg, viol, stack, 
-                             gi, node, once, rounds, resets, sl, wr, r, calls, 
-                             n, done, tries, res, fc, inUse >>
+                             ivr, cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 hg(self) == hg0(self) \/ hg1(self)
 
@@ -1380,9 +1449,9 @@ fi0(self) == /\ pc[self] = "fi0"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 fi1(self) == /\ pc[self] = "fi1"
              /\ wtr = NoProc /\ rdrs = {}
@@ -1392,9 +1461,9 @@ fi1(self) == /\ pc[self] = "fi1"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, cfd, sopen, toSrv, toCli, rst, up, 
                              restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 fi2(self) == /\ pc[self] = "fi2"
              /\ published' = FALSE
@@ -1403,9 +1472,9 @@ fi2(self) == /\ pc[self] = "fi2"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, freed, rdrs, 
                              wantW, cfd, sopen, toSrv, toCli, rst, up, 
                              restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 fi3(self) == /\ pc[self] = "fi3"
              /\ IF fc[self] <= NC
@@ -1417,9 +1486,9 @@ fi3(self) == /\ pc[self] = "fi3"
              /\ UNCHANGED << ref, lk, waiters, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, inUse >>
 
 fi4(self) == /\ pc[self] = "fi4"
              /\ fc' = [fc EXCEPT ![self] = 1]
@@ -1427,9 +1496,9 @@ fi4(self) == /\ pc[self] = "fi4"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              freed, rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, 
                              rst, up, restarts, good, held, kind, intr, dl, gr, 
-                             ivr, cres, dead, bit, sent, ran, sg, viol, stack, 
-                             gi, node, once, rounds, resets, sl, wr, r, calls, 
-                             n, done, tries, res, inUse >>
+                             ivr, cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, inUse >>
 
 fi5(self) == /\ pc[self] = "fi5"
              /\ IF fc[self] <= NC
@@ -1447,9 +1516,9 @@ fi5(self) == /\ pc[self] = "fi5"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res >>
 
 fi6(self) == /\ pc[self] = "fi6"
              /\ ref' = [ref EXCEPT ![fc[self]] = NoProc]
@@ -1457,9 +1526,9 @@ fi6(self) == /\ pc[self] = "fi6"
              /\ UNCHANGED << lk, waiters, cstate, destroyed, published, freed, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 fi7(self) == /\ pc[self] = "fi7"
              /\ \/ /\ waiters[fc[self]] = 0 /\ lk[fc[self]] \in Free
@@ -1477,9 +1546,9 @@ fi7(self) == /\ pc[self] = "fi7"
              /\ pc' = [pc EXCEPT ![self] = "fi5"]
              /\ UNCHANGED << ref, lk, waiters, cstate, published, freed, rdrs, 
                              wtr, wantW, up, restarts, good, held, kind, intr, 
-                             dl, gr, ivr, cres, dead, bit, sent, ran, sg, viol, 
-                             stack, gi, node, once, rounds, resets, sl, wr, r, 
-                             calls, n, done, tries, res >>
+                             dl, gr, ivr, cres, dead, extras, bit, sent, ran, 
+                             sg, viol, stack, gi, node, once, rounds, resets, 
+                             sl, wr, r, calls, n, done, tries, res >>
 
 fi8(self) == /\ pc[self] = "fi8"
              /\ IF ~inUse[self]
@@ -1490,9 +1559,9 @@ fi8(self) == /\ pc[self] = "fi8"
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 
                              rdrs, wtr, wantW, cfd, sopen, toSrv, toCli, rst, 
                              up, restarts, good, held, kind, intr, dl, gr, ivr, 
-                             cres, dead, bit, sent, ran, sg, viol, stack, gi, 
-                             node, once, rounds, resets, sl, wr, r, calls, n, 
-                             done, tries, res, fc, inUse >>
+                             cres, dead, extras, bit, sent, ran, sg, viol, 
+                             stack, gi, node, once, rounds, resets, sl, wr, r, 
+                             calls, n, done, tries, res, fc, inUse >>
 
 fi(self) == fi0(self) \/ fi1(self) \/ fi2(self) \/ fi3(self) \/ fi4(self)
                \/ fi5(self) \/ fi6(self) \/ fi7(self) \/ fi8(self)
@@ -1510,7 +1579,9 @@ Next == en
            \/ Terminating
 
 Spec == /\ Init /\ [][Next]_vars
-        /\ \A self \in Threads : SF_vars(cl(self)) /\ SF_vars(getService(self)) /\ SF_vars(invoke(self))
+        /\ \A self \in Threads : /\ WF_vars(cl(self))
+                                 /\ WF_vars(getService(self))
+                                 /\ SF_vars(gs4(self))                                 /\ WF_vars(invoke(self))
         /\ \A self \in SrvProcs : WF_vars(sv(self))
         /\ WF_vars(en)
         /\ \A self \in FiniProcs : WF_vars(fi(self))
@@ -1530,7 +1601,8 @@ TypeOK ==
     /\ lk \in [Conns -> Threads \cup {NoProc}]
     /\ held \in [Threads -> 0..NC]
     /\ waiters \in [Conns -> 0..Cardinality(Threads)]
-    /\ \A c \in Conns : Len(toSrv[c]) + Len(toCli[c]) <= 2
+    /\ \A c \in Conns : Len(toSrv[c]) + Len(toCli[c]) <= 2 + MaxExtra
+    /\ extras \in 0..MaxExtra
 
 \* A call takes the response to its own request or none: never another
 \* thread's, never a late one of a request given up on.
@@ -1591,12 +1663,31 @@ GoodCallsSucceed == "GoodFailed" \notin viol
 
 Idle(t) == pc[t] \in {"c0", "Done"}
 
-\* Every call returns, once the server answers with data for good.
+\* Every call returns, once the server answers with data for good. With
+\* Endless this is freedom from starvation: a thread gets a connection
+\* although the others never stop calling.
 CallsReturn == <>[]good => \A t \in Threads : [](~Idle(t) => <>Idle(t))
+
+\* Whatever the server does, a call returns or keeps asking: it is at no
+\* time left waiting for a lock, a connection or an answer for good. Only
+\* the calls that wait for seeding ask without end (c5), while the server
+\* answers -EAGAIN.
+CallsProgress ==
+    \A t \in Threads : [](~Idle(t) => <>(Idle(t) \/ pc[t] = "c5"))
 
 \* A _full_timeout call returns once its deadline passed, whatever the
 \* server does and however long other callers hold the connections.
 DeadlineReturns ==
     \A t \in Threads :
         [](kind[t] = "timeout" /\ dl[t] => <>(kind[t] # "timeout"))
+
+\* The specification without the strong fairness of the wait for a busy
+\* connection: what a mutex that guarantees no order gives.
+WeakSpec ==
+    /\ Init /\ [][Next]_vars
+    /\ \A t \in Threads :
+           WF_vars(cl(t)) /\ WF_vars(getService(t)) /\ WF_vars(invoke(t))
+    /\ \A s \in SrvProcs : WF_vars(sv(s))
+    /\ WF_vars(en)
+    /\ \A f \in FiniProcs : WF_vars(fi(f))
 =============================================================================
