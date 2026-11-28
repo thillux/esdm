@@ -1,10 +1,20 @@
-// A0 poster of the ESDM for developers (portrait, 841 x 1189 mm). It reads
-// top down: what the ESDM is, the path from the noise to the random numbers
-// with the central figure in the left column, the state machines, the seed
-// buffer and the output paths in the right one, and a closing band. The
-// two columns are independent of each other. The body is set at 34 pt, headings at 70 pt, the title at
-// 116 pt. Its claims are those of the design document, its colors those of
-// palette.typ.
+// A0 poster of the ESDM (portrait, 841 x 1189 mm) for open source
+// conferences, workshops and office walls.
+//
+// What it has to achieve:
+//   from 3 m    the ESDM is a random number generator for Linux in user
+//               space: the title and the pipeline figure;
+//   from 1.5 m  how entropy becomes random numbers, and that the ESDM is
+//               tailored for FIPS 140-3 and AIS 20/31: the four stages and
+//               the four claims;
+//   up close    enough detail to start a conversation, and the two links.
+//
+// It does not document the ESDM. All figures are drawn here for the poster,
+// none is one of the design document: no label is smaller than 34 pt. The
+// left column is the pipeline from the noise to the consumers; the right
+// column, independent of it, shows the seed buffer, the states of a DRNG
+// instance and the claims. Its statements are those of the design document,
+// its colors those of palette.typ.
 
 #import "../palette.typ": *
 #import "../inputs.typ": esdm-version, doc-date
@@ -12,59 +22,72 @@
 
 #let sans = "Source Sans 3"
 #let mono = "Source Code Pro"
-#let figdir = "../figures/"
 #let margin = 40mm
-#let gutter = 24mm
+#let gutter = 26mm
+
+#let t-body = 40pt
+#let t-small = 34pt
+#let t-stage = 54pt
+#let t-heading = 76pt
 
 #set document(title: [ESDM Poster],
   author: ("Stephan Müller", "Markus Theil"))
 #set page(width: 841mm, height: 1189mm, margin: 0pt, fill: background)
-#set text(font: sans, size: 34pt, fill: ink, lang: "en")
-#set par(justify: false, leading: 0.55em, spacing: 0.8em)
-#show raw: set text(font: mono, size: 28pt)
-#set raw(theme: raw-theme)
-#show raw.where(block: true): it => block(width: 100%, fill: surface-code,
-  stroke: 1pt + line-color, radius: 6pt, inset: (x: 18pt, y: 14pt), it)
-#set list(marker: text(fill: accent)[•], body-indent: 0.5em,
-  spacing: 0.55em)
+#set text(font: sans, size: t-body, fill: ink, lang: "en",
+  top-edge: "cap-height", bottom-edge: "baseline")
+#set par(justify: false, leading: 0.62em, spacing: 0.9em)
+#show raw: set text(font: mono, size: 1.12em)
 
-// The heading of a panel, in the accent color.
-#let panel-title(title) = text(size: 70pt, weight: "semibold",
-  fill: accent-text, tracking: -0.5pt, title)
+// ---------------------------------------------------------------- elements
 
-// A panel: a heading, then the body.
-#let panel(title, body) = block(width: 100%, {
-  panel-title(title)
-  v(10mm, weak: true)
+#let heading-text(body) = text(size: t-heading, weight: "semibold",
+  fill: accent-text, tracking: -0.5pt, body)
+
+// A rounded box with a label: an entropy source, a DRNG instance, an
+// interface.
+#let chip(body, fill: background, stroke: rule, color: ink, height: 42mm,
+  weight: "regular") = box(width: 100%, height: height, radius: 5mm,
+  fill: fill, stroke: 2.5pt + stroke, inset: (x: 3mm),
+  align(center + horizon, text(fill: color, weight: weight, body)))
+
+// The number of a stage.
+#let badge(n) = box(width: 24mm, height: 24mm, radius: 12mm, fill: accent,
+  align(center + horizon, text(size: 48pt, weight: "semibold",
+    fill: background, str(n))))
+
+// A stage of the pipeline: its number and name, what happens, the parts.
+#let stage(n, title, note, body) = block(width: 100%, fill: surface,
+  radius: 8mm, inset: 13mm, {
+  grid(columns: (auto, 1fr), column-gutter: 8mm, align: horizon,
+    badge(n),
+    stack(spacing: 8mm,
+      text(size: t-stage, weight: "semibold", title),
+      text(size: t-small, fill: muted, note)))
+  v(11mm, weak: true)
   body
 })
 
-// A figure of the design document with its caption.
-#let fig(file, width, caption) = align(center, {
-  image(figdir + file, width: width)
-  v(2mm)
-  text(size: 27pt, fill: muted, caption)
-})
+// The arrow between two stages, with what happens on the way. It takes the
+// height the grid of the pipeline leaves to its row.
+#let flow-arrow(body) = block(width: 100%, height: 100%, inset: (y: 5mm),
+  grid(columns: (1fr, 60pt, 1fr), rows: 100%, align: (left, center, left),
+    [],
+    grid(columns: 60pt, rows: (1fr, 44pt), align: center,
+      rect(width: 12pt, height: 100%, fill: accent, stroke: none),
+      polygon(fill: accent, stroke: none, (0pt, 0pt), (60pt, 0pt),
+        (30pt, 44pt))),
+    align(horizon, pad(left: 6mm, text(size: t-small, fill: muted, body)))))
 
-// A step of the path from the noise to the random numbers.
-#let step(n, title, body) = grid(columns: (62pt, 1fr), column-gutter: 18pt,
-  box(width: 62pt, height: 62pt, radius: 31pt, fill: accent,
-    align(center + horizon, text(size: 34pt, weight: "semibold",
-      fill: background, str(n)))),
-  {
-    text(size: 40pt, weight: "semibold", title)
-    v(5mm, weak: true)
-    body
-  })
+#let chips(columns, ..items) = grid(columns: (1fr,) * columns,
+  column-gutter: 7mm, row-gutter: 7mm, ..items)
 
 // ---------------------------------------------------------------- header
 
 #let header-h = 122mm
 #let footer-h = 34mm
-#let band-h = 112mm
 
 #block(width: 100%, height: header-h, fill: navy, inset: (x: margin),
-  align(horizon, stack(spacing: 24mm,
+  align(horizon, stack(spacing: 20mm,
     text(size: 116pt, weight: "semibold", fill: background,
       tracking: -1.5pt)[ESDM: Entropy Source and DRNG Manager],
     text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
@@ -79,94 +102,203 @@
     align(horizon, grid(columns: (1fr, auto, auto), column-gutter: 28mm,
       text(weight: "semibold", tracking: 3pt,
         upper[ESDM #esdm-version · #doc-date]),
-      [#text(size: 47pt, baseline: 3pt, icon("globe", fill: on-navy))
+      [#box(baseline: 6pt, text(size: 44pt, icon("globe", fill: on-navy)))
         #h(0.4em) https://chronox.de/esdm/],
-      [#text(size: 40pt, baseline: 3pt, brand("github")) #h(0.4em)
+      [#box(baseline: 6pt, text(size: 40pt, brand("github"))) #h(0.4em)
         https://github.com/smuellerDD/esdm]))
   }))
 
-// The closing band above the footer: what the ESDM is for and what backs it.
-#place(bottom, dy: -footer-h, block(width: 100%, height: band-h,
-  fill: surface, inset: (x: margin), align(horizon,
-  grid(columns: (1fr, 1fr), column-gutter: gutter,
-    panel[Toolkit][
-      - Only the generator is mandatory; every other part is chosen.
-      - Upstream integrations: OpenSSL, hypervisors.
-      - Key generation moves out of the kernel.
-    ],
-    panel[Compliance and Assurance][
-      - SP 800-90C, FIPS 140-3, AIS 20/31 (NTG.1, DRG.3, DRG.4).
-      - SP 800-90B assessment, health tests, self tests.
-      - Model checking, fuzzing and sanitizers in CI.
-    ],
-  ))))
+// ---------------------------------------------------------------- pipeline
+
+#let pipeline = grid(columns: 100%,
+  rows: (auto, 14mm, auto, 1fr, auto, 1fr, auto, 1fr, auto),
+  heading-text[From Noise to Random Numbers],
+  [],
+  stage(1)[Collect][Twelve entropy sources, each switched on, credited and
+    reported on its own][
+    #chips(4,
+      chip(fill: source, stroke: source-strong)[Interrupts],
+      chip(fill: source, stroke: source-strong)[Scheduler],
+      chip[Jitter RNG],
+      chip[CPU],
+      chip[Kernel RNG],
+      chip[TPM 2.0],
+      chip[`/dev/hwrng`],
+      chip[External],
+    )
+    #v(7mm, weak: true)
+    #chip(fill: accent-faint, stroke: accent)[Auxiliary pool: data written
+      by applications and by root]
+  ],
+  flow-arrow[Health tests on the raw \ data of the timing sources],
+  stage(2)[Credit][Each source fills its slot of the seed buffer: data and
+    the entropy it is credited][
+    #let slot(fill, n) = stack(spacing: 4mm,
+      rect(width: 100%, height: 36mm, fill: fill,
+        stroke: 2.5pt + ink-soft),
+      align(center, text(size: t-small, fill: muted, n)))
+    #grid(columns: (1fr,) * 9, column-gutter: 0pt,
+      slot(source)[256], slot(source-soft)[0], slot(accent-soft)[256],
+      slot(accent-soft)[8], slot(accent-soft)[128], slot(background)[0],
+      slot(background)[0], slot(background)[0], slot(accent-faint)[…])
+  ],
+  flow-arrow[Conditioned with a hash; \ the credits are added up],
+  stage(3)[Seed][256 bits of entropy seed a DRNG instance fully, 384 bits
+    with the SP 800-90C oversampling][
+    #let drng(name, sub) = chip(fill: accent-soft, stroke: accent,
+      height: 56mm, stack(spacing: 7mm,
+        text(weight: "semibold", name),
+        text(size: t-small, fill: muted, sub)))
+    #grid(columns: (1fr, 1fr, auto, 1fr), column-gutter: 7mm,
+      align: horizon,
+      drng[DRNG][CPU 0], drng[DRNG][CPU 1],
+      text(size: 60pt, fill: muted)[…],
+      drng[DRNG][reseeded per block])
+  ],
+  flow-arrow[`esdm-server`, unprivileged \ after its start],
+  stage(4)[Serve][Unmodified software, OpenSSL and hypervisors read from
+    the interface they already use][
+    #let face(body) = chip(fill: accent, stroke: accent, color: background,
+      weight: "semibold", body)
+    #chips(3,
+      face[`/dev/random`], face[`getrandom()`], face[RPC library],
+      face[EGD socket], face[OpenSSL provider], face[`/dev/esdm_pr`])
+  ],
+)
+
+// ---------------------------------------------------------------- seed buffer
+
+// The slots of the seed buffer: every source delivers 256 bits of data, the
+// bar is the entropy the default build credits them.
+#let seed-buffer = {
+  heading-text[Seed Buffer]
+  v(14mm, weak: true)
+  let row(name, bits, fill: accent) = (
+    align(horizon, name),
+    box(width: 100%, height: 24mm, fill: surface, radius: 2mm,
+      stroke: 2pt + rule, align(left, rect(width: calc.max(bits / 256, 0.012)
+        * 100%, height: 100%, radius: 2mm, fill: fill, stroke: none))),
+    align(horizon + right, text(weight: "semibold", str(bits))),
+  )
+  grid(columns: (auto, 1fr, 26mm), column-gutter: 8mm, row-gutter: 8mm,
+    ..row([Interrupts], 256, fill: source-strong),
+    ..row([Jitter RNG], 256),
+    ..row([Kernel RNG], 128),
+    ..row([CPU], 8),
+    ..row([TPM 2.0], 0),
+  )
+  v(10mm, weak: true)
+  text(size: t-small, fill: muted)[Bits of entropy the default build
+    credits to 256 bits of data. The credits are added up; data without
+    credit still goes into the seed.]
+}
+
+// ---------------------------------------------------------------- states
+
+// The states of a DRNG instance, drawn on a canvas of fixed size.
+#let states = {
+  heading-text[DRNG Instance]
+  v(14mm, weak: true)
+  let w = 320mm // canvas
+  let node-x = 30mm
+  let node-w = 200mm
+  let node-h = 56mm
+  let gap = 72mm
+  let y(i) = i * (node-h + gap)
+  let at(dx, dy, body) = place(top + left, dx: dx, dy: dy, body)
+  let node(i, title, sub, fill: accent-soft, stroke: accent) = at(node-x,
+    y(i), box(width: node-w, height: node-h, radius: 8mm, fill: fill,
+      stroke: 2.5pt + stroke, align(center + horizon, stack(spacing: 7mm,
+        text(weight: "semibold", title),
+        text(size: t-small, fill: muted, sub)))))
+  let seg(x1, y1, x2, y2, stroke) = at(x1, y1, line(start: (0pt, 0pt),
+    end: (x2 - x1, y2 - y1), stroke: stroke))
+  // An arrow head at (x, y) pointing down, up or right.
+  let head(x, y, dir, fill) = at(x, y, {
+    let a = 9mm
+    let b = 5mm
+    polygon(fill: fill, stroke: none, ..if dir == "down" {
+      ((-b, -a), (b, -a), (0mm, 0mm))
+    } else if dir == "up" {
+      ((-b, a), (b, a), (0mm, 0mm))
+    } else { ((-a, -b), (-a, b), (0mm, 0mm)) })
+  })
+  let ok = 5pt + accent
+  let bad = (paint: alert, thickness: 5pt, dash: (14pt, 10pt))
+  let label(x, y, body, fill: muted) = at(x, y, box(width: 120mm,
+    text(size: t-small, fill: fill, body)))
+  let down-x = node-x + 40mm
+  let up-x = node-x + node-w - 40mm
+  let fail-x = 6mm
+
+  box(width: w, height: y(2) + node-h, {
+    node(0, fill: surface, stroke: ink-soft)[Not fully seeded][no output]
+    node(1)[Fully seeded][serves requests]
+    node(2)[Reseed due][reseeds, then serves]
+    // seeded
+    seg(down-x, y(0) + node-h, down-x, y(1) - 8mm, ok)
+    head(down-x, y(1), "down", accent)
+    label(down-x + 9mm, y(0) + node-h + 30mm)[256 bits of entropy]
+    // reseed due
+    seg(down-x, y(1) + node-h, down-x, y(2) - 8mm, ok)
+    head(down-x, y(2), "down", accent)
+    at(down-x + 7mm, y(1) + node-h + 21mm, box(width: up-x - down-x
+      - 14mm, align(center, text(size: t-small, fill: muted)[2#super[20]
+        requests \ or 600 s])))
+    // reseeded
+    seg(up-x, y(2), up-x, y(1) + node-h + 8mm, ok)
+    head(up-x, y(1) + node-h, "up", accent)
+    label(up-x + 9mm, y(1) + node-h + 30mm)[full reseed]
+    // the state is lost
+    seg(node-x, y(1) + node-h / 2, fail-x, y(1) + node-h / 2, bad)
+    seg(node-x, y(2) + node-h / 2, fail-x, y(2) + node-h / 2, bad)
+    seg(fail-x, y(2) + node-h / 2, fail-x, y(0) + node-h / 2, bad)
+    seg(fail-x, y(0) + node-h / 2, node-x - 8mm, y(0) + node-h / 2, bad)
+    head(node-x, y(0) + node-h / 2, "right", alert)
+  })
+  v(10mm, weak: true)
+  text(size: t-small, fill: alert)[Dashed: a reset, a fork in the child,
+    or 2#super[30] requests without a full reseed.]
+}
+
+// ---------------------------------------------------------------- claims
+
+#let claim(sign, title, body) = grid(columns: (32mm, 1fr),
+  column-gutter: 9mm, align: horizon,
+  box(width: 32mm, height: 32mm, radius: 7mm, fill: accent-soft,
+    align(center + horizon, text(size: 64pt, icon(sign,
+      fill: accent-text)))),
+  stack(spacing: 6mm,
+    text(size: 46pt, weight: "semibold", title),
+    text(size: t-small, fill: muted, body)))
+
+#let claims = {
+  heading-text[Why the ESDM]
+  v(14mm, weak: true)
+  stack(spacing: 13mm,
+    claim("plug")[A toolkit][Only the generator is mandatory. Sources,
+      interfaces and kernel modules are chosen per system.],
+    claim("shield")[Built for regulated use][Configurations for
+      SP 800-90C, FIPS 140-3 and AIS 20/31: NTG.1, DRG.3, DRG.4.],
+    claim("key")[Keys outside the kernel][Keys are generated in user
+      space; the kernel RNG is seeded by the ESDM.],
+    claim("flask")[Assured][SP 800-90B assessment, health and self tests,
+      model checking, fuzzing.],
+  )
+}
 
 // ---------------------------------------------------------------- body
 
-// Two columns that do not share their rows: each is filled top to bottom.
-#let column-h = 1189mm - header-h - band-h - footer-h - 28mm - 24mm
-#let column(..panels) = block(width: 100%, height: column-h,
-  panels.pos().join(v(1fr)))
+#let body-h = 1189mm - header-h - footer-h - 30mm - 36mm
 
-#block(inset: (x: margin, top: 28mm),
-  grid(columns: (1fr, 1fr), column-gutter: gutter,
-    column(
-      panel[From Noise to Random Numbers][
-        #fig("big-picture.svg", 100%)[Entropy sources fill the seed
-          buffer that seeds the DRNG instances.]
-        #v(6mm)
-        #stack(spacing: 8mm,
-          step(1)[Collect][Sources time interrupts and task wakeups, or
-            deliver on request: Jitter RNG, CPU, TPM, `/dev/hwrng`.],
-          step(2)[Credit][Each source fills its slot of the seed buffer
-            with data and the entropy it is credited.],
-          step(3)[Seed][256 bits of entropy seed a DRNG instance fully,
-            384 with the SP 800-90C oversampling.],
-          step(4)[Serve][One DRNG instance per CPU serves the requests
-            and is reseeded ahead of them.],
-        )
-      ],
-      panel[Seeding the DRNG Instances][
-        #fig("numa-drng.svg", 100%)[Every DRNG instance is seeded from a
-          seed buffer of its own collection.]
-      ],
-      panel[Processes][
-        #fig("processes.svg", 100%)[`esdm-server` drops its privileges
-          after start; the clients reach it over RPC and EGD sockets.]
-      ],
-    ),
-    column(
-      panel[State Machines][
-        #fig("fsm-drng.svg", 100%)[A DRNG instance]
-        #v(6mm)
-        #grid(columns: (1.1fr, 1fr), column-gutter: 12mm, align: horizon,
-          fig("fsm-esdm.svg", 100%)[The ESDM as a whole],
-          [
-            - No output before the first full seed.
-            - A reseed with the time alone does not count as a full
-              reseed.
-            - A fork ends the output in the child.
-          ])
-      ],
-      panel[Seed Buffer][
-        #grid(columns: (1.1fr, 1fr), column-gutter: 12mm, align: horizon,
-          fig("es-manager.svg", 100%)[From the entropy sources to the
-            seed],
-          [
-            - One slot per entropy source: its data and the credited
-              bits.
-            - The credits are added up, at most 256 bits count.
-            - Data without credit is additional input.
-          ])
-      ],
-      panel[Output Paths][
-        #fig("paths.svg", 82%)[Interfaces and the four output paths]
-        #v(3mm)
-        #block(width: 100%, fill: accent-faint, radius: 6pt,
-          inset: (x: 16pt, y: 12pt))[#icon("warning",
-          fill: source-strong) #h(0.3em) The device files and
-          `getrandom()` fall back to the kernel RNG when the server
-          cannot be reached. The other interfaces report the error.]
-      ],
-    ),
-  ))
+#block(inset: (x: margin, y: 30mm), grid(columns: (1.22fr, 1fr),
+  column-gutter: gutter,
+  block(width: 100%, height: body-h, pipeline),
+  block(width: 100%, height: body-h, {
+    seed-buffer
+    v(1fr)
+    states
+    v(1fr)
+    claims
+  }),
+))
