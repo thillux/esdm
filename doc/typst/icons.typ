@@ -21,6 +21,9 @@
   bug: "\u{f188}",
   plug: "\u{f1e6}",
   globe: "\u{f0ac}",
+  puzzle: "\u{f12e}",
+  scale: "\u{f24e}",
+  eye: "\u{f06e}",
 )
 
 #let icon(name, fallback: none, fill: none) = context {

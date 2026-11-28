@@ -6,14 +6,15 @@
 //               space: the title and the pipeline figure;
 //   from 1.5 m  how entropy becomes random numbers, and that the ESDM is
 //               tailored for FIPS 140-3 and AIS 20/31: the four stages and
-//               the four claims;
+//               the claims;
 //   up close    enough detail to start a conversation, and the two links.
 //
 // It does not document the ESDM. All figures are drawn here for the poster,
 // none is one of the design document: no label is smaller than 34 pt. The
 // left column is the pipeline from the noise to the consumers; the right
-// column, independent of it, shows the seed buffer, the states of a DRNG
-// instance and the claims. Its statements are those of the design document,
+// column, independent of it, says why to use the ESDM: eight claims, each a
+// benefit in one line, then the deployments with their parts and the
+// states of a DRNG instance. Its statements are those of the design document,
 // its colors those of palette.typ.
 
 #import "../palette.typ": *
@@ -166,107 +167,12 @@
   ],
 )
 
-// ---------------------------------------------------------------- seed buffer
-
-// The slots of the seed buffer: every source delivers 256 bits of data, the
-// bar is the entropy the default build credits them.
-#let seed-buffer = {
-  heading-text[Seed Buffer]
-  v(14mm, weak: true)
-  let row(name, bits, fill: accent) = (
-    align(horizon, name),
-    box(width: 100%, height: 24mm, fill: surface, radius: 2mm,
-      stroke: 2pt + rule, align(left, rect(width: calc.max(bits / 256, 0.012)
-        * 100%, height: 100%, radius: 2mm, fill: fill, stroke: none))),
-    align(horizon + right, text(weight: "semibold", str(bits))),
-  )
-  grid(columns: (auto, 1fr, 26mm), column-gutter: 8mm, row-gutter: 8mm,
-    ..row([Interrupts], 256, fill: source-strong),
-    ..row([Jitter RNG], 256),
-    ..row([Kernel RNG], 128),
-    ..row([CPU], 8),
-    ..row([TPM 2.0], 0),
-  )
-  v(10mm, weak: true)
-  text(size: t-small, fill: muted)[Bits of entropy the default build
-    credits to 256 bits of data. The credits are added up; data without
-    credit still goes into the seed.]
-}
-
-// ---------------------------------------------------------------- states
-
-// The states of a DRNG instance, drawn on a canvas of fixed size.
-#let states = {
-  heading-text[DRNG Instance]
-  v(14mm, weak: true)
-  let w = 320mm // canvas
-  let node-x = 30mm
-  let node-w = 200mm
-  let node-h = 56mm
-  let gap = 72mm
-  let y(i) = i * (node-h + gap)
-  let at(dx, dy, body) = place(top + left, dx: dx, dy: dy, body)
-  let node(i, title, sub, fill: accent-soft, stroke: accent) = at(node-x,
-    y(i), box(width: node-w, height: node-h, radius: 8mm, fill: fill,
-      stroke: 2.5pt + stroke, align(center + horizon, stack(spacing: 7mm,
-        text(weight: "semibold", title),
-        text(size: t-small, fill: muted, sub)))))
-  let seg(x1, y1, x2, y2, stroke) = at(x1, y1, line(start: (0pt, 0pt),
-    end: (x2 - x1, y2 - y1), stroke: stroke))
-  // An arrow head at (x, y) pointing down, up or right.
-  let head(x, y, dir, fill) = at(x, y, {
-    let a = 9mm
-    let b = 5mm
-    polygon(fill: fill, stroke: none, ..if dir == "down" {
-      ((-b, -a), (b, -a), (0mm, 0mm))
-    } else if dir == "up" {
-      ((-b, a), (b, a), (0mm, 0mm))
-    } else { ((-a, -b), (-a, b), (0mm, 0mm)) })
-  })
-  let ok = 5pt + accent
-  let bad = (paint: alert, thickness: 5pt, dash: (14pt, 10pt))
-  let label(x, y, body, fill: muted) = at(x, y, box(width: 120mm,
-    text(size: t-small, fill: fill, body)))
-  let down-x = node-x + 40mm
-  let up-x = node-x + node-w - 40mm
-  let fail-x = 6mm
-
-  box(width: w, height: y(2) + node-h, {
-    node(0, fill: surface, stroke: ink-soft)[Not fully seeded][no output]
-    node(1)[Fully seeded][serves requests]
-    node(2)[Reseed due][reseeds, then serves]
-    // seeded
-    seg(down-x, y(0) + node-h, down-x, y(1) - 8mm, ok)
-    head(down-x, y(1), "down", accent)
-    label(down-x + 9mm, y(0) + node-h + 30mm)[256 bits of entropy]
-    // reseed due
-    seg(down-x, y(1) + node-h, down-x, y(2) - 8mm, ok)
-    head(down-x, y(2), "down", accent)
-    at(down-x + 7mm, y(1) + node-h + 21mm, box(width: up-x - down-x
-      - 14mm, align(center, text(size: t-small, fill: muted)[2#super[20]
-        requests \ or 600 s])))
-    // reseeded
-    seg(up-x, y(2), up-x, y(1) + node-h + 8mm, ok)
-    head(up-x, y(1) + node-h, "up", accent)
-    label(up-x + 9mm, y(1) + node-h + 30mm)[full reseed]
-    // the state is lost
-    seg(node-x, y(1) + node-h / 2, fail-x, y(1) + node-h / 2, bad)
-    seg(node-x, y(2) + node-h / 2, fail-x, y(2) + node-h / 2, bad)
-    seg(fail-x, y(2) + node-h / 2, fail-x, y(0) + node-h / 2, bad)
-    seg(fail-x, y(0) + node-h / 2, node-x - 8mm, y(0) + node-h / 2, bad)
-    head(node-x, y(0) + node-h / 2, "right", alert)
-  })
-  v(10mm, weak: true)
-  text(size: t-small, fill: alert)[Dashed: a reset, a fork in the child,
-    or 2#super[30] requests without a full reseed.]
-}
-
 // ---------------------------------------------------------------- claims
 
-#let claim(sign, title, body) = grid(columns: (32mm, 1fr),
+#let claim(sign, title, body) = grid(columns: (30mm, 1fr),
   column-gutter: 9mm, align: horizon,
-  box(width: 32mm, height: 32mm, radius: 7mm, fill: accent-soft,
-    align(center + horizon, text(size: 64pt, icon(sign,
+  box(width: 30mm, height: 30mm, radius: 7mm, fill: accent-soft,
+    align(center + horizon, text(size: 60pt, icon(sign,
       fill: accent-text)))),
   stack(spacing: 6mm,
     text(size: 46pt, weight: "semibold", title),
@@ -275,16 +181,80 @@
 #let claims = {
   heading-text[Why the ESDM]
   v(14mm, weak: true)
-  stack(spacing: 13mm,
-    claim("plug")[A toolkit][Only the generator is mandatory. Sources,
-      interfaces and kernel modules are chosen per system.],
-    claim("shield")[Built for regulated use][Configurations for
-      SP 800-90C, FIPS 140-3 and AIS 20/31: NTG.1, DRG.3, DRG.4.],
-    claim("key")[Keys outside the kernel][Keys are generated in user
-      space; the kernel RNG is seeded by the ESDM.],
-    claim("flask")[Assured][SP 800-90B assessment, health and self tests,
-      model checking, fuzzing.],
+  stack(spacing: 17mm,
+    claim("plug")[Drop-in][No change to the applications],
+    claim("microchip")[Stock kernel][No kernel patch; updated like any
+      package],
+    claim("puzzle")[A toolkit][Only the generator is mandatory],
+    claim("scale")[Built for regulated use][FIPS 140-3, SP 800-90C,
+      AIS 20/31],
+    claim("key")[Keys from an assessed RNG][Key generation leaves the
+      kernel RNG],
+    claim("eye")[Every source accountable][Chosen, credited, tested and
+      reported alone],
+    claim("shield")[High assurance][Assessed, model checked, fuzzed],
+    claim("lock")[Least privilege][Root for the set-up only, then dropped],
   )
+}
+
+// ---------------------------------------------------------------- toolkit
+
+// The deployments against the components each of them needs: the claim
+// "a toolkit" as a picture.
+#let toolkit = {
+  heading-text[Pick What You Need]
+  v(14mm, weak: true)
+  let parts = ([Generator], [Server], [RPC socket], [EGD socket],
+    [CUSE daemons], [OpenSSL provider], [Kernel module])
+  let uses = (
+    ([One program], (0,)),
+    ([OpenSSL applications], (0, 1, 2, 5)),
+    ([Unmodified software], (0, 1, 2, 4)),
+    ([Hypervisor], (0, 1, 3, 6)),
+  )
+  let dot(on) = align(center + horizon, if on {
+    circle(radius: 10mm, fill: accent, stroke: none)
+  } else {
+    circle(radius: 3mm, fill: rule, stroke: none)
+  })
+  grid(columns: (auto,) + (1fr,) * parts.len(), column-gutter: 2mm,
+    row-gutter: 13mm, align: (x, y) => if y == 0 { center + bottom } else
+      if x == 0 { left + horizon } else { center + horizon },
+    [], ..parts.map(p => rotate(-90deg, reflow: true, text(size: t-small,
+      fill: muted, p))),
+    ..uses.map(((name, on)) => (text(weight: "semibold", name),
+      ..range(parts.len()).map(i => dot(i in on)))).flatten(),
+  )
+}
+
+// ---------------------------------------------------------------- states
+
+// The states of a DRNG instance in one line: the claim "assured".
+#let states = {
+  heading-text[Life of a DRNG Instance]
+  v(14mm, weak: true)
+  let state(title, sub, fill: accent-soft, stroke: accent) = box(
+    width: 100%, height: 66mm, radius: 7mm, fill: fill,
+    stroke: 2.5pt + stroke, align(center + horizon, stack(spacing: 7mm,
+      text(weight: "semibold", title),
+      text(size: t-small, fill: muted, sub))))
+  let arrow(back: false) = align(center + horizon, stack(spacing: 4mm,
+    polygon(fill: accent, stroke: none, (0mm, 3mm), (11mm, 3mm),
+      (11mm, 0mm), (19mm, 5mm), (11mm, 10mm), (11mm, 7mm), (0mm, 7mm)),
+    if back {
+      polygon(fill: accent, stroke: none, (19mm, 3mm), (8mm, 3mm),
+        (8mm, 0mm), (0mm, 5mm), (8mm, 10mm), (8mm, 7mm), (19mm, 7mm))
+    }))
+  grid(columns: (1fr, 21mm, 1fr, 21mm, 1fr), column-gutter: 3mm,
+    state(fill: surface, stroke: ink-soft)[Unseeded][no output],
+    arrow(),
+    state[Seeded][serves],
+    arrow(back: true),
+    state[Reseed due][reseeds first])
+  v(10mm, weak: true)
+  text(size: t-small, fill: muted)[A reseed is due after 2#super[20]
+    requests or 600 s. A reset or a fork ends the output until the next
+    full seed.]
 }
 
 // ---------------------------------------------------------------- body
@@ -295,10 +265,10 @@
   column-gutter: gutter,
   block(width: 100%, height: body-h, pipeline),
   block(width: 100%, height: body-h, {
-    seed-buffer
+    claims
+    v(1fr)
+    toolkit
     v(1fr)
     states
-    v(1fr)
-    claims
   }),
 ))
