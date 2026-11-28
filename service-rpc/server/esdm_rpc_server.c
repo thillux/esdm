@@ -1590,6 +1590,13 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	CKINT(drop_privileges_permanent(username ? username : "nobody",
 					groupname ? groupname : NULL));
 
+	/*
+	 * The change of the IDs cleared the parent-death signal of a daemon
+	 * under a PID namespace supervisor. Armed in this thread, the main
+	 * one: the setting ends with its thread.
+	 */
+	linux_pidns_arm_parent_death();
+
 	/* Notify all unpriv handler threads that they can become active */
 	atomic_store(&esdm_rpc_init_state, esdm_rpcs_state_perm_dropped);
 	thread_wake_all(&esdm_rpc_thread_init_wait);
@@ -1643,6 +1650,10 @@ static int esdm_rpcs_interfaces_init(const char *username,
 	/* Permanently drop all privileges */
 	CKINT(drop_privileges_permanent(username ? username : "nobody",
 					groupname ? groupname : NULL));
+
+	/* As with the RPC interface: cleared by the drop, the main thread */
+	linux_pidns_arm_parent_death();
+
 	atomic_store(&esdm_rpc_init_state, esdm_rpcs_state_perm_dropped);
 
 	/*

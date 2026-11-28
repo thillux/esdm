@@ -77,8 +77,11 @@ unsigned int linux_term_signals(int *sigs);
  *	       can catch and a process ends by as well, as it would die from
  *	       one it does not forward and leave the daemon unsupervised. Only
  *	       a signal it cannot catch, as SIGKILL, ends it before the daemon:
- *	       the daemon then receives SIGTERM, unless it changed its user or
- *	       group ID since, which clears the parent-death signal.
+ *	       the daemon then receives SIGTERM, the parent-death signal. A
+ *	       change of its user or group ID clears that setting: the daemon
+ *	       calls linux_pidns_arm_parent_death() after its last one, or
+ *	       keeps a thread in linux_pidns_watch_supervisor() if it goes on
+ *	       changing them.
  * @param [in] nr_fwd_signals Number of entries in fwd_signals.
  * @param [in] supervisor_exit_cb Optional callback (may be NULL) the
  *	       supervisor invokes - with its retained privileges - after the
@@ -87,6 +90,30 @@ unsigned int linux_term_signals(int *sigs);
 int linux_isolate_namespace_prefork(const int *fwd_signals,
 				    unsigned int nr_fwd_signals,
 				    void (*supervisor_exit_cb)(void));
+/**
+ * @brief Have the kernel send SIGTERM when the PID namespace supervisor ends.
+ *
+ * For the daemon linux_isolate_namespace_prefork() returned in, which armed
+ * the signal once; nothing is done in a process without supervisor. To be
+ * called again after a change of the user or group ID, which clears the
+ * setting in every thread, and by a thread that lives as long as the daemon:
+ * the setting ends with the thread that made it. A supervisor that ended
+ * before the call is noticed, the daemon then sends the signal to itself. As
+ * init of its namespace the daemon receives SIGTERM only with a handler for
+ * it installed.
+ */
+void linux_pidns_arm_parent_death(void);
+/**
+ * @brief Wait for the PID namespace supervisor to end, then send SIGTERM to
+ *	  the calling process.
+ *
+ * For a thread of a daemon that changes its user or group ID while it serves,
+ * in which the parent-death signal does not stay armed. Blocks in poll(2), a
+ * cancellation point.
+ *
+ * @return 0 once the supervisor ended, -ENOENT without a supervisor.
+ */
+int linux_pidns_watch_supervisor(void);
 int linux_personalization_string(char **ptr, size_t *length);
 
 #ifdef __cplusplus

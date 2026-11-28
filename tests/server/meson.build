@@ -15,3 +15,19 @@ if get_option('esdm-server').enabled()
 		args: [ esdm_server.full_path() ],
 		suite: 'server')
 endif
+
+# The daemon behind a PID namespace supervisor that is killed. Skipped (77)
+# unless run as root, which is what starting the server needs.
+if get_option('esdm-server').enabled()
+	server_supervisor_test = executable(
+			'server_supervisor_test',
+			[ 'server_supervisor_test.c' ],
+			include_directories: [ include_dirs_server,
+					       include_directories('../common') ],
+		)
+
+	test('esdm-server without its supervisor', server_supervisor_test,
+		args: [ esdm_server.full_path() ],
+		timeout: 120,
+		suite: 'server')
+endif

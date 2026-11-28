@@ -139,7 +139,11 @@ Fork the daemon into an isolating PID namespace. The starting process remains
 as its privileged supervisor and removes the IPC objects once the daemon ended,
 unless
 .B \-\-keep_ipc
-is given.
+is given. A daemon whose supervisor ends before it, as by
+.BR SIGKILL ,
+shuts down as on
+.BR SIGTERM ;
+the IPC objects and the PID file then stay in place.
 .TP
 .BR \-e ", " \-\-egd_socket " \fIPATH\fR"
 Additionally serve the EGD protocol on the UNIX domain socket

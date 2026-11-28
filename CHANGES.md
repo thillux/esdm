@@ -169,6 +169,14 @@ longer lose a termination signal during their start; a supervisor also
 forwards the other signals a process can send it and it can catch (SIGABRT,
 SIGPIPE, the fault signals), from which it died leaving the daemon unsupervised
 
+* --pid_namespace: a daemon whose supervisor ends before it - by SIGKILL, which
+cannot be forwarded - no longer serves on unsupervised but shuts down as on
+SIGTERM. The parent-death signal did this only until the privilege drop, which
+clears it: esdm-server sets it again after the drop, the CUSE daemons have a
+thread wait for the end of the supervisor, and both notice a supervisor that
+ended before the signal was set. The IPC objects and the PID file the
+supervisor of esdm-server would have removed stay in place
+
 * Kernel module esdm_es: a request overlapping a health test failure, or the
 completion of the window a failure fell into, no longer credits events the
 reset of that failure is about to discard - a change of the startup test

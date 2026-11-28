@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -44,6 +45,14 @@
  * blocked, before the child is reaped.
  */
 static volatile pid_t linux_pidns_child;
+
+/*
+ * The daemon's end of the lifeline, a pipe only the supervisor holds the write
+ * end of: it reports a hang-up once the supervisor ended, whatever ended it.
+ * Other than the parent-death signal it is no setting the kernel clears, and
+ * it can be asked at any time. -1 in a process without supervisor.
+ */
+static int linux_pidns_lifeline = -1;
 
 static void linux_pidns_forward_signal(int sig)
 {
@@ -85,6 +94,50 @@ static void linux_pidns_forward_sent(int sig, siginfo_t *info, void *ucontext)
 	linux_pidns_forward_signal(sig);
 }
 
+/* Nothing is ever written to the lifeline: an event on it is the hang-up */
+static bool linux_pidns_supervisor_ended(int timeout)
+{
+	struct pollfd pfd = { .fd = linux_pidns_lifeline, .events = POLLIN };
+	int ret;
+
+	do {
+		ret = poll(&pfd, 1, timeout);
+	} while (ret < 0 && errno == EINTR);
+
+	return ret > 0;
+}
+
+void linux_pidns_arm_parent_death(void)
+{
+	if (linux_pidns_lifeline < 0)
+		return;
+
+	if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1)
+		esdm_logger(LOGGER_WARN, LOGGER_C_SERVER,
+			    "Cannot set parent-death signal: %s\n",
+			    strerror(errno));
+
+	/*
+	 * The kernel sends the signal at the death of the supervisor only: for
+	 * one that ended before the prctl() nothing arrives. getppid() cannot
+	 * tell, it is 0 for a parent outside the PID namespace all along.
+	 */
+	if (linux_pidns_supervisor_ended(0))
+		kill(getpid(), SIGTERM);
+}
+
+int linux_pidns_watch_supervisor(void)
+{
+	if (linux_pidns_lifeline < 0)
+		return -ENOENT;
+
+	while (!linux_pidns_supervisor_ended(-1))
+		;
+
+	kill(getpid(), SIGTERM);
+	return 0;
+}
+
 unsigned int linux_term_signals(int *sigs)
 {
 	static const int term_signals[] = {
@@ -118,7 +171,7 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	siginfo_t info;
 	unsigned int i;
 	pid_t pid;
-	int errsv, status, nsfd;
+	int errsv, status, nsfd, lifeline[2];
 
 	sigemptyset(&fwd_set);
 	for (i = 0; i < nr_fwd_signals; i++)
@@ -145,6 +198,15 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	esdm_logger(LOGGER_VERBOSE, LOGGER_C_SERVER,
 		    "Successfully entered isolating PID namespace\n");
 
+	/* See linux_pidns_lifeline */
+	if (pipe2(lifeline, O_CLOEXEC) == -1) {
+		errsv = errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_SERVER,
+			    "Cannot create the supervisor lifeline: %s\n",
+			    strerror(errsv));
+		return -errsv;
+	}
+
 	/*
 	 * Block the forwarded signals until the supervisor's forwarders are
 	 * installed. In between, one would run the caller's handler in the
@@ -170,6 +232,8 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 			    strerror(errsv));
 		sigaction(SIGCHLD, &sa_chld, NULL);
 		sigprocmask(SIG_SETMASK, &old_mask, NULL);
+		close(lifeline[0]);
+		close(lifeline[1]);
 		return -errsv;
 	}
 
@@ -180,14 +244,14 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 		/*
 		 * Child: PID 1 of the new namespace, continues as the actual
 		 * daemon. Tie its lifetime to the supervisor so a SIGKILLed
-		 * supervisor does not leak an unreachable daemon. Best
-		 * effort only: the kernel clears the parent-death signal
-		 * when the daemon later drops privileges.
+		 * supervisor does not leak an unreachable daemon. The kernel
+		 * clears the parent-death signal in every thread when the
+		 * daemon changes its user or group ID: the caller arms it
+		 * again after that, or watches the lifeline.
 		 */
-		if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1)
-			esdm_logger(LOGGER_WARN, LOGGER_C_SERVER,
-				    "Cannot set parent-death signal: %s\n",
-				    strerror(errno));
+		close(lifeline[1]);
+		linux_pidns_lifeline = lifeline[0];
+		linux_pidns_arm_parent_death();
 		return 0;
 	}
 
@@ -200,6 +264,12 @@ int linux_isolate_namespace_prefork(const int *fwd_signals,
 	 * ancestor namespace if the init installed a handler for it.
 	 */
 	linux_pidns_child = pid;
+
+	/*
+	 * The write end stays open, unused, for as long as the supervisor
+	 * lives: the kernel closes it at its end, which the daemon is told.
+	 */
+	close(lifeline[0]);
 
 	/* Name must fit the 15 character kernel limit on thread names */
 	pthread_setname_np(pthread_self(), "ESDM supervisor");

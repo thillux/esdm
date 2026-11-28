@@ -118,7 +118,13 @@ Test mode builds only: with 1, never serve from the kernel device (see
 .BR NOTES ).
 .TP
 .B \-\-pid_namespace
-Fork the daemon into an isolating PID namespace.
+Fork the daemon into an isolating PID namespace; the starting process remains
+as its supervisor and forwards the signals. A daemon whose supervisor ends
+before it, as by
+.BR SIGKILL ,
+ends as on
+.B SIGTERM
+and removes its bind mount.
 .TP
 .BR \-d ", " "\-o debug"
 Enable debug output. Implies

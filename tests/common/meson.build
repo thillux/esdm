@@ -67,6 +67,16 @@ linux_support_test = executable(
 		link_with: esdm_common_static_lib,
 	)
 
+# The PID namespace supervisor. All but the calls without a supervisor is
+# skipped (77) unless run as root, which creating the namespace needs.
+linux_pidns_test = executable(
+		'linux_pidns_test',
+		[ 'linux_pidns_test.c' ],
+		include_directories: include_dirs_server,
+		dependencies: common_test_deps,
+		link_with: esdm_common_static_lib,
+	)
+
 helper_test = executable(
 		'helper_test',
 		[ 'helper_test.c' ],
@@ -159,6 +169,7 @@ test('common buffer handling', buffer_test, suite: 'common')
 test('common logger', esdm_logger_test, suite: 'common')
 test('common helper', helper_test, suite: 'common')
 test('common Linux support', linux_support_test, suite: 'common')
+test('common PID namespace supervisor', linux_pidns_test, suite: 'common')
 test('common known answer test comparison', selftest_kat_test, suite: 'common')
 test('common operating system random numbers', os_random_test, suite: 'common')
 test('common xoshiro256++ PRNG', xoshiro_test, suite: 'common')

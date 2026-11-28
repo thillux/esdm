@@ -1440,6 +1440,23 @@ static int esdm_cuse_session_loop(struct fuse_session *se)
 #endif
 }
 
+/*
+ * The daemon changes its effective user ID at its start and around every
+ * privileged ioctl, and each change clears the parent-death signal in all
+ * threads: it cannot stay armed. This thread waits for the end of the PID
+ * namespace supervisor instead and then sends SIGTERM to the process, which
+ * the main thread takes as one the supervisor forwarded.
+ */
+static void *esdm_cuse_supervisor_watch(void *unused)
+{
+	(void)unused;
+
+	pthread_setname_np(pthread_self(), "ESDM cuse_supv");
+	linux_pidns_watch_supervisor();
+
+	return NULL;
+}
+
 int main_common(const char *_devname, const char *target, const char *semname,
 		const struct cuse_lowlevel_ops *clop, int argc, char **argv)
 {
@@ -1553,6 +1570,15 @@ int main_common(const char *_devname, const char *target, const char *semname,
 
 	/* One thread group */
 	CKINT(thread_init(1));
+
+	/*
+	 * Until the first change of the user ID the parent-death signal of the
+	 * prefork is armed, so no end of the supervisor goes unnoticed.
+	 */
+	if (param.pid_namespace)
+		CKINT_LOG(thread_start_detached(esdm_cuse_supervisor_watch,
+						NULL),
+			  "Starting supervisor watch thread failed: %d\n", ret);
 
 	esdm_sem_name = semname;
 
