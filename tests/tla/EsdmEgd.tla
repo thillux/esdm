@@ -20,21 +20,37 @@
 (*   and a client closing before the step has the same effect.             *)
 (* - The generators: until the environment turns good, one non-blocking    *)
 (*   generation of n units yields any amount from 0 to n, an error with    *)
-(*   GenFail, and a regular one that yields nothing may find the ESDM      *)
-(*   operational (a reseed is awaited, the read is parked) or not. Once    *)
+(*   GenFail, and a non-blocking read that got nothing may find the ESDM   *)
+(*   operational (a reseed is awaited, the read is parked) or not. Which   *)
+(*   reads can be parked depends on the command, not only on the socket    *)
+(*   (0xe2 always can, 0xe0 never), so "nb" may be parked on either. Once  *)
 (*   good, every generation yields all it is asked for.                    *)
+(* - The calls of the worker that could wait return instead: the sockets   *)
+(*   are non-blocking (EAGAIN from recv() and send()), a generation that   *)
+(*   cannot deliver returns what it has. Block names the calls that wait   *)
+(*   instead, for the configurations showing WorkerNeverBlocks fail. The   *)
+(*   locks the ESDM takes inside a call are left to EsdmReseed and         *)
+(*   EsdmAuxPool.                                                          *)
 (* - epoll is level-triggered: epoll_wait() returns min(ready, MaxEvents)  *)
 (*   of the ready descriptors with their flags at that moment, in any      *)
 (*   order, or none after its timeout. The timeouts, deferred_progress and *)
 (*   deferred_requests only set the pace and are left out, as is the park  *)
-(*   time: a parked read may expire at any later attempt.                  *)
+(*   time: a parked read may expire at any later attempt. The retry time   *)
+(*   of a failed accept passes in an epoll_wait() that times out.          *)
 (* - The write timeout may reclaim a connection whose response stayed      *)
 (*   pending through a pass of the retry walk (Stall).                     *)
-(* - A client has one connection; its UID is latched at accept (Root).    *)
+(* - A client has one connection; its UID is latched at accept (peer_uid,  *)
+(*   the field root; Root is the truth it is checked against).             *)
 (* - Not modelled: shutdown (esdm_egd_exit), the bulk insert 0xec, the     *)
 (*   status buffers (out_heap behaves as out), unknown commands, failures  *)
 (*   of calloc(), getsockopt() and epoll_ctl(), and what the ESDM does     *)
 (*   inside a generation (EsdmReseed).                                     *)
+(*                                                                         *)
+(* The model is a server that does not end: the worker always has the      *)
+(* timeout of epoll_wait() to go on with, so a deadlock is reached only    *)
+(* when the worker waits in a call (Block) and every client is done. A     *)
+(* hang short of that shows as a violation of WorkerNeverBlocks or of a    *)
+(* liveness property.                                                      *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
@@ -58,7 +74,14 @@ CONSTANTS
     NoSignal,     \* send() passes MSG_NOSIGNAL
     KeepArmed,    \* mutation: esdm_egd_conn_arm() leaves a deferred or parked
                   \* connection armed for EPOLLIN
-    FixFair,      \* fix: one recv() per event, and only its EOF closes
+    Block,        \* mutation: the calls that wait instead of returning
+                  \* EAGAIN, of "recv", "send" and "gen" (a blocking read
+                  \* generated with a call that waits)
+    FixHangup,    \* fix: EPOLLHUP and EPOLLERR mark the connection
+                  \* (esdm_egd_hangup) instead of closing it at once
+    FixEpipe,     \* fix: so does a send() failing with EPIPE or ECONNRESET
+    FixFair,      \* fix: one recv() per event
+    FixRdhup,     \* fix: only the EOF of recv() closes, EPOLLRDHUP does not
     FixAccept,    \* fix: a failed accept disarms the listeners until the next
                   \* epoll_wait() timeout or a connection is closed
     FixCap,       \* fix: a listener event is skipped at the connection limit
@@ -74,9 +97,11 @@ Err == -1
 Min(a, b) == IF a < b THEN a ELSE b
 
 \* struct esdm_egd_conn: in, out, deferred with answer_len (ans), parked,
-\* hangup, armed; fin is a ghost, the id of the last command finished
+\* hangup, armed, peer_uid = 0 (root); fin is a ghost, the id of the last
+\* command finished
 Conn0 == [in |-> <<>>, out |-> NoResp, dfr |-> NoCmd, ans |-> 0,
-          parked |-> FALSE, hup |-> FALSE, armed |-> "in", fin |-> 0]
+          parked |-> FALSE, hup |-> FALSE, armed |-> "in", root |-> FALSE,
+          fin |-> 0]
 
 \* esdm_egd_cmd_has_effect()
 HasEffect(k) == k \in {"wr", "priv"}
@@ -86,7 +111,8 @@ HasEffect(k) == k \in {"wr", "priv"}
 SDeferred == [c \in Clients |->
                  IF c = "a" THEN <<<<"blk", 2>>, <<"cnt", 0>>>>
                  ELSE <<<<"priv", 0>>>>]
-\* a: a non-blocking read, parked or answered, then a write; b: a read
+\* a: a non-blocking read, parked or answered, then a privileged command;
+\* b: a blocking read
 SPark == [c \in Clients |->
              IF c = "a" THEN <<<<"nb", 1>>, <<"priv", 0>>>>
              ELSE <<<<"blk", 1>>>>]
@@ -96,6 +122,14 @@ SBlk == [c \in Clients |-> <<<<"blk", 2>>>>]
 SCnt == [c \in Clients |-> <<<<"cnt", 0>>>>]
 \* a write followed by a privileged command
 SWrPriv == [c \in Clients |-> <<<<"wr", 0>>, <<"priv", 0>>>>]
+\* a request answered from the state, then a write
+SCntWr == [c \in Clients |-> <<<<"cnt", 0>>, <<"wr", 0>>>>]
+\* commands with an effect behind a request that holds up the connection:
+\* a: a blocking read, then a write; b: two answers for a socket that holds
+\* one, then a privileged command
+SBehind == [c \in Clients |->
+               IF c = "a" THEN <<<<"blk", 1>>, <<"wr", 0>>>>
+               ELSE <<<<"cnt", 0>>, <<"cnt", 0>>, <<"priv", 0>>>>]
 
 (* --algorithm EsdmEgd {
 variables
@@ -109,10 +143,15 @@ variables
     good = FALSE,                       \* the generators deliver
     rv = "ok",                          \* the worker's return value
     recvd = FALSE,                      \* this event took input already
-    \* ghosts: requests sent and responses read per client, properties
-    \* violated
+    \* ghosts: requests sent and responses read per client; the commands
+    \* with an effect that reached esdm_egd_cmd_write_entropy() or
+    \* esdm_egd_cmd_priv(); why each connection was closed; the listeners
+    \* whose event accepted nobody in this round; properties violated
     nsent = [c \in Clients |-> 0],
     nrecv = [c \in Clients |-> 0],
+    acted = [c \in Clients |-> {}],
+    closed = [c \in Clients |-> "none"],
+    lfail = {},
     viol = {};
 
 define {
@@ -150,11 +189,17 @@ define {
     \* one non-blocking generation of len units
     GenOut(len) == IF good THEN {len}
                    ELSE (0..len) \cup (IF GenFail THEN {Err} ELSE {})
+    \* the generation of a blocking read: esdm_egd_get_random(), or with
+    \* "gen" in Block a call that waits until the generators deliver
+    BlkOut(len) == IF "gen" \notin Block THEN GenOut(len)
+                   ELSE IF good THEN {len} ELSE {}
     \* esdm_state_operational() for a regular generation that yields nothing
     OpOut == IF good THEN {TRUE} ELSE BOOLEAN
     \* the state an event could change
     Snap(c, r) == <<r, sq[c], rq[c], cst[c]>>
     NResp(c, j) == Cardinality({i \in 1..j : Script[c][i][1] # "wr"})
+    \* the commands with an effect the client has sent
+    Effects(c) == {i \in 1..nsent[c] : HasEffect(Script[c][i][1])}
     \* responses to requests sent that the client has not got
     Owed(c) == IF c \in Streamers THEN 0
                ELSE NResp(c, nsent[c]) - nrecv[c] - Len(rq[c])
@@ -174,31 +219,50 @@ define {
 macro respond(c, r, resp, bv) {
     viol := viol \cup bv
                  \cup (IF cn[c].out # NoResp THEN {"Overflow"} ELSE {})
-                 \cup (IF cst[c] = "gone"
+                 \cup (IF cst[c] = "gone" /\ ~r.hup
                        THEN {"SendClosed"} \cup
                             (IF NoSignal THEN {} ELSE {"Sigpipe"})
                        ELSE {});
-    if (cst[c] = "gone") {
-        \* EPIPE: esdm_egd_hangup()
-        cn[c] := Hangup(r);
+    if (r.hup) {
+        \* esdm_egd_flush(): nobody to deliver to, no send()
+        cn[c] := r;
+    } else if (cst[c] = "gone") {
+        \* EPIPE: esdm_egd_hangup(); before the fix it closed
+        if (FixEpipe) {
+            cn[c] := Hangup(r);
+        } else {
+            cn[c] := r;
+            rv := "pipe";
+        };
     } else if (Len(rq[c]) < SndBuf) {
         cn[c] := r;
         rq[c] := Append(rq[c], resp);
     } else {
-        \* EAGAIN: the response waits for EPOLLOUT
+        \* EAGAIN: the response waits for EPOLLOUT; a blocking send()
+        \* would wait for the client here
+        await "send" \notin Block;
         cn[c] := [r EXCEPT !.out = resp];
     };
 }
 
 \* epoll_ctl(EPOLL_CTL_DEL) and esdm_egd_release_conn(); why: "eof",
-\* "rdhup", "err" or "stall"
+\* "rdhup", "err" (a generation failed), "stall", and before the fix "hup"
+\* and "pipe". A generation error and the write timeout give up the
+\* connection with what is unprocessed of its input; every other close
+\* comes after the commands with an effect were handled.
 macro release(c, why) {
     srv[c] := "freed";
     cn[c] := Conn0;
     conns := SelectSeq(conns, LAMBDA x : x # c);
+    closed[c] := why;
     viol := viol \cup (IF why \in {"eof", "rdhup"} /\ cst[c] # "gone"
                           /\ Owed(c) > 0
-                       THEN {"Lost"} ELSE {});
+                       THEN {"Lost"} ELSE {})
+                 \cup (IF why \notin {"err", "stall"} /\ c \notin Streamers
+                          /\ ~(Effects(c) \subseteq acted[c])
+                       THEN {"Dropped"} ELSE {});
+    \* a descriptor became free: accepting again at once is no spin
+    lfail := {};
     if (FixAccept) backoff := FALSE;
 }
 
@@ -212,17 +276,22 @@ pr1: if (cn[p].out # NoResp) {
                                  (IF NoSignal THEN {} ELSE {"Sigpipe"})
                             ELSE {});
          if (cst[p] = "gone") {
-             cn[p] := Hangup(cn[p]);
+             \* EPIPE: esdm_egd_hangup(); before the fix it closed
+             if (FixEpipe) {
+                 cn[p] := Hangup(cn[p]);
+             } else {
+                 rv := "pipe";
+             };
          } else if (Len(rq[p]) < SndBuf) {
              rq[p] := Append(rq[p], cn[p].out);
              cn[p].out := NoResp;
          };
      };
-pr2: if (cn[p].out # NoResp) {
+pr2: if (rv # "ok" \/ cn[p].out # NoResp) {
          return;
      } else if (cn[p].dfr # NoCmd) {
          \* esdm_egd_serve_deferred(): one generation for the rest
-         with (r = cn[p], d = r.dfr, y \in GenOut(d[3] - r.ans)) {
+         with (r = cn[p], d = r.dfr, y \in BlkOut(d[3] - r.ans)) {
              if (y = Err) {
                  rv := "err";
                  return;
@@ -237,7 +306,7 @@ pr2: if (cn[p].out # NoResp) {
          };
      };
      \* the commands in the input buffer, one per step
-pr3: if (cn[p].out # NoResp \/ cn[p].in = <<>>) {
+pr3: if (rv # "ok" \/ cn[p].out # NoResp \/ cn[p].in = <<>>) {
          return;
      } else {
          with (r = cn[p], cm = Head(r.in), id = cm[1], k = cm[2], n = cm[3],
@@ -251,18 +320,22 @@ pr3: if (cn[p].out # NoResp \/ cn[p].in = <<>>) {
              } else if (k = "cnt") {
                  respond(p, r1, <<id, "cnt">>, bv);
              } else if (k = "priv") {
-                 \* esdm_egd_cmd_priv(): the UID latched at accept
-                 respond(p, r1,
-                         <<id, IF p \in Root THEN "ok" ELSE "eperm">>, bv);
+                 \* esdm_egd_cmd_priv(): the UID latched at accept decides;
+                 \* carried out for another peer than root is a violation
+                 respond(p, r1, <<id, IF r.root THEN "ok" ELSE "eperm">>,
+                         bv \cup (IF r.root /\ p \notin Root
+                                  THEN {"PrivDone"} ELSE {}));
+                 acted[p] := acted[p] \cup {id};
              } else if (k = "wr") {
                  \* esdm_egd_cmd_write_entropy(): no response
                  cn[p] := r1;
                  viol := viol \cup bv;
+                 if (id > 0) acted[p] := acted[p] \cup {id};
              } else if (k = "nb") {
                  \* esdm_egd_cmd_read_nonblock(), esdm_egd_reseed_wait()
                  with (y \in GenOut(n), op \in OpOut,
                        ex \in IF r.parked THEN BOOLEAN ELSE {FALSE}) {
-                     if (Sock(p) = "Lreg" /\ y = 0 /\ op /\ ~ex) {
+                     if (y = 0 /\ op /\ ~ex) {
                          \* parked at the head of the input
                          cn[p].parked := TRUE;
                          viol := viol \cup bv;
@@ -273,7 +346,7 @@ pr3: if (cn[p].out # NoResp \/ cn[p].in = <<>>) {
                  };
              } else {
                  \* esdm_egd_cmd_read_block()
-                 with (y \in GenOut(n)) {
+                 with (y \in BlkOut(n)) {
                      if (y = Err) {
                          rv := "err";
                          return;
@@ -316,7 +389,8 @@ rd2: if (rv # "ok" \/ cn[q].dfr # NoCmd \/ cn[q].parked \/ cn[q].out # NoResp
          rv := "eof";
          return;
      } else {
-         \* EAGAIN
+         \* EAGAIN; a blocking recv() would wait for the client here
+         await "recv" \notin Block;
          return;
      };
 rd3: if (rv = "ok" /\ ~FixFair) {
@@ -335,6 +409,12 @@ wt: while (TRUE) {
         \* the listeners re-armed (listen_armed), epoll_wait()
         with (want = NOpen < Cap /\ ~backoff, b \in Batches(Ready(want))) {
             evs := b;
+            \* a listener whose event accepted nobody, with nothing
+            \* changed since, is ready again at once
+            viol := viol \cup
+                    (IF \E l \in lfail : <<l, {"IN"}>> \in Ready(want)
+                     THEN {"Spin"} ELSE {});
+            lfail := {};
             \* FixAccept: the timeout passed
             if (b = {}) backoff := FALSE;
         };
@@ -345,23 +425,22 @@ ev1:    while (evs # {}) {
             };
 ev2:        if (ev[1] \in Listeners /\ FixCap /\ NOpen >= Cap) {
                 \* at the limit: disarmed in the next round
+                lfail := lfail \cup {ev[1]};
                 ev := NoEv;
             } else if (ev[1] \in Listeners) {
                 \* esdm_egd_accept(); the limit was checked before epoll_wait()
                 either {
                     \* accept4() fails: the client stays queued
                     await AcceptFail /\ ~good;
-                    if (FixAccept) {
-                        backoff := TRUE;
-                    } else {
-                        \* still armed and ready: reported at once again
-                        viol := viol \cup
-                                (IF NOpen < Cap THEN {"Spin"} ELSE {});
-                    };
+                    lfail := lfail \cup {ev[1]};
+                    \* accept_retry_at; without it the listener stays
+                    \* armed and ready
+                    if (FixAccept) backoff := TRUE;
                 } or {
                     with (c \in Backlog(ev[1])) {
                         srv[c] := "open";
-                        cn[c] := Conn0;
+                        \* SO_PEERCRED
+                        cn[c] := [Conn0 EXCEPT !.root = c \in Root];
                         conns := Append(conns, c);
                     };
                 };
@@ -371,18 +450,22 @@ ev2:        if (ev[1] \in Listeners /\ FixCap /\ NOpen >= Cap) {
                     viol := viol \cup (IF srv[c] # "open"
                                        THEN {"UseAfterFree"} ELSE {});
                     snap := Snap(c, cn[c]);
-                    \* gone, but its input is still to be processed
-                    if ("HUP" \in ev[2]) cn[c] := Hangup(cn[c]);
-                    rv := "ok";
+                    \* gone, but its input is still to be processed; before
+                    \* the fix the connection was closed at once
+                    if ("HUP" \in ev[2] /\ FixHangup) cn[c] := Hangup(cn[c]);
+                    rv := IF "HUP" \in ev[2] /\ ~FixHangup THEN "hup"
+                          ELSE "ok";
                 };
-ev3:            if (cn[ev[1]].out # NoResp) {
+ev3:            if (rv # "ok") {
+                    skip;
+                } else if (cn[ev[1]].out # NoResp) {
                     call egdProcess(ev[1]);
                 } else {
                     call egdRead(ev[1]);
                 };
                 \* the EPOLLRDHUP check, then close or esdm_egd_conn_arm()
 ev4:            with (c = ev[1], r = cn[c], a = Arm(r)) {
-                    if (rv # "ok" \/ ("RDHUP" \in ev[2] /\ ~FixFair
+                    if (rv # "ok" \/ ("RDHUP" \in ev[2] /\ ~FixRdhup
                                       /\ r.dfr = NoCmd /\ ~r.parked
                                       /\ r.out = NoResp)) {
                         with (why = IF rv = "ok" THEN "rdhup" ELSE rv)
@@ -501,7 +584,7 @@ en: await Liveness;
 \* BEGIN TRANSLATION
 CONSTANT defaultInitValue
 VARIABLES cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, nsent, nrecv, 
-          viol, pc, stack
+          acted, closed, lfail, viol, pc, stack
 
 (* define statement *)
 NOpen == Cardinality({c \in Clients : srv[c] = "open"})
@@ -539,10 +622,16 @@ Batches(S) ==
 GenOut(len) == IF good THEN {len}
                ELSE (0..len) \cup (IF GenFail THEN {Err} ELSE {})
 
+
+BlkOut(len) == IF "gen" \notin Block THEN GenOut(len)
+               ELSE IF good THEN {len} ELSE {}
+
 OpOut == IF good THEN {TRUE} ELSE BOOLEAN
 
 Snap(c, r) == <<r, sq[c], rq[c], cst[c]>>
 NResp(c, j) == Cardinality({i \in 1..j : Script[c][i][1] # "wr"})
+
+Effects(c) == {i \in 1..nsent[c] : HasEffect(Script[c][i][1])}
 
 Owed(c) == IF c \in Streamers THEN 0
            ELSE NResp(c, nsent[c]) - nrecv[c] - Len(rq[c])
@@ -559,7 +648,8 @@ RespOK(c, i, v) ==
 VARIABLES p, q, evs, ev, walk, cur, po, snap
 
 vars == << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, nsent, 
-           nrecv, viol, pc, stack, p, q, evs, ev, walk, cur, po, snap >>
+           nrecv, acted, closed, lfail, viol, pc, stack, p, q, evs, ev, walk, 
+           cur, po, snap >>
 
 ProcSet == {"worker"} \cup (Clients) \cup {"env"}
 
@@ -576,6 +666,9 @@ Init == (* Global variables *)
         /\ recvd = FALSE
         /\ nsent = [c \in Clients |-> 0]
         /\ nrecv = [c \in Clients |-> 0]
+        /\ acted = [c \in Clients |-> {}]
+        /\ closed = [c \in Clients |-> "none"]
+        /\ lfail = {}
         /\ viol = {}
         (* Procedure egdProcess *)
         /\ p = [ self \in ProcSet |-> defaultInitValue]
@@ -600,22 +693,27 @@ pr1(self) == /\ pc[self] = "pr1"
                                                     (IF NoSignal THEN {} ELSE {"Sigpipe"})
                                                ELSE {}))
                         /\ IF cst[p[self]] = "gone"
-                              THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(cn[p[self]])]
+                              THEN /\ IF FixEpipe
+                                         THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(cn[p[self]])]
+                                              /\ rv' = rv
+                                         ELSE /\ rv' = "pipe"
+                                              /\ cn' = cn
                                    /\ rq' = rq
                               ELSE /\ IF Len(rq[p[self]]) < SndBuf
                                          THEN /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], cn[p[self]].out)]
                                               /\ cn' = [cn EXCEPT ![p[self]].out = NoResp]
                                          ELSE /\ TRUE
                                               /\ UNCHANGED << rq, cn >>
+                                   /\ rv' = rv
                    ELSE /\ TRUE
-                        /\ UNCHANGED << rq, cn, viol >>
+                        /\ UNCHANGED << rq, cn, rv, viol >>
              /\ pc' = [pc EXCEPT ![self] = "pr2"]
-             /\ UNCHANGED << cst, srv, sq, conns, backoff, good, rv, recvd, 
-                             nsent, nrecv, stack, p, q, evs, ev, walk, cur, po, 
-                             snap >>
+             /\ UNCHANGED << cst, srv, sq, conns, backoff, good, recvd, nsent, 
+                             nrecv, acted, closed, lfail, stack, p, q, evs, ev, 
+                             walk, cur, po, snap >>
 
 pr2(self) == /\ pc[self] = "pr2"
-             /\ IF cn[p[self]].out # NoResp
+             /\ IF rv # "ok" \/ cn[p[self]].out # NoResp
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ p' = [p EXCEPT ![self] = Head(stack[self]).p]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
@@ -623,7 +721,7 @@ pr2(self) == /\ pc[self] = "pr2"
                    ELSE /\ IF cn[p[self]].dfr # NoCmd
                               THEN /\ LET r == cn[p[self]] IN
                                         LET d == r.dfr IN
-                                          \E y \in GenOut(d[3] - r.ans):
+                                          \E y \in BlkOut(d[3] - r.ans):
                                             IF y = Err
                                                THEN /\ rv' = "err"
                                                     /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -634,18 +732,28 @@ pr2(self) == /\ pc[self] = "pr2"
                                                ELSE /\ IF r.ans + y = d[3]
                                                           THEN /\ viol' = (viol \cup ({})
                                                                                 \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
-                                                                                \cup (IF cst[p[self]] = "gone"
+                                                                                \cup (IF cst[p[self]] = "gone" /\ ~([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]).hup
                                                                                       THEN {"SendClosed"} \cup
                                                                                            (IF NoSignal THEN {} ELSE {"Sigpipe"})
                                                                                       ELSE {}))
-                                                               /\ IF cst[p[self]] = "gone"
-                                                                     THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]))]
-                                                                          /\ rq' = rq
-                                                                     ELSE /\ IF Len(rq[p[self]]) < SndBuf
-                                                                                THEN /\ cn' = [cn EXCEPT ![p[self]] = [r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]]
-                                                                                     /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<d[1], d[3]>>))]
-                                                                                ELSE /\ cn' = [cn EXCEPT ![p[self]] = [([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]) EXCEPT !.out = (<<d[1], d[3]>>)]]
+                                                               /\ IF ([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]).hup
+                                                                     THEN /\ cn' = [cn EXCEPT ![p[self]] = [r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]]
+                                                                          /\ UNCHANGED << rq, 
+                                                                                          rv >>
+                                                                     ELSE /\ IF cst[p[self]] = "gone"
+                                                                                THEN /\ IF FixEpipe
+                                                                                           THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]))]
+                                                                                                /\ rv' = rv
+                                                                                           ELSE /\ cn' = [cn EXCEPT ![p[self]] = [r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]]
+                                                                                                /\ rv' = "pipe"
                                                                                      /\ rq' = rq
+                                                                                ELSE /\ IF Len(rq[p[self]]) < SndBuf
+                                                                                           THEN /\ cn' = [cn EXCEPT ![p[self]] = [r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]]
+                                                                                                /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<d[1], d[3]>>))]
+                                                                                           ELSE /\ "send" \notin Block
+                                                                                                /\ cn' = [cn EXCEPT ![p[self]] = [([r EXCEPT !.dfr = NoCmd, !.ans = 0, !.fin = d[1]]) EXCEPT !.out = (<<d[1], d[3]>>)]]
+                                                                                                /\ rq' = rq
+                                                                                     /\ rv' = rv
                                                                /\ pc' = [pc EXCEPT ![self] = "pr3"]
                                                                /\ UNCHANGED << stack, 
                                                                                p >>
@@ -654,19 +762,20 @@ pr2(self) == /\ pc[self] = "pr2"
                                                                /\ p' = [p EXCEPT ![self] = Head(stack[self]).p]
                                                                /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                                                                /\ UNCHANGED << rq, 
+                                                                               rv, 
                                                                                viol >>
-                                                    /\ rv' = rv
                               ELSE /\ pc' = [pc EXCEPT ![self] = "pr3"]
                                    /\ UNCHANGED << rq, cn, rv, viol, stack, p >>
              /\ UNCHANGED << cst, srv, sq, conns, backoff, good, recvd, nsent, 
-                             nrecv, q, evs, ev, walk, cur, po, snap >>
+                             nrecv, acted, closed, lfail, q, evs, ev, walk, 
+                             cur, po, snap >>
 
 pr3(self) == /\ pc[self] = "pr3"
-             /\ IF cn[p[self]].out # NoResp \/ cn[p[self]].in = <<>>
+             /\ IF rv # "ok" \/ cn[p[self]].out # NoResp \/ cn[p[self]].in = <<>>
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ p' = [p EXCEPT ![self] = Head(stack[self]).p]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                        /\ UNCHANGED << rq, cn, rv, viol >>
+                        /\ UNCHANGED << rq, cn, rv, acted, viol >>
                    ELSE /\ LET r == cn[p[self]] IN
                              LET cm == Head(r.in) IN
                                LET id == cm[1] IN
@@ -679,49 +788,74 @@ pr3(self) == /\ pc[self] = "pr3"
                                             THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
                                                  /\ viol' = (viol \cup bv)
                                                  /\ pc' = [pc EXCEPT ![self] = "pr4"]
-                                                 /\ UNCHANGED << rq, rv, stack, 
-                                                                 p >>
+                                                 /\ UNCHANGED << rq, rv, acted, 
+                                                                 stack, p >>
                                             ELSE /\ IF k = "cnt"
                                                        THEN /\ viol' = (viol \cup bv
                                                                              \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
-                                                                             \cup (IF cst[p[self]] = "gone"
+                                                                             \cup (IF cst[p[self]] = "gone" /\ ~r1.hup
                                                                                    THEN {"SendClosed"} \cup
                                                                                         (IF NoSignal THEN {} ELSE {"Sigpipe"})
                                                                                    ELSE {}))
-                                                            /\ IF cst[p[self]] = "gone"
-                                                                  THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
-                                                                       /\ rq' = rq
-                                                                  ELSE /\ IF Len(rq[p[self]]) < SndBuf
-                                                                             THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
-                                                                                  /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, "cnt">>))]
-                                                                             ELSE /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, "cnt">>)]]
-                                                                                  /\ rq' = rq
-                                                            /\ pc' = [pc EXCEPT ![self] = "pr4"]
-                                                            /\ UNCHANGED << rv, 
-                                                                            stack, 
-                                                                            p >>
-                                                       ELSE /\ IF k = "priv"
-                                                                  THEN /\ viol' = (viol \cup bv
-                                                                                        \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
-                                                                                        \cup (IF cst[p[self]] = "gone"
-                                                                                              THEN {"SendClosed"} \cup
-                                                                                                   (IF NoSignal THEN {} ELSE {"Sigpipe"})
-                                                                                              ELSE {}))
-                                                                       /\ IF cst[p[self]] = "gone"
-                                                                             THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
+                                                            /\ IF r1.hup
+                                                                  THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                       /\ UNCHANGED << rq, 
+                                                                                       rv >>
+                                                                  ELSE /\ IF cst[p[self]] = "gone"
+                                                                             THEN /\ IF FixEpipe
+                                                                                        THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
+                                                                                             /\ rv' = rv
+                                                                                        ELSE /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                             /\ rv' = "pipe"
                                                                                   /\ rq' = rq
                                                                              ELSE /\ IF Len(rq[p[self]]) < SndBuf
                                                                                         THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
-                                                                                             /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, IF p[self] \in Root THEN "ok" ELSE "eperm">>))]
-                                                                                        ELSE /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, IF p[self] \in Root THEN "ok" ELSE "eperm">>)]]
+                                                                                             /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, "cnt">>))]
+                                                                                        ELSE /\ "send" \notin Block
+                                                                                             /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, "cnt">>)]]
                                                                                              /\ rq' = rq
+                                                                                  /\ rv' = rv
+                                                            /\ pc' = [pc EXCEPT ![self] = "pr4"]
+                                                            /\ UNCHANGED << acted, 
+                                                                            stack, 
+                                                                            p >>
+                                                       ELSE /\ IF k = "priv"
+                                                                  THEN /\ viol' = (viol \cup (bv \cup (IF r.root /\ p[self] \notin Root
+                                                                                                       THEN {"PrivDone"} ELSE {}))
+                                                                                        \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
+                                                                                        \cup (IF cst[p[self]] = "gone" /\ ~r1.hup
+                                                                                              THEN {"SendClosed"} \cup
+                                                                                                   (IF NoSignal THEN {} ELSE {"Sigpipe"})
+                                                                                              ELSE {}))
+                                                                       /\ IF r1.hup
+                                                                             THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                  /\ UNCHANGED << rq, 
+                                                                                                  rv >>
+                                                                             ELSE /\ IF cst[p[self]] = "gone"
+                                                                                        THEN /\ IF FixEpipe
+                                                                                                   THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
+                                                                                                        /\ rv' = rv
+                                                                                                   ELSE /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                        /\ rv' = "pipe"
+                                                                                             /\ rq' = rq
+                                                                                        ELSE /\ IF Len(rq[p[self]]) < SndBuf
+                                                                                                   THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                        /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, IF r.root THEN "ok" ELSE "eperm">>))]
+                                                                                                   ELSE /\ "send" \notin Block
+                                                                                                        /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, IF r.root THEN "ok" ELSE "eperm">>)]]
+                                                                                                        /\ rq' = rq
+                                                                                             /\ rv' = rv
+                                                                       /\ acted' = [acted EXCEPT ![p[self]] = acted[p[self]] \cup {id}]
                                                                        /\ pc' = [pc EXCEPT ![self] = "pr4"]
-                                                                       /\ UNCHANGED << rv, 
-                                                                                       stack, 
+                                                                       /\ UNCHANGED << stack, 
                                                                                        p >>
                                                                   ELSE /\ IF k = "wr"
                                                                              THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
                                                                                   /\ viol' = (viol \cup bv)
+                                                                                  /\ IF id > 0
+                                                                                        THEN /\ acted' = [acted EXCEPT ![p[self]] = acted[p[self]] \cup {id}]
+                                                                                        ELSE /\ TRUE
+                                                                                             /\ acted' = acted
                                                                                   /\ pc' = [pc EXCEPT ![self] = "pr4"]
                                                                                   /\ UNCHANGED << rq, 
                                                                                                   rv, 
@@ -731,32 +865,42 @@ pr3(self) == /\ pc[self] = "pr3"
                                                                                         THEN /\ \E y \in GenOut(n):
                                                                                                   \E op \in OpOut:
                                                                                                     \E ex \in IF r.parked THEN BOOLEAN ELSE {FALSE}:
-                                                                                                      IF Sock(p[self]) = "Lreg" /\ y = 0 /\ op /\ ~ex
+                                                                                                      IF y = 0 /\ op /\ ~ex
                                                                                                          THEN /\ cn' = [cn EXCEPT ![p[self]].parked = TRUE]
                                                                                                               /\ viol' = (viol \cup bv)
                                                                                                               /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                                                                                               /\ p' = [p EXCEPT ![self] = Head(stack[self]).p]
                                                                                                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                                                                                              /\ rq' = rq
+                                                                                                              /\ UNCHANGED << rq, 
+                                                                                                                              rv >>
                                                                                                          ELSE /\ viol' = (viol \cup bv
                                                                                                                                \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
-                                                                                                                               \cup (IF cst[p[self]] = "gone"
+                                                                                                                               \cup (IF cst[p[self]] = "gone" /\ ~r1.hup
                                                                                                                                      THEN {"SendClosed"} \cup
                                                                                                                                           (IF NoSignal THEN {} ELSE {"Sigpipe"})
                                                                                                                                      ELSE {}))
-                                                                                                              /\ IF cst[p[self]] = "gone"
-                                                                                                                    THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
-                                                                                                                         /\ rq' = rq
-                                                                                                                    ELSE /\ IF Len(rq[p[self]]) < SndBuf
-                                                                                                                               THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
-                                                                                                                                    /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, IF y = Err THEN 0 ELSE y>>))]
-                                                                                                                               ELSE /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, IF y = Err THEN 0 ELSE y>>)]]
+                                                                                                              /\ IF r1.hup
+                                                                                                                    THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                         /\ UNCHANGED << rq, 
+                                                                                                                                         rv >>
+                                                                                                                    ELSE /\ IF cst[p[self]] = "gone"
+                                                                                                                               THEN /\ IF FixEpipe
+                                                                                                                                          THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
+                                                                                                                                               /\ rv' = rv
+                                                                                                                                          ELSE /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                                               /\ rv' = "pipe"
                                                                                                                                     /\ rq' = rq
+                                                                                                                               ELSE /\ IF Len(rq[p[self]]) < SndBuf
+                                                                                                                                          THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                                               /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, IF y = Err THEN 0 ELSE y>>))]
+                                                                                                                                          ELSE /\ "send" \notin Block
+                                                                                                                                               /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, IF y = Err THEN 0 ELSE y>>)]]
+                                                                                                                                               /\ rq' = rq
+                                                                                                                                    /\ rv' = rv
                                                                                                               /\ pc' = [pc EXCEPT ![self] = "pr4"]
                                                                                                               /\ UNCHANGED << stack, 
                                                                                                                               p >>
-                                                                                             /\ rv' = rv
-                                                                                        ELSE /\ \E y \in GenOut(n):
+                                                                                        ELSE /\ \E y \in BlkOut(n):
                                                                                                   IF y = Err
                                                                                                      THEN /\ rv' = "err"
                                                                                                           /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -768,18 +912,28 @@ pr3(self) == /\ pc[self] = "pr3"
                                                                                                      ELSE /\ IF y = n
                                                                                                                 THEN /\ viol' = (viol \cup bv
                                                                                                                                       \cup (IF cn[p[self]].out # NoResp THEN {"Overflow"} ELSE {})
-                                                                                                                                      \cup (IF cst[p[self]] = "gone"
+                                                                                                                                      \cup (IF cst[p[self]] = "gone" /\ ~r1.hup
                                                                                                                                             THEN {"SendClosed"} \cup
                                                                                                                                                  (IF NoSignal THEN {} ELSE {"Sigpipe"})
                                                                                                                                             ELSE {}))
-                                                                                                                     /\ IF cst[p[self]] = "gone"
-                                                                                                                           THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
-                                                                                                                                /\ rq' = rq
-                                                                                                                           ELSE /\ IF Len(rq[p[self]]) < SndBuf
-                                                                                                                                      THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
-                                                                                                                                           /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, n>>))]
-                                                                                                                                      ELSE /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, n>>)]]
+                                                                                                                     /\ IF r1.hup
+                                                                                                                           THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                                /\ UNCHANGED << rq, 
+                                                                                                                                                rv >>
+                                                                                                                           ELSE /\ IF cst[p[self]] = "gone"
+                                                                                                                                      THEN /\ IF FixEpipe
+                                                                                                                                                 THEN /\ cn' = [cn EXCEPT ![p[self]] = Hangup(r1)]
+                                                                                                                                                      /\ rv' = rv
+                                                                                                                                                 ELSE /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                                                      /\ rv' = "pipe"
                                                                                                                                            /\ rq' = rq
+                                                                                                                                      ELSE /\ IF Len(rq[p[self]]) < SndBuf
+                                                                                                                                                 THEN /\ cn' = [cn EXCEPT ![p[self]] = r1]
+                                                                                                                                                      /\ rq' = [rq EXCEPT ![p[self]] = Append(rq[p[self]], (<<id, n>>))]
+                                                                                                                                                 ELSE /\ "send" \notin Block
+                                                                                                                                                      /\ cn' = [cn EXCEPT ![p[self]] = [r1 EXCEPT !.out = (<<id, n>>)]]
+                                                                                                                                                      /\ rq' = rq
+                                                                                                                                           /\ rv' = rv
                                                                                                                      /\ pc' = [pc EXCEPT ![self] = "pr4"]
                                                                                                                      /\ UNCHANGED << stack, 
                                                                                                                                      p >>
@@ -789,16 +943,18 @@ pr3(self) == /\ pc[self] = "pr3"
                                                                                                                      /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                                                                                                      /\ p' = [p EXCEPT ![self] = Head(stack[self]).p]
                                                                                                                      /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                                                                                                     /\ rq' = rq
-                                                                                                          /\ rv' = rv
+                                                                                                                     /\ UNCHANGED << rq, 
+                                                                                                                                     rv >>
+                                                                                  /\ acted' = acted
              /\ UNCHANGED << cst, srv, sq, conns, backoff, good, recvd, nsent, 
-                             nrecv, q, evs, ev, walk, cur, po, snap >>
+                             nrecv, closed, lfail, q, evs, ev, walk, cur, po, 
+                             snap >>
 
 pr4(self) == /\ pc[self] = "pr4"
              /\ pc' = [pc EXCEPT ![self] = "pr3"]
              /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, 
-                             recvd, nsent, nrecv, viol, stack, p, q, evs, ev, 
-                             walk, cur, po, snap >>
+                             recvd, nsent, nrecv, acted, closed, lfail, viol, 
+                             stack, p, q, evs, ev, walk, cur, po, snap >>
 
 egdProcess(self) == pr1(self) \/ pr2(self) \/ pr3(self) \/ pr4(self)
 
@@ -813,8 +969,8 @@ rd1(self) == /\ pc[self] = "rd1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "rd2"]
                         /\ UNCHANGED << stack, p >>
              /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, 
-                             recvd, nsent, nrecv, viol, q, evs, ev, walk, cur, 
-                             po, snap >>
+                             recvd, nsent, nrecv, acted, closed, lfail, viol, 
+                             q, evs, ev, walk, cur, po, snap >>
 
 rd2(self) == /\ pc[self] = "rd2"
              /\ IF rv # "ok" \/ cn[q[self]].dfr # NoCmd \/ cn[q[self]].parked \/ cn[q[self]].out # NoResp
@@ -841,13 +997,15 @@ rd2(self) == /\ pc[self] = "rd2"
                                               /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                               /\ q' = [q EXCEPT ![self] = Head(stack[self]).q]
                                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                         ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                         ELSE /\ "recv" \notin Block
+                                              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                               /\ q' = [q EXCEPT ![self] = Head(stack[self]).q]
                                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                                               /\ rv' = rv
                                    /\ UNCHANGED << sq, cn, recvd, viol, p >>
              /\ UNCHANGED << cst, srv, rq, conns, backoff, good, nsent, nrecv, 
-                             evs, ev, walk, cur, po, snap >>
+                             acted, closed, lfail, evs, ev, walk, cur, po, 
+                             snap >>
 
 rd3(self) == /\ pc[self] = "rd3"
              /\ IF rv = "ok" /\ ~FixFair
@@ -857,8 +1015,8 @@ rd3(self) == /\ pc[self] = "rd3"
                         /\ q' = [q EXCEPT ![self] = Head(stack[self]).q]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, 
-                             recvd, nsent, nrecv, viol, p, evs, ev, walk, cur, 
-                             po, snap >>
+                             recvd, nsent, nrecv, acted, closed, lfail, viol, 
+                             p, evs, ev, walk, cur, po, snap >>
 
 egdRead(self) == rd1(self) \/ rd2(self) \/ rd3(self)
 
@@ -866,13 +1024,18 @@ wt == /\ pc["worker"] = "wt"
       /\ LET want == NOpen < Cap /\ ~backoff IN
            \E b \in Batches(Ready(want)):
              /\ evs' = b
+             /\ viol' = (viol \cup
+                         (IF \E l \in lfail : <<l, {"IN"}>> \in Ready(want)
+                          THEN {"Spin"} ELSE {}))
+             /\ lfail' = {}
              /\ IF b = {}
                    THEN /\ backoff' = FALSE
                    ELSE /\ TRUE
                         /\ UNCHANGED backoff
       /\ pc' = [pc EXCEPT !["worker"] = "ev1"]
       /\ UNCHANGED << cst, srv, sq, rq, cn, conns, good, rv, recvd, nsent, 
-                      nrecv, viol, stack, p, q, ev, walk, cur, po, snap >>
+                      nrecv, acted, closed, stack, p, q, ev, walk, cur, po, 
+                      snap >>
 
 ev1 == /\ pc["worker"] = "ev1"
        /\ IF evs # {}
@@ -883,77 +1046,89 @@ ev1 == /\ pc["worker"] = "ev1"
              ELSE /\ pc' = [pc EXCEPT !["worker"] = "wk0"]
                   /\ UNCHANGED << evs, ev >>
        /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, 
-                       nsent, nrecv, viol, stack, p, q, walk, cur, po, snap >>
+                       nsent, nrecv, acted, closed, lfail, viol, stack, p, q, 
+                       walk, cur, po, snap >>
 
 ev2 == /\ pc["worker"] = "ev2"
        /\ IF ev[1] \in Listeners /\ FixCap /\ NOpen >= Cap
-             THEN /\ ev' = NoEv
+             THEN /\ lfail' = (lfail \cup {ev[1]})
+                  /\ ev' = NoEv
                   /\ pc' = [pc EXCEPT !["worker"] = "ev1"]
                   /\ UNCHANGED << srv, cn, conns, backoff, rv, viol, snap >>
              ELSE /\ IF ev[1] \in Listeners
                         THEN /\ \/ /\ AcceptFail /\ ~good
+                                   /\ lfail' = (lfail \cup {ev[1]})
                                    /\ IF FixAccept
                                          THEN /\ backoff' = TRUE
-                                              /\ viol' = viol
-                                         ELSE /\ viol' = (viol \cup
-                                                          (IF NOpen < Cap THEN {"Spin"} ELSE {}))
+                                         ELSE /\ TRUE
                                               /\ UNCHANGED backoff
                                    /\ UNCHANGED <<srv, cn, conns>>
                                 \/ /\ \E c \in Backlog(ev[1]):
                                         /\ srv' = [srv EXCEPT ![c] = "open"]
-                                        /\ cn' = [cn EXCEPT ![c] = Conn0]
+                                        /\ cn' = [cn EXCEPT ![c] = [Conn0 EXCEPT !.root = c \in Root]]
                                         /\ conns' = Append(conns, c)
-                                   /\ UNCHANGED <<backoff, viol>>
+                                   /\ UNCHANGED <<backoff, lfail>>
                              /\ ev' = NoEv
                              /\ pc' = [pc EXCEPT !["worker"] = "ev1"]
-                             /\ UNCHANGED << rv, snap >>
+                             /\ UNCHANGED << rv, viol, snap >>
                         ELSE /\ LET c == ev[1] IN
                                   /\ viol' = (viol \cup (IF srv[c] # "open"
                                                          THEN {"UseAfterFree"} ELSE {}))
                                   /\ snap' = Snap(c, cn[c])
-                                  /\ IF "HUP" \in ev[2]
+                                  /\ IF "HUP" \in ev[2] /\ FixHangup
                                         THEN /\ cn' = [cn EXCEPT ![c] = Hangup(cn[c])]
                                         ELSE /\ TRUE
                                              /\ cn' = cn
-                                  /\ rv' = "ok"
+                                  /\ rv' = (IF "HUP" \in ev[2] /\ ~FixHangup THEN "hup"
+                                            ELSE "ok")
                              /\ pc' = [pc EXCEPT !["worker"] = "ev3"]
-                             /\ UNCHANGED << srv, conns, backoff, ev >>
-       /\ UNCHANGED << cst, sq, rq, good, recvd, nsent, nrecv, stack, p, q, 
-                       evs, walk, cur, po >>
+                             /\ UNCHANGED << srv, conns, backoff, lfail, ev >>
+       /\ UNCHANGED << cst, sq, rq, good, recvd, nsent, nrecv, acted, closed, 
+                       stack, p, q, evs, walk, cur, po >>
 
 ev3 == /\ pc["worker"] = "ev3"
-       /\ IF cn[ev[1]].out # NoResp
-             THEN /\ /\ p' = [p EXCEPT !["worker"] = ev[1]]
-                     /\ stack' = [stack EXCEPT !["worker"] = << [ procedure |->  "egdProcess",
-                                                                  pc        |->  "ev4",
-                                                                  p         |->  p["worker"] ] >>
-                                                              \o stack["worker"]]
-                  /\ pc' = [pc EXCEPT !["worker"] = "pr1"]
-                  /\ q' = q
-             ELSE /\ /\ q' = [q EXCEPT !["worker"] = ev[1]]
-                     /\ stack' = [stack EXCEPT !["worker"] = << [ procedure |->  "egdRead",
-                                                                  pc        |->  "ev4",
-                                                                  q         |->  q["worker"] ] >>
-                                                              \o stack["worker"]]
-                  /\ pc' = [pc EXCEPT !["worker"] = "rd1"]
-                  /\ p' = p
+       /\ IF rv # "ok"
+             THEN /\ TRUE
+                  /\ pc' = [pc EXCEPT !["worker"] = "ev4"]
+                  /\ UNCHANGED << stack, p, q >>
+             ELSE /\ IF cn[ev[1]].out # NoResp
+                        THEN /\ /\ p' = [p EXCEPT !["worker"] = ev[1]]
+                                /\ stack' = [stack EXCEPT !["worker"] = << [ procedure |->  "egdProcess",
+                                                                             pc        |->  "ev4",
+                                                                             p         |->  p["worker"] ] >>
+                                                                         \o stack["worker"]]
+                             /\ pc' = [pc EXCEPT !["worker"] = "pr1"]
+                             /\ q' = q
+                        ELSE /\ /\ q' = [q EXCEPT !["worker"] = ev[1]]
+                                /\ stack' = [stack EXCEPT !["worker"] = << [ procedure |->  "egdRead",
+                                                                             pc        |->  "ev4",
+                                                                             q         |->  q["worker"] ] >>
+                                                                         \o stack["worker"]]
+                             /\ pc' = [pc EXCEPT !["worker"] = "rd1"]
+                             /\ p' = p
        /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, 
-                       nsent, nrecv, viol, evs, ev, walk, cur, po, snap >>
+                       nsent, nrecv, acted, closed, lfail, viol, evs, ev, walk, 
+                       cur, po, snap >>
 
 ev4 == /\ pc["worker"] = "ev4"
        /\ LET c == ev[1] IN
             LET r == cn[c] IN
               LET a == Arm(r) IN
-                /\ IF rv # "ok" \/ ("RDHUP" \in ev[2] /\ ~FixFair
+                /\ IF rv # "ok" \/ ("RDHUP" \in ev[2] /\ ~FixRdhup
                                     /\ r.dfr = NoCmd /\ ~r.parked
                                     /\ r.out = NoResp)
                       THEN /\ LET why == IF rv = "ok" THEN "rdhup" ELSE rv IN
                                 /\ srv' = [srv EXCEPT ![c] = "freed"]
                                 /\ cn' = [cn EXCEPT ![c] = Conn0]
                                 /\ conns' = SelectSeq(conns, LAMBDA x : x # c)
+                                /\ closed' = [closed EXCEPT ![c] = why]
                                 /\ viol' = (viol \cup (IF why \in {"eof", "rdhup"} /\ cst[c] # "gone"
                                                           /\ Owed(c) > 0
-                                                       THEN {"Lost"} ELSE {}))
+                                                       THEN {"Lost"} ELSE {})
+                                                 \cup (IF why \notin {"err", "stall"} /\ c \notin Streamers
+                                                          /\ ~(Effects(c) \subseteq acted[c])
+                                                       THEN {"Dropped"} ELSE {}))
+                                /\ lfail' = {}
                                 /\ IF FixAccept
                                       THEN /\ backoff' = FALSE
                                       ELSE /\ TRUE
@@ -963,20 +1138,21 @@ ev4 == /\ pc["worker"] = "ev4"
                                        (IF snap = Snap(c, [r EXCEPT !.armed = a])
                                            /\ Flags(c, a) # {}
                                         THEN {"Spin"} ELSE {}))
-                           /\ UNCHANGED << srv, conns, backoff >>
+                           /\ UNCHANGED << srv, conns, backoff, closed, lfail >>
                 /\ ev' = NoEv
                 /\ snap' = <<>>
                 /\ rv' = "ok"
                 /\ recvd' = FALSE
        /\ pc' = [pc EXCEPT !["worker"] = "ev1"]
-       /\ UNCHANGED << cst, sq, rq, good, nsent, nrecv, stack, p, q, evs, walk, 
-                       cur, po >>
+       /\ UNCHANGED << cst, sq, rq, good, nsent, nrecv, acted, stack, p, q, 
+                       evs, walk, cur, po >>
 
 wk0 == /\ pc["worker"] = "wk0"
        /\ walk' = conns
        /\ pc' = [pc EXCEPT !["worker"] = "wk1"]
        /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, 
-                       nsent, nrecv, viol, stack, p, q, evs, ev, cur, po, snap >>
+                       nsent, nrecv, acted, closed, lfail, viol, stack, p, q, 
+                       evs, ev, cur, po, snap >>
 
 wk1 == /\ pc["worker"] = "wk1"
        /\ IF walk # <<>>
@@ -994,7 +1170,8 @@ wk1 == /\ pc["worker"] = "wk1"
              ELSE /\ pc' = [pc EXCEPT !["worker"] = "wt"]
                   /\ UNCHANGED << viol, walk, cur, po >>
        /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, 
-                       nsent, nrecv, stack, p, q, evs, ev, snap >>
+                       nsent, nrecv, acted, closed, lfail, stack, p, q, evs, 
+                       ev, snap >>
 
 wk2 == /\ pc["worker"] = "wk2"
        /\ /\ p' = [p EXCEPT !["worker"] = cur]
@@ -1004,7 +1181,8 @@ wk2 == /\ pc["worker"] = "wk2"
                                                    \o stack["worker"]]
        /\ pc' = [pc EXCEPT !["worker"] = "pr1"]
        /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, good, rv, recvd, 
-                       nsent, nrecv, viol, q, evs, ev, walk, cur, po, snap >>
+                       nsent, nrecv, acted, closed, lfail, viol, q, evs, ev, 
+                       walk, cur, po, snap >>
 
 wk3 == /\ pc["worker"] = "wk3"
        /\ LET r == cn[cur] IN
@@ -1016,21 +1194,27 @@ wk3 == /\ pc["worker"] = "wk3"
                               /\ srv' = [srv EXCEPT ![cur] = "freed"]
                               /\ cn' = [cn EXCEPT ![cur] = Conn0]
                               /\ conns' = SelectSeq(conns, LAMBDA x : x # cur)
+                              /\ closed' = [closed EXCEPT ![cur] = why]
                               /\ viol' = (viol \cup (IF why \in {"eof", "rdhup"} /\ cst[cur] # "gone"
                                                         /\ Owed(cur) > 0
-                                                     THEN {"Lost"} ELSE {}))
+                                                     THEN {"Lost"} ELSE {})
+                                               \cup (IF why \notin {"err", "stall"} /\ cur \notin Streamers
+                                                        /\ ~(Effects(cur) \subseteq acted[cur])
+                                                     THEN {"Dropped"} ELSE {}))
+                              /\ lfail' = {}
                               /\ IF FixAccept
                                     THEN /\ backoff' = FALSE
                                     ELSE /\ TRUE
                                          /\ UNCHANGED backoff
                     ELSE /\ cn' = [cn EXCEPT ![cur].armed = Arm(r)]
-                         /\ UNCHANGED << srv, conns, backoff, viol >>
+                         /\ UNCHANGED << srv, conns, backoff, closed, lfail, 
+                                         viol >>
               /\ cur' = NoConn
               /\ po' = NoResp
               /\ rv' = "ok"
        /\ pc' = [pc EXCEPT !["worker"] = "wk1"]
-       /\ UNCHANGED << cst, sq, rq, good, recvd, nsent, nrecv, stack, p, q, 
-                       evs, ev, walk, snap >>
+       /\ UNCHANGED << cst, sq, rq, good, recvd, nsent, nrecv, acted, stack, p, 
+                       q, evs, ev, walk, snap >>
 
 worker == wt \/ ev1 \/ ev2 \/ ev3 \/ ev4 \/ wk0 \/ wk1 \/ wk2 \/ wk3
 
@@ -1039,8 +1223,8 @@ cc(self) == /\ pc[self] = "cc"
             /\ srv' = [srv EXCEPT ![self] = "backlog"]
             /\ pc' = [pc EXCEPT ![self] = "c1"]
             /\ UNCHANGED << sq, rq, cn, conns, backoff, good, rv, recvd, nsent, 
-                            nrecv, viol, stack, p, q, evs, ev, walk, cur, po, 
-                            snap >>
+                            nrecv, acted, closed, lfail, viol, stack, p, q, 
+                            evs, ev, walk, cur, po, snap >>
 
 c1(self) == /\ pc[self] = "c1"
             /\ \/ /\ cst[self] = "conn" /\ Len(sq[self]) < SqCap
@@ -1083,16 +1267,17 @@ c1(self) == /\ pc[self] = "c1"
                      \/ srv[self] = "freed" /\ rq[self] = <<>>
                   /\ pc' = [pc EXCEPT ![self] = "cx"]
                   /\ UNCHANGED <<cst, sq, rq, nsent, nrecv, viol>>
-            /\ UNCHANGED << srv, cn, conns, backoff, good, rv, recvd, stack, p, 
-                            q, evs, ev, walk, cur, po, snap >>
+            /\ UNCHANGED << srv, cn, conns, backoff, good, rv, recvd, acted, 
+                            closed, lfail, stack, p, q, evs, ev, walk, cur, po, 
+                            snap >>
 
 cx(self) == /\ pc[self] = "cx"
             /\ cst' = [cst EXCEPT ![self] = "gone"]
             /\ rq' = [rq EXCEPT ![self] = <<>>]
             /\ pc' = [pc EXCEPT ![self] = "Done"]
             /\ UNCHANGED << srv, sq, cn, conns, backoff, good, rv, recvd, 
-                            nsent, nrecv, viol, stack, p, q, evs, ev, walk, 
-                            cur, po, snap >>
+                            nsent, nrecv, acted, closed, lfail, viol, stack, p, 
+                            q, evs, ev, walk, cur, po, snap >>
 
 client(self) == cc(self) \/ c1(self) \/ cx(self)
 
@@ -1101,7 +1286,8 @@ en == /\ pc["env"] = "en"
       /\ good' = TRUE
       /\ pc' = [pc EXCEPT !["env"] = "Done"]
       /\ UNCHANGED << cst, srv, sq, rq, cn, conns, backoff, rv, recvd, nsent, 
-                      nrecv, viol, stack, p, q, evs, ev, walk, cur, po, snap >>
+                      nrecv, acted, closed, lfail, viol, stack, p, q, evs, ev, 
+                      walk, cur, po, snap >>
 
 env == en
 
@@ -1123,10 +1309,18 @@ Spec == /\ Init /\ [][Next]_vars
 TypeOK ==
     /\ cst \in [Clients -> {"init", "conn", "wrshut", "gone"}]
     /\ srv \in [Clients -> {"none", "backlog", "open", "freed"}]
+    /\ closed \in [Clients -> {"none", "eof", "rdhup", "err", "stall", "hup",
+                               "pipe"}]
+    /\ \A c \in Clients : (closed[c] = "none") = (srv[c] # "freed")
+    /\ \A c \in Clients : acted[c] \subseteq 1..nsent[c]
+    /\ lfail \subseteq Listeners
     /\ \A c \in Clients : Len(cn[c].in) <= BufCmds /\ Len(rq[c]) <= SndBuf
     /\ NOpen <= Cap + Cardinality(Listeners) - 1
 
-\* The worker never waits: it has a step in every state.
+\* The worker never waits: it has a step in every state. The steps that
+\* could wait are the recv(), the send() and the generation of a blocking
+\* read; they wait with the call in Block and return otherwise, as the
+\* non-blocking sockets and generator calls of the code do.
 WorkerNeverBlocks ==
     ENABLED (worker \/ egdProcess("worker") \/ egdRead("worker"))
 
@@ -1135,7 +1329,11 @@ WorkerNeverBlocks ==
 \* request is deferred or parked, EPOLLIN otherwise.
 ArmedRight ==
     pc["worker"] = "wt" =>
-        \A c \in Clients : srv[c] = "open" => cn[c].armed = Arm(cn[c])
+        \A c \in Clients : srv[c] = "open" =>
+            LET r == cn[c] IN
+            r.armed = IF r.out # NoResp THEN "out"
+                      ELSE IF r.dfr = NoCmd /\ ~r.parked THEN "in"
+                      ELSE "none"
 
 \* The state of a deferred request: what was collected is short of what was
 \* asked for; neither a response nor a parked read stands beside it; a
@@ -1160,8 +1358,9 @@ InOrder == viol \cap {"Order", "Dup"} = {}
 FullAnswer == "Short" \notin viol
 
 \* A privileged command succeeds only for a peer with UID 0, and is refused
-\* with -EPERM otherwise.
-PrivOnlyRoot == "Priv" \notin viol
+\* with -EPERM otherwise: as the client sees it in the response ("Priv"),
+\* and as the server carries it out, answered or not ("PrivDone").
+PrivOnlyRoot == viol \cap {"Priv", "PrivDone"} = {}
 
 \* Answers say what the protocol says for them.
 ContentOK == "Content" \notin viol
@@ -1181,8 +1380,18 @@ OneResponse == "Overflow" \notin viol
 \* the client has all its responses.
 NoLoss == "Lost" \notin viol
 
+\* The commands with an effect are not discarded: when the server closes a
+\* connection for the end of its input or a hang-up, every write and every
+\* privileged command the client sent has reached its handler. A connection
+\* closed for a failed generation or by the write timeout is exempt: it is
+\* given up with its input.
+NoDrop == "Dropped" \notin viol
+
 \* No event is handled without changing anything while its descriptor stays
-\* ready: level-triggered epoll would report it again at once.
+\* ready: level-triggered epoll would report it again at once. For a
+\* listener: after an event that accepted nobody, for a failed accept or
+\* at the connection limit, it is not ready at the next epoll_wait() unless
+\* a connection was closed in between.
 NoSpin == "Spin" \notin viol
 
 \* No send() to a peer that is gone raises SIGPIPE.
@@ -1202,4 +1411,15 @@ Served ==
 \* A client that is gone is cleaned up.
 CleanedUp ==
     <>[]good => \A c \in Clients : [](cst[c] = "gone" => <>(srv[c] = "freed"))
+
+-----------------------------------------------------------------------------
+(* Liveness, whatever the generators do *)
+
+\* The connection of a client that is gone is closed, with or without
+\* output of the generators; with NoDrop, what it sent before is handled.
+\* No fairness of epoll_wait() among the ready descriptors is needed for
+\* it: the clients here are finite, and every event handled makes progress
+\* (NoSpin).
+Reclaimed ==
+    \A c \in Clients : [](cst[c] = "gone" => <>(srv[c] = "freed"))
 =============================================================================
