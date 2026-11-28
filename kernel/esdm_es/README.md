@@ -12,10 +12,10 @@ entropy data - the hook of the scheduler patch sits in `ttwu_stat()`, which
 Similarly, every time an interrupt is received, its high-resolution time stamp
 is used as raw entropy.
 
-Yet, if both entropy sources are enabled at the same time, the interrupt-based
-entropy source is always credited with zero bits of entropy, because both
-entropy sources show a dependency because a scheduling event may also cause
-an interrupt event at the same time.
+Both entropy sources may be enabled at the same time, but the ESDM credits at
+most one of them, as their events depend on each other: an interrupt may wake
+up a task. The build refuses two non-zero rates of `es_irq_entropy_rate` and
+`es_sched_entropy_rate`, and a non-zero rate set at runtime zeroes the other.
 
 Each entropy source collects the time stamps in a per-CPU ring of events.
 When the ESDM asks for entropy, the events collected so far are taken from the
