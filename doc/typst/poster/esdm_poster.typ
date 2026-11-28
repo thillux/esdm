@@ -28,12 +28,14 @@
 #set list(marker: text(fill: accent)[•], body-indent: 0.5em,
   spacing: 0.55em)
 
-// A panel: a heading over a short blue rule, then the body.
+// The heading of a panel, in the accent color.
+#let panel-title(title) = text(size: 60pt, weight: "semibold",
+  fill: accent-text, tracking: -0.5pt, title)
+
+// A panel: a heading, then the body.
 #let panel(title, body) = block(width: 100%, {
-  text(size: 60pt, weight: "semibold", fill: ink, title)
-  v(8pt, weak: true)
-  line(length: 90pt, stroke: 6pt + accent)
-  v(9mm, weak: true)
+  panel-title(title)
+  v(10mm, weak: true)
   body
 })
 
@@ -74,15 +76,13 @@
 
 // ---------------------------------------------------------------- header
 
-#block(width: 100%, height: 178mm, fill: navy, inset: (x: margin,
-  top: 34mm), {
+#block(width: 100%, height: 166mm, fill: navy, inset: (x: margin,
+  top: 36mm), {
   stack(spacing: 11mm,
-    line(length: 120pt, stroke: 8pt + accent),
     text(size: 132pt, weight: "semibold", fill: background,
       tracking: -1.5pt)[Entropy Source and DRNG Manager],
     text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
-      user space – a toolkit to tailor for FIPS 140-3, SP 800-90 and
-      AIS 20/31, every entropy source chosen, credited and reported],
+      user space – a toolkit for FIPS 140-3, SP 800-90 and AIS 20/31],
   )
   place(bottom, dy: -18mm, grid(columns: (1fr, auto),
     text(size: 30pt, weight: "semibold", fill: on-navy, tracking: 3pt,
@@ -107,10 +107,8 @@
   inset: (x: margin, y: 16mm), grid(columns: (1fr, auto),
   column-gutter: gutter, align: horizon,
   {
-    text(size: 60pt, weight: "semibold")[Learn More]
-    v(8pt, weak: true)
-    line(length: 90pt, stroke: 6pt + accent)
-    v(8mm, weak: true)
+    panel-title[Learn More]
+    v(9mm, weak: true)
     par(justify: false)[The design document in the repository –
       #box(raw("nix build .#esdm-doc")) – gives the design and the attacker
       model in chapter 2, the entropy assessments in chapters 3 and 4, the
