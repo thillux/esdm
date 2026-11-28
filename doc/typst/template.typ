@@ -2,25 +2,35 @@
 //
 // The numbering follows the LaTeX article class the document was originally
 // typeset with - numbered sections, figures and equations numbered per
-// section -, the look is a calmer, more open one: the text in New Computer
-// Modern at 10.5pt with generous leading and spacing between paragraphs
-// instead of indents, side margins of 25 mm; headings, captions, the title
-// page and the running header in Source Sans 3 - the face of the slides - in
-// dark slate with one blue accent; chapters open a page under a large
-// chapter number; tables with horizontal rules only and a light blue header
-// row; code in soft grey cards.
+// section -, the look is a calmer, more open one: one type family throughout -
+// the text in Source Serif 4 at 10pt with generous leading and spacing between
+// paragraphs instead of indents, headings, captions, the title page and the
+// running header in Source Sans 3 - the face of the slides -, code in Source
+// Code Pro, formulas in STIX Two Math, whose letters match the serif; side
+// margins of 28 mm for lines of some 90 characters; dark slate with one blue
+// accent; chapters open a page under a large chapter number; tables with
+// horizontal rules only and a light blue header row; code in soft grey cards.
 
-#let body-font = "New Computer Modern"
+#import "inputs.typ": esdm-version, doc-date
+// The paper size, a4 or us-letter, an input of doc/typst/Makefile.
+#let paper = sys.inputs.at("paper", default: "a4")
+#assert(paper in ("a4", "us-letter"),
+  message: "paper must be a4 or us-letter, not " + paper)
+
+#let body-font = "Source Serif 4"
 #let sans-font = "Source Sans 3"
 #let mono-font = "Source Code Pro"
+#let math-font = "STIX Two Math"
 
-#let accent = rgb("#1d4ed8")
-#let accent-light = rgb("#eff6ff")
-#let ink = rgb("#1e293b")
-#let muted = rgb("#64748b")
-#let hairline = rgb("#cbd5e1")
-#let code-fill = rgb("#f8fafc")
-#let code-stroke = rgb("#e2e8f0")
+#import "palette.typ": *
+#import "icons.typ": icon, yes, warning-note
+#import "acronyms.typ": ac, acs, in-lists, init-acronyms, acronym-index
+// The roles of the palette here: accent-text for blue text, accent for
+// blue rules, bullets and the band of the title page.
+#let accent-light = accent-faint
+#let hairline = rule
+#let code-fill = surface-code
+#let code-stroke = line-color
 
 // What the running header names on the left of every page
 #let doc-title = state("esdm-doc-title", none)
@@ -52,6 +62,24 @@
 // The number of a heading as it is displayed.
 #let heading-number(h) = numbering(h.numbering,
   ..counter(heading).at(h.location()))
+
+// A part of the document: a page of its own under "Part I", "Part II", and an
+// entry of the contents. The chapters number on through the parts; a hidden
+// figure of kind "part" carries the entry, as an outline lists only headings
+// and figures.
+#let part(title) = page(header: none, footer: none, {
+  place(hide(figure(kind: "part", supplement: [Part], numbering: "I",
+    caption: title, outlined: true, [])))
+  v(1fr)
+  text(font: sans-font, size: 11pt, weight: "semibold", fill: accent-text,
+    tracking: 0.14em, upper[Part #context counter(figure.where(kind:
+      "part")).display("I")])
+  v(8pt)
+  text(font: sans-font, size: 30pt, weight: "bold", fill: ink, title)
+  v(10pt, weak: true)
+  line(length: 44pt, stroke: 3pt + accent)
+  v(2fr)
+})
 
 // A title of the front matter (contents, lists): set like a chapter title,
 // but no heading - it neither numbers nor appears in the outline.
@@ -90,118 +118,20 @@
   align(center, counter(page).display("1"))
 }
 
-#let esdm-doc(
-  title: none,
-  author: none,
-  date: none,
-  abstract: none,
-  body,
-) = {
-  set document(title: title, author: "Stephan Müller")
-  doc-title.update(title)
-  set page(
-    paper: "a4",
-    margin: (x: 25mm, top: 30mm, bottom: 27mm),
-    header-ascent: 40%,
-    footer-descent: 40%,
-    header: running-header,
-    footer: running-footer,
-  )
-  set text(font: body-font, size: 10.5pt, lang: "en", fill: rgb("#111827"))
-  set par(justify: true, leading: 0.68em, spacing: 1.05em,
-    first-line-indent: 0pt)
-  // Typst sets raw text at 0.8em: Source Code Pro at 0.88 of the text
-  // matches the x-height of New Computer Modern.
-  show raw: set text(font: mono-font, size: 1.1em)
-  show raw.where(block: true): set par(justify: false, leading: 0.55em)
-  show raw.where(block: true): it => block(width: 100%, fill: code-fill,
-    stroke: 0.5pt + code-stroke, radius: 3pt, inset: (x: 9pt, y: 7pt), it)
-  // Long identifiers may break after an underscore or a slash rather than
-  // stretching the line.
-  show raw.where(block: false): it => text(font: mono-font,
-    fill: rgb("#334155"),
-    it.text.replace("_", "_\u{200B}").replace("/", "/\u{200B}"))
-  show math.equation: set text(font: "New Computer Modern Math")
-  show math.equation.where(block: true): set block(above: 1.1em,
-    below: 1.1em)
-
-  set list(indent: 0.3em, body-indent: 0.6em, spacing: 0.8em,
-    marker: (text(fill: accent)[•], text(fill: muted)[–],
-      text(fill: muted)[◦]))
-  set enum(indent: 0.2em, body-indent: 0.6em, spacing: 0.8em, full: true,
-    numbering: (..ns) => {
-      let ns = ns.pos()
-      text(fill: accent, numbering(("1.", "(a)", "i.").at(
-        calc.min(ns.len(), 3) - 1), ns.last()))
-    })
-  set terms(separator: h(0.6em), hanging-indent: 1.5em, spacing: 0.7em)
-  show terms.item: it => block[#text(font: sans-font, weight: "semibold",
-    fill: ink, it.term)#h(0.6em)#it.description]
-  show list: set block(above: 0.95em, below: 0.95em)
-  show enum: set block(above: 0.95em, below: 0.95em)
-  show strong: set text(fill: ink)
-
-  show link: it => if type(it.dest) == str {
-    text(fill: accent, it)
-  } else { it }
-
-  // Headings in Source Sans 3: a chapter opens a page, under its number in
-  // light blue - "Appendix A" in the appendix -, the others carry their
-  // number in blue in front of a hanging title.
+// The numbering of figures, tables and equations and the references to
+// them.
+#let numbering-rules(body) = {
   set heading(numbering: "1.1.1")
-  show heading: set text(font: sans-font, fill: ink)
-  show heading: it => {
-    let size = (14pt, 11.5pt, 10.5pt).at(calc.min(it.level, 4) - 2,
-      default: 10.5pt)
-    set text(size: size, weight: "semibold")
-    set par(first-line-indent: 0pt, justify: false, leading: 0.5em)
-    block(above: if it.level == 2 { 2em } else { 1.7em },
-      below: if it.level == 2 { 1em } else { 0.85em },
-      sticky: true,
-      if it.numbering != none {
-        grid(columns: (auto, 1fr), column-gutter: 0.75em,
-          text(fill: accent, counter(heading).display(it.numbering)),
-          it.body)
-      } else { it.body })
-  }
-  // Figures and equations are numbered per chapter.
-  show heading.where(level: 1): it => {
-    counter(figure.where(kind: image)).update(0)
-    counter(math.equation).update(0)
-    pagebreak(weak: true)
-    set par(first-line-indent: 0pt, justify: false, leading: 0.4em)
-    block(above: 0pt, below: 2.4em, sticky: true, {
-      v(26pt)
-      if it.numbering != none {
-        let num = counter(heading).display(it.numbering)
-        if type(it.numbering) == str and it.numbering.starts-with("A") {
-          text(size: 10pt, weight: "semibold", fill: accent,
-            tracking: 0.12em, upper[Appendix])
-          v(2pt)
-        }
-        text(size: 44pt, weight: "light", fill: accent, num)
-        v(10pt, weak: true)
-      }
-      text(size: 24pt, weight: "semibold", it.body)
-      v(12pt, weak: true)
-      line(length: 36pt, stroke: 2.5pt + accent)
-    })
-  }
   set figure(numbering: n => context {
     let s = counter(heading).get()
     numbering("1.1", if s.len() == 0 { 0 } else { s.first() }, n)
   })
   show figure.where(kind: table): set figure(numbering: "1")
   show figure.where(kind: table): set figure.caption(position: top)
-  set figure(gap: 1em)
-  show figure: set block(above: 1.8em, below: 1.8em)
-  show figure.caption: it => {
-    set text(size: 9.5pt)
-    set par(justify: false, leading: 0.55em)
-    let label = text(font: sans-font, weight: "semibold", fill: accent,
-      [#it.supplement #context it.counter.display(it.numbering)])
-    block(width: 100%, align(center, [#label#h(0.5em)#it.body]))
-  }
+  // Long tables continue on the next page instead of leaving a gap; cells
+  // are set ragged, as justified narrow columns hyphenate.
+  show figure.where(kind: table): set block(breakable: true)
+  show table: set par(justify: false)
   set math.equation(numbering: n => context {
     let s = counter(heading).get()
     text(fill: muted, numbering("(1.1)", if s.len() == 0 { 0 } else {
@@ -219,7 +149,137 @@
         per-section(counter(figure.where(kind: image)), el.location()))
     } else { it }
   }
+  body
+}
 
+// The authors as (name, e-mail) pairs: the title page marks each name with
+// a dagger or a like symbol and gives the address in a footnote.
+#let author-names(authors) = authors.map(a => a.at(0))
+
+#let paged-doc(title, authors, date, abstract, body) = {
+  set document(title: title, author: author-names(authors))
+  doc-title.update(title)
+  init-acronyms()
+  set page(
+    paper: paper,
+    margin: (x: 28mm, top: 30mm, bottom: 27mm),
+    header-ascent: 40%,
+    footer-descent: 40%,
+    header: running-header,
+    footer: running-footer,
+  )
+  set text(font: body-font, size: 10pt, lang: "en", fill: ink,
+    number-type: "lining")
+  set par(justify: true, leading: 0.74em, spacing: 1.15em,
+    first-line-indent: 0pt)
+  // Typst sets raw text at 0.8em: Source Code Pro at 0.92 of the text
+  // matches the x-height of Source Serif 4.
+  show raw: set text(font: mono-font, size: 1.15em)
+  // Highlighting in the colors of the palette, in gray for the grayscale
+  // variant, with syntaxes for the languages Typst ships none for.
+  set raw(theme: raw-theme, syntaxes: ("syntaxes/tla.sublime-syntax",
+    "syntaxes/console.sublime-syntax", "syntaxes/meson.sublime-syntax",
+    "syntaxes/strongswan.sublime-syntax"))
+  // The grayscale variant shows the gray renderings of the figures and the
+  // plots, <dir>/<name>.gray.svg of doc/tools/gray_svg.py.
+  show image: it => {
+    let src = it.source
+    if (not grayscale or type(src) != str or not src.ends-with(".svg")
+        or src.ends-with(".gray.svg")) { return it }
+    let parts = src.split("/")
+    image("/" + parts.at(-2) + "/" + parts.last().slice(0, -4) + ".gray.svg",
+      width: it.at("width", default: auto),
+      height: it.at("height", default: auto),
+      alt: it.at("alt", default: none))
+  }
+  show raw.where(block: true): set par(justify: false, leading: 0.55em)
+  show raw.where(block: true): it => block(width: 100%, fill: code-fill,
+    stroke: 0.5pt + code-stroke, radius: 3pt, inset: (x: 9pt, y: 7pt), it)
+  // Long identifiers may break after an underscore or a slash rather than
+  // stretching the line, but not at their end, which would push the
+  // punctuation after them, e.g. a ")", to the next line alone.
+  show raw.where(block: false): it => text(font: mono-font,
+    fill: ink-soft,
+    it.text.replace("_", "_\u{200B}").replace("/", "/\u{200B}")
+      .trim("\u{200B}", at: end))
+  show math.equation: set text(font: math-font)
+  show math.equation.where(block: true): set block(above: 1.1em,
+    below: 1.1em)
+
+  set list(indent: 0.3em, body-indent: 0.6em, spacing: 0.8em,
+    // The third marker is drawn: Source Serif 4 has no white bullet.
+    marker: (text(fill: accent)[•], text(fill: muted)[–],
+      box(height: 0.6em, align(horizon,
+        circle(radius: 1.4pt, stroke: 0.6pt + muted)))))
+  set enum(indent: 0.2em, body-indent: 0.6em, spacing: 0.8em, full: true,
+    numbering: (..ns) => {
+      let ns = ns.pos()
+      text(fill: accent-text, numbering(("1.", "(a)", "i.").at(
+        calc.min(ns.len(), 3) - 1), ns.last()))
+    })
+  set terms(separator: h(0.6em), hanging-indent: 1.5em, spacing: 0.7em)
+  show terms.item: it => block[#text(font: sans-font, weight: "semibold",
+    fill: ink, it.term)#h(0.6em)#it.description]
+  show list: set block(above: 0.95em, below: 0.95em)
+  show enum: set block(above: 0.95em, below: 0.95em)
+  show strong: set text(fill: ink)
+
+  show link: it => if type(it.dest) == str {
+    text(fill: accent-text, it)
+  } else { it }
+
+  show: numbering-rules
+
+  // Headings in Source Sans 3: a chapter opens a page, under its number in
+  // semibold blue - "Appendix A" in the appendix -, the others carry their
+  // number in blue in front of a hanging title.
+  show heading: set text(font: sans-font, fill: ink)
+  show heading: it => {
+    let size = (14pt, 11.5pt, 10.5pt).at(calc.min(it.level, 4) - 2,
+      default: 10.5pt)
+    set text(size: size, weight: "semibold")
+    set par(first-line-indent: 0pt, justify: false, leading: 0.5em)
+    block(above: if it.level == 2 { 2em } else { 1.7em },
+      below: if it.level == 2 { 1em } else { 0.85em },
+      sticky: true,
+      if it.numbering != none {
+        grid(columns: (auto, 1fr), column-gutter: 0.75em,
+          text(fill: accent-text, counter(heading).display(it.numbering)),
+          it.body)
+      } else { it.body })
+  }
+  // Figures and equations are numbered per chapter.
+  show heading.where(level: 1): it => {
+    counter(figure.where(kind: image)).update(0)
+    counter(math.equation).update(0)
+    pagebreak(weak: true)
+    set par(first-line-indent: 0pt, justify: false, leading: 0.4em)
+    block(above: 0pt, below: 2.4em, sticky: true, {
+      v(26pt)
+      if it.numbering != none {
+        let num = counter(heading).display(it.numbering)
+        if type(it.numbering) == str and it.numbering.starts-with("A") {
+          text(size: 10pt, weight: "semibold", fill: accent-text,
+            tracking: 0.12em, upper[Appendix])
+          v(2pt)
+        }
+        text(size: 36pt, weight: "semibold", fill: accent-text, num)
+        v(10pt, weak: true)
+      }
+      text(size: 24pt, weight: "semibold", it.body)
+      v(12pt, weak: true)
+      line(length: 36pt, stroke: 2.5pt + accent)
+    })
+  }
+  set figure(gap: 1em)
+  show figure: set block(above: 1.8em, below: 1.8em)
+  show figure.caption: it => {
+    set text(size: 9.5pt)
+    set par(justify: false, leading: 0.55em)
+    let label = text(font: sans-font, weight: "semibold", fill: accent-text,
+      [#it.supplement #context it.counter.display(it.numbering)])
+    block(width: 100%, sticky: true, align(center, [#label#h(0.5em)#it.body]))
+  }
   // Tables: horizontal rules only, a light blue header row in Source Sans
   // 3 semibold.
   set table(
@@ -238,27 +298,34 @@
   // The title page: a blue band on top, the title in Source Sans 3 with a
   // short blue line under it, author and version, the abstract on a light
   // blue card at the foot of the page.
-  page(margin: (x: 25mm, top: 0pt, bottom: 25mm), header: none,
+  page(margin: (x: 28mm, top: 0pt, bottom: 25mm), header: none,
     footer: none, {
     set par(first-line-indent: 0pt, justify: false)
-    place(top + left, dx: -25mm, rect(width: 210mm, height: 9mm,
-      fill: accent))
+    // In the grayscale variant a light band rather than a black one
+    place(top + left, dx: -28mm, rect(width: 100% + 56mm, height: 9mm,
+      fill: if grayscale { faint } else { accent }))
     v(62mm)
-    text(font: sans-font, size: 10pt, weight: "semibold", fill: accent,
-      tracking: 0.14em, upper[ESDM Design Document])
+    text(font: sans-font, size: 10pt, weight: "semibold", fill: accent-text,
+      tracking: 0.14em, upper[ESDM Design Document and Manual])
     v(6mm)
     block(text(font: sans-font, size: 32pt, weight: "bold", fill: ink,
       title))
     v(5mm)
     line(length: 44pt, stroke: 3pt + accent)
     v(9mm)
-    text(font: sans-font, size: 13pt, fill: ink, author)
+    {
+      // Symbols instead of numbers, only here: the footnotes of the text
+      // start at 1 again after the title page.
+      set footnote(numbering: n => ("†", "‡", "§", "¶").at(n - 1))
+      text(font: sans-font, size: 13pt, fill: ink,
+        authors.map(a => [#a.at(0)#footnote(raw(a.at(1)))]).join(", "))
+    }
     v(3mm)
     text(font: sans-font, size: 11.5pt, fill: muted, date)
     v(1fr)
     if abstract != none {
       block(width: 100%, fill: accent-light, radius: 4pt, inset: 14pt, {
-        text(font: sans-font, size: 9pt, weight: "semibold", fill: accent,
+        text(font: sans-font, size: 9pt, weight: "semibold", fill: accent-text,
           tracking: 0.12em, upper[Abstract])
         v(4pt)
         set text(size: 9.5pt)
@@ -268,6 +335,8 @@
     }
   })
 
+  counter(footnote).update(0)
+
   // Table of contents, lists of figures and tables.
   {
     set par(first-line-indent: 0pt, justify: false)
@@ -275,12 +344,25 @@
     show outline.entry.where(level: 1): it => {
       v(1.1em, weak: true)
       link(it.element.location(), text(font: sans-font, weight: "semibold",
-        fill: ink, it.indented(text(fill: accent, it.prefix()),
+        fill: ink, it.indented(text(fill: accent-text, it.prefix()),
         [#it.body()#h(1fr)#it.page()])))
+    }
+    // A part: its number and title above its chapters, no page number
+    show outline.entry: it => {
+      if it.element.func() != figure or it.element.kind != "part" {
+        return it
+      }
+      v(1.8em, weak: true)
+      link(it.element.location(), text(font: sans-font, size: 10pt,
+        weight: "semibold", fill: accent-text, tracking: 0.12em,
+        upper[Part #numbering("I", ..it.element.counter.at(
+          it.element.location()))#h(0.8em)#it.element.caption.body]))
+      v(0.4em, weak: true)
     }
     set outline.entry(fill: box(width: 1fr, repeat(gap: 0.5em,
       text(fill: hairline)[.])))
-    outline(title: none, indent: auto, depth: 3)
+    outline(title: none, indent: auto, depth: 3,
+      target: selector(heading).or(figure.where(kind: "part")))
     pagebreak(weak: true)
     // Entries of the lists of figures and tables: number, caption, dots.
     show outline.entry: it => {
@@ -293,19 +375,30 @@
       }
       block(above: 0.6em, below: 0.6em, link(loc, grid(
         columns: (2.6em, 1fr),
-        text(font: sans-font, fill: accent, num),
+        text(font: sans-font, fill: accent-text, num),
         par(justify: false)[#it.element.caption.body#box(width: 1fr,
           repeat(gap: 0.5em, text(fill: hairline)[.]))#it.page()])))
     }
+    in-lists.update(true)
     front-title[List of Figures]
     outline(title: none, target: figure.where(kind: image))
     v(2em)
     front-title[List of Tables]
     outline(title: none, target: figure.where(kind: table))
+    in-lists.update(false)
   }
 
   body
 }
+
+// The design document.
+#let esdm-doc(
+  title: none,
+  authors: (),
+  date: none,
+  abstract: none,
+  body,
+) = paged-doc(title, authors, date, abstract, body)
 
 // Switch to appendix numbering (A, B, ...).
 #let appendix(body) = {

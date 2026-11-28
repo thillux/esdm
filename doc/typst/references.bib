@@ -9,10 +9,207 @@
   url         = {http://www.ietf.org/rfc/rfc7539.txt},
 }
 
-@book{sp80090b,
-  author = {Meltem Sönmez Turan and Elaine Barker and John Kelsey and
-            Kerry A. McKay and Mary L. Baish and Mike Boyle},
-  title  = {{NIST Special Publication 800-90B Recommendation for the
-            Entropy Sources Uses for Random Bit Generation}},
-  year   = {2018},
+@techreport{sp80090a,
+  author      = {Elaine Barker and John Kelsey},
+  title       = {{Recommendation for Random Number Generation Using
+                 Deterministic Random Bit Generators}},
+  type        = {NIST Special Publication 800-90A Rev. 1},
+  institution = {National Institute of Standards and Technology},
+  year        = {2015},
+  month       = jun,
+  doi         = {10.6028/NIST.SP.800-90Ar1},
+}
+
+@techreport{sp80090b,
+  author      = {Meltem Sönmez Turan and Elaine Barker and John Kelsey and
+                 Kerry A. McKay and Mary L. Baish and Mike Boyle},
+  title       = {{Recommendation for the Entropy Sources Used for Random Bit
+                 Generation}},
+  type        = {NIST Special Publication 800-90B},
+  institution = {National Institute of Standards and Technology},
+  year        = {2018},
+  month       = jan,
+  doi         = {10.6028/NIST.SP.800-90B},
+}
+
+@techreport{sp80090c,
+  author      = {Elaine Barker and John Kelsey and Kerry McKay and
+                 Allen Roginsky and Meltem Sönmez Turan},
+  title       = {{Recommendation for Random Bit Generator (RBG)
+                 Constructions}},
+  type        = {NIST Special Publication 800-90C},
+  institution = {National Institute of Standards and Technology},
+  year        = {2025},
+  month       = sep,
+  doi         = {10.6028/NIST.SP.800-90C},
+}
+
+@techreport{ais2031-2011,
+  author      = {Wolfgang Killmann and Werner Schindler},
+  title       = {{A Proposal for: Functionality Classes for Random Number
+                 Generators}},
+  type        = {Version},
+  number      = {2.0},
+  institution = {Bundesamt für Sicherheit in der Informationstechnik (BSI)},
+  year        = {2011},
+  month       = sep,
+  url         = {https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/Zertifizierung/Interpretationen/AIS_31_Functionality_classes_for_random_number_generators_e.pdf?__blob=publicationFile},
+}
+
+@techreport{ais2031,
+  author      = {Matthias Peter and Werner Schindler},
+  title       = {{A Proposal for Functionality Classes for Random Number
+                 Generators}},
+  type        = {Version},
+  number      = {3.0},
+  institution = {Bundesamt für Sicherheit in der Informationstechnik (BSI)},
+  year        = {2024},
+  month       = sep,
+  url         = {https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Certification/Interpretations/AIS_31_Functionality_classes_for_random_number_generators_e_2024.html},
+}
+
+@misc{fips1402ig,
+  author      = {{National Institute of Standards and Technology} and
+                 {Canadian Centre for Cyber Security}},
+  title       = {{Implementation Guidance for FIPS PUB 140-2 and the
+                 Cryptographic Module Validation Program}},
+  year        = {2023},
+  month       = oct,
+  url         = {https://csrc.nist.gov/csrc/media/projects/cryptographic-module-validation-program/documents/fips140-2/FIPS1402IG.pdf},
+}
+
+@misc{fips1403ig,
+  author      = {{National Institute of Standards and Technology} and
+                 {Canadian Centre for Cyber Security}},
+  title       = {{Implementation Guidance for FIPS 140-3 and the
+                 Cryptographic Module Validation Program}},
+  year        = {2026},
+  month       = nov,
+  url         = {https://csrc.nist.gov/projects/cryptographic-module-validation-program/fips-140-3-ig-announcements},
+}
+
+@article{xdrbg,
+  author  = {John Kelsey and Stefan Lucks and Stephan Müller},
+  title   = {{XDRBG: A Proposed Deterministic Random Bit Generator Based on
+             Any XOF}},
+  journal = {IACR Transactions on Symmetric Cryptology},
+  volume  = {2024},
+  number  = {1},
+  pages   = {5--34},
+  year    = {2024},
+  month   = mar,
+  doi     = {10.46586/tosc.v2024.i1.5-34},
+}
+
+@techreport{nistir8446,
+  author      = {Elaine Barker and John Kelsey and Kerry McKay and Johannes
+                 Mittmann and Matthias Peter and Werner Schindler and Meltem
+                 Sönmez Turan},
+  title       = {{Bridging the Gap Between Standards on Random Number
+                 Generation: Comparison of SP 800-90 Series and AIS 20/31}},
+  type        = {NIST Internal Report},
+  number      = {8446},
+  institution = {National Institute of Standards and Technology},
+  year        = {2026},
+  month       = jan,
+  doi         = {10.6028/NIST.IR.8446},
+  url         = {https://doi.org/10.6028/NIST.IR.8446},
+}
+
+@article{tla,
+  author  = {Leslie Lamport},
+  title   = {{The Temporal Logic of Actions}},
+  journal = {ACM Transactions on Programming Languages and Systems},
+  volume  = {16},
+  number  = {3},
+  pages   = {872--923},
+  year    = {1994},
+  month   = may,
+  doi     = {10.1145/177492.177726},
+}
+
+@book{specifying-systems,
+  author    = {Leslie Lamport},
+  title     = {{Specifying Systems: The TLA+ Language and Tools for Hardware
+               and Software Engineers}},
+  publisher = {Addison-Wesley},
+  year      = {2002},
+  isbn      = {0-321-14306-X},
+}
+
+@inproceedings{pluscal,
+  author    = {Leslie Lamport},
+  title     = {{The PlusCal Algorithm Language}},
+  booktitle = {Theoretical Aspects of Computing -- ICTAC 2009},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {5684},
+  pages     = {36--60},
+  publisher = {Springer},
+  year      = {2009},
+  doi       = {10.1007/978-3-642-03466-4_2},
+}
+
+@inproceedings{tlc,
+  author    = {Yuan Yu and Panagiotis Manolios and Leslie Lamport},
+  title     = {{Model Checking TLA+ Specifications}},
+  booktitle = {Correct Hardware Design and Verification Methods -- CHARME
+               1999},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {1703},
+  pages     = {54--66},
+  publisher = {Springer},
+  year      = {1999},
+  doi       = {10.1007/3-540-48153-2_6},
+}
+
+@misc{tlatools,
+  title = {{TLA+ Tools: the SANY Parser, the PlusCal Translator and the TLC
+           Model Checker}},
+  note  = {Version 1.8.0},
+  url   = {https://github.com/tlaplus/tlaplus},
+}
+
+@misc{jent,
+  author = {Stephan M{\"u}ller},
+  title  = {{CPU Time Jitter Based Non-Physical True Random Number
+            Generator}},
+  note   = {Documentation and entropy assessment of the Jitter RNG library},
+  url    = {https://www.chronox.de/jent/},
+}
+
+@misc{libkcapi,
+  author = {Stephan M{\"u}ller},
+  title  = {{libkcapi -- Linux Kernel Crypto API User Space Interface
+            Library}},
+  url    = {https://github.com/smuellerDD/libkcapi},
+}
+
+@misc{leancrypto,
+  author = {Stephan M{\"u}ller},
+  title  = {{leancrypto -- Lean Cryptographic Library}},
+  url    = {https://leancrypto.org},
+}
+
+@article{aws-formal-methods,
+  author  = {Chris Newcombe and Tim Rath and Fan Zhang and Bogdan Munteanu and
+             Marc Brooker and Michael Deardeuff},
+  title   = {{How Amazon Web Services Uses Formal Methods}},
+  journal = {Communications of the ACM},
+  volume  = {58},
+  number  = {4},
+  pages   = {66--73},
+  year    = {2015},
+  doi     = {10.1145/2699417},
+}
+
+@techreport{bsi-vm-rng,
+  author      = {Stephan M{\"u}ller and Gerald Krummeck and Helmut Kurth},
+  title       = {{Analysis of Random Number Generation in Virtual
+                 Environments}},
+  type        = {Study},
+  number      = {Version 1.0},
+  institution = {Bundesamt f{\"u}r Sicherheit in der Informationstechnik},
+  year        = {2016},
+  month       = oct,
+  url         = {https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/Publikationen/Studien/ZufallinVMS/Randomness-in-VMs.html},
 }

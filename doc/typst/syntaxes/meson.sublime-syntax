@@ -1,0 +1,38 @@
+%YAML 1.2
+---
+# The Meson build language, which Typst ships no syntax for.
+name: Meson
+file_extensions: [meson]
+scope: source.meson
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.meson
+    - match: "f?'''"
+      push:
+        - meta_scope: string.quoted.triple.meson
+        - match: "'''"
+          pop: true
+    - match: "f?'"
+      push:
+        - meta_scope: string.quoted.single.meson
+        - match: '\\.'
+          scope: constant.character.escape.meson
+        - match: "'"
+          pop: true
+    - match: '\b(if|elif|else|endif|foreach|endforeach|continue|break|and|or|not|in)\b'
+      scope: keyword.control.meson
+    - match: '\b(true|false)\b'
+      scope: constant.language.meson
+    - match: '\b\d+\b'
+      scope: constant.numeric.meson
+    - match: '\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()'
+      captures:
+        1: variable.function.meson
+    - match: '\b([A-Za-z_][A-Za-z0-9_]*)\s*(:)'
+      captures:
+        1: variable.parameter.keyword.meson
+        2: punctuation.separator.keyword.meson
+    - match: '\.\.\.'
+      scope: comment.other.ellipsis.meson

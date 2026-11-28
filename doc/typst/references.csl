@@ -45,16 +45,30 @@
           </else>
         </choose>
         <group delimiter=", ">
+          <text variable="container-title" font-style="italic"/>
+          <group delimiter=" ">
+            <text variable="volume"/>
+            <text variable="issue" prefix="(" suffix=")"/>
+          </group>
+          <text variable="page" prefix="pp. "/>
           <group delimiter=" ">
             <text variable="genre"/>
             <text variable="number"/>
           </group>
+          <text variable="publisher"/>
           <text macro="date"/>
         </group>
-        <group delimiter=" ">
-          <text value="URL"/>
-          <text variable="URL"/>
-        </group>
+        <choose>
+          <if variable="DOI">
+            <text variable="DOI" prefix="DOI "/>
+          </if>
+          <else>
+            <group delimiter=" ">
+              <text value="URL"/>
+              <text variable="URL"/>
+            </group>
+          </else>
+        </choose>
       </group>
     </layout>
   </bibliography>

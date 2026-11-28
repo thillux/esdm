@@ -1,0 +1,89 @@
+%YAML 1.2
+---
+# TLA+ with PlusCal and the TLC configuration files, for the listings of the
+# formal verification chapter: Typst ships no TLA+ syntax.
+name: TLA+
+file_extensions: [tla]
+scope: source.tla
+
+variables:
+  ident: '[A-Za-z_][A-Za-z0-9_]*'
+
+contexts:
+  main:
+    - include: comments
+    - match: '^\s*-{4,}\s*(MODULE)\s+({{ident}})\s*-{4,}'
+      captures:
+        1: keyword.other.module.tla
+        2: entity.name.type.module.tla
+    - match: '^\s*[-=]{4,}\s*$'
+      scope: punctuation.separator.tla
+    - match: '"'
+      scope: punctuation.definition.string.begin.tla
+      push: string
+    - match: '\b\d+\b'
+      scope: constant.numeric.tla
+    # A PlusCal label ends an atomic step: an identifier and a colon at the
+    # start of a line, not := or ::.
+    - match: '^\s*({{ident}})\s*(:)(?![=:])'
+      captures:
+        1: entity.name.label.tla
+        2: punctuation.separator.label.tla
+    # Definitions: Name ==, Name(a, b) ==
+    - match: '^\s*({{ident}})(?=\s*(\([^()]*\))?\s*==)'
+      captures:
+        1: entity.name.function.tla
+    - match: '\b(procedure|process|macro)\s+({{ident}})'
+      captures:
+        1: keyword.other.pluscal.tla
+        2: entity.name.function.tla
+    - match: '\b(WF|SF)_'
+      scope: keyword.other.fairness.tla
+    - match: '\\[AE]{1,2}\b'
+      scope: keyword.operator.quantifier.tla
+    - match: '\\(in|notin|cup|cap|union|intersect|subseteq|subset|supseteq|o|X|times|div|lnot|neg|land|lor|equiv|leq|geq|prec|succ|cdot)\b'
+      scope: keyword.operator.word.tla
+    - match: '\b(ASSUME|ASSUMPTION|AXIOM|BY|CASE|CHOOSE|CONSTANTS?|DEF|DOMAIN|ELSE|ENABLED|EXCEPT|EXTENDS|IF|IN|INSTANCE|LAMBDA|LEMMA|LET|LOCAL|MODULE|OTHER|PROOF|QED|RECURSIVE|SUBSET|THEN|THEOREM|UNCHANGED|UNION|USE|VARIABLES?|WITH)\b'
+      scope: keyword.other.tla
+    # TLC configuration files
+    - match: '\b(INIT|NEXT|SPECIFICATION|INVARIANTS?|PROPERTY|PROPERTIES|CONSTRAINTS?|ACTION_CONSTRAINTS?|SYMMETRY|VIEW|ALIAS|POSTCONDITION|CHECK_DEADLOCK)\b'
+      scope: keyword.other.config.tla
+    - match: '\b(algorithm|fair|process|procedure|macro|variables?|define|begin|end|while|do|if|then|else|elsif|either|or|with|await|when|call|return|goto|skip|print|assert)\b'
+      scope: keyword.control.pluscal.tla
+    - match: '\b(TRUE|FALSE)\b'
+      scope: constant.language.tla
+    - match: '\b(BOOLEAN|STRING|Nat|Int|Real|Seq)\b'
+      scope: support.type.tla
+    - match: '\b(Len|Append|Head|Tail|SubSeq|SelectSeq|Cardinality|IsFiniteSet)\b'
+      scope: support.function.tla
+    - match: '\bself\b'
+      scope: variable.language.tla
+    - match: '/\\|\\/|=>|<=>|~>|\[\]|<>|~|==|:=|\|->|->|<-|#|/=|<=|>=|\.\.'
+      scope: keyword.operator.tla
+
+  comments:
+    - match: '\\\*'
+      scope: punctuation.definition.comment.tla
+      push:
+        - meta_scope: comment.line.tla
+        - match: '$'
+          pop: true
+    - match: '\(\*'
+      scope: punctuation.definition.comment.begin.tla
+      push: block-comment
+
+  block-comment:
+    - meta_scope: comment.block.tla
+    - match: '\(\*'
+      push: block-comment
+    - match: '\*\)'
+      scope: punctuation.definition.comment.end.tla
+      pop: true
+
+  string:
+    - meta_scope: string.quoted.double.tla
+    - match: '\\.'
+      scope: constant.character.escape.tla
+    - match: '"'
+      scope: punctuation.definition.string.end.tla
+      pop: true
