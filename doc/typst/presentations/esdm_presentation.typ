@@ -14,8 +14,8 @@
 #import "screens.typ": *
 #import "meson-excerpts.typ": *
 
-#show: setup.with(sections: ([Overview], [Interfaces], [DRNG management],
-  [Entropy sources], [System events], [Security], [Compliance],
+#show: setup.with(sections: ([Overview], [Interfaces], [DRNG Management],
+  [Entropy Sources], [System Events], [Security], [Compliance],
   [Assurance]))
 #set document(title: "Entropy Source and DRNG Manager 1.2.4")
 
@@ -105,23 +105,23 @@
         str(n)))),
     [#text(size: t-body, weight: "semibold", title) \ #text(fill: muted, body)])
   #grid(columns: (1fr, 1fr), column-gutter: gap, row-gutter: 27pt,
-    item(1)[Overview][What the ESDM is and what it adds],
-    item(5)[System events][Clones, suspend, fork, virtual machines],
-    item(2)[Interfaces][Processes, output paths, getting started],
+    item(1)[Overview][Purpose, design goals, architecture],
+    item(5)[System Events][Clones, suspend, fork, virtual machines],
+    item(2)[Interfaces][Processes, output paths, first steps],
     item(6)[Security][Attacker model, security domains, hardening],
-    item(3)[DRNG management][Seeding, reseeding, state machines],
+    item(3)[DRNG Management][Seeding, reseeding, state machines],
     item(7)[Compliance][SP 800-90C, FIPS 140-3, AIS 20/31, DRT.1],
-    item(4)[Entropy sources][Twelve sources, their rates and health tests],
+    item(4)[Entropy Sources][Twelve sources, their rates and health tests],
     item(8)[Assurance][Testing, interface specification, model checking],
   )
 ]
 
 // ================================================================ part 1
 #section-slide(number: 1, title: [Overview],
-  subtitle: [What the ESDM is, and what it adds to the random number
-    generator of the kernel])
+  subtitle: [Purpose, design goals, comparison with the alternatives and
+    architecture])
 
-#slide(title: [The ESDM manages entropy sources and DRNGs in user space])[
+#slide(title: [Purpose of the ESDM])[
   #grid(columns: (1fr, 1fr, 1fr), column-gutter: gap,
     stat[12][entropy sources, each with an entropy rate of its own],
     stat[4][output paths: full, plain, prediction resistance, seed],
@@ -134,7 +134,7 @@
     start-up, the ESDM runs without privileges
 ]
 
-#slide(title: [Five goals shape the design])[
+#slide(title: [Design Goals])[
   - An API- and ABI-compatible replacement of the Linux random number
     interfaces
   - User space: privileges serve the set-up only and are dropped before the
@@ -145,7 +145,7 @@
   - Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31
 ]
 
-#slide(title: [What the ESDM adds to the alternatives, and at what cost])[
+#slide(title: [Comparison with the Alternatives])[
   #let alt(name, adds, cost) = card(name, height: 250pt)[
     #adds
     #place(bottom + left)[#text(weight: "semibold")[Cost:] #cost]
@@ -165,8 +165,7 @@
   #more[“Design Rationale and Alternatives”]
 ]
 
-#slide(title: [The ESDM is a toolkit: a system takes the subset it
-  needs])[
+#slide(title: [Toolkit and Minimal Configurations])[
   #let cfg(name, parts, serves) = card(name, height: 196pt)[
     #parts
     #place(bottom + left)[#text(weight: "semibold")[Serves:] #serves]
@@ -190,12 +189,11 @@
   #more[“Interfaces of a Deployment”]
 ]
 
-#slide(title: [Entropy sources fill a seed buffer that seeds the DRNG
-  instances])[
+#slide(title: [Architecture])[
   #pic("big-picture.svg")
 ]
 
-#slide(title: [From noise to random numbers in four steps])[
+#slide(title: [Data Flow from Noise to Output])[
   #grid(columns: (1fr, 1fr), column-gutter: gap, row-gutter: 26pt,
     step(1)[Collect][Internal sources time interrupts and task wakeups, in a
       kernel module or in eBPF programs. External sources deliver on
@@ -214,10 +212,9 @@
 
 // ================================================================ part 2
 #section-slide(number: 2, title: [Interfaces],
-  subtitle: [The processes, the four output paths and how to get started])
+  subtitle: [Processes, output paths and first steps])
 
-#slide(title: [One server holds the generator; every other process is a
-  client])[
+#slide(title: [Processes])[
   #pic("processes.svg", height: 218pt)
   #v(10pt)
   #set text(size: t-small)
@@ -231,8 +228,7 @@
   )
 ]
 
-#slide(title: [The server is built with both socket interfaces, or with
-  one])[
+#slide(title: [Server Builds with One Interface])[
   #cols(widths: (1fr, 1fr), valign: top,
     card([Without EGD: `-Desdm-server-egd=disabled`], height: 196pt)[
       - The server contains no EGD code and refuses `--egd_socket`
@@ -253,7 +249,7 @@
   client library, no units, no tests. The default build has both.
 ]
 
-#slide(title: [Four output paths decide what a caller receives])[
+#slide(title: [Output Paths])[
   #cols(widths: (1.45fr, 1fr), valign: horizon,
     pic("paths.svg"),
     [
@@ -267,8 +263,7 @@
     ])
 ]
 
-#slide(title: [The drop-in interfaces serve unmodified software – and fail
-  open])[
+#slide(title: [Drop-in Interfaces])[
   - `/dev/random`, `/dev/urandom`: CUSE daemons, bind-mounted over the
     devices of the kernel
   - `getrandom()`, `getentropy()`: `libesdm-getrandom.so`, preloaded or
@@ -280,7 +275,7 @@
     the system call directly, never reaches the ESDM.]
 ]
 
-#slide(title: [The interfaces without fallback report an error instead])[
+#slide(title: [Interfaces without Fallback])[
   #grid(columns: (1fr, 1fr), column-gutter: 14pt, row-gutter: 14pt,
     card([RPC client library], height: 112pt)[The stable API: all four
       paths, the status, the configuration.],
@@ -296,8 +291,7 @@
     the backup section]
 ]
 
-#slide(title: [Prediction resistance: a reseed before every block of
-  output])[
+#slide(title: [Prediction Resistance])[
   - A DRNG instance of its own, reseeded from the entropy sources for every
     block
   - A block holds at most 256 bits, and at most the entropy its reseed
@@ -308,7 +302,7 @@
     `_pr` and the second EGD socket
 ]
 
-#slide(title: [Getting started takes three steps])[
+#slide(title: [Getting Started])[
   #cols(widths: (1fr, 1.05fr),
     stack(spacing: 20pt,
       step(1)[Build and install][`meson setup build`, `meson compile` and
@@ -324,8 +318,7 @@
   )
 ]
 
-#slide(title: [The status reports every entropy source and every DRNG
-  instance])[
+#slide(title: [Status Report])[
   #cols(widths: (1fr, 1.05fr),
     [
       #set text(size: 18pt)
@@ -341,11 +334,10 @@
 ]
 
 // ================================================================ part 3
-#section-slide(number: 3, title: [DRNG management],
-  subtitle: [Seeding, reseeding and the state machines behind every call])
+#section-slide(number: 3, title: [DRNG Management],
+  subtitle: [Seeding, reseeding and state machines])
 
-#slide(title: [A seeding reads all entropy sources in parallel into one seed
-  buffer])[
+#slide(title: [Seeding])[
   #cols(widths: (1fr, 1.3fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -361,8 +353,7 @@
   )
 ]
 
-#slide(title: [At start-up the initial DRNG is seeded first, then the ESDM
-  is operational])[
+#slide(title: [Start-up Sequence])[
   #set text(size: 18pt)
   - Every entropy source is read on a thread of its own (`fj_002`, …);
     a source that is not available delivers nothing
@@ -371,8 +362,7 @@
     title: "esdm-server -f -vvvvv (time and source location omitted)")
 ]
 
-#slide(title: [A DRNG instance serves requests only while it is fully
-  seeded])[
+#slide(title: [Fully Seeded State])[
   #cols(widths: (1fr, 1.15fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -387,8 +377,7 @@
   )
 ]
 
-#slide(title: [A reseed worker reseeds the DRNG instances ahead of the
-  requests])[
+#slide(title: [Reseed Worker])[
   #set text(size: 18pt)
   - It reseeds every instance whose reseed is due and brings up those not
     yet fully seeded
@@ -401,8 +390,7 @@
     title: "esdm-server -f -vvvvv (time and source location omitted)")
 ]
 
-#slide(title: [One DRNG instance per CPU: no lock is shared by all
-  requests])[
+#slide(title: [DRNG Instances per CPU])[
   #pic("numa-drng.svg", height: 96pt)
   #v(10pt)
   #set text(size: 18pt)
@@ -414,8 +402,7 @@
     and falls back to the initial instance
 ]
 
-#slide(title: [A few state machines decide whether a call delivers, waits or
-  fails])[
+#slide(title: [State Machines])[
   #cols(widths: (1fr, 1.1fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -433,8 +420,7 @@
   )
 ]
 
-#slide(title: [In a DRNG instance, “reseed due” and “budget spent” are
-  predicates over counters])[
+#slide(title: [States of a DRNG Instance])[
   #pic("fsm-drng.svg", height: 208pt)
   #v(8pt)
   #set text(size: t-small)
@@ -448,8 +434,7 @@
   )
 ]
 
-#slide(title: [A failed self test is final: nothing generated after it is
-  handed out])[
+#slide(title: [Self Tests])[
   #pic("fsm-selftest.svg", height: 112pt)
   #v(10pt)
   #set text(size: 18pt)
@@ -460,8 +445,7 @@
     nothing until a later test passes
 ]
 
-#slide(title: [A slow or failing entropy source is skipped, not waited
-  for])[
+#slide(title: [Unavailable Entropy Sources])[
   #cols(widths: (1fr, 1.6fr), gutter: 20pt, valign: horizon,
     [
       #set text(size: t-small)
@@ -476,12 +460,10 @@
 ]
 
 // ================================================================ part 4
-#section-slide(number: 4, title: [Entropy sources],
-  subtitle: [Twelve sources, the entropy they are credited with and the
-    health tests on their raw data])
+#section-slide(number: 4, title: [Entropy Sources],
+  subtitle: [Twelve sources, their entropy rates and health tests])
 
-#slide(title: [Twelve entropy sources, each credited with a rate of its
-  own])[
+#slide(title: [Entropy Sources and Their Rates])[
   #grid(columns: (1fr,) * 6, column-gutter: 9pt, row-gutter: 9pt,
     rate-tile(fill: source)[Interrupts \ kernel module][256],
     rate-tile(fill: source)[Scheduler \ kernel module][0],
@@ -505,8 +487,7 @@
   #more[“Entropy Sources: Rates, Health Tests and Independence”]
 ]
 
-#slide(title: [The credits are added up: independence is enforced only where
-  a dependency is known])[
+#slide(title: [Independence of the Entropy Sources])[
   #grid(columns: (1fr, 1fr), column-gutter: 14pt,
     card([Enforced], height: 196pt)[
       - Timing sources: the build refuses to credit two of them; a rate set
@@ -526,8 +507,7 @@
     system, not an assessed one.]
 ]
 
-#slide(title: [The kernel module stores a timestamp per event and conditions
-  on request])[
+#slide(title: [Interrupt and Scheduler Entropy Sources])[
   #set text(size: 18pt)
   - Interrupts and task wakeups: two entropy sources of the same
     architecture, in the module `esdm_es` with a small kernel patch
@@ -539,8 +519,7 @@
   #pic("irq-processing.svg", height: 150pt)
 ]
 
-#slide(title: [eBPF programs collect the same event timing on an unpatched
-  kernel])[
+#slide(title: [eBPF Entropy Sources])[
   #set text(size: 18pt)
   - Attached to the tracepoints `sched_switch` and `irq_handler_entry`;
     needs BTF and libbpf 1.2 or later
@@ -551,8 +530,7 @@
   #pic("ebpf-processing.svg", height: 150pt)
 ]
 
-#slide(title: [The SP 800-90B health tests gate the delivery – in FIPS mode
-  only])[
+#slide(title: [SP 800-90B Health Tests])[
   #cols(widths: (1fr, 1.2fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -569,8 +547,7 @@
   )
 ]
 
-#slide(title: [Jitter RNG, CPU, kernel RNG, TPM and hwrng deliver on
-  request])[
+#slide(title: [Entropy Sources Read on Request])[
   #grid(columns: (1fr, 1fr), column-gutter: 14pt, row-gutter: 14pt,
     card([Jitter RNG], height: 128pt)[The SP 800-90B source of the
       jitterentropy library. Several collectors, each with a lock of its
@@ -585,8 +562,7 @@
   )
 ]
 
-#slide(title: [The auxiliary pool is an XDRBG-256 for data that trickles
-  in])[
+#slide(title: [Auxiliary Pool])[
   #cols(widths: (1.25fr, 1fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -603,8 +579,7 @@
   )
 ]
 
-#slide(title: [An entropy source of your own is a separate process on a
-  socket])[
+#slide(title: [External Entropy Sources])[
   #set text(size: 18pt)
   #cols(widths: (1fr, 1.25fr),
     [
@@ -624,7 +599,7 @@
     ])
 ]
 
-#slide(title: [One crypto backend per build, behind a table of callbacks])[
+#slide(title: [Crypto Backends])[
   #let be(name, drng) = card(name, height: 150pt, drng)
   #grid(columns: (1fr,) * 5, column-gutter: 9pt,
     be[builtin (default)][Hash DRBG with SHA-512, or ChaCha20 DRNG],
@@ -640,12 +615,11 @@
 ]
 
 // ================================================================ part 5
-#section-slide(number: 5, title: [System events],
-  subtitle: [Clones and snapshots, suspend and resume, fork – and entropy in
+#section-slide(number: 5, title: [System Events],
+  subtitle: [Clones and snapshots, suspend and resume, fork, entropy in
     virtual machines])
 
-#slide(title: [Four system events change what the state of the DRNGs is
-  worth])[
+#slide(title: [System Events])[
   #pic("deck-system-events.svg", height: 222pt)
   #v(8pt)
   #set text(size: 18pt)
@@ -654,8 +628,7 @@
   #more[“System Events: Clones, Suspend, Resume and Shutdown”]
 ]
 
-#slide(title: [The kernel module reports the events; without it, a clone
-  goes undetected])[
+#slide(title: [Reporting of System Events])[
   - Built without its entropy sources, `esdm_es` needs no kernel patch and
     only reports the events
   - Without the module, `esdm-server-signal-helper` reports suspend and
@@ -666,8 +639,7 @@
     draws on the duplicated state
 ]
 
-#slide(title: [The kernel module `esdm_es` is needed for two things, and
-  only for them])[
+#slide(title: [Use of the Kernel Module `esdm_es`])[
   #cols(widths: (1fr, 1fr), valign: top,
     card([Its entropy sources], height: 210pt)[
       - Where the other sources do not suffice, or a second assessed
@@ -687,7 +659,7 @@
   #more[“When the Kernel Module esdm_es Is Needed”]
 ]
 
-#slide(title: [A fork ends the output of the ESDM in the child process])[
+#slide(title: [Fork])[
   #stack(spacing: 15pt,
     step(1)[Fork][A process that embeds `libesdm.so` would hand a copy of
       every DRNG state to its child, which would repeat the output of the
@@ -704,8 +676,7 @@
     detected. The ESDM server initializes the ESDM after its own forks.]
 ]
 
-#slide(title: [In a guest, the timing sources depend on the timestamp of the
-  hypervisor])[
+#slide(title: [Entropy in Virtual Machines])[
   - Timing sources and the Jitter RNG draw their entropy from the low bits
     of a high-resolution timestamp: check that the guest reads the cycle
     counter without a trap
@@ -718,8 +689,7 @@
   #more[“Entropy in Virtual Machines”, following a study of the BSI]
 ]
 
-#slide(title: [Operating guests: entropy from the host, a gated boot, clones
-  of stopped images])[
+#slide(title: [Operation of Guests])[
   #grid(columns: (1fr, 1fr), column-gutter: 14pt, row-gutter: 14pt,
     card([Entropy from the host], height: 122pt)[Feed virtio-rng from the
       ESDM of the host and credit `/dev/hwrng` in the guest – when host and
@@ -740,7 +710,7 @@
   subtitle: [The attacker model, the security domains and the hardening of
     the server])
 
-#slide(title: [The ESDM protects three assets])[
+#slide(title: [Protected Assets])[
   #grid(columns: (1fr, 1fr, 1fr), column-gutter: 14pt,
     card([State], height: 150pt)[The states of the DRNG instances, of the
       pools and of the entropy sources, the seed buffers: confidentiality
@@ -758,7 +728,7 @@
   #more[“Attacker Model and Non-Goals”]
 ]
 
-#slide(title: [Six attackers are in scope, each with its countermeasures])[
+#slide(title: [Attacker Model])[
   #set text(size: t-small)
   #set par(leading: 0.42em)
   #let row(who, what) = (text(weight: "semibold", who), what)
@@ -779,7 +749,7 @@
   )
 ]
 
-#slide(title: [The design names its residual risks and non-goals])[
+#slide(title: [Residual Risks and Non-Goals])[
   - Fallback: a local user who keeps enough connections busy moves the
     consumers of the drop-in interfaces to the kernel RNG
   - Entropy consumption: the seed call and the prediction resistance path
@@ -790,7 +760,7 @@
     hypervisor; physical attacks; network attackers – all sockets are local
 ]
 
-#slide(title: [Secrets exist in two of the seven security domains])[
+#slide(title: [Security Domains])[
   #pic("deck-security-domains.svg", height: 252pt)
   #v(8pt)
   #set text(size: t-small)
@@ -799,8 +769,7 @@
   boundary.
 ]
 
-#slide(title: [The server uses root to set itself up, and for nothing
-  else])[
+#slide(title: [Privileges of the Server])[
   #grid(columns: (1fr, 1fr), column-gutter: gap, row-gutter: 20pt,
     step(1)[Start as root][Optionally fork into a PID namespace; a root
       supervisor stays outside, forwards signals, and the daemon ends
@@ -818,7 +787,7 @@
   )
 ]
 
-#slide(title: [The hardening is layered around the core])[
+#slide(title: [Hardening])[
   #pic("hardening-layers.svg", height: 244pt)
   #v(10pt)
   #set text(size: 18pt)
@@ -828,11 +797,10 @@
 
 // ================================================================ part 7
 #section-slide(number: 7, title: [Compliance],
-  subtitle: [Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31 – and
-    what is not claimed])
+  subtitle: [Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31, and
+    the claims not made])
 
-#slide(title: [Three seeding strategies define when a DRNG is fully
-  seeded])[
+#slide(title: [Seeding Strategies])[
   #let strategy(n, name, body) = card(none, height: 236pt)[
     #text(size: 40pt, weight: "semibold", fill: accent-text, tracking: -1pt,
       top-edge: "cap-height", bottom-edge: "baseline", n)
@@ -854,8 +822,7 @@
   #more[the build options are shown verbatim in the backup section]
 ]
 
-#slide(title: [The build options select the class, the output path delivers
-  it])[
+#slide(title: [Build Options and Classes])[
   #cols(widths: (1.5fr, 1fr), valign: horizon,
     pic("compliance-options.svg"),
     [
@@ -868,7 +835,7 @@
     ])
 ]
 
-#slide(title: [Only the prediction resistance path delivers NTG.1 output])[
+#slide(title: [NTG.1 Output])[
   #{
     set text(size: 18pt, top-edge: "cap-height", bottom-edge: "baseline")
     show table.cell.where(y: 0): set text(weight: "semibold",
@@ -894,8 +861,7 @@
     backup section]
 ]
 
-#slide(title: [SP 800-90C: an RBG2 construction, and RBG3(RS) on the
-  prediction resistance path])[
+#slide(title: [SP 800-90C Constructions])[
   #cols(widths: (1.25fr, 1fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -917,8 +883,7 @@
   )
 ]
 
-#slide(title: [AIS 20/31: NTG.1, DRG.3 and DRG.4 each have a build
-  option])[
+#slide(title: [AIS 20/31 Classes])[
   - All DRNGs of the ESDM are DRG.3; `ais2031_drg3` adds the oversampling of
     the initial seed
   - `ais2031_drg4`: no request after 2#super[17] bits without a successful
@@ -930,8 +895,7 @@
     DRG.4 and DRT.1 to its implementation
 ]
 
-#slide(title: [DRT.1: the NTG.1 output of the host seeds the DRNGs of its
-  guests])[
+#slide(title: [DRT.1])[
   #pic("deck-drt1.svg", height: 196pt)
   #v(8pt)
   #set text(size: 18pt)
@@ -942,7 +906,7 @@
   - No SP 800-90C or FIPS 140-3 claim of the host carries into the guest
 ]
 
-#slide(title: [What the ESDM does not claim])[
+#slide(title: [Claims Not Made])[
   - Output of the kernel RNG, which the drop-in interfaces serve while the
     server cannot be reached
   - Anything for the default build: its entropy rates are a pragmatic choice
@@ -959,7 +923,7 @@
   subtitle: [Testing, the interface specification and the formal
     verification of the concurrent parts])
 
-#slide(title: [Each subsystem is verified with the methods that fit it])[
+#slide(title: [Verification Methods])[
   #set text(size: 18pt)
   #set par(leading: 0.42em)
   #let row(what, how) = (text(weight: "semibold", what), how)
@@ -978,12 +942,11 @@
   #more[“Scope” of chapter “Formal Verification”]
 ]
 
-#slide(title: [Tests run on every push, in the Nix flake and by hand])[
+#slide(title: [Test Execution])[
   #pic("testing.svg")
 ]
 
-#slide(title: [The test suite covers each option; fuzzers and sanitizers
-  cover the input])[
+#slide(title: [Test Coverage])[
   #cols(widths: (1fr, 1.75fr), gutter: 20pt,
     [
       #set text(size: t-small)
@@ -1002,8 +965,7 @@
   )
 ]
 
-#slide(title: [Every external interface is specified and carries an
-  identifier])[
+#slide(title: [Interface Specification])[
   #let group(name, ids) = card(name, height: 104pt, {
     set par(leading: 0.6em)
     ids.map(i => box(raw(i))).join(h(0.8em))
@@ -1027,8 +989,7 @@
   the numbers are stable, later versions only append.
 ]
 
-#slide(title: [Specified down to the datagram: an RPC call is one request
-  and one response])[
+#slide(title: [Wire Format of an RPC Call])[
   - Two services on `SOCK_SEQPACKET` sockets: `UnprivAccess` for every local
     user, `PrivAccess` for user ID 0
   - A header of unsigned 32-bit fields in little-endian order:
@@ -1040,8 +1001,7 @@
   #more[chapter “Interface Specification”, “RPC Interfaces”]
 ]
 
-#slide(title: [Model checking runs every interleaving of a bounded
-  instance])[
+#slide(title: [Model Checking])[
   #pic("deck-model-checking.svg", height: 230pt)
   #v(8pt)
   #set text(size: 18pt)
@@ -1050,7 +1010,7 @@
   that does not hold.
 ]
 
-#slide(title: [The concurrent parts of the ESDM are modelled in TLA+])[
+#slide(title: [TLA+ Models])[
   #grid(columns: (1fr, 1.1fr), column-gutter: 14pt,
     card([What is modelled], height: 262pt, size: 18pt)[
       - Seeding and output of the DRNG instances
@@ -1071,8 +1031,7 @@
   #more[chapter “Formal Verification”]
 ]
 
-#slide(title: [The models are validated against the code, and their limits
-  are stated])[
+#slide(title: [Validation and Limits of the Models])[
   #grid(columns: (1fr, 1fr), column-gutter: 14pt,
     card([Validation], height: 262pt, size: 18pt)[
       - Correspondence: every step is named after the C function it stems
@@ -1092,7 +1051,7 @@
   )
 ]
 
-#slide(title: [The design document says more])[
+#slide(title: [Further Reading])[
   #cols(widths: (1fr, 150pt), valign: horizon,
     [
       - *Design and assurance*: the design and the attacker model, the
@@ -1117,7 +1076,7 @@
     commands and results, and the build options as meson_options.txt
     states them])
 
-#slide(title: [Backup: the output path of each interface])[
+#slide(title: [Backup: Output Path of Each Interface])[
   #ref-table(columns: (1.7fr, 1fr, 1.1fr), size: 12pt,
     inset: (x: 7pt, y: 4.6pt),
     table.header([Interface], [Path], [ESDM server unreachable]),
@@ -1142,7 +1101,7 @@
   )
 ]
 
-#slide(title: [Backup: the commands of the EGD interface])[
+#slide(title: [Backup: Commands of the EGD Interface])[
   #cols(widths: (1fr, 1.25fr),
     [
       #set text(size: t-small)
@@ -1167,8 +1126,7 @@
   )
 ]
 
-#slide(title: [Backup: the result of the output calls in each state of the
-  ESDM])[
+#slide(title: [Backup: Results of the Output Calls per State])[
   #ref-table(columns: (1.95fr, 0.9fr, 1.15fr, 1.5fr), size: 12pt,
     table.header([Call], [Loaded], [Available, not operational],
       [Operational]),
@@ -1191,8 +1149,7 @@
   returns `-EOPNOTSUPP`.
 ]
 
-#slide(title: [Backup: SP 800-90B measurements of the interrupt entropy
-  source])[
+#slide(title: [Backup: SP 800-90B Measurements of the Interrupt Entropy Source])[
   #cols(widths: (1fr, 1.75fr), gutter: 20pt,
     [
       #set text(size: t-small)
@@ -1235,7 +1192,7 @@
   )
 ]
 
-#slide(title: [Backup: the crypto backends and their DRNGs])[
+#slide(title: [Backup: Crypto Backends and Their DRNGs])[
   #ref-table(columns: (0.8fr, 2fr, 1fr),
     table.header([Backend], [DRNG], [Hash]),
     [builtin (default)], [SP 800-90A Hash DRBG with SHA-512 (default) or
@@ -1299,7 +1256,7 @@
   - A read has a deadline of 2 seconds
 ]
 
-#slide(title: [Backup: the complete status of a default build])[
+#slide(title: [Backup: Status of a Default Build])[
   #grid(columns: (1fr, 1fr, 1fr), column-gutter: 10pt,
     window(status-left.slice(0, 31), size: 6.5pt,
       title: "esdm-tool --status"),
