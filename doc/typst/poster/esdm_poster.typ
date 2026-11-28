@@ -21,6 +21,7 @@
 #import "../palette.typ": *
 #import "../inputs.typ": esdm-version, doc-date
 #import "../icons.typ": icon, brand
+#import "../presentations/template.typ": hex-words
 
 #let sans = "Source Sans 3"
 #let mono = "Source Code Pro"
@@ -47,7 +48,7 @@
 
 // A rounded box with a label: an entropy source, a DRNG instance, an
 // interface.
-#let chip(body, fill: background, stroke: rule, color: ink, height: 49mm,
+#let chip(body, fill: background, stroke: rule, color: ink, height: 45mm,
   weight: "regular") = box(width: 100%, height: height, radius: 5mm,
   fill: fill, stroke: 2.5pt + stroke, inset: (x: 3mm),
   align(center + horizon, text(fill: color, weight: weight, body)))
@@ -87,21 +88,90 @@
   body
 }
 
+// A symbol, centred on its own bounds instead of the text line.
+#let sign(name, size: 46pt, fill: accent-text) = text(size: size,
+  top-edge: "bounds", bottom-edge: "bounds", icon(name, fill: fill))
+
+// A part of a deployment: its symbol, its name and one line about it.
+#let tile(name, title, sub, fill: background, stroke: rule,
+  height: 31mm) = box(width: 100%, height: height, radius: 5mm, fill: fill,
+  stroke: 2.5pt + stroke, inset: (x: 7mm), grid(columns: (17mm, 1fr),
+    rows: 100%, column-gutter: 6mm, align: (center + horizon,
+      left + horizon),
+    sign(name),
+    stack(spacing: 5mm,
+      text(weight: "semibold", title),
+      text(size: t-small, fill: muted, sub))))
+
+// A card that holds the parts of one machine.
+#let zone(name, fill, body) = block(width: 100%, fill: fill, radius: 8mm,
+  inset: (x: 9mm, y: 8mm), {
+  if name != none {
+    text(size: t-small, weight: "semibold", fill: muted, tracking: 2pt,
+      upper(name))
+    v(7mm, weak: true)
+  }
+  body
+})
+
+// The arrow between two parts, with what connects them.
+#let small-arrow(height: 15mm) = block(width: 40pt, height: height,
+  grid(columns: 40pt, rows: (1fr, 24pt), align: center,
+    rect(width: 9pt, height: 100%, fill: accent, stroke: none),
+    polygon(fill: accent, stroke: none, (0pt, 0pt), (36pt, 0pt),
+      (18pt, 24pt))))
+#let link(body, height: 15mm) = grid(columns: (1fr, 40pt, 1fr),
+  rows: height, align: (left, center, left + horizon),
+  [], small-arrow(height: height),
+  pad(left: 5mm, text(size: t-small, fill: muted, body)))
+
+// Hex encoded random numbers as a texture: the words of the generator of
+// the slides, each with a brightness of its own, faded by `fade(x, y)` with
+// x and y from 0 to 1 across the field.
+#let byte-field(width, height, size: 27pt, color: on-navy, fade: (x, y) => 1,
+  strength: 0.3) = {
+  let pitch-x = 3.1 * size
+  let pitch-y = 1.55 * size
+  let cols = calc.floor(width / pitch-x)
+  let rows = calc.floor(height / pitch-y)
+  let words = hex-words(cols * rows)
+  box(width: width, height: height, {
+    set text(font: mono, size: size)
+    for r in range(rows) {
+      for c in range(cols) {
+        let (w, flicker) = words.at(r * cols + c)
+        let alpha = calc.min(1, fade((c + 0.5) / cols, (r + 0.5) / rows)
+          * (0.35 + 0.65 * flicker / 100) * strength)
+        if alpha > 0.015 {
+          place(top + left, dx: c * pitch-x, dy: r * pitch-y,
+            text(fill: color.transparentize(100% * (1 - alpha)), w))
+        }
+      }
+    }
+  })
+}
+
 #let chips(columns, ..items) = grid(columns: (1fr,) * columns,
   column-gutter: 7mm, row-gutter: 7mm, ..items)
 
 // ---------------------------------------------------------------- header
 
-#let header-h = 122mm
+#let header-h = 118mm
 #let footer-h = 34mm
 
-#block(width: 100%, height: header-h, fill: navy, inset: (x: margin),
-  align(horizon, stack(spacing: 20mm,
-    text(size: 116pt, weight: "semibold", fill: background,
-      tracking: -1.5pt)[ESDM: Entropy Source and DRNG Manager],
-    text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
-      user space – a toolkit for FIPS 140-3, SP 800-90 and AIS 20/31],
-  )))
+// Navy, with random numbers fading in from the right behind the title.
+#block(width: 100%, height: header-h, fill: navy, clip: true, {
+  place(top + right, byte-field(440mm, header-h, strength: 0.34,
+    fade: (x, y) => calc.pow(x, 1.7) * calc.pow(calc.sin(calc.pi * y),
+      0.5)))
+  block(width: 100%, height: 100%, inset: (x: margin),
+    align(horizon, stack(spacing: 20mm,
+      text(size: 116pt, weight: "semibold", fill: background,
+        tracking: -1.5pt)[ESDM: Entropy Source and DRNG Manager],
+      text(size: 50pt, fill: on-navy-soft)[Random numbers for Linux from
+        user space – a toolkit for FIPS 140-3, SP 800-90 and AIS 20/31],
+    )))
+})
 
 // ---------------------------------------------------------------- footer
 
@@ -120,7 +190,7 @@
 // ---------------------------------------------------------------- pipeline
 
 #let pipeline = grid(columns: 100%,
-  rows: (auto, 14mm, auto, 1fr, auto, 1fr, auto, 1fr, auto),
+  rows: (auto, 14mm, auto, 1fr, auto, 1fr, auto, 1fr, auto, auto),
   heading-text[From Noise to Random Numbers],
   [],
   stage(1)[Collect][Twelve entropy sources, each switched on, credited and
@@ -185,15 +255,21 @@
       face[`/dev/random`], face[`getrandom()`], face[RPC library],
       face[EGD socket], face[OpenSSL provider], face[`/dev/esdm_pr`])
   ],
+  // What leaves the pipeline: random numbers, fading out downwards.
+  {
+    block(width: 100%, height: 30mm, flow-arrow[])
+    layout(size => align(center, byte-field(size.width, 50mm, size: 31pt,
+      color: accent-text, strength: 1.7,
+      fade: (x, y) => calc.pow(1.1 - y, 1.3))))
+  },
 )
 
 // ---------------------------------------------------------------- claims
 
-#let claim(sign, title, body) = grid(columns: (27mm, 1fr),
+#let claim(name, title, body) = grid(columns: (26mm, 1fr),
   column-gutter: 9mm, align: horizon,
-  box(width: 27mm, height: 27mm, radius: 6mm, fill: accent-soft,
-    align(center + horizon, text(size: 54pt, top-edge: "bounds",
-      bottom-edge: "bounds", icon(sign, fill: accent-text)))),
+  box(width: 26mm, height: 26mm, radius: 6mm, fill: accent,
+    align(center + horizon, sign(name, size: 50pt, fill: background))),
   stack(spacing: 6mm,
     text(size: 46pt, weight: "semibold", title),
     text(size: t-small, fill: muted, body)))
@@ -230,37 +306,19 @@
       kernel RNG.
   ]
   v(10mm, weak: true)
-  let part(title, sub, fill: background, stroke: rule) = chip(fill: fill,
-    stroke: stroke, height: 31mm, stack(spacing: 5mm,
-      text(weight: "semibold", title),
-      text(size: t-small, fill: muted, sub)))
-  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 15mm,
-    align: (left, center, left + horizon),
-    [],
-    grid(columns: 40pt, rows: (1fr, 24pt), align: center,
-      rect(width: 9pt, height: 100%, fill: accent, stroke: none),
-      polygon(fill: accent, stroke: none, (0pt, 0pt), (36pt, 0pt),
-        (18pt, 24pt))),
-    pad(left: 5mm, text(size: t-small, fill: muted, body)))
-  let zone(name, fill, body) = block(width: 100%, fill: fill, radius: 8mm,
-    inset: (x: 9mm, y: 7mm), {
-    text(size: t-small, weight: "semibold", fill: muted, tracking: 2pt,
-      upper(name))
-    v(7mm, weak: true)
-    body
-  })
   zone([Host], surface, {
-    part(fill: accent-soft, stroke: accent)[`esdm-server`][seeded by the
-      entropy sources of the host]
+    tile("server", fill: accent-soft, stroke: accent)[`esdm-server`][seeded
+      by the entropy sources of the host]
     link[EGD socket]
-    part[`esdm_cdev`: `/dev/esdm_pr`][kernel module, no fallback]
+    tile("microchip")[`esdm_cdev`: `/dev/esdm_pr`][kernel module, no
+      fallback]
     link[read]
-    part[Cloud Hypervisor][`--rng src=/dev/esdm_pr`]
+    tile("cloud")[Cloud Hypervisor][`--rng src=/dev/esdm_pr`]
   })
   link[virtio-rng]
   zone([Guest], accent-faint, {
-    part(fill: accent-soft, stroke: accent)[ESDM of the guest][credits
-      `/dev/hwrng` with 256 bits]
+    tile("cube", fill: accent-soft, stroke: accent)[ESDM of the guest][
+      credits `/dev/hwrng` with 256 bits]
   })
 }
 
@@ -277,26 +335,23 @@
     - The providers for PKCS\#11 and PC/SC ship with the ESDM.
   ]
   v(10mm, weak: true)
-  let part(title, sub, fill: background, stroke: rule, height: 33mm) = chip(
-    fill: fill, stroke: stroke, height: height, stack(spacing: 5mm,
-      text(weight: "semibold", title),
-      if sub != none { text(size: t-small, fill: muted, sub) }))
-  let down = align(center, grid(columns: 40pt, rows: (7mm, 30pt),
-    align: center,
-    rect(width: 9pt, height: 100%, fill: accent, stroke: none),
-    polygon(fill: accent, stroke: none, (0pt, 0pt), (40pt, 0pt),
-      (20pt, 30pt))))
-  grid(columns: (1fr, 1fr, 1fr), column-gutter: 6mm, row-gutter: 4mm,
-    part(fill: surface)[HSM][PKCS\#11],
-    part(fill: surface)[Smart card][PC/SC],
-    part(fill: surface)[KMS][KMIP, REST],
-    down, down, down,
-    grid.cell(colspan: 3, part[Provider process][`esdm-es-pkcs11`,
+  let device(name, title, sub) = chip(height: 33mm, stack(spacing: 5mm,
+    [#box(baseline: 12%, sign(name, size: 36pt)) #h(0.2em)
+      #text(weight: "semibold", title)],
+    text(size: t-small, fill: muted, sub)))
+  zone(none, surface, grid(columns: (1fr, 1fr, 1fr), column-gutter: 6mm,
+    row-gutter: 3mm,
+    device("key")[HSM][PKCS\#11],
+    device("card")[Smart card][PC/SC],
+    device("cloud")[KMS][KMIP, REST],
+    ..(align(center, small-arrow(height: 12mm)),) * 3,
+    grid.cell(colspan: 3, tile("plug")[Provider process][`esdm-es-pkcs11`,
       `esdm-es-pcsc` or your own]),
-    grid.cell(colspan: 3, down),
-    grid.cell(colspan: 3, part(fill: accent-soft, stroke: accent)[
-      `esdm-server`][external entropy source, credited as configured]),
-  )
+    grid.cell(colspan: 3, align(center, small-arrow(height: 12mm))),
+    grid.cell(colspan: 3, tile("server", fill: accent-soft,
+      stroke: accent)[`esdm-server`][external entropy source, credited as
+      configured]),
+  ))
 }
 
 // ---------------------------------------------------------------- body

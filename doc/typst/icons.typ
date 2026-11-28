@@ -24,6 +24,9 @@
   puzzle: "\u{f12e}",
   scale: "\u{f24e}",
   eye: "\u{f06e}",
+  cloud: "\u{f0c2}",
+  card: "\u{f2c2}",
+  cube: "\u{f1b2}",
 )
 
 #let icon(name, fallback: none, fill: none) = context {
