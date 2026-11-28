@@ -94,9 +94,16 @@
   title: [Entropy Source and \ DRNG Manager],
   subtitle: [... or /dev/random in User Space],
   version: [ESDM #esdm-version],
-  author: grid(columns: (auto, auto), column-gutter: 48pt,
-    [Stephan Müller \ \<smueller\@chronox.de\>],
-    [Markus Theil \ \<theil.markus\@gmail.com\>]),
+  author: {
+    // The name, and below it the address, smaller and with an envelope.
+    let person(name, mail) = stack(spacing: 9pt,
+      text(weight: "semibold", name),
+      text(size: 12.5pt, fill: on-navy-soft)[#icon("mail", fill: on-navy)
+        #h(0.25em) #mail])
+    grid(columns: (auto, auto), column-gutter: 44pt,
+      person[Stephan Müller][smueller\@chronox.de],
+      person[Markus Theil][theil.markus\@gmail.com])
+  },
 )
 
 #slide(title: [Agenda])[

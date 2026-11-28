@@ -27,6 +27,7 @@
   cloud: "\u{f0c2}",
   card: "\u{f2c2}",
   cube: "\u{f1b2}",
+  mail: "\u{f0e0}",
 )
 
 #let icon(name, fallback: none, fill: none) = context {
