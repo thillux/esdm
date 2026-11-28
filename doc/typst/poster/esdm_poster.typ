@@ -8,7 +8,7 @@
 
 #import "../palette.typ": *
 #import "../inputs.typ": esdm-version, doc-date
-#import "../icons.typ": icon
+#import "../icons.typ": icon, brand
 
 #let sans = "Source Sans 3"
 #let mono = "Source Code Pro"
@@ -100,10 +100,14 @@
 // ---------------------------------------------------------------- footer
 
 #place(bottom, block(width: 100%, height: 34mm, fill: navy,
-  inset: (x: margin), align(horizon, grid(columns: (1fr, auto),
-    text(size: 30pt, fill: on-navy)[Design document and manual:
-      `nix build .#esdm-doc`],
-    text(size: 30pt, fill: on-navy)[https://github.com/smuellerDD/esdm]))))
+  inset: (x: margin), {
+    set text(size: 30pt, fill: on-navy)
+    align(horizon, grid(columns: (1fr, auto),
+      [#text(size: 47pt, baseline: 3pt, icon("globe", fill: on-navy))
+        #h(0.4em) https://chronox.de/esdm/],
+      [#text(size: 40pt, baseline: 3pt, brand("github")) #h(0.4em)
+        https://github.com/smuellerDD/esdm]))
+  }))
 
 // ---------------------------------------------------------------- body
 

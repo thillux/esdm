@@ -20,6 +20,7 @@
   flask: "\u{f0c3}",
   bug: "\u{f188}",
   plug: "\u{f1e6}",
+  globe: "\u{f0ac}",
 )
 
 #let icon(name, fallback: none, fill: none) = context {
@@ -29,6 +30,13 @@
     box(text(font: icon-font, size: 0.85em,
       fill: if fill == none { muted } else { fill }, icon-codes.at(name)))
   }
+}
+
+// A logo of Font Awesome Free Brands, in the color of the text around it.
+#let brand-font = "Font Awesome 7 Brands"
+#let brand-codes = (github: "\u{f09b}")
+#let brand(name) = context {
+  if target() != "html" { box(text(font: brand-font, brand-codes.at(name))) }
 }
 
 // "yes" of a compliance table: a check mark and its conditions
