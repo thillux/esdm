@@ -13,8 +13,9 @@
 // none is one of the design document: no label is smaller than 34 pt. The
 // left column is the pipeline from the noise to the consumers; the right
 // column, independent of it, says why to use the ESDM: eight claims, each a
-// benefit in one line, then the deployments with their parts and the
-// states of a DRNG instance. Its statements are those of the design document,
+// benefit in one line, then one deployment end to end - a guest of
+// Cloud Hypervisor seeded through esdm_cdev - and the states of a DRNG
+// instance. Its statements are those of the design document,
 // its colors those of palette.typ.
 
 #import "../palette.typ": *
@@ -181,7 +182,7 @@
 #let claims = {
   heading-text[Why the ESDM]
   v(14mm, weak: true)
-  stack(spacing: 17mm,
+  stack(spacing: 11mm,
     claim("plug")[Drop-in][No change to the applications],
     claim("microchip")[Stock kernel][No kernel patch; updated like any
       package],
@@ -197,34 +198,45 @@
   )
 }
 
-// ---------------------------------------------------------------- toolkit
+// ---------------------------------------------------------------- example
 
-// The deployments against the components each of them needs: the claim
-// "a toolkit" as a picture.
-#let toolkit = {
-  heading-text[Pick What You Need]
+// One deployment end to end: the ESDM of a host seeds a guest of Cloud
+// Hypervisor through the kernel module esdm_cdev and virtio-rng.
+#let example = {
+  heading-text[Example: Entropy for a VM]
   v(14mm, weak: true)
-  let parts = ([Generator], [Server], [RPC socket], [EGD socket],
-    [CUSE daemons], [OpenSSL provider], [Kernel module])
-  let uses = (
-    ([One program], (0,)),
-    ([OpenSSL applications], (0, 1, 2, 5)),
-    ([Unmodified software], (0, 1, 2, 4)),
-    ([Hypervisor], (0, 1, 3, 6)),
-  )
-  let dot(on) = align(center + horizon, if on {
-    circle(radius: 10mm, fill: accent, stroke: none)
-  } else {
-    circle(radius: 3mm, fill: rule, stroke: none)
+  let part(title, sub, fill: background, stroke: rule) = chip(fill: fill,
+    stroke: stroke, height: 38mm, stack(spacing: 6mm,
+      text(weight: "semibold", title),
+      text(size: t-small, fill: muted, sub)))
+  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 22mm,
+    align: (left, center, left + horizon),
+    [],
+    grid(columns: 40pt, rows: (1fr, 30pt), align: center,
+      rect(width: 9pt, height: 100%, fill: accent, stroke: none),
+      polygon(fill: accent, stroke: none, (0pt, 0pt), (40pt, 0pt),
+        (20pt, 30pt))),
+    pad(left: 5mm, text(size: t-small, fill: muted, body)))
+  let zone(name, fill, body) = block(width: 100%, fill: fill, radius: 8mm,
+    inset: (x: 10mm, y: 9mm), {
+    text(size: t-small, weight: "semibold", fill: muted, tracking: 2pt,
+      upper(name))
+    v(7mm, weak: true)
+    body
   })
-  grid(columns: (auto,) + (1fr,) * parts.len(), column-gutter: 2mm,
-    row-gutter: 13mm, align: (x, y) => if y == 0 { center + bottom } else
-      if x == 0 { left + horizon } else { center + horizon },
-    [], ..parts.map(p => rotate(-90deg, reflow: true, text(size: t-small,
-      fill: muted, p))),
-    ..uses.map(((name, on)) => (text(weight: "semibold", name),
-      ..range(parts.len()).map(i => dot(i in on)))).flatten(),
-  )
+  zone([Host], surface, {
+    part(fill: accent-soft, stroke: accent)[`esdm-server`][seeded by the
+      entropy sources of the host]
+    link[EGD socket]
+    part[`esdm_cdev`: `/dev/esdm_pr`][kernel module, no fallback]
+    link[read]
+    part[Cloud Hypervisor][`--rng src=/dev/esdm_pr`]
+  })
+  link[virtio-rng]
+  zone([Guest], accent-faint, {
+    part(fill: accent-soft, stroke: accent)[ESDM of the guest][credits
+      `/dev/hwrng` with 256 bits]
+  })
 }
 
 // ---------------------------------------------------------------- states
@@ -267,7 +279,7 @@
   block(width: 100%, height: body-h, {
     claims
     v(1fr)
-    toolkit
+    example
     v(1fr)
     states
   }),
