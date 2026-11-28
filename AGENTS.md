@@ -129,6 +129,61 @@ checks: `check-palette` (only colors of `palette.typ`), `check-identifiers`
 (the options and functions named exist), `check-options` (the option
 reference matches `meson_options.txt`).
 
+The documentation is methodical and rational. It is written for a reader
+who checks it: an evaluator, an integrator, a reviewer.
+
+Method:
+
+- Proceed in a fixed order: the requirement or the goal, the design that
+  meets it, the reason for the design, the evidence. A section that states
+  a property also states how the property is verified: a test, a model, an
+  assessment or an argument.
+- Give the reason for a decision, and name the alternatives that were
+  rejected and why. A statement without a reason is a claim; mark it as
+  one or support it.
+- Define a term before it is used, and use one term for one thing
+  throughout. Acronyms go through `acronyms.typ`.
+- Separate what the ESDM does from what the operator must do, and what is
+  claimed from what is not. Limits, assumptions and non-goals are written
+  down in the place where the claim is made.
+- State conditions precisely: the build option, the default, the unit, the
+  bound. "Usually" and "should" need a stated exception or are replaced by
+  the rule.
+- Treat like things alike. Sections on entropy sources, interfaces, models
+  and configurations follow one structure each, so that they can be
+  compared and a missing item is visible.
+
+Standards:
+
+- FIPS 140-3 with its implementation guidance, SP 800-90A, SP 800-90B and
+  SP 800-90C, and AIS 20/31 are the frame of reference. Use their terms
+  where they have one: entropy source, noise source, conditioning
+  component, health test, security strength, prediction resistance,
+  functionality class.
+- Relate a design decision that touches randomness to the requirement it
+  serves, by standard, section and identifier: the construction of
+  SP 800-90C, the section of the implementation guidance, the requirement
+  of the functionality class of AIS 20/31.
+- State for which standard a statement holds when the standards differ, for
+  example in the entropy of the seed or in the reseeding.
+- A compliance claim names the standard and its version, the build options
+  that establish it, and the conditions under which it holds. Do not claim
+  what is not shown, and do not weaken a claim silently.
+
+Citations:
+
+- Cite a statement that is not established by the ESDM itself: a
+  requirement of a standard, a result of the literature, a property of
+  another component. Cite with the keys of `references.bib` and add the
+  section or the identifier of the requirement.
+- Cite the version of the standard that was used. A new source gets an
+  entry in `references.bib` with the data to find it.
+- Refer to the code for a statement about the ESDM: the function, the build
+  option or the file. Refer to sections by their labels, not by numbers.
+- Do not cite from memory. Verify a quotation, a section number and an
+  identifier against the source; if the source is not at hand, say so
+  rather than guess.
+
 Rules for the text:
 
 - Formal technical English, no first person, no informal headings.
