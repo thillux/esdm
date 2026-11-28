@@ -492,10 +492,11 @@ void esdm_set_entropy_thresh(uint32_t new_entropy_bits)
 }
 
 /*
- * Reset ESDM state - the entropy counters are reset, but the data that may
- * or may not have entropy remains in the pools as this data will not hurt.
+ * Reset the entropy sources - the entropy counters are reset, but the data
+ * that may or may not have entropy remains in the pools as this data will not
+ * hurt. Before the DRNGs are reset, see esdm_reset().
  */
-void esdm_reset_state(void)
+void esdm_es_reset(void)
 {
 	uint32_t i;
 
@@ -503,6 +504,11 @@ void esdm_reset_state(void)
 		if (esdm_es[i]->reset)
 			esdm_es[i]->reset();
 	}
+}
+
+/* Reset ESDM state once the entropy sources and the DRNGs are reset */
+void esdm_reset_state(void)
+{
 	/*
 	 * Not the operational state: that follows the initial DRNG and is
 	 * cleared with it, under its lock - see esdm_unset_fully_seeded().

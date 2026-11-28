@@ -263,6 +263,11 @@ void esdm_drng_reset(struct esdm_drng *drng)
 	atomic_store(&drng->requests_since_fully_seeded, 0);
 	atomic_store(&drng->request_bits_since_fully_seeded, 0);
 	/*
+	 * A seeding that collected its entropy before this reset, without the
+	 * lock of the DRNG, finds out here - see esdm_drng_seed_es().
+	 */
+	atomic_fetch_add(&drng->reset_generation, 1);
+	/*
 	 * drng->seed_generation and drng->last_seeded_wtime are deliberately
 	 * kept: they report what happened to this DRNG, and no seeding is
 	 * undone here - only the reseed bookkeeping is restarted.
@@ -847,8 +852,8 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 			   addtl __aligned(ESDM_KCAPI_ALIGN),
 		collected_seedbuf;
 	uint32_t requested_bits, collected_entropy = 0, injected_entropy = 0;
-	unsigned int i, num_es_delivered = 0;
-	bool seeded = false, reached = false;
+	unsigned int i, num_es_delivered = 0, reset_generation;
+	bool seeded = false, reached = false, stale = false;
 	bool pr = (drng == &esdm_drng_pr);
 	unsigned int es_delivered_threshold = 1;
 	bool do_full_init =
@@ -900,6 +905,9 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 		requested_bits = esdm_get_seed_entropy_osr(do_full_init,
 							   !do_full_init && pr);
 
+		/* Before the collection - see the check under the lock below */
+		reset_generation = atomic_load(&drng->reset_generation);
+
 		/*
 		 * Get the entropy and the additional data in one pass over the
 		 * entropy sources.
@@ -914,15 +922,30 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 			mutex_w_lock(&drng->lock);
 			/* One taken out of the fully seeded state needs more */
 			do_full_init |= !atomic_load(&drng->fully_seeded);
+			/*
+			 * esdm_reset() since the collection began: the entropy
+			 * of before the reset is worth no credit - not this
+			 * collection, which is injected as data only, nor the
+			 * ones added up before it.
+			 */
+			stale = reset_generation !=
+				atomic_load(&drng->reset_generation);
 		}
 
-		seed_entropy = esdm_entropy_rate_eb(&seedbuf);
+		seed_entropy = stale ? 0 : esdm_entropy_rate_eb(&seedbuf);
+		if (stale) {
+			collected_entropy = 0;
+			injected_entropy = 0;
+		}
 		collected_entropy += seed_entropy;
 
 		/* Sum iterations up. */
 		for_each_esdm_es (i) {
-			collected_seedbuf.entropy_es[i].e_bits +=
-				seedbuf.entropy_es[i].e_bits;
+			if (stale)
+				collected_seedbuf.entropy_es[i].e_bits = 0;
+			else
+				collected_seedbuf.entropy_es[i].e_bits +=
+					seedbuf.entropy_es[i].e_bits;
 			num_es_delivered += !!seedbuf.entropy_es[i].e_bits;
 		}
 
@@ -946,6 +969,7 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 		 * oversampled amount it asked for, see above.
 		 */
 		fully_seeded =
+			!stale &&
 			esdm_fully_seeded(do_full_init, collected_entropy,
 					  &collected_seedbuf) &&
 			(!pr || do_full_init ||
@@ -958,7 +982,7 @@ static uint32_t esdm_drng_seed_es(struct esdm_drng *drng,
 			seeded = true;
 			injected_entropy += seed_entropy;
 			reached = fully_seeded;
-		} else {
+		} else if (!stale) {
 			/*
 			 * What a failed injection collected is not in the DRNG:
 			 * it must not count towards the next injection.
@@ -1064,6 +1088,7 @@ static void esdm_drng_reseed_seed_locked(struct esdm_drng *drng)
 	struct entropy_buf seedbuf __aligned(ESDM_KCAPI_ALIGN),
 		addtl __aligned(ESDM_KCAPI_ALIGN);
 	uint32_t entropy;
+	unsigned int reset_generation;
 	bool fully_seeded;
 
 	/* Nothing seeds after a failed self test - see esdm_drng_seed_es() */
@@ -1091,14 +1116,21 @@ static void esdm_drng_reseed_seed_locked(struct esdm_drng *drng)
 
 	memset(&seedbuf, 0, sizeof(seedbuf));
 	memset(&addtl, 0, sizeof(addtl));
+	reset_generation = atomic_load(&drng->reset_generation);
 	esdm_get_seed_buffers(&seedbuf, &addtl,
 			      esdm_get_seed_entropy_osr(false, false),
 			      atomic_load(&drng->force_reseed));
 	entropy = esdm_entropy_rate_eb(&seedbuf);
 
 	mutex_w_lock(&drng->lock);
-	/* One that left the fully seeded state meanwhile needs more */
-	fully_seeded = esdm_fully_seeded(!atomic_load(&drng->fully_seeded),
+	/*
+	 * One that left the fully seeded state meanwhile needs more, and after
+	 * an esdm_reset() since the collection began, entropy of after the
+	 * reset: what was collected before it is injected as data only.
+	 */
+	fully_seeded = reset_generation ==
+			       atomic_load(&drng->reset_generation) &&
+		       esdm_fully_seeded(!atomic_load(&drng->fully_seeded),
 					 entropy, &seedbuf);
 	/* Nor after a self test failed during the collection */
 	if (!esdm_selftest_crypto_failed() &&
@@ -2355,11 +2387,19 @@ static void esdm_drng_reset_locked(struct esdm_drng *drng)
 
 /*
  * Reset ESDM such that all existing entropy is gone.
+ *
+ * The entropy of the sources first: a DRNG that is reset wakes the ES monitor,
+ * and a seeding running next to this function must not bring a DRNG reset
+ * here back up with entropy of before the reset. One that collected such
+ * entropy already is told by the reset generation of its DRNG.
  */
 void esdm_reset(void)
 {
-	struct esdm_drng **esdm_drng = esdm_drng_get_instances();
+	struct esdm_drng **esdm_drng;
 
+	esdm_es_reset();
+
+	esdm_drng = esdm_drng_get_instances();
 	if (!esdm_drng) {
 		esdm_drng_reset_locked(&esdm_drng_init);
 	} else {

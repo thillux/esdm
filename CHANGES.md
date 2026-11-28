@@ -61,6 +61,12 @@ the device of the kernel, instead of success
 reseeding credited the next injection with the entropy collected for the failed
 one, which could mark a DRNG fully seeded with less entropy than required
 
+* The reset after a change of the VM generation drops the entropy of the
+entropy sources before it resets the DRNGs, not after, and a seeding that
+collected its entropy before the reset of its DRNG is given no credit for it:
+a seeding running next to the reset could mark a DRNG fully seeded again with
+entropy of before the reset, which a clone holds as well
+
 * The prediction resistance DRNG serves only once it was fully seeded, like
 every other DRNG: before its initial full seed, it served as much as the
 fresh entropy of a request allowed

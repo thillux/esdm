@@ -63,6 +63,14 @@ struct esdm_drng {
 	atomic_llong seed_generation;
 
 	/*
+	 * Number of resets of this DRNG, changed under its lock. A seeding
+	 * that collects without the lock reads it before the collection and
+	 * under the lock: entropy collected before a reset is given no credit
+	 * after it, see esdm_reset().
+	 */
+	atomic_uint reset_generation;
+
+	/*
 	 * Time of last seeding in whole seconds (CLOCK_MONOTONIC), atomic so
 	 * the lock-free must_reseed() fast path can read it without taking
 	 * drng->lock. No consumer needs sub-second resolution.
@@ -106,6 +114,7 @@ struct esdm_drng {
 	.drng = d, .drng_cb = d_cb, .hash_cb = h_cb,                           \
 	.requests = ESDM_DRNG_RESEED_THRESH, .requests_since_fully_seeded = 0, \
 	.request_bits_since_fully_seeded = 0, .seed_generation = 0,            \
+	.reset_generation = 0,                                                 \
 	.last_seeded_time = 0, .last_seeded_wtime = 0, .fully_seeded = false,  \
 	.force_reseed = true, .initiated = false, .reseed_running = false,     \
 	.seed_lock = MUTEX_W_UNLOCKED

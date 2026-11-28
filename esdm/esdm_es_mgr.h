@@ -35,6 +35,7 @@ bool esdm_es_name_taken(const char *name, const struct esdm_es_cb *self);
  */
 extern _Atomic uint32_t esdm_write_wakeup_bits;
 void esdm_set_entropy_thresh(uint32_t new);
+void esdm_es_reset(void);
 void esdm_reset_state(void);
 
 void esdm_pool_all_nodes_seeded(bool set);
