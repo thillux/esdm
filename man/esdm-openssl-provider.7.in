@@ -17,7 +17,9 @@ rather than from OpenSSL's own DRBG chain. They are built with the meson
 option
 .BR openssl\-rand\-provider .
 .PP
-Each provider offers the four RAND algorithms OpenSSL knows \-
+Each provider but
+.B libesdm\-seed\-src\-provider.so
+offers the four RAND algorithms OpenSSL knows \-
 .BR CTR\-DRBG ", " HASH\-DRBG ", " HMAC\-DRBG " and " SEED\-SRC
 \- and routes all of them to the ESDM. Which one an application asks for
 therefore no longer selects a construction; it selects nothing at all, because
@@ -110,13 +112,19 @@ The
 provider stays activated because the rest of OpenSSL needs its algorithms; only
 the random section is redirected.
 .SS EGD socket selection
-The EGD providers take their socket path, in decreasing precedence, from the
+The EGD providers take their socket path from the
 .B egd_socket
 key of their provider section in
-.IR openssl.cnf ,
-from the
+.IR openssl.cnf .
+Without the key,
+.B libesdm\-egd\-provider.so
+uses the
 .B ESDM_EGD_SOCKET
-environment variable, and from the path the ESDM was built with. Configuring
+environment variable, which is ignored in a process running with raised
+privileges, and then the path of the EGD socket the ESDM was built with;
+.B libesdm\-egd\-provider\-pr.so
+does not read the variable and uses the path of the prediction resistance
+socket the ESDM was built with. Configuring
 the EGD variant therefore differs from the above only in the module and in the
 properties:
 .PP
@@ -157,9 +165,13 @@ advisory rather than binding.
 .SH ENVIRONMENT
 .TP
 .B ESDM_EGD_SOCKET
-Path of the EGD socket, used by the EGD providers when
+Path of the EGD socket, used by
+.B libesdm\-egd\-provider.so
+when
 .I openssl.cnf
 does not name one.
+.B libesdm\-egd\-provider\-pr.so
+does not read it.
 .SH EXAMPLES
 Check that the provider is loaded and serving:
 .PP

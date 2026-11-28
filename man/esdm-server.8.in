@@ -230,9 +230,9 @@ source for up to half a second; a provider answering later is disconnected.
 Shut the daemon down cleanly.
 .TP
 .B SIGUSR1
-Mark the ESDM as suspended in the status shared memory segment, so that
-consumers waiting on it notice that the daemon is about to be suspended. This
-is what
+Count up the suspend generation in the status shared memory segment and wake
+the consumers waiting on it, so that none of them blocks on a daemon that is
+about to be suspended. This is what
 .BR esdm\-server\-signal\-helper (8)
 sends before the system goes to sleep.
 .SH FILES
@@ -253,7 +253,7 @@ used.
 .SH EXIT STATUS
 .B esdm\-server
 exits with a non\-zero status when it cannot initialize the ESDM or the
-requested interfaces.
+requested interfaces, or when an RPC worker thread fails.
 .SH SEE ALSO
 .BR esdm\-tool (1),
 .BR esdm\-cuse\-random (8),

@@ -31,7 +31,7 @@ of this source due to increased internal sampling rounds.
 option('es_jent_ntg1', type: 'feature', value: 'disabled',
        description:'''Jitter RNG NTG.1 compliance mode
 
-The options enables the jitter RNGs NTG.1 mode (an BSI AIS 20/31 functionality
+The option enables the NTG.1 mode of the jitter RNG (a BSI AIS 20/31 functionality
 class). This internally also enables FIPS mode and health tests.
 Please make sure, that you configured jitterentropy according to
 entropy estimates on your target platform. Otherwise failing health tests
@@ -48,7 +48,7 @@ option('es_jent_max_mem', type: 'integer', min: -1, max: 20, value: -1,
 
 The jitter RNG performs random accesses on a memory buffer as part of
 its noise source. Use this option to adapt the size of the buffer after
-entropy measurements with differents memory sizes. Please consult the
+entropy measurements with different memory sizes. Please consult the
 source code of your jitterentropy version for a current meaning of the
 values. At the time of writing this description text e.g. 16 would allocate
 32 MB.
@@ -68,7 +68,7 @@ option('es_jent_all_caches', type: 'feature', value: 'disabled',
        description:'''Jitter RNG cache logic use all caches
 
 If no max memory size is given, the jitter RNG estimates an
-adequate size of the memory buffer dependending on the cache
+adequate size of the memory buffer depending on the cache
 size of the system. Typically only the size of the L1 is used for
 this. With this option, the sum all caches up to L3 is taken
 into account.
@@ -169,7 +169,7 @@ Thus, only disable it if you ensured that other entropy
 sources are available that supply the ESDM with entropy.
 
 Side note: when enabling this entropy source, one of the main
-entropy sources of the kernel RNG is divered into ESDM. This
+entropy sources of the kernel RNG is diverted into ESDM. This
 means that this entropy source is not available to the kernel
 RNG any more. To offset the issue, the ESDM reseeds the
 kernel RNG once in a while.
@@ -189,7 +189,7 @@ module.
 
 Note, this value caps the interrupt ES kernel module value!
 
-Note 2: The events for the interrupt-baased and scheduler-based ES
+Note 2: The events for the interrupt-based and scheduler-based ES
 both have some dependencies. Thus it is not permissible to award both
 entropy sources an entropy rate greater than zero.
 ''')
@@ -202,12 +202,12 @@ entropy sources an entropy rate greater than zero.
 option('es_sched', type: 'feature', value: 'enabled',
        description: '''Enable support for scheduler-based entropy source.
 
-The ESDM models an entropy source based on the timing of the
-occurrence of scheduler-triggered context switches. Enable
-this option to enable this scheduler entropy source.
+The ESDM models an entropy source based on the timing of
+task wakeups. Enable this option to enable this scheduler
+entropy source.
 
 The scheduler entropy source is triggered every time a
-context switch is triggered thus causes the scheduler to
+task is woken up and thus causes the scheduler to
 execute slightly longer. Disabling the scheduler entropy
 source implies that the performance penalty on the scheduler
 added by the ESDM is eliminated. Yet, this entropy source is
@@ -240,7 +240,7 @@ module.
 
 Note, this value caps the scheduler ES kernel module value!
 
-Note 2: The events for the interrupt-baased and scheduler-based ES
+Note 2: The events for the interrupt-based and scheduler-based ES
 both have some dependencies. Thus it is not permissible to award both
 entropy sources an entropy rate greater than zero.
 ''')
@@ -268,8 +268,8 @@ the events is where the entropy is, and it is the signal the
 SP800-90B assessment measures. A buffer is handed to a BPF ring
 buffer once it is full, or after an idle deadline when its CPU
 falls quiet before that. The ESDM server reads them from there
-when it wants entropy, conditions them with the configured hash
-into an entropy pool and stops reading once that pool is full.
+when it wants entropy, conditions them in an XDRBG-256 pool
+and stops reading once that pool is full.
 Events collected while nobody reads are discarded.
 
 This entropy source is mutually exclusive with the es_sched
@@ -289,7 +289,7 @@ option('es_sched_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF scheduler entropy source. Every context switch
-event contributes its 64 bit time stamp, so 256 bits of data are four
+event contributes its 64 bit time delta, so 256 bits of data are four
 events. The ESDM enforces the limit that this value must be between 0 and
 256 bits.
 
@@ -335,8 +335,8 @@ option('es_irq_ebpf', type: 'feature', value: 'disabled',
 The ESDM models an entropy source based on the timing of the
 occurrence of interrupts. In contrast to the es_irq entropy
 source which requires a patched kernel, this entropy source
-obtains the interrupt timing by attaching eBPF programs to the
-stable irq_handler_entry and softirq_entry tracepoints of a
+obtains the interrupt timing by attaching an eBPF program to
+the stable irq_handler_entry tracepoint of a
 stock Linux kernel (BTF/CO-RE required, i.e. the kernel must be
 built with CONFIG_DEBUG_INFO_BTF).
 
@@ -362,7 +362,7 @@ option('es_irq_ebpf_entropy_rate', type: 'integer', min: 0, max: 256,
 
 The option defines the amount of entropy the ESDM applies to 256 bits of
 data obtained from the eBPF interrupt entropy source. Every interrupt event
-contributes its 64 bit time stamp, so 256 bits of data are four events. The
+contributes its 64 bit time delta, so 256 bits of data are four events. The
 ESDM enforces the limit that this value must be between 0 and 256 bits.
 
 The credited entropy is additionally capped by the oversampling rate
@@ -544,8 +544,7 @@ entropy rate unless started with --entropy_rate. Needs esdm-es-ext.''')
 ################################################################################
 
 option('es_jent_kernel', type: 'feature', value: 'disabled',
-       description: '''Enable support for jitterentropy-based entropy source
-       (in-kernel).
+       description: '''Enable support for the in-kernel jitterentropy-based entropy source.
 ''')
 
 option('es_jent_kernel_name', type: 'string', value: 'jitterentropy_rng',
@@ -695,8 +694,8 @@ When enabling this option, the request size based reseeding
 limits are capped to the values required by DRG.4.10 of
 German AIS 20/31 3.0 from 2024: a DRNG instance starts no
 request after 2**17 output bits without a successful reseed
-- one started before is completed, in generate operations
-of 2**19 bits at most - and tries to reseed after three
+(one started before is completed, in generate operations
+of 2**19 bits at most) and tries to reseed after three
 quarters of that at the latest.
 
 Smaller values configured through 'drng_reseed_threshold_bits'
@@ -745,7 +744,9 @@ When disabled, the entropy sources are always queried sequentially.
 ''')
 
 option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
-       description: '''Besides request count based reseeding, this option can
+       description: '''Output bits after which a DRNG instance tries to reseed.
+
+       Besides request count based reseeding, this option can
        be used to enable request size (Bit) based reseeding. Set this to
        UINT32_MAX (0xffffffff) to disable it (default).
 
@@ -753,7 +754,7 @@ option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
        After 'drng_reseed_threshold_bits' (this option) the DRNG code
        tries to reseed the DRNG instance.
 
-       If this was unsucessful multiple times, the DRNG changes into
+       If this was unsuccessful multiple times, the DRNG changes into
        the unseeded state after 'drng_max_reseed_bits' bits.
        Therefore 'drng_max_reseed_bits' always has to be larger than
        'drng_reseed_threshold_bits'.
@@ -769,8 +770,10 @@ option('drng_reseed_threshold_bits', type: 'integer', value: 0xffffffff,
        ''')
 
 option('drng_max_reseed_bits', type: 'integer', value: 0xffffffff,
-       description: '''This sets the maximum number of output/request bits before
-       the DRNG instances become loose their fully seeded state without
+       description: '''Output bits after which a DRNG instance is no longer fully seeded.
+
+       This sets the maximum number of output/request bits before
+       the DRNG instances lose their fully seeded state without
        successful reseeding.
 
        UINT32_MAX (0xffffffff) disables this setting. For more details on this
@@ -778,23 +781,27 @@ option('drng_max_reseed_bits', type: 'integer', value: 0xffffffff,
        ''')
 
 option('num-aux-pools', type: 'integer', value: 1, min: 1, max: 1024,
-       description: '''Increases the number of aux pools in order to be more robust
-       on seed bursts.
+       description: '''Number of auxiliary pools.
+
+       More pools make the ESDM more robust on seed bursts.
        ''')
 
 option('aux-has-full-entropy', type: 'feature', value: 'disabled',
-       description: '''The auxiliary entropy source will apply oversampling,
-       if SP800-90C mode is enabled, because it has to assume by default,
-       that its interrupts did not have full entropy (small error term allowed).
+       description: '''Treat the data inserted into the auxiliary pool as having full entropy.
 
-       Disable it with this option, if e.g. only output from an approved smartcard
-       is inserted into the pool and you know it has full entropy.
+       The auxiliary entropy source applies oversampling,
+       if SP800-90C mode is enabled, because it has to assume by default
+       that its inputs did not have full entropy (small error term allowed).
+
+       Enable this option to turn the oversampling off, if e.g. only output
+       from an approved smartcard is inserted into the pool and you know it
+       has full entropy.
        ''')
 
 option('systemd', type: 'feature', value: 'enabled',
        description: '''Enable support for systemd notify and systemd socket activation
 
-       ESDM services will notify systemd about beeing ready and use provided FDs
+       ESDM services will notify systemd about being ready and use provided FDs
        for their sockets (socket activation).
        ''')
 
@@ -1001,7 +1008,7 @@ thread. The client code also uses this value to close idle connections after hal
 of this time in order to reduce timeouts.
 
 Lower this value further, when the amount of worker threads shall be not increased
-further and a high rate of short connections may saturates them.
+further and a high rate of short connections may saturate them.
 ''')
 
 

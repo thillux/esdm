@@ -16,10 +16,14 @@ Options that change the state of the daemon go through the privileged RPC
 interface and therefore require root; they are marked as such below. All other
 operations work for any user that may access the unprivileged RPC socket.
 .PP
-Log messages, the output of
-.B \-\-status
-among them, go to standard error; data \- JSON documents, random numbers, seeds,
-benchmark results \- to standard output.
+Log messages go to standard error, the output of
+.BR \-\-status ,
+.BR \-\-entropy\-count ,
+.B \-\-entropy\-level
+and
+.B \-\-is\-fully\-seeded
+among them; data \- JSON documents, the Jitter RNG status, random numbers,
+seeds, benchmark results \- to standard output.
 .SH OPTIONS
 .SS General
 .TP
@@ -123,7 +127,8 @@ Let
 .B \-\-get\-random
 use the request that does not wait: it fails at once while the ESDM is not
 operational, instead of waiting for it. No data of an unseeded ESDM is handed
-out. With
+out. If the ESDM is operational and delivers less than requested because its
+DRNGs await a reseed, the tool obtains the rest with the waiting request. With
 .BR \-\-get\-seed ,
 the entropy of an initial seed is asked for instead of that of a reseed. The
 last of

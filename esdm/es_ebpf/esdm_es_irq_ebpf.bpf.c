@@ -2,8 +2,8 @@
 /*
  * ESDM eBPF-based interrupt entropy source: eBPF program
  *
- * Collects the timing of hardware and soft interrupts via the stable
- * irq_handler_entry and softirq_entry tracepoints. The tracepoint arguments
+ * Collects the timing of hardware interrupts via the stable
+ * irq_handler_entry tracepoint. The tracepoint arguments
  * are deliberately not accessed: only the event timing is of interest.
  *
  * Copyright (C) 2026, Jakub Zelenka <bukka@php.net>

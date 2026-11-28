@@ -60,6 +60,16 @@ mounted with
 must allow; with
 .B \-\-pid_namespace
 the caller is not visible and uid 0 is required instead.
+.B RNDADDTOENTCNT
+fails with
+.B EINVAL
+for a negative count,
+.B RNDADDENTROPY
+for a negative size, a negative count and a count above 8 bits per byte of
+data. When the request of one of these two commands to the ESDM fails with
+another error than a timeout, the daemon issues the command on the device of
+the kernel it opened at its start; without such a device, the command fails
+with the error of the request to the ESDM.
 .PP
 Both daemons must be started as root and drop to an unprivileged user after
 the device has been created. On systemd installations they are normally

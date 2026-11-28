@@ -15,9 +15,11 @@ wants entropy, instead of pushing data at it on a timer.
 .PP
 The daemon posts a named POSIX semaphore whenever its auxiliary pool falls
 below the level it wants. A provider waits on that semaphore and inserts
-entropy \- through
-.BR esdm_rpcc_write_data ()
-of
+data \- credited with entropy through
+.BR esdm_rpcc_rnd_add_entropy ()
+as root, uncredited through
+.BR esdm_rpcc_write_data (),
+both of
 .BR libesdm_rpc_client (3),
 or
 .BR esdm_egd_client_write_entropy ()
@@ -39,12 +41,13 @@ Wait until the daemon asks for entropy, or until the absolute deadline
 .I ts
 on
 .B CLOCK_MONOTONIC
-expires. This is a thin wrapper around
+expires. The deadline and the error convention are those of
 .BR sem_clockwait (3):
-.I ts
-and the return value and
+0 when the daemon needs entropy, which is also returned at once while the need
+lasts, and \-1 with
 .I errno
-convention are that call's. In particular a return of \-1 with
+set otherwise. A wake\-up without a need, as after a suspend notification,
+does not end the wait. In particular a return of \-1 with
 .I errno
 set to
 .B ETIMEDOUT

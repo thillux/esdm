@@ -244,8 +244,11 @@ Unknown check or wrong arguments: the usage, with every check, is printed.
 .B 77
 The check was skipped, as the line starting with
 .B SKIP:
-says: the module is not loaded, or the check needs CAP_SYS_ADMIN, as root of the
-initial user namespace, and does not have it. 77 is what
+says: the module is not loaded, the check needs CAP_SYS_ADMIN, as root of the
+initial user namespace, and does not have it, or stalled\-writers lacks the
+right to use
+.BR userfaultfd (2)
+for faults of the kernel. 77 is what
 .B meson test
 takes for a skipped test.
 .SH EXAMPLES
@@ -258,9 +261,11 @@ esdm\-cdev\-check reads
 esdm\-cdev\-check reads sync
 esdm\-cdev\-check nonblock
 esdm\-cdev\-check poll
+esdm\-cdev\-check pr
 esdm\-cdev\-check writes
 esdm\-cdev\-check ioctl\-unpriv
 esdm\-cdev\-check proc
+esdm\-cdev\-check stalled\-writers
 .fi
 .RE
 .SH SEE ALSO

@@ -53,7 +53,9 @@ keeps itself out of core dumps and of
 .SH NAME, RATE AND STATUS
 The source declares the name
 .B PKCS#11
-followed by the token label, if that makes a valid name, and the entropy rate
+followed by the label configured with
+.BR \-\-token_label ,
+if that makes a valid name, and the entropy rate
 of the meson option
 .B es_pkcs11_entropy_rate
 \- see

@@ -20,9 +20,9 @@ On
 the helper reads the PID of the daemon from its PID file and, if that process
 holds the lock of the file, sends it
 .BR SIGUSR1 .
-The daemon then marks itself as suspended in the status shared memory segment,
-so that consumers waiting on it do not block on a daemon that is about to stop
-running.
+The daemon then counts up the suspend generation in the status shared memory
+segment and wakes the consumers waiting on it, so that they do not block on a
+daemon that is about to stop running.
 .PP
 On
 .BR \-\-resume ,

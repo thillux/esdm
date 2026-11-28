@@ -20,8 +20,9 @@ The reason to use this rather than
 is reach: the EGD interface needs nothing but a single UNIX domain stream
 socket \- no protobuf, no shared memory, no second socket \- so it works in
 places the RPC interface cannot go, such as a chroot that can be handed
-exactly one socket. The price is the protocol: it is a legacy one that can
-neither express prediction resistance nor transfer more than
+exactly one socket. The price is the protocol: the commands this library uses are the legacy
+ones, which neither select prediction resistance per request nor transfer more
+than
 .B ESDM_EGD_MAX_TRANSFER
 (255) bytes per request, though this client splits larger requests
 transparently.
@@ -119,7 +120,7 @@ bits of
 .B ESDM_EGD_STATE_FLAG_OPERATIONAL
 while the ESDM serves reads,
 .B ESDM_EGD_STATE_FLAG_FULLY_SEEDED
-while all its DRNGs are fully seeded.
+while its initial DRNG is fully seeded.
 .TP
 .BI "int esdm_egd_client_write_entropy(struct esdm_egd_client *" client ", const uint8_t *" buf ", size_t " buflen ", uint32_t " entropy_bits ");"
 Insert at most

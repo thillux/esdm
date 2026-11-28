@@ -113,16 +113,25 @@ is a combination of
 instead of blocking) and
 .B ESDM_GET_SEED_FULLY_SEEDED
 (the caller's DRNG is already seeded, so the smaller runtime entropy rate
-suffices instead of the initial seeding rate).
+suffices instead of the initial seeding rate). The call waits until all DRNGs
+of the ESDM are fully seeded. Only one call is served at a time: another one
+returns
+.B \-EAGAIN
+meanwhile. When a DRNG of the ESDM loses its seed level, that DRNG has
+precedence: a blocking call waits again, a non\-blocking one returns
+.BR \-EAGAIN .
 .PP
 All of these return the number of bytes written, or a negative errno value.
 .SH STATUS
 .TP
-.BI "void esdm_status(char *" buf ", size_t " buflen ");"
-Status of the ESDM and its entropy sources as human readable text.
+.BI "int esdm_status(char *" buf ", size_t " buflen ");"
+Status of the ESDM and its entropy sources as human readable text. Returns 0,
+.B \-EMSGSIZE
+when the report does not fit into the buffer, which then holds what was
+assembled, or another negative errno value.
 .TP
-.BI "void esdm_status_json(char *" buf ", size_t " buflen ");"
-The same information as a JSON document.
+.BI "int esdm_status_json(char *" buf ", size_t " buflen ");"
+The same information as a JSON document, with the same return values.
 .TP
 .BI "void esdm_status_machine(struct esdm_status_st *" status ");"
 The same information in a structure meant for programmatic use.
@@ -134,7 +143,9 @@ Version information.
 Whether the ESDM is operational.
 .TP
 .BI "int esdm_state_fully_seeded(void);"
-Whether the ESDM is fully seeded.
+Whether the ESDM is fully seeded: its initial DRNG is fully seeded. Every
+request falls back on the initial DRNG; the DRNGs of the nodes may still be
+seeding.
 .TP
 .BI "int esdm_sp80090c_compliant(void);"
 Whether the current configuration meets SP800\-90C.
