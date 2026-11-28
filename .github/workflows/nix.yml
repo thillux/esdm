@@ -236,3 +236,22 @@ jobs:
           fi
           ls -l "$ko"
           nix shell nixpkgs#kmod -c modinfo "$ko"
+
+  # The TLA+ models of tests/tla: the flake check tla runs tests/tla/check.sh
+  # without the configurations marked slow (chapter Formal Verification of the
+  # documentation). Those are run by hand: TLA_ALL=1 tests/tla/check.sh.
+  tla:
+    name: TLA+ models
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Model check
+        run: |
+          nix build --no-link --print-build-logs .#checks.x86_64-linux.tla
