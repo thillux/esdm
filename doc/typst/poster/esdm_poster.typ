@@ -47,7 +47,7 @@
 
 // A rounded box with a label: an entropy source, a DRNG instance, an
 // interface.
-#let chip(body, fill: background, stroke: rule, color: ink, height: 42mm,
+#let chip(body, fill: background, stroke: rule, color: ink, height: 49mm,
   weight: "regular") = box(width: 100%, height: height, radius: 5mm,
   fill: fill, stroke: 2.5pt + stroke, inset: (x: 3mm),
   align(center + horizon, text(fill: color, weight: weight, body)))
@@ -135,22 +135,34 @@
   flow-arrow[Health tests on the raw \ data of the timing sources],
   stage(2)[Credit][Each source fills its slot of the seed buffer: data and
     the entropy it is credited][
-    #let slot(fill, n) = stack(spacing: 4mm,
-      rect(width: 100%, height: 36mm, fill: fill,
-        stroke: 2.5pt + ink-soft),
-      align(center, text(size: t-small, fill: muted, n)))
-    #grid(columns: (1fr,) * 9, column-gutter: 0pt,
-      slot(source)[256], slot(source-soft)[0], slot(accent-soft)[256],
-      slot(accent-soft)[8], slot(accent-soft)[128], slot(background)[0],
-      slot(background)[0], slot(background)[0], slot(accent-faint)[…])
+    #let slot(fill, name, n) = stack(spacing: 5mm,
+      rect(width: 100%, height: 46mm, fill: fill,
+        stroke: 2.5pt + ink-soft, align(center + horizon, name)),
+      align(center, text(weight: "semibold", n)))
+    #grid(columns: (1fr,) * 8, column-gutter: 0pt,
+      slot(source)[IRQ][256], slot(source-soft)[Sched][0],
+      slot(accent-soft)[Jitter][256], slot(accent-soft)[CPU][8],
+      slot(accent-soft)[Kernel][128], slot(background)[TPM][0],
+      slot(background)[hwrng][0], slot(accent-faint)[…][])
+    #v(14mm, weak: true)
+    #text(size: t-small, fill: muted)[Bits of entropy the default build
+      credits to 256 bits of data of each source]
   ],
   flow-arrow[Conditioned with a hash; \ the credits are added up],
   stage(3)[Seed][256 bits of entropy seed a DRNG instance fully, 384 bits
     with the SP 800-90C oversampling][
-    #let drng(name, sub) = chip(fill: accent-soft, stroke: accent,
-      height: 56mm, stack(spacing: 7mm,
-        text(weight: "semibold", name),
-        text(size: t-small, fill: muted, sub)))
+    // Every instance is seeded from a seed buffer of its own collection.
+    #let buffer = grid(columns: (1fr,) * 8, rows: 13mm,
+      ..(source, source-soft, accent-soft, accent-soft, accent-soft,
+        background, background, accent-faint).map(f => rect(width: 100%,
+        height: 100%, fill: f, stroke: 2pt + ink-soft)))
+    #let tip = align(center, polygon(fill: accent, stroke: none,
+      (0pt, 0pt), (36pt, 0pt), (18pt, 26pt)))
+    #let drng(name, sub) = stack(spacing: 4mm, buffer, tip,
+      chip(fill: accent-soft, stroke: accent, height: 56mm,
+        stack(spacing: 7mm,
+          text(weight: "semibold", name),
+          text(size: t-small, fill: muted, sub))))
     #grid(columns: (1fr, 1fr, auto, 1fr), column-gutter: 7mm,
       align: horizon,
       drng[DRNG][CPU 0], drng[DRNG][CPU 1],
