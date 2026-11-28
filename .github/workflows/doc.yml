@@ -53,6 +53,12 @@ jobs:
         run: |
           nix develop .#doc -c python3 -m unittest discover -s doc/tools -v
 
+      # Needs the whole tree, which the nix build of the documentation
+      # does not get.
+      - name: Check the identifiers the documentation names
+        run: |
+          nix develop .#doc -c python3 doc/tools/check_identifiers.py
+
       - name: Build the documentation
         if: ${{ !cancelled() }}
         run: |

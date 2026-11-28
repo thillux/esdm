@@ -182,6 +182,8 @@ the ESDM
 
 * esdm_cdev: /dev/esdm_pr serves the prediction resistance DRNG without O_SYNC, for the virtio-rng backends of QEMU and Cloud Hypervisor: a non-blocking read gives data or EAGAIN only, and poll() backs off after an empty read
 
+* Documentation: the design document and the slide deck are built from Typst sources, the design document as PDF/A in A4 and US Letter, in color and in grayscale for black and white printing, and as HTML with one page per chapter; one color palette; the user guidance of README.usage.md moved into the design document, which covers AIS 20/31 3.0 only
+
 Changes 1.2.3
 * Fix handling of non-blocking server response
 

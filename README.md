@@ -403,7 +403,13 @@ to constitute a stable API that should be used to program against.
 
 ## Documentation
 
-See the documentation in the `doc/` directory.
+The design document, its user guidance included, the slide deck and a
+poster are built from the Typst sources in `doc/typst` (`make -C doc/typst`
+or `nix build .#esdm-doc`): the design document as PDF in A4 and US Letter,
+in color and in grayscale for black and white printing, and as HTML. A
+change that alters a compliance claim - an option, the oversampling, a
+reseed limit, an interface - updates the chapter "Compliant Configurations"
+in the same commit.
 
 # THANKS
 
