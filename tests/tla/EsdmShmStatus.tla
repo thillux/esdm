@@ -21,7 +21,10 @@
 (*   (esdm_init_ops(), esdm_unset_fully_seeded()) flips the operational    *)
 (*   state and publishes it; threads changing the auxiliary pool flip      *)
 (*   esdm_need_entropy() and call esdm_shm_status_set_need_entropy(). The  *)
-(*   SIGUSR1 handler is one atomic step on the thread it interrupts. All   *)
+(*   SIGUSR1 handler is one atomic step on the thread it interrupts; the   *)
+(*   same notification from the thread of esdm_es_events.c (suspend and    *)
+(*   shutdown events of the kernel module) is NOT modelled - there its     *)
+(*   store and its posts are separate steps. All                           *)
 (*   of them are quiescent while esdm_shm_status_init() runs (the server   *)
 (*   starts no thread before) and are joined before the exit.              *)
 (* - A server restart is a new process: the ESDM is not operational, the   *)
@@ -807,7 +810,7 @@ cm1(self) == /\ pc[self] = "cm1"
              /\ IF semAt[cn[self]] = 0
                    THEN /\ IF semAt[cn[self]] = 0
                               THEN /\ Assert(nextSem <= MaxSem, 
-                                             "Failure of assertion at line 152, column 9 of macro called at line 242, column 10.")
+                                             "Failure of assertion at line 155, column 9 of macro called at line 245, column 10.")
                                    /\ srvSem' = [srvSem EXCEPT ![cn[self]] = nextSem]
                                    /\ semAt' = [semAt EXCEPT ![cn[self]] = nextSem]
                                    /\ nextSem' = nextSem + 1
@@ -828,7 +831,7 @@ cm1(self) == /\ pc[self] = "cm1"
 cm2(self) == /\ pc[self] = "cm2"
              /\ IF semAt[cn[self]] = 0
                    THEN /\ Assert(nextSem <= MaxSem, 
-                                  "Failure of assertion at line 152, column 9 of macro called at line 246, column 6.")
+                                  "Failure of assertion at line 155, column 9 of macro called at line 249, column 6.")
                         /\ srvSem' = [srvSem EXCEPT ![cn[self]] = nextSem]
                         /\ semAt' = [semAt EXCEPT ![cn[self]] = nextSem]
                         /\ nextSem' = nextSem + 1
@@ -900,7 +903,7 @@ cs2 == /\ pc["srv"] = "cs2"
        /\ IF sid = 0
              THEN /\ IF keyAt = 0
                         THEN /\ Assert(nextSeg <= MaxSeg, 
-                                       "Failure of assertion at line 139, column 9 of macro called at line 267, column 19.")
+                                       "Failure of assertion at line 142, column 9 of macro called at line 270, column 19.")
                              /\ sid' = nextSeg
                              /\ keyAt' = nextSeg
                              /\ alive' = [alive EXCEPT ![nextSeg] = TRUE]
@@ -1350,7 +1353,7 @@ cu1 == /\ pc["ck"] = "cu1"
        /\ IF semAt["R"] = 0
              THEN /\ IF semAt["R"] = 0
                         THEN /\ Assert(nextSem <= MaxSem, 
-                                       "Failure of assertion at line 152, column 9 of macro called at line 404, column 10.")
+                                       "Failure of assertion at line 155, column 9 of macro called at line 407, column 10.")
                              /\ cuseSem' = nextSem
                              /\ semAt' = [semAt EXCEPT !["R"] = nextSem]
                              /\ nextSem' = nextSem + 1
@@ -1369,7 +1372,7 @@ cu1 == /\ pc["ck"] = "cu1"
 cu2 == /\ pc["ck"] = "cu2"
        /\ IF semAt["R"] = 0
              THEN /\ Assert(nextSem <= MaxSem, 
-                            "Failure of assertion at line 152, column 9 of macro called at line 407, column 6.")
+                            "Failure of assertion at line 155, column 9 of macro called at line 410, column 6.")
                   /\ cuseSem' = nextSem
                   /\ semAt' = [semAt EXCEPT !["R"] = nextSem]
                   /\ nextSem' = nextSem + 1
@@ -1426,7 +1429,7 @@ cu6 == /\ pc["ck"] = "cu6"
        /\ IF cseg = 0 /\ cr
              THEN /\ IF keyAt = 0
                         THEN /\ Assert(nextSeg <= MaxSeg, 
-                                       "Failure of assertion at line 139, column 9 of macro called at line 416, column 26.")
+                                       "Failure of assertion at line 142, column 9 of macro called at line 419, column 26.")
                              /\ cseg' = nextSeg
                              /\ keyAt' = nextSeg
                              /\ alive' = [alive EXCEPT ![nextSeg] = TRUE]
