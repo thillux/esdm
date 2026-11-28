@@ -2881,7 +2881,8 @@ supervisor in section @sec:fv-supervisor, and the operational flag and the
 connections of the kernel module `esdm_cdev` in sections @sec:fv-kernel-cdev
 and @sec:fv-kernel-cdev-conn. An #ac("RPC") connection of the server has no
 state beyond open and closed: a request is read, carried out and answered
-within one event, and a connection idle for the idle timeout is closed.
+within one event, and a connection idle for the idle timeout is closed, after
+the requests written to it until then are answered.
 
 == Cryptographic Primitives Used By ESDM <sec:crypto>
 

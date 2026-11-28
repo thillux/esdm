@@ -14,10 +14,11 @@
 (*   next one.                                                             *)
 (* - The server is nondeterministic within what esdm_rpc_server.c does: it *)
 (*   answers a request with data or -EAGAIN, loses an answer (write        *)
-(*   timeout), closes a connection (idle reaper, error, cap) with or       *)
-(*   without a request unread, restarts, and refuses connects. Reading a   *)
-(*   request and answering it are one step: the client cannot tell them    *)
-(*   apart but by ECONNRESET versus EOF, which a close chooses freely.     *)
+(*   timeout), closes a connection (error, cap, the idle reaper of a       *)
+(*   server that does not serve a pending request first) with or without a *)
+(*   request unread, restarts, and refuses connects. Reading a request and *)
+(*   answering it are one step: the client cannot tell them apart but by   *)
+(*   ECONNRESET versus EOF, which a close chooses freely.                  *)
 (*   Once the environment is good the server answers every request with   *)
 (*   data within the client's receive timeout and closes nothing.          *)
 (* - Time is left out. A read() that finds nothing is one SO_RCVTIMEO      *)
@@ -556,8 +557,9 @@ sv0: while (~AllDone) {
              run(Head(toSrv[ConnOf(self)]));
              toSrv[ConnOf(self)] := Tail(toSrv[ConnOf(self)]);
          } or {
-             \* esdm_rpcs_close_conn(): idle, error or cap; a request not
-             \* read yet leaves ECONNRESET
+             \* esdm_rpcs_close_conn(): error, cap, or idle in a server that
+             \* does not serve a pending request first; a request not read
+             \* yet leaves ECONNRESET
              await Closes /\ ~good /\ sopen[ConnOf(self)];
              with (e \in IF toSrv[ConnOf(self)] # <<>> THEN BOOLEAN
                          ELSE {FALSE})

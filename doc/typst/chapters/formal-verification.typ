@@ -729,7 +729,7 @@ largest state space checked.
     [`EsdmCuse` \ section @sec:fv-cuse], [`frontends/cuse/`], [Polling and reading threads, the #ac("FUSE") workers and the kernel, the poll checker, the server], [37, 14 demonstrating; largest 6,218,589 states],
     [`EsdmEgd` \ section @sec:fv-egd], [`service-egd/server/esdm_egd_server.c`], [The worker, clients of both sockets, the generators], [29, 13 demonstrating; largest 2,272,766 states],
     [`EsdmSupervisor` \ section @sec:fv-supervisor], [`common/linux_support.c` and its callers], [The supervisor, the daemon, senders of signals], [25, 18 demonstrating; largest 239,648 states],
-    [`EsdmRpcServer` \ section @sec:fv-rpc-server], [`service-rpc/server/esdm_rpc_server.c`, the thread pool], [The main thread, the unprivileged interface thread, its workers, clients, termination signals, `esdm_fini`], [37, 12 demonstrating; largest 49,696,012 states],
+    [`EsdmRpcServer` \ section @sec:fv-rpc-server], [`service-rpc/server/esdm_rpc_server.c`, the thread pool], [The main thread, the unprivileged interface thread, its workers, clients, termination signals, `esdm_fini`], [39, 13 demonstrating; largest 54,160,420 states],
     [`EsdmRpcClient` \ section @sec:fv-rpc-client], [`service-rpc/client/`], [Client threads of the calls for random bytes and of a call not re-sent, the server per connection, interrupts, deadlines, the teardown], [29, 9 demonstrating; largest 7,005,733 states],
     [`EsdmKernelEs` \ section @sec:fv-kernel-es], [`kernel/esdm_es/`: `esdm_es_ring.c`, `esdm_health.c`, `esdm_es_drbg.c`], [The interrupt and scheduler hooks per #ac("CPU") with nested interrupts, the #ac("IOCTL") readers, notifier resets, module exit], [32, 16 demonstrating; largest 125,689,609 states],
     [`EsdmKernelCdev` \ section @sec:fv-kernel-cdev], [`kernel/esdm_cdev/esdm_cdev_main.c`], [Readers and pollers of the three devices, the watcher, the wake work of `/dev/esdm_pr`, the #ac("ESDM"), signals], [20, 6 demonstrating; largest 2,336,957 states],
@@ -2393,7 +2393,12 @@ variable of the worker and records the calls that took effect. A write
 delivers, fails because the client closed, or times out while the client
 leaves responses unread. The idle timer fires at any time in some
 configurations and never in others, in which a worker blocked in `epoll_wait`
-learns of a shutdown from its eventfd only. Each worker has a slot of the
+learns of a shutdown from its eventfd only. A pass of the timer takes the
+connections that fell due in any order and closes each as
+`esdm_rpcs_close_idle_conn` does: it shuts down the receiving side, reads
+until nothing is left, serving each request like any other, and closes. The
+shutdown and the first read are one step; every further read and the close
+are steps of their own. Each worker has a slot of the
 thread pool to itself. A switch per fix selects the code before or after it;
 two further switches seed a defect the code never had – a handler that closes
 the connection instead of replying, and a privileged handler without the
@@ -2417,12 +2422,13 @@ request unanswered in these cases only, and `RepliedOrBroken` with
 `ClosedForCause` fail on any other: the request is invalid (too short, too
 long, an unknown method, not unpackable), which closes the connection without
 a reply; the reply cannot be delivered, because the client closed or left
-responses unread until the write timed out; the client hung up; the idle
-timer closes a connection that was not read for an interval while a request
-arrives; `accept4` succeeded, but memory or the epoll set had no room for the
-connection; the server shuts down. The case of the idle timer is a property
-of the code: a request that arrives while the timer pass runs is dropped
-with its connection, and the client has to send it again on a new one.]
+responses unread until the write timed out; the client hung up; `accept4`
+succeeded, but memory or the epoll set had no room for the connection; the
+server shuts down. The idle timer is not among them. Before it closes a
+connection that was not read for an interval, the worker shuts down the
+receiving side of it: a `write` of the client fails with `EPIPE` from then
+on, upon which the client closes its end and connects again, and a request
+written before is read and answered before the connection is closed.]
 
 #figure(
   table(columns: (0.9fr, 1.6fr, 0.9fr), align: left + horizon,
@@ -2442,8 +2448,12 @@ with its connection, and the client has to send it again on a new one.]
       the second fix (`LostReply`)],
     [`ClosedForCause`], [A connection is closed with a request unread only
       when the client closed it, an earlier request was invalid or its reply
-      lost, the idle timer closed it, it was released at accept, or the
-      server shuts down.], [Holds],
+      lost, it was released at accept, or the server shuts down. The idle
+      timer is no cause.], [Holds; violated before the sixth fix
+      (`IdleDrop`)],
+    [`ShutIsClosed`], [A connection that the idle timer shut for reading
+      does not stay open: its worker serves what is left in it and closes
+      it.], [Holds],
     [`InStep`], [A client that matches responses by order receives the
       answer to its request.], [Holds; violated before the second fix
       (`OutOfStep`)],
@@ -2504,16 +2514,17 @@ which the descriptors stay exhausted, and a queued client waits as long.
     [`EfdFix`], [Every eventfd created before the first worker, a failing start ending the server], [holds], [673,383],
     [`EfdEnds`], [A failing eventfd or start ends the server, no client], [holds, L], [25,937],
     [`Cap`], [The connection cap, the listener disarmed], [holds, L], [107,876],
-    [`Idle`], [Two workers, a client closing at any time, idle reaping], [holds], [889,664],
-    [`IdleLive`], [One worker, a client closing at any time, idle reaping], [holds, L], [70,196],
-    [`Liveness`], [Two workers, a client closing at any time, idle reaping], [holds, L, slow], [889,664],
+    [`Idle`], [Two workers, a client closing at any time, idle reaping], [holds], [997,512],
+    [`IdleLive`], [One worker, a client closing at any time, idle reaping], [holds, L], [77,580],
+    [`IdlePipe`], [One worker, a client that pipelines two requests and connects again, idle reaping: every request written before the shutdown answered], [holds], [516,140],
+    [`Liveness`], [Two workers, a client closing at any time, idle reaping], [holds, L, slow], [997,512],
     [`LostReplyFix`], [A lost reply closing the connection], [holds, L], [20,060],
     [`BadReq`], [Invalid requests closing the connection, the client connecting again], [holds, L], [153,764],
     [`TwoConn`], [Two connections on one worker], [holds, L], [135,228],
     [`TwoConnClose`], [Two connections on one worker, closing at any time], [holds], [1,374,180],
-    [`TwoConnIdle`], [Two connections on one worker, idle timer, pipelining], [holds, slow], [49,696,012],
+    [`TwoConnIdle`], [Two connections on one worker, idle timer, pipelining], [holds, slow], [54,160,420],
     [`Reconnect`], [A client that closes and connects again], [holds, L], [137,636],
-    [`ReconnectIdle`], [A reconnecting client with the idle timer], [holds], [990,228],
+    [`ReconnectIdle`], [A reconnecting client with the idle timer], [holds], [1,035,052],
     [`ReconnectCap`], [Two reconnecting clients at the connection cap], [holds], [257,220],
     [`WorkerExitFix`], [A worker leaving on an epoll failure ends the server], [holds, L], [185,924],
     [`WorkerExitPriv`], [The privileged worker leaving on an epoll failure], [holds, L], [194,745],
@@ -2522,18 +2533,19 @@ which the descriptors stay exhausted, and a queued client waits as long.
     [`Startup`], [Start-up with failures and a termination signal], [holds, L], [66,847],
     [`Shutdown`], [The shutdown from every state of the start-up and the service], [holds, slow], [10,659,788],
     [`Terminate`], [The shutdown ends `main` and every worker], [holds, L, slow], [659,840],
-    [`EfdFail`], [Before the fix: an eventfd failing after the first worker started], [finds `NoUseAfterFree`], [3,251],
-    [`EfdHang`], [Before the fix: a worker learning of the shutdown late], [finds `PromptShutdown`], [1,463],
-    [`LostReply`], [Before the fix: a response dropped, the connection kept], [finds `AnsweredOrClosed`], [6,167],
-    [`OutOfStep`], [Before the fix: a pipelining client after a dropped response], [finds `InStep`], [10,450],
+    [`EfdFail`], [Before the fix: an eventfd failing after the first worker started], [finds `NoUseAfterFree`], [3,281],
+    [`EfdHang`], [Before the fix: a worker learning of the shutdown late], [finds `PromptShutdown`], [1,408],
+    [`LostReply`], [Before the fix: a response dropped, the connection kept], [finds `AnsweredOrClosed`], [6,171],
+    [`OutOfStep`], [Before the fix: a pipelining client after a dropped response], [finds `InStep`], [10,338],
     [`JoinDeadlock`], [Before the fix: a termination signal while the unprivileged workers start], [finds `NoCircularWait`], [4,985],
-    [`AcceptSpin`], [Before the fix: `accept4` failing for want of descriptors], [finds `NoAcceptSpin`], [3,081],
-    [`CapSpin`], [The listener left armed at the connection cap], [finds `NoAcceptSpin`], [16,549],
-    [`WorkerExit`], [Before the fix: a worker leaving on an epoll failure], [finds `WorkersServe`], [754],
-    [`WorkerExitHang`], [Before the fix: a client queued at an interface without workers], [finds a deadlock], [11,145],
-    [`NoReply`], [Seeded defect: a handler closing instead of replying], [finds `RepliedOrBroken`], [2,965],
-    [`PrivNoCheck`], [Seeded defect: a privileged handler without the authorization], [finds `PrivAuthorized`], [2,868],
-    [`PrivDrop`], [A client dropping its privileges after connecting (documented)], [finds `PrivAtCall`], [5,191],
+    [`IdleDrop`], [Before the fix: a request arriving during the pass of the idle timer], [finds `ClosedForCause`], [5,312],
+    [`AcceptSpin`], [Before the fix: `accept4` failing for want of descriptors], [finds `NoAcceptSpin`], [3,082],
+    [`CapSpin`], [The listener left armed at the connection cap], [finds `NoAcceptSpin`], [16,700],
+    [`WorkerExit`], [Before the fix: a worker leaving on an epoll failure], [finds `WorkersServe`], [780],
+    [`WorkerExitHang`], [Before the fix: a client queued at an interface without workers], [finds a deadlock], [11,522],
+    [`NoReply`], [Seeded defect: a handler closing instead of replying], [finds `RepliedOrBroken`], [2,971],
+    [`PrivNoCheck`], [Seeded defect: a privileged handler without the authorization], [finds `PrivAuthorized`], [2,908],
+    [`PrivDrop`], [A client dropping its privileges after connecting (documented)], [finds `PrivAtCall`], [5,149],
   ),
   caption: [Configurations of the #ac("RPC") server model and their results.
     All run with deadlock checking; "L" marks the ones that check liveness
@@ -2541,8 +2553,9 @@ which the descriptors stay exhausted, and a queued client waits as long.
 ) <tab:fv-rpc-server-results>
 
 #paragraph[Findings][Model checking found four defects and the review of the
-model a fifth, all fixed since, confirms a documented limitation and states
-one behavior left open, the idle timer above. The
+model a fifth; a sixth, the idle timer, the model stated as a behavior of the
+code before it was decided to be a defect. All six are fixed. The model also
+confirms a documented limitation. The
 configurations named first show each defect in the code before its fix; the
 ones named last check the code after it:]
 
@@ -2595,6 +2608,28 @@ ones named last check the code after it:]
   signals the exit and returns its error, which ends the server as a worker
   that fails to start does (`WorkerExitFix`, `WorkerExitPriv`,
   `WorkerExitTwo`).
+- The pass of the idle timer closed every connection whose last request lay
+  an interval back, with whatever the connection held. A request that the
+  client wrote after `epoll_wait` had returned and before the `close` was
+  dropped with its connection (`IdleDrop`, `ClosedForCause`); the client saw
+  the end of the connection and sent the request again on a new one, unless
+  it was a request that must not run twice, which failed. No look at the
+  socket before the `close` removes that window, as the client may write up
+  to the `close`. `esdm_rpcs_close_idle_conn` therefore shuts down the
+  receiving side first, reads until nothing is left and closes: a request
+  either reached the connection before the shutdown and is answered, or its
+  `write` fails with `EPIPE` and the client connects again (`Idle`,
+  `IdleLive`, `IdlePipe`, `ReconnectIdle`, `TwoConnIdle`). A client that
+  pipelines is served every request it wrote. Three changes in copies of the
+  model confirm the parts of the fix: with a single read after the shutdown,
+  `IdlePipe` violates `ClosedForCause`; with a shutdown that does not stop
+  the writes of the client, which is a look at the socket followed by the
+  `close`, `IdleLive` violates `ClosedForCause`; and with a pass that leaves
+  the connection open after its reply, `IdleLive` violates `ShutIsClosed`.
+  In the same set-up the result of `timerfd_create` was not checked. The
+  worker left with the `EBADF` of the `timerfd_settime` that followed and now
+  leaves with the error of `timerfd_create`; the model does not tell the two
+  apart, both are the failing set-up of the timer.
 - A privileged call is authorized by the #ac("UID") the client had when it
   connected (`SO_PEERCRED`): a client that drops its privileges keeps a
   privileged connection (`PrivDrop`, `PrivAtCall`), as `esdm_rpc_server.h`
@@ -3615,7 +3650,7 @@ statement of the behavior was wrong.
     [The shutdown deadlocks while the unprivileged workers start], [#ac("RPC") server], [medium], [fixed],
     [A failing `accept4` spins a worker], [#ac("RPC") server], [low], [fixed],
     [A worker leaving on a failure leaves its interface with fewer workers], [#ac("RPC") server], [low], [fixed],
-    [A request arriving during the pass of the idle timer is closed unanswered], [#ac("RPC") server], [low], [open],
+    [A request arriving during the pass of the idle timer is closed unanswered], [#ac("RPC") server], [low], [fixed],
     [A privileged connection outlives the privilege drop of its client], [#ac("RPC") server], [informational], [by design],
     [A request credits events sampled after a health test failure, before its reset], [Kernel `esdm_es`], [low], [fixed],
     [A request credits the samples of a failure window before their reset], [Kernel `esdm_es`], [low], [fixed],

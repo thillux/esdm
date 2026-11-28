@@ -736,6 +736,36 @@ static void esdm_rpcs_close_conn(struct esdm_rpcs_worker *worker,
 }
 
 /*
+ * Close a connection the idle timer found unused for an interval.
+ *
+ * The client may have written a request since epoll_wait() returned, and may
+ * write one until the descriptor is closed: closed with it, the request would
+ * be lost and the client left to send it again, which it does not for a
+ * request that must not run twice. Hence the read side is shut down first.
+ * From then on a write of the client fails with EPIPE, upon which it connects
+ * anew and nothing is lost, while what it wrote before stays readable and is
+ * served before the connection goes. No look at the socket short of that (a
+ * poll(), a read()) closes the gap up to the close().
+ */
+static void esdm_rpcs_close_idle_conn(struct esdm_rpcs_worker *worker,
+				      struct esdm_rpcs_connection *rpc_conn)
+{
+	/*
+	 * Serve what was written before the shutdown - a client that pipelines
+	 * may have queued more than one request. Nothing joins the queue any
+	 * more: the loop ends with the EOF behind the last request, which
+	 * esdm_rpcs_process() refuses, or with a reply that cannot be
+	 * delivered.
+	 */
+	if (!shutdown(rpc_conn->child_fd, SHUT_RD)) {
+		while (!esdm_rpcs_read(rpc_conn))
+			;
+	}
+
+	esdm_rpcs_close_conn(worker, rpc_conn, " after timeout");
+}
+
+/*
  * Accept one connection.
  *
  * @return 0 if the worker goes on (connection taken, turned away, another
@@ -883,6 +913,13 @@ static int esdm_rpcs_handler(void *args)
 
 	/* cleanup timer */
 	tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (tfd < 0) {
+		ret = -errno;
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "Unable to create cleanup timer: %s\n",
+			    strerror(-ret));
+		goto out;
+	}
 	struct itimerspec its = {
 		.it_interval = {
 			.tv_sec = ESDM_RPC_IDLE_TIMEOUT_USEC / 1000000,
@@ -1036,8 +1073,8 @@ static int esdm_rpcs_handler(void *args)
 			{
 				if (esdm_time_after(&timeout_threshold,
 						    &tmp1->last_used)) {
-					esdm_rpcs_close_conn(&worker, tmp1,
-							     " after timeout");
+					esdm_rpcs_close_idle_conn(&worker,
+								  tmp1);
 				}
 			}
 		}

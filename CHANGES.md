@@ -67,6 +67,16 @@ post and the version waited without having seen the status of the new server
 command, esdm_set_write_wakeup_bits()) publishes the need for entropy it
 changes: the status segment, and with it the write poll of /dev/random and the
 entropy providers, followed only at the next change of the auxiliary pool
+
+* RPC server: the idle timer answers a request that reached a connection
+before it closes it. A request written while the pass of the timer ran was
+closed unanswered with its connection, and the client had to send it again,
+which it does not for a request that must not run twice. The worker shuts down
+the receiving side first, so that a later write of the client fails with EPIPE
+and the client connects anew, serves what was written before, and closes. A
+failing timerfd_create() ends the worker with its error, not with the EBADF of
+the timerfd_settime() that followed
+
 * RPC server: a worker thread that leaves on a failure of its epoll set, its
 timer, epoll_wait() or the registration of an accepted connection ends the
 server with that error, as a worker that fails to start does: the interface

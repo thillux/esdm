@@ -685,8 +685,12 @@ option `threading_max_worker_threads` (64 by default), the unprivileged one. A w
 serving 1024 connections accepts no further one until one of them closes; the
 clients beyond wait in the backlog of the socket, for which the server asks
 for 4096 entries. A worker closes a connection that carried no request for 2
-seconds. The client library therefore reconnects before a call when it last
-used the connection 1 second or longer ago.]
+seconds. It first shuts down its receiving side of the connection, answers
+the requests the client wrote until then, and closes the connection after
+them: a request that meets the idle timeout is either answered, or its
+`write` fails with `EPIPE` and nothing was sent. The client library connects
+again after `EPIPE`, and it reconnects before a call when it last used the
+connection 1 second or longer ago.]
 
 #paragraph[Errors of the client library][The functions `esdm_rpcc_<call>`
 return the `ret` of the response, or an error of their own: `-ETIMEDOUT`

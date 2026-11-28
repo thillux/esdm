@@ -24,10 +24,8 @@
 (*   unprivileged interface has no such call.                              *)
 (* - The server closes a connection with a request unanswered in these     *)
 (*   cases only: the request is invalid; its reply cannot be delivered     *)
-(*   (below); the client hung up; the idle timer found the connection      *)
-(*   unread for an interval while a request arrived; accept4() succeeded   *)
-(*   but memory or the epoll set had no room for the connection; the       *)
-(*   server shuts down.                                                    *)
+(*   (below); the client hung up; accept4() succeeded but memory or the    *)
+(*   epoll set had no room for the connection; the server shuts down.      *)
 (* - A write either delivers, fails with EPIPE (the client closed), or,    *)
 (*   with SndBuf unread responses queued, waits for the client or times    *)
 (*   out. Write retries are part of that wait.                             *)
@@ -35,6 +33,15 @@
 (*   or the exit flag is set; a pass closes the connections not read since *)
 (*   the previous pass. Without Idle it never fires, so that a worker      *)
 (*   blocked in epoll_wait() learns of a shutdown from its eventfd only.   *)
+(* - esdm_rpcs_close_idle_conn() closes such a connection in three steps:  *)
+(*   shutdown(SHUT_RD), after which a write() of the client fails with     *)
+(*   EPIPE - it closes its end and connects anew - while the requests it   *)
+(*   wrote before stay readable; esdm_rpcs_read() until nothing is left,   *)
+(*   each request served as any other; the close, a step of its own after  *)
+(*   the read that found nothing. The shutdown and the first read are one  *)
+(*   step. A pass takes the connections in any order. Before the fix       *)
+(*   (FixIdle = FALSE) the pass closed them in one step with what they     *)
+(*   held: a request written since epoll_wait() returned was dropped.      *)
 (* - With FdFull, accept4() may fail for want of descriptors while a       *)
 (*   client is queued; a pending accept retry falls due at any time. The   *)
 (*   connection may also be accepted and released at once: calloc() failed *)
@@ -104,7 +111,9 @@ CONSTANTS
     FixLostReply, \* fix: every failed write marks the connection broken
     FixJoin,      \* fix: esdm_rpc_server_fini() waits for the unprivileged
                   \* interface thread before thread_wait_all()
-    FixWorkerExit \* fix: a worker that leaves on a failure ends the server
+    FixWorkerExit, \* fix: a worker that leaves on a failure ends the server
+    FixIdle       \* fix: the idle pass stops the client's writes and serves
+                  \* what it wrote before, then closes
 
 ASSUME Mutant \in {"none", "NoReply", "NoPrivCheck"}
 
@@ -154,6 +163,7 @@ variables
     peerRoot = [k \in ConnIds |-> FALSE], \* SO_PEERCRED: UID 0 at connect()
     cclosed = [k \in ConnIds |-> FALSE],  \* the client closed its end
     inq = [k \in ConnIds |-> <<>>],     \* requests queued at the server
+    rdshut = [k \in ConnIds |-> FALSE], \* shutdown(SHUT_RD) by the idle pass
     outq = [k \in ConnIds |-> <<>>],    \* responses queued at the client
     rootNow = [c \in Clients |-> c \in Root],
     rv = [p \in {"main", "unp"} |-> 0],
@@ -415,7 +425,7 @@ enI: while (~Finished) {
 \* thread_worker() running esdm_rpcs_handler()
 fair process (wk \in Workers)
     variables batch = {}, reap = FALSE, cur = NoConn, rq = 0, retry = FALSE,
-              auth = FALSE;
+              auth = FALSE, due = {};
 {
 hs0: await thr[self] = "sched" \/ exited;
      if (thr[self] # "sched") {
@@ -571,13 +581,23 @@ hsT:                 if (auth) {
                          undeliv := undeliv \cup {<<cur, rq>>};
                          if (FixLostReply) closeConn(cur);
                      };
-                     cur := NoConn;
-                     rq := 0;
+                     if (rdshut[cur] /\ srv[cur] = "open") {
+                         \* the idle pass goes on with this connection
+                         goto hsD;
+                     } else {
+                         cur := NoConn;
+                         rq := 0;
+                     };
                  };
              };
          };
-         \* the idle timer: close what was not read since the last pass
-hsC:     if (reap) {
+         \* the idle timer: what was not read since the last pass falls due
+hsC:     if (reap /\ FixIdle) {
+             due := {k \in Owned(self) : ~fresh[k]};
+             fresh := [k \in ConnIds |->
+                       IF k \in Owned(self) THEN FALSE ELSE fresh[k]];
+         } else if (reap) {
+             \* before the fix: closed with the requests it holds
              with (idle = {k \in Owned(self) : ~fresh[k]}) {
                  owner := [k \in ConnIds |->
                            IF k \in idle THEN NoW ELSE owner[k]];
@@ -596,12 +616,47 @@ hsC:     if (reap) {
              };
          };
          reap := FALSE;
+         \* no connection is due, or none is left: the loop goes on
+         if (due = {}) goto hsL;
+         \* esdm_rpcs_close_idle_conn(): shutdown(SHUT_RD), esdm_rpcs_read()
+hsR:     while (due # {}) {
+             with (k \in due) {
+                 viol := viol \cup UAF(owner[k] # self);
+                 rdshut[k] := TRUE;
+                 due := due \ {k};
+                 cur := k;
+                 if (inq[k] # <<>>) {
+                     \* a request written before the shutdown: served
+                     rq := Head(inq[k]);
+                     taken := taken \cup {<<k, Head(inq[k])>>};
+                     inq[k] := Tail(inq[k]);
+                 };
+             };
+             if (rq # 0) {
+                 goto hsP;
+             } else {
+                 goto hsK;
+             };
+             \* after a reply: esdm_rpcs_read() again, until EOF
+hsD:         if (inq[cur] # <<>>) {
+                 rq := Head(inq[cur]);
+                 taken := taken \cup {<<cur, Head(inq[cur])>>};
+                 inq[cur] := Tail(inq[cur]);
+                 goto hsP;
+             };
+             \* EOF: esdm_rpcs_close_conn() " after timeout"
+hsK:         closeConn(cur);
+             reaped := reaped \cup {cur};
+             cur := NoConn;
+             rq := 0;
+         };
      };
      goto hsX;
      \* out, with an error: the fix ends the server, as for a failed start
 hsF: wfailed[self] := TRUE;
      batch := {};
      reap := FALSE;
+     due := {};
      if (FixWorkerExit) serverExit := 1;
      \* out: every connection closed, the job ends
 hsX: with (mine = Owned(self)) {
@@ -639,7 +694,8 @@ cl0: while (ci < MaxConn) {
          };
 cl1:     while (TRUE) {
              either {
-                 await cn < MaxReq /\ cn - cgot < Pipe /\ ~Gone(ck);
+                 await cn < MaxReq /\ cn - cgot < Pipe /\ ~Gone(ck)
+                       /\ ~rdshut[ck];
                  inq[ck] := Append(inq[ck], cn + 1);
                  asked := asked \cup {<<ck, cn + 1>>};
                  either { skip; }
@@ -651,6 +707,14 @@ cl1:     while (TRUE) {
                                     THEN {"OutOfStep"} ELSE {});
                  outq[ck] := Tail(outq[ck]);
                  cgot := cgot + 1;
+             } or {
+                 \* write() fails with EPIPE, the server reads no more: the
+                 \* client closes its end and connects anew
+                 await cn < MaxReq /\ cn - cgot < Pipe /\ ~Gone(ck)
+                       /\ rdshut[ck];
+                 cclosed[ck] := TRUE;
+                 outq[ck] := <<>>;
+                 goto clN;
              } or {
                  \* EOF: closed by the server, all read
                  await Gone(ck) /\ outq[ck] = <<>>;
@@ -678,9 +742,9 @@ clZ: skip;
 CONSTANT defaultInitValue
 VARIABLES initState, serverExit, unpStarted, unpDone, dropped, fin, exited, 
           lsock, backlog, frame, targs, efd, thr, shut, joinMe, num, owner, 
-          srv, fresh, peerRoot, cclosed, inq, outq, rootNow, rv, wfailed, 
-          monDone, unpFailed, spins, viol, asked, bad, taken, answered, 
-          undeliv, applied, sent, reaped, rejected, pc, stack
+          srv, fresh, peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
+          wfailed, monDone, unpFailed, spins, viol, asked, bad, taken, 
+          answered, undeliv, applied, sent, reaped, rejected, pc, stack
 
 (* define statement *)
 Owned(w) == {k \in ConnIds : owner[k] = w}
@@ -709,16 +773,16 @@ Finished ==
     /\ \A p \in {"main", "unp", "mon"} \cup Workers \cup Clients :
            pc[p] = "Done"
 
-VARIABLES ifc, t, startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-          cgot, ci
+VARIABLES ifc, t, startErr, wi, batch, reap, cur, rq, retry, auth, due, ck, 
+          cn, cgot, ci
 
 vars == << initState, serverExit, unpStarted, unpDone, dropped, fin, exited, 
            lsock, backlog, frame, targs, efd, thr, shut, joinMe, num, owner, 
-           srv, fresh, peerRoot, cclosed, inq, outq, rootNow, rv, wfailed, 
-           monDone, unpFailed, spins, viol, asked, bad, taken, answered, 
-           undeliv, applied, sent, reaped, rejected, pc, stack, ifc, t, 
-           startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, cgot, ci
-        >>
+           srv, fresh, peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
+           wfailed, monDone, unpFailed, spins, viol, asked, bad, taken, 
+           answered, undeliv, applied, sent, reaped, rejected, pc, stack, ifc, 
+           t, startErr, wi, batch, reap, cur, rq, retry, auth, due, ck, cn, 
+           cgot, ci >>
 
 ProcSet == {"main"} \cup {"unp"} \cup {"mon"} \cup {"env"} \cup (Workers) \cup (Clients)
 
@@ -745,6 +809,7 @@ Init == (* Global variables *)
         /\ peerRoot = [k \in ConnIds |-> FALSE]
         /\ cclosed = [k \in ConnIds |-> FALSE]
         /\ inq = [k \in ConnIds |-> <<>>]
+        /\ rdshut = [k \in ConnIds |-> FALSE]
         /\ outq = [k \in ConnIds |-> <<>>]
         /\ rootNow = [c \in Clients |-> c \in Root]
         /\ rv = [p \in {"main", "unp"} |-> 0]
@@ -775,6 +840,7 @@ Init == (* Global variables *)
         /\ rq = [self \in Workers |-> 0]
         /\ retry = [self \in Workers |-> FALSE]
         /\ auth = [self \in Workers |-> FALSE]
+        /\ due = [self \in Workers |-> {}]
         (* Process cl *)
         /\ ck = [self \in Clients |-> NoConn]
         /\ cn = [self \in Clients |-> 0]
@@ -796,12 +862,12 @@ wl0(self) == /\ pc[self] = "wl0"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, efd, 
                              thr, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             batch, reap, cur, rq, retry, auth, due, ck, cn, 
+                             cgot, ci >>
 
 wlF(self) == /\ pc[self] = "wlF"
              /\ IF t[self] <= Len(WSeq(ifc[self]))
@@ -817,11 +883,11 @@ wlF(self) == /\ pc[self] = "wlF"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, thr, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, startErr, wi, batch, 
-                             reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                             reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 wl1(self) == /\ pc[self] = "wl1"
              /\ IF t[self] <= Len(WSeq(ifc[self]))
@@ -838,12 +904,12 @@ wl1(self) == /\ pc[self] = "wl1"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, thr, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             batch, reap, cur, rq, retry, auth, due, ck, cn, 
+                             cgot, ci >>
 
 wl2(self) == /\ pc[self] = "wl2"
              /\ \/ /\ ~shut[WSeq(ifc[self])[t[self]]]
@@ -864,11 +930,11 @@ wl2(self) == /\ pc[self] = "wl2"
              /\ UNCHANGED << initState, unpStarted, unpDone, dropped, fin, 
                              exited, lsock, backlog, frame, targs, efd, shut, 
                              joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                             inq, outq, rootNow, rv, wfailed, monDone, 
+                             inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
                              unpFailed, spins, viol, asked, bad, taken, 
                              answered, undeliv, applied, sent, reaped, 
                              rejected, stack, ifc, wi, batch, reap, cur, rq, 
-                             retry, auth, ck, cn, cgot, ci >>
+                             retry, auth, due, ck, cn, cgot, ci >>
 
 wl3(self) == /\ pc[self] = "wl3"
              /\ serverExit # 0
@@ -878,12 +944,12 @@ wl3(self) == /\ pc[self] = "wl3"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, thr, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             batch, reap, cur, rq, retry, auth, due, ck, cn, 
+                             cgot, ci >>
 
 wl4(self) == /\ pc[self] = "wl4"
              /\ \A w \in Mine(ifc[self]) : thr[w] \notin {"sched", "run"}
@@ -900,11 +966,11 @@ wl4(self) == /\ pc[self] = "wl4"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, thr, 
                              shut, joinMe, num, owner, srv, fresh, peerRoot, 
-                             cclosed, inq, outq, rootNow, wfailed, monDone, 
-                             unpFailed, spins, viol, asked, bad, taken, 
-                             answered, undeliv, applied, sent, reaped, 
+                             cclosed, inq, rdshut, outq, rootNow, wfailed, 
+                             monDone, unpFailed, spins, viol, asked, bad, 
+                             taken, answered, undeliv, applied, sent, reaped, 
                              rejected, wi, batch, reap, cur, rq, retry, auth, 
-                             ck, cn, cgot, ci >>
+                             due, ck, cn, cgot, ci >>
 
 wlE(self) == /\ pc[self] = "wlE"
              /\ targs' = [targs EXCEPT ![ifc[self]] = "freed"]
@@ -917,11 +983,11 @@ wlE(self) == /\ pc[self] = "wlE"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, efd, 
                              thr, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, wfailed, 
-                             monDone, unpFailed, spins, viol, asked, bad, 
-                             taken, answered, undeliv, applied, sent, reaped, 
-                             rejected, wi, batch, reap, cur, rq, retry, auth, 
-                             ck, cn, cgot, ci >>
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, 
+                             wfailed, monDone, unpFailed, spins, viol, asked, 
+                             bad, taken, answered, undeliv, applied, sent, 
+                             reaped, rejected, wi, batch, reap, cur, rq, retry, 
+                             auth, due, ck, cn, cgot, ci >>
 
 workerloop(self) == wl0(self) \/ wlF(self) \/ wl1(self) \/ wl2(self)
                        \/ wl3(self) \/ wl4(self) \/ wlE(self)
@@ -933,11 +999,11 @@ ma0 == /\ pc["main"] = "ma0"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 ma1 == /\ pc["main"] = "ma1"
        /\ initState = "privdone" \/ serverExit # 0
@@ -946,11 +1012,12 @@ ma1 == /\ pc["main"] = "ma1"
        /\ pc' = [pc EXCEPT !["main"] = "ma2"]
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, backlog, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 ma2 == /\ pc["main"] = "ma2"
        /\ unpStarted' = TRUE
@@ -959,11 +1026,12 @@ ma2 == /\ pc["main"] = "ma2"
              ELSE /\ pc' = [pc EXCEPT !["main"] = "ma3"]
        /\ UNCHANGED << initState, serverExit, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 ma3 == /\ pc["main"] = "ma3"
        /\ initState \in {"unpdone", "unpfail"} \/ serverExit # 0
@@ -973,11 +1041,11 @@ ma3 == /\ pc["main"] = "ma3"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 ma4 == /\ pc["main"] = "ma4"
        /\ \/ /\ dropped' = TRUE
@@ -987,11 +1055,12 @@ ma4 == /\ pc["main"] = "ma4"
              /\ UNCHANGED dropped
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 ma5 == /\ pc["main"] = "ma5"
        /\ initState' = "dropped"
@@ -1007,11 +1076,11 @@ ma5 == /\ pc["main"] = "ma5"
        /\ pc' = [pc EXCEPT !["main"] = "wl0"]
        /\ UNCHANGED << serverExit, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, wi, batch, reap, cur, rq, retry, auth, 
-                       ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, wi, batch, reap, cur, rq, retry, 
+                       auth, due, ck, cn, cgot, ci >>
 
 ma6 == /\ pc["main"] = "ma6"
        /\ IF rv["main"] # 0
@@ -1020,11 +1089,11 @@ ma6 == /\ pc["main"] = "ma6"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 maS == /\ pc["main"] = "maS"
        /\ IF lsock["priv"] = "listen"
@@ -1038,11 +1107,11 @@ maS == /\ pc["main"] = "maS"
        /\ pc' = [pc EXCEPT !["main"] = "maR"]
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, frame, targs, efd, thr, shut, joinMe, num, 
-                       owner, fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                       wfailed, monDone, unpFailed, spins, viol, asked, bad, 
-                       taken, answered, undeliv, applied, sent, reaped, 
-                       rejected, stack, ifc, t, startErr, wi, batch, reap, cur, 
-                       rq, retry, auth, ck, cn, cgot, ci >>
+                       owner, fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
+                       asked, bad, taken, answered, undeliv, applied, sent, 
+                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 maR == /\ pc["main"] = "maR"
        /\ frame' = [frame EXCEPT !["priv"] = "dead"]
@@ -1051,21 +1120,23 @@ maR == /\ pc["main"] = "maR"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, targs, efd, thr, shut, 
                        joinMe, num, owner, srv, fresh, peerRoot, cclosed, inq, 
-                       outq, rootNow, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       rdshut, outq, rootNow, wfailed, monDone, unpFailed, 
+                       spins, viol, asked, bad, taken, answered, undeliv, 
+                       applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 maF == /\ pc["main"] = "maF"
        /\ serverExit' = 1
        /\ pc' = [pc EXCEPT !["main"] = "maW"]
        /\ UNCHANGED << initState, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 maW == /\ pc["main"] = "maW"
        /\ IF FixJoin
@@ -1075,11 +1146,11 @@ maW == /\ pc["main"] = "maW"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 maA == /\ pc["main"] = "maA"
        /\ IF wi <= Len(WAll)
@@ -1093,11 +1164,11 @@ maA == /\ pc["main"] = "maA"
                   /\ UNCHANGED << shut, joinMe >>
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, batch, reap, 
-                       cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 maJ == /\ pc["main"] = "maJ"
        /\ IF wi <= Len(WAll)
@@ -1116,11 +1187,11 @@ maJ == /\ pc["main"] = "maJ"
                   /\ UNCHANGED << thr, joinMe >>
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, num, 
-                       owner, srv, fresh, peerRoot, cclosed, inq, outq, 
+                       owner, srv, fresh, peerRoot, cclosed, inq, rdshut, outq, 
                        rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
                        asked, bad, taken, answered, undeliv, applied, sent, 
                        reaped, rejected, stack, ifc, t, startErr, batch, reap, 
-                       cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 maB == /\ pc["main"] = "maB"
        /\ IF wi <= Len(WAll)
@@ -1134,11 +1205,11 @@ maB == /\ pc["main"] = "maB"
                   /\ UNCHANGED << shut, joinMe >>
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, batch, reap, 
-                       cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 maU == /\ pc["main"] = "maU"
        /\ ~unpStarted \/ unpDone
@@ -1146,11 +1217,11 @@ maU == /\ pc["main"] = "maU"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 maK == /\ pc["main"] = "maK"
        /\ IF wi <= Len(WAll)
@@ -1169,11 +1240,11 @@ maK == /\ pc["main"] = "maK"
                   /\ UNCHANGED << thr, joinMe >>
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, num, 
-                       owner, srv, fresh, peerRoot, cclosed, inq, outq, 
+                       owner, srv, fresh, peerRoot, cclosed, inq, rdshut, outq, 
                        rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
                        asked, bad, taken, answered, undeliv, applied, sent, 
                        reaped, rejected, stack, ifc, t, startErr, batch, reap, 
-                       cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 maZ == /\ pc["main"] = "maZ"
        /\ fin' = TRUE
@@ -1181,10 +1252,11 @@ maZ == /\ pc["main"] = "maZ"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        exited, lsock, backlog, frame, targs, efd, thr, shut, 
                        joinMe, num, owner, srv, fresh, peerRoot, cclosed, inq, 
-                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
-                       viol, asked, bad, taken, answered, undeliv, applied, 
-                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
-                       batch, reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       rdshut, outq, rootNow, rv, wfailed, monDone, unpFailed, 
+                       spins, viol, asked, bad, taken, answered, undeliv, 
+                       applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 maX == /\ pc["main"] = "maX"
        /\ exited' = TRUE
@@ -1192,10 +1264,11 @@ maX == /\ pc["main"] = "maX"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, lsock, backlog, frame, targs, efd, thr, shut, 
                        joinMe, num, owner, srv, fresh, peerRoot, cclosed, inq, 
-                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
-                       viol, asked, bad, taken, answered, undeliv, applied, 
-                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
-                       batch, reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       rdshut, outq, rootNow, rv, wfailed, monDone, unpFailed, 
+                       spins, viol, asked, bad, taken, answered, undeliv, 
+                       applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 pmain == ma0 \/ ma1 \/ ma2 \/ ma3 \/ ma4 \/ ma5 \/ ma6 \/ maS \/ maR \/ maF
             \/ maW \/ maA \/ maJ \/ maB \/ maU \/ maK \/ maZ \/ maX
@@ -1208,11 +1281,11 @@ un0 == /\ pc["unp"] = "un0"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 un4 == /\ pc["unp"] = "un4"
        /\ frame' = [frame EXCEPT !["unpriv"] = "live"]
@@ -1223,11 +1296,12 @@ un4 == /\ pc["unp"] = "un4"
              /\ lsock' = lsock
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, backlog, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 un1 == /\ pc["unp"] = "un1"
        /\ initState' = "unpdone"
@@ -1236,11 +1310,12 @@ un1 == /\ pc["unp"] = "un1"
              ELSE /\ pc' = [pc EXCEPT !["unp"] = "un2"]
        /\ UNCHANGED << serverExit, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 un2 == /\ pc["unp"] = "un2"
        /\ initState = "dropped" \/ serverExit # 0
@@ -1260,10 +1335,10 @@ un2 == /\ pc["unp"] = "un2"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, wi, batch, reap, cur, 
-                       rq, retry, auth, ck, cn, cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, wi, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 un3 == /\ pc["unp"] = "un3"
        /\ IF rv["unp"] # 0
@@ -1279,11 +1354,11 @@ un3 == /\ pc["unp"] = "un3"
                   /\ UNCHANGED << serverExit, unpFailed >>
        /\ UNCHANGED << initState, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, spins, viol, asked, bad, 
-                       taken, answered, undeliv, applied, sent, reaped, 
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, spins, viol, asked, 
+                       bad, taken, answered, undeliv, applied, sent, reaped, 
                        rejected, stack, ifc, t, startErr, wi, batch, reap, cur, 
-                       rq, retry, auth, ck, cn, cgot, ci >>
+                       rq, retry, auth, due, ck, cn, cgot, ci >>
 
 unF == /\ pc["unp"] = "unF"
        /\ IF initState \in {"uninit", "privdone"}
@@ -1293,11 +1368,12 @@ unF == /\ pc["unp"] = "unF"
        /\ pc' = [pc EXCEPT !["unp"] = "unR"]
        /\ UNCHANGED << serverExit, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 unS == /\ pc["unp"] = "unS"
        /\ IF lsock["unpriv"] = "listen"
@@ -1311,11 +1387,11 @@ unS == /\ pc["unp"] = "unS"
        /\ pc' = [pc EXCEPT !["unp"] = "unR"]
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, frame, targs, efd, thr, shut, joinMe, num, 
-                       owner, fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                       wfailed, monDone, unpFailed, spins, viol, asked, bad, 
-                       taken, answered, undeliv, applied, sent, reaped, 
-                       rejected, stack, ifc, t, startErr, wi, batch, reap, cur, 
-                       rq, retry, auth, ck, cn, cgot, ci >>
+                       owner, fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
+                       asked, bad, taken, answered, undeliv, applied, sent, 
+                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 unR == /\ pc["unp"] = "unR"
        /\ frame' = [frame EXCEPT !["unpriv"] = "dead"]
@@ -1324,11 +1400,11 @@ unR == /\ pc["unp"] = "unR"
        /\ pc' = [pc EXCEPT !["unp"] = "unZ"]
        /\ UNCHANGED << initState, serverExit, unpStarted, dropped, fin, exited, 
                        lsock, backlog, targs, efd, thr, shut, joinMe, num, 
-                       owner, srv, fresh, peerRoot, cclosed, inq, outq, 
+                       owner, srv, fresh, peerRoot, cclosed, inq, rdshut, outq, 
                        rootNow, wfailed, monDone, unpFailed, spins, viol, 
                        asked, bad, taken, answered, undeliv, applied, sent, 
                        reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 unZ == /\ pc["unp"] = "unZ"
        /\ TRUE
@@ -1336,11 +1412,11 @@ unZ == /\ pc["unp"] = "unZ"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 punp == un0 \/ un4 \/ un1 \/ un2 \/ un3 \/ unF \/ unS \/ unR \/ unZ
 
@@ -1351,11 +1427,11 @@ mo1 == /\ pc["mon"] = "mo1"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 mo2 == /\ pc["mon"] = "mo2"
        /\ initState' = "privdone"
@@ -1363,11 +1439,11 @@ mo2 == /\ pc["mon"] = "mo2"
        /\ pc' = [pc EXCEPT !["mon"] = "moZ"]
        /\ UNCHANGED << serverExit, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, unpFailed, spins, viol, asked, 
-                       bad, taken, answered, undeliv, applied, sent, reaped, 
-                       rejected, stack, ifc, t, startErr, wi, batch, reap, cur, 
-                       rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, unpFailed, spins, viol, 
+                       asked, bad, taken, answered, undeliv, applied, sent, 
+                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
+                       reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 moZ == /\ pc["mon"] = "moZ"
        /\ TRUE
@@ -1375,11 +1451,11 @@ moZ == /\ pc["mon"] = "moZ"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 pmon == mo1 \/ mo2 \/ moZ
 
@@ -1391,11 +1467,12 @@ en0 == /\ pc["env"] = "en0"
        /\ pc' = [pc EXCEPT !["env"] = "enI"]
        /\ UNCHANGED << initState, unpStarted, unpDone, dropped, fin, exited, 
                        lsock, backlog, frame, targs, efd, thr, shut, joinMe, 
-                       num, owner, srv, fresh, peerRoot, cclosed, inq, outq, 
-                       rootNow, rv, wfailed, monDone, unpFailed, spins, viol, 
-                       asked, bad, taken, answered, undeliv, applied, sent, 
-                       reaped, rejected, stack, ifc, t, startErr, wi, batch, 
-                       reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                       num, owner, srv, fresh, peerRoot, cclosed, inq, rdshut, 
+                       outq, rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                       viol, asked, bad, taken, answered, undeliv, applied, 
+                       sent, reaped, rejected, stack, ifc, t, startErr, wi, 
+                       batch, reap, cur, rq, retry, auth, due, ck, cn, cgot, 
+                       ci >>
 
 enI == /\ pc["env"] = "enI"
        /\ IF ~Finished
@@ -1406,11 +1483,11 @@ enI == /\ pc["env"] = "enI"
        /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, dropped, 
                        fin, exited, lsock, backlog, frame, targs, efd, thr, 
                        shut, joinMe, num, owner, srv, fresh, peerRoot, cclosed, 
-                       inq, outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                       spins, viol, asked, bad, taken, answered, undeliv, 
-                       applied, sent, reaped, rejected, stack, ifc, t, 
-                       startErr, wi, batch, reap, cur, rq, retry, auth, ck, cn, 
-                       cgot, ci >>
+                       inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
+                       unpFailed, spins, viol, asked, bad, taken, answered, 
+                       undeliv, applied, sent, reaped, rejected, stack, ifc, t, 
+                       startErr, wi, batch, reap, cur, rq, retry, auth, due, 
+                       ck, cn, cgot, ci >>
 
 penv == en0 \/ enI
 
@@ -1427,12 +1504,12 @@ hs0(self) == /\ pc[self] = "hs0"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             batch, reap, cur, rq, retry, auth, due, ck, cn, 
+                             cgot, ci >>
 
 hs1(self) == /\ pc[self] = "hs1"
              /\ viol' = (viol \cup UAF(ArgsGone(self) \/ ProtoGone(self)))
@@ -1445,11 +1522,12 @@ hs1(self) == /\ pc[self] = "hs1"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, spins, asked, bad, 
-                             taken, answered, undeliv, applied, sent, reaped, 
-                             rejected, stack, ifc, t, startErr, wi, batch, 
-                             reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                             asked, bad, taken, answered, undeliv, applied, 
+                             sent, reaped, rejected, stack, ifc, t, startErr, 
+                             wi, batch, reap, cur, rq, retry, auth, due, ck, 
+                             cn, cgot, ci >>
 
 hsL(self) == /\ pc[self] = "hsL"
              /\ IF serverExit = 0
@@ -1458,12 +1536,12 @@ hsL(self) == /\ pc[self] = "hsL"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, spins, viol, asked, 
-                             bad, taken, answered, undeliv, applied, sent, 
-                             reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                             viol, asked, bad, taken, answered, undeliv, 
+                             applied, sent, reaped, rejected, stack, ifc, t, 
+                             startErr, wi, batch, reap, cur, rq, retry, auth, 
+                             due, ck, cn, cgot, ci >>
 
 hsW(self) == /\ pc[self] = "hsW"
              /\ LET rdy == Ready(self, (num[self] < Cap \/ ~CapDisarm) /\ ~retry[self]) IN
@@ -1486,11 +1564,11 @@ hsW(self) == /\ pc[self] = "hsW"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, viol, asked, bad, 
-                             taken, answered, undeliv, applied, sent, reaped, 
-                             rejected, stack, ifc, t, startErr, wi, reap, cur, 
-                             rq, auth, ck, cn, cgot, ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, viol, 
+                             asked, bad, taken, answered, undeliv, applied, 
+                             sent, reaped, rejected, stack, ifc, t, startErr, 
+                             wi, reap, cur, rq, auth, due, ck, cn, cgot, ci >>
 
 hsE(self) == /\ pc[self] = "hsE"
              /\ IF batch[self] # {}
@@ -1611,10 +1689,10 @@ hsE(self) == /\ pc[self] = "hsE"
                                         rejected, batch, reap, cur, rq, retry >>
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, frame, targs, thr, 
-                             shut, joinMe, peerRoot, cclosed, outq, rootNow, 
-                             rv, monDone, unpFailed, asked, bad, answered, 
-                             undeliv, applied, sent, reaped, stack, ifc, t, 
-                             startErr, wi, auth, ck, cn, cgot, ci >>
+                             shut, joinMe, peerRoot, cclosed, rdshut, outq, 
+                             rootNow, rv, monDone, unpFailed, asked, bad, 
+                             answered, undeliv, applied, sent, reaped, stack, 
+                             ifc, t, startErr, wi, auth, due, ck, cn, cgot, ci >>
 
 hsP(self) == /\ pc[self] = "hsP"
              /\ viol' =     viol
@@ -1640,10 +1718,11 @@ hsP(self) == /\ pc[self] = "hsP"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, fresh, peerRoot, 
-                             cclosed, outq, rootNow, rv, wfailed, monDone, 
-                             unpFailed, asked, bad, taken, answered, undeliv, 
-                             applied, sent, reaped, rejected, stack, ifc, t, 
-                             startErr, wi, batch, reap, ck, cn, cgot, ci >>
+                             cclosed, rdshut, outq, rootNow, rv, wfailed, 
+                             monDone, unpFailed, asked, bad, taken, answered, 
+                             undeliv, applied, sent, reaped, rejected, stack, 
+                             ifc, t, startErr, wi, batch, reap, due, ck, cn, 
+                             cgot, ci >>
 
 hsT(self) == /\ pc[self] = "hsT"
              /\ IF auth[self]
@@ -1690,51 +1769,132 @@ hsT(self) == /\ pc[self] = "hsT"
                               /\ UNCHANGED << num, owner, srv, inq, spins, 
                                               retry >>
                    /\ UNCHANGED <<outq, answered, sent>>
-             /\ cur' = [cur EXCEPT ![self] = NoConn]
-             /\ rq' = [rq EXCEPT ![self] = 0]
-             /\ pc' = [pc EXCEPT ![self] = "hsE"]
+             /\ IF rdshut[cur[self]] /\ srv'[cur[self]] = "open"
+                   THEN /\ pc' = [pc EXCEPT ![self] = "hsD"]
+                        /\ UNCHANGED << cur, rq >>
+                   ELSE /\ cur' = [cur EXCEPT ![self] = NoConn]
+                        /\ rq' = [rq EXCEPT ![self] = 0]
+                        /\ pc' = [pc EXCEPT ![self] = "hsE"]
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, fresh, peerRoot, 
-                             cclosed, rootNow, rv, wfailed, monDone, unpFailed, 
-                             asked, bad, taken, reaped, rejected, stack, ifc, 
-                             t, startErr, wi, batch, reap, ck, cn, cgot, ci >>
+                             cclosed, rdshut, rootNow, rv, wfailed, monDone, 
+                             unpFailed, asked, bad, taken, reaped, rejected, 
+                             stack, ifc, t, startErr, wi, batch, reap, due, ck, 
+                             cn, cgot, ci >>
 
 hsC(self) == /\ pc[self] = "hsC"
-             /\ IF reap[self]
-                   THEN /\ LET idle == {k \in Owned(self) : ~fresh[k]} IN
-                             /\ owner' = [k \in ConnIds |->
-                                          IF k \in idle THEN NoW ELSE owner[k]]
-                             /\ srv' = [k \in ConnIds |->
-                                        IF k \in idle THEN "closed" ELSE srv[k]]
-                             /\ inq' = [k \in ConnIds |->
-                                        IF k \in idle THEN <<>> ELSE inq[k]]
-                             /\ fresh' = [k \in ConnIds |->
-                                          IF k \in Owned(self) THEN FALSE ELSE fresh[k]]
-                             /\ num' = [num EXCEPT ![self] = num[self] - Cardinality(idle)]
-                             /\ reaped' = (reaped \cup idle)
-                             /\ IF idle # {}
-                                   THEN /\ retry' = [retry EXCEPT ![self] = FALSE]
-                                        /\ spins' = [spins EXCEPT ![self] = 0]
-                                   ELSE /\ TRUE
-                                        /\ UNCHANGED << spins, retry >>
-                   ELSE /\ TRUE
-                        /\ UNCHANGED << num, owner, srv, fresh, inq, spins, 
-                                        reaped, retry >>
+             /\ IF reap[self] /\ FixIdle
+                   THEN /\ due' = [due EXCEPT ![self] = {k \in Owned(self) : ~fresh[k]}]
+                        /\ fresh' = [k \in ConnIds |->
+                                     IF k \in Owned(self) THEN FALSE ELSE fresh[k]]
+                        /\ UNCHANGED << num, owner, srv, inq, spins, reaped, 
+                                        retry >>
+                   ELSE /\ IF reap[self]
+                              THEN /\ LET idle == {k \in Owned(self) : ~fresh[k]} IN
+                                        /\ owner' = [k \in ConnIds |->
+                                                     IF k \in idle THEN NoW ELSE owner[k]]
+                                        /\ srv' = [k \in ConnIds |->
+                                                   IF k \in idle THEN "closed" ELSE srv[k]]
+                                        /\ inq' = [k \in ConnIds |->
+                                                   IF k \in idle THEN <<>> ELSE inq[k]]
+                                        /\ fresh' = [k \in ConnIds |->
+                                                     IF k \in Owned(self) THEN FALSE ELSE fresh[k]]
+                                        /\ num' = [num EXCEPT ![self] = num[self] - Cardinality(idle)]
+                                        /\ reaped' = (reaped \cup idle)
+                                        /\ IF idle # {}
+                                              THEN /\ retry' = [retry EXCEPT ![self] = FALSE]
+                                                   /\ spins' = [spins EXCEPT ![self] = 0]
+                                              ELSE /\ TRUE
+                                                   /\ UNCHANGED << spins, 
+                                                                   retry >>
+                              ELSE /\ TRUE
+                                   /\ UNCHANGED << num, owner, srv, fresh, inq, 
+                                                   spins, reaped, retry >>
+                        /\ due' = due
              /\ reap' = [reap EXCEPT ![self] = FALSE]
-             /\ pc' = [pc EXCEPT ![self] = "hsL"]
+             /\ IF due'[self] = {}
+                   THEN /\ pc' = [pc EXCEPT ![self] = "hsL"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "hsR"]
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, peerRoot, cclosed, 
-                             outq, rootNow, rv, wfailed, monDone, unpFailed, 
-                             viol, asked, bad, taken, answered, undeliv, 
-                             applied, sent, rejected, stack, ifc, t, startErr, 
-                             wi, batch, cur, rq, auth, ck, cn, cgot, ci >>
+                             rdshut, outq, rootNow, rv, wfailed, monDone, 
+                             unpFailed, viol, asked, bad, taken, answered, 
+                             undeliv, applied, sent, rejected, stack, ifc, t, 
+                             startErr, wi, batch, cur, rq, auth, ck, cn, cgot, 
+                             ci >>
+
+hsR(self) == /\ pc[self] = "hsR"
+             /\ IF due[self] # {}
+                   THEN /\ \E k \in due[self]:
+                             /\ viol' = (viol \cup UAF(owner[k] # self))
+                             /\ rdshut' = [rdshut EXCEPT ![k] = TRUE]
+                             /\ due' = [due EXCEPT ![self] = due[self] \ {k}]
+                             /\ cur' = [cur EXCEPT ![self] = k]
+                             /\ IF inq[k] # <<>>
+                                   THEN /\ rq' = [rq EXCEPT ![self] = Head(inq[k])]
+                                        /\ taken' = (taken \cup {<<k, Head(inq[k])>>})
+                                        /\ inq' = [inq EXCEPT ![k] = Tail(inq[k])]
+                                   ELSE /\ TRUE
+                                        /\ UNCHANGED << inq, taken, rq >>
+                        /\ IF rq'[self] # 0
+                              THEN /\ pc' = [pc EXCEPT ![self] = "hsP"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "hsK"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "hsL"]
+                        /\ UNCHANGED << inq, rdshut, viol, taken, cur, rq, due >>
+             /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
+                             dropped, fin, exited, lsock, backlog, frame, 
+                             targs, efd, thr, shut, joinMe, num, owner, srv, 
+                             fresh, peerRoot, cclosed, outq, rootNow, rv, 
+                             wfailed, monDone, unpFailed, spins, asked, bad, 
+                             answered, undeliv, applied, sent, reaped, 
+                             rejected, stack, ifc, t, startErr, wi, batch, 
+                             reap, retry, auth, ck, cn, cgot, ci >>
+
+hsD(self) == /\ pc[self] = "hsD"
+             /\ IF inq[cur[self]] # <<>>
+                   THEN /\ rq' = [rq EXCEPT ![self] = Head(inq[cur[self]])]
+                        /\ taken' = (taken \cup {<<cur[self], Head(inq[cur[self]])>>})
+                        /\ inq' = [inq EXCEPT ![cur[self]] = Tail(inq[cur[self]])]
+                        /\ pc' = [pc EXCEPT ![self] = "hsP"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "hsK"]
+                        /\ UNCHANGED << inq, taken, rq >>
+             /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
+                             dropped, fin, exited, lsock, backlog, frame, 
+                             targs, efd, thr, shut, joinMe, num, owner, srv, 
+                             fresh, peerRoot, cclosed, rdshut, outq, rootNow, 
+                             rv, wfailed, monDone, unpFailed, spins, viol, 
+                             asked, bad, answered, undeliv, applied, sent, 
+                             reaped, rejected, stack, ifc, t, startErr, wi, 
+                             batch, reap, cur, retry, auth, due, ck, cn, cgot, 
+                             ci >>
+
+hsK(self) == /\ pc[self] = "hsK"
+             /\ owner' = [owner EXCEPT ![cur[self]] = NoW]
+             /\ srv' = [srv EXCEPT ![cur[self]] = "closed"]
+             /\ inq' = [inq EXCEPT ![cur[self]] = <<>>]
+             /\ num' = [num EXCEPT ![self] = num[self] - 1]
+             /\ retry' = [retry EXCEPT ![self] = FALSE]
+             /\ spins' = [spins EXCEPT ![self] = 0]
+             /\ reaped' = (reaped \cup {cur[self]})
+             /\ cur' = [cur EXCEPT ![self] = NoConn]
+             /\ rq' = [rq EXCEPT ![self] = 0]
+             /\ pc' = [pc EXCEPT ![self] = "hsR"]
+             /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
+                             dropped, fin, exited, lsock, backlog, frame, 
+                             targs, efd, thr, shut, joinMe, fresh, peerRoot, 
+                             cclosed, rdshut, outq, rootNow, rv, wfailed, 
+                             monDone, unpFailed, viol, asked, bad, taken, 
+                             answered, undeliv, applied, sent, rejected, stack, 
+                             ifc, t, startErr, wi, batch, reap, auth, due, ck, 
+                             cn, cgot, ci >>
 
 hsF(self) == /\ pc[self] = "hsF"
              /\ wfailed' = [wfailed EXCEPT ![self] = TRUE]
              /\ batch' = [batch EXCEPT ![self] = {}]
              /\ reap' = [reap EXCEPT ![self] = FALSE]
+             /\ due' = [due EXCEPT ![self] = {}]
              /\ IF FixWorkerExit
                    THEN /\ serverExit' = 1
                    ELSE /\ TRUE
@@ -1743,7 +1903,7 @@ hsF(self) == /\ pc[self] = "hsF"
              /\ UNCHANGED << initState, unpStarted, unpDone, dropped, fin, 
                              exited, lsock, backlog, frame, targs, efd, thr, 
                              shut, joinMe, num, owner, srv, fresh, peerRoot, 
-                             cclosed, inq, outq, rootNow, rv, monDone, 
+                             cclosed, inq, rdshut, outq, rootNow, rv, monDone, 
                              unpFailed, spins, viol, asked, bad, taken, 
                              answered, undeliv, applied, sent, reaped, 
                              rejected, stack, ifc, t, startErr, wi, cur, rq, 
@@ -1760,11 +1920,11 @@ hsX(self) == /\ pc[self] = "hsX"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, shut, joinMe, fresh, peerRoot, 
-                             cclosed, outq, rootNow, rv, wfailed, monDone, 
-                             unpFailed, spins, viol, asked, bad, taken, 
-                             answered, undeliv, applied, sent, reaped, 
+                             cclosed, rdshut, outq, rootNow, rv, wfailed, 
+                             monDone, unpFailed, spins, viol, asked, bad, 
+                             taken, answered, undeliv, applied, sent, reaped, 
                              rejected, stack, ifc, t, startErr, wi, batch, 
-                             reap, cur, rq, retry, auth, ck, cn, cgot, ci >>
+                             reap, cur, rq, retry, auth, due, ck, cn, cgot, ci >>
 
 hsI(self) == /\ pc[self] = "hsI"
              /\ shut[self]
@@ -1773,12 +1933,12 @@ hsI(self) == /\ pc[self] = "hsI"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, shut, joinMe, num, owner, srv, fresh, 
-                             peerRoot, cclosed, inq, outq, rootNow, rv, 
+                             peerRoot, cclosed, inq, rdshut, outq, rootNow, rv, 
                              wfailed, monDone, unpFailed, spins, viol, asked, 
                              bad, taken, answered, undeliv, applied, sent, 
                              reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             batch, reap, cur, rq, retry, auth, due, ck, cn, 
+                             cgot, ci >>
 
 hsZ(self) == /\ pc[self] = "hsZ"
              /\ TRUE
@@ -1786,16 +1946,17 @@ hsZ(self) == /\ pc[self] = "hsZ"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, spins, viol, asked, 
-                             bad, taken, answered, undeliv, applied, sent, 
-                             reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                             viol, asked, bad, taken, answered, undeliv, 
+                             applied, sent, reaped, rejected, stack, ifc, t, 
+                             startErr, wi, batch, reap, cur, rq, retry, auth, 
+                             due, ck, cn, cgot, ci >>
 
 wk(self) == hs0(self) \/ hs1(self) \/ hsL(self) \/ hsW(self) \/ hsE(self)
-               \/ hsP(self) \/ hsT(self) \/ hsC(self) \/ hsF(self)
-               \/ hsX(self) \/ hsI(self) \/ hsZ(self)
+               \/ hsP(self) \/ hsT(self) \/ hsC(self) \/ hsR(self)
+               \/ hsD(self) \/ hsK(self) \/ hsF(self) \/ hsX(self)
+               \/ hsI(self) \/ hsZ(self)
 
 cl0(self) == /\ pc[self] = "cl0"
              /\ IF ci[self] < MaxConn
@@ -1816,14 +1977,15 @@ cl0(self) == /\ pc[self] = "cl0"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, frame, targs, efd, 
                              thr, shut, joinMe, num, owner, fresh, cclosed, 
-                             inq, outq, rootNow, rv, wfailed, monDone, 
+                             inq, rdshut, outq, rootNow, rv, wfailed, monDone, 
                              unpFailed, spins, viol, asked, bad, taken, 
                              answered, undeliv, applied, sent, reaped, 
                              rejected, stack, ifc, t, startErr, wi, batch, 
-                             reap, cur, rq, retry, auth, cn, cgot >>
+                             reap, cur, rq, retry, auth, due, cn, cgot >>
 
 cl1(self) == /\ pc[self] = "cl1"
              /\ \/ /\ cn[self] < MaxReq /\ cn[self] - cgot[self] < Pipe /\ ~Gone(ck[self])
+                      /\ ~rdshut[ck[self]]
                    /\ inq' = [inq EXCEPT ![ck[self]] = Append(inq[ck[self]], cn[self] + 1)]
                    /\ asked' = (asked \cup {<<ck[self], cn[self] + 1>>})
                    /\ \/ /\ TRUE
@@ -1840,6 +2002,12 @@ cl1(self) == /\ pc[self] = "cl1"
                    /\ cgot' = [cgot EXCEPT ![self] = cgot[self] + 1]
                    /\ pc' = [pc EXCEPT ![self] = "cl1"]
                    /\ UNCHANGED <<cclosed, inq, rootNow, asked, bad, cn>>
+                \/ /\ cn[self] < MaxReq /\ cn[self] - cgot[self] < Pipe /\ ~Gone(ck[self])
+                      /\ rdshut[ck[self]]
+                   /\ cclosed' = [cclosed EXCEPT ![ck[self]] = TRUE]
+                   /\ outq' = [outq EXCEPT ![ck[self]] = <<>>]
+                   /\ pc' = [pc EXCEPT ![self] = "clN"]
+                   /\ UNCHANGED <<inq, rootNow, viol, asked, bad, cn, cgot>>
                 \/ /\ Gone(ck[self]) /\ outq[ck[self]] = <<>>
                    /\ pc' = [pc EXCEPT ![self] = "clN"]
                    /\ UNCHANGED <<cclosed, inq, outq, rootNow, viol, asked, bad, cn, cgot>>
@@ -1855,10 +2023,11 @@ cl1(self) == /\ pc[self] = "cl1"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, rv, wfailed, monDone, unpFailed, 
-                             spins, taken, answered, undeliv, applied, sent, 
-                             reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, ci >>
+                             fresh, peerRoot, rdshut, rv, wfailed, monDone, 
+                             unpFailed, spins, taken, answered, undeliv, 
+                             applied, sent, reaped, rejected, stack, ifc, t, 
+                             startErr, wi, batch, reap, cur, rq, retry, auth, 
+                             due, ck, ci >>
 
 clN(self) == /\ pc[self] = "clN"
              /\ ck' = [ck EXCEPT ![self] = NoConn]
@@ -1868,11 +2037,12 @@ clN(self) == /\ pc[self] = "clN"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, spins, viol, asked, 
-                             bad, taken, answered, undeliv, applied, sent, 
-                             reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                             viol, asked, bad, taken, answered, undeliv, 
+                             applied, sent, reaped, rejected, stack, ifc, t, 
+                             startErr, wi, batch, reap, cur, rq, retry, auth, 
+                             due, ci >>
 
 clZ(self) == /\ pc[self] = "clZ"
              /\ TRUE
@@ -1880,12 +2050,12 @@ clZ(self) == /\ pc[self] = "clZ"
              /\ UNCHANGED << initState, serverExit, unpStarted, unpDone, 
                              dropped, fin, exited, lsock, backlog, frame, 
                              targs, efd, thr, shut, joinMe, num, owner, srv, 
-                             fresh, peerRoot, cclosed, inq, outq, rootNow, rv, 
-                             wfailed, monDone, unpFailed, spins, viol, asked, 
-                             bad, taken, answered, undeliv, applied, sent, 
-                             reaped, rejected, stack, ifc, t, startErr, wi, 
-                             batch, reap, cur, rq, retry, auth, ck, cn, cgot, 
-                             ci >>
+                             fresh, peerRoot, cclosed, inq, rdshut, outq, 
+                             rootNow, rv, wfailed, monDone, unpFailed, spins, 
+                             viol, asked, bad, taken, answered, undeliv, 
+                             applied, sent, reaped, rejected, stack, ifc, t, 
+                             startErr, wi, batch, reap, cur, rq, retry, auth, 
+                             due, ck, cn, cgot, ci >>
 
 cl(self) == cl0(self) \/ cl1(self) \/ clN(self) \/ clZ(self)
 
@@ -1963,16 +2133,23 @@ AnsweredOrClosed ==
         InService(x) \/ srv[x[1]] # "open"
 
 \* A connection is closed with a request unread only for a cause: the client
-\* closed it, an earlier request was invalid or its reply lost, the idle
-\* timer closed it, it was released at accept, or the server shuts down.
+\* closed it, an earlier request was invalid or its reply lost, it was
+\* released at accept, or the server shuts down. The idle timer is no cause:
+\* what the client wrote before the pass shut the connection is served.
 Broken(k) == \E y \in undeliv \cup (bad \cap taken) : y[1] = k
 ClosedForCause ==
     \A x \in asked \ taken :
         srv[x[1]] = "closed"
             => \/ cclosed[x[1]]
                \/ Broken(x[1])
-               \/ x[1] \in reaped \cup rejected
+               \/ x[1] \in rejected
                \/ serverExit # 0
+
+\* A connection the idle pass shut for reading does not stay open: its worker
+\* serves what is left in it and closes it.
+ShutIsClosed ==
+    \A k \in ConnIds :
+        rdshut[k] /\ srv[k] = "open" => \E w \in Workers : cur[w] = k
 
 \* A client matching responses by order gets the answer to its request.
 InStep == "OutOfStep" \notin viol

@@ -659,8 +659,10 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 		}
 
 		/*
-		 * EOF: the server closed without answering (idle timeout,
-		 * restart, connection limit); like a lost answer, ask again.
+		 * EOF: the server closed without answering (restart,
+		 * connection limit, the idle timeout of a server that does not
+		 * serve a pending request first); like a lost answer, ask
+		 * again.
 		 */
 		if (received == 0) {
 			ret = -ECONNRESET;
