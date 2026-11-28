@@ -62,6 +62,20 @@ static char *mount_dst = NULL;
 static struct esdm_shm_status *esdm_cuse_shm_status = NULL;
 static atomic_llong next_fh = 1;
 
+/*
+ * The suspend generation of the status segment this daemon has acted on. The
+ * segment's counter is shared with the other CUSE daemon and never cleared by
+ * a reader: each daemon wakes its pollers once per generation it has not seen.
+ */
+static atomic_uint esdm_cuse_suspend_seen = 0;
+
+/* Is there a suspend notification the poll checker has yet to act on? */
+static bool esdm_cuse_suspend_pending(void)
+{
+	return atomic_load(&esdm_cuse_shm_status->suspend_gen) !=
+	       atomic_load(&esdm_cuse_suspend_seen);
+}
+
 static int esdm_cuse_shm_status_avail(void)
 {
 	static int initialized = 0;
@@ -135,6 +149,10 @@ static int esdm_cuse_shm_status_create_shm(void)
 		return -errsv;
 	}
 	esdm_cuse_shm_status = tmp;
+
+	/* No poller waits yet: the notifications so far concern none */
+	atomic_store(&esdm_cuse_suspend_seen,
+		     atomic_load(&esdm_cuse_shm_status->suspend_gen));
 
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_CUSE,
 		    "ESDM shared memory segment successfully attached to\n");
@@ -1043,14 +1061,15 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 	}
 
 	/*
-	 * Simply wake the poller no matter what it waits for. This one-shot
-	 * trigger is NOT cleared here: clearing it as a side effect of reading
-	 * the mask would let whichever caller reads it first consume the event,
-	 * so pollers already parked in the checker's list would never be woken.
-	 * The checker clears it once, after it has evaluated every registered
-	 * poll handle against it (see esdm_cuse_poll_checker()).
+	 * Simply wake the poller no matter what it waits for. The suspend
+	 * generation is NOT marked as seen here: doing so as a side effect of
+	 * reading the mask would let whichever caller reads it first consume
+	 * the event, so pollers already parked in the checker's list would
+	 * never be woken. The checker marks it once, after it has evaluated
+	 * every registered poll handle against it (see
+	 * esdm_cuse_poll_checker()).
 	 */
-	if (atomic_load(&esdm_cuse_shm_status->suspend_trigger))
+	if (esdm_cuse_suspend_pending())
 		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
 
 	/* Simply wake the poller no matter what it waits for. */
@@ -1169,20 +1188,20 @@ static int esdm_cuse_poll_checker(void __unused *unused)
 	thread_wake_all(&esdm_cuse_poll_checker_wait);
 
 	while (!atomic_load(&esdm_cuse_poll_thread_shutdown)) {
-		unsigned int sysmask, mask;
-		bool sysmask_set = false, suspend_seen = false;
+		unsigned int sysmask, mask, suspend_gen = 0;
+		bool sysmask_set = false;
 		struct esdm_cuse_poll **pp;
 
 		mutex_w_lock(&esdm_cuse_ph_lock);
 
 		/*
-		 * Capture the one-shot suspend trigger for this pass so it can
-		 * be cleared exactly once below, after every registered handle
+		 * Capture the suspend generation for this pass so that exactly
+		 * it is marked as seen below, after every registered handle
 		 * has been evaluated against it.
 		 */
 		if (esdm_cuse_shm_status)
-			suspend_seen = atomic_load(
-				&esdm_cuse_shm_status->suspend_trigger);
+			suspend_gen = atomic_load(
+				&esdm_cuse_shm_status->suspend_gen);
 
 		pp = &esdm_cuse_poll_list;
 		while (*pp) {
@@ -1209,13 +1228,15 @@ static int esdm_cuse_poll_checker(void __unused *unused)
 		}
 
 		/*
-		 * Clear the one-shot trigger only now - every poll handle in the
-		 * list has just been woken by it. A trigger that arrives after
-		 * this point re-posts the status semaphore, so it is not lost.
+		 * Mark the generation captured above as seen only now - every
+		 * poll handle in the list has just been woken by it. A
+		 * notification that arrived since is a newer generation and
+		 * posts the status semaphore, so it is not lost; the segment
+		 * is not written, as the other CUSE daemon reads the same
+		 * counter.
 		 */
-		if (suspend_seen && esdm_cuse_shm_status)
-			atomic_store(&esdm_cuse_shm_status->suspend_trigger,
-					false);
+		if (esdm_cuse_shm_status)
+			atomic_store(&esdm_cuse_suspend_seen, suspend_gen);
 
 		mutex_w_unlock(&esdm_cuse_ph_lock);
 		esdm_cuse_shm_status_down();

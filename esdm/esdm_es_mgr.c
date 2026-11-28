@@ -754,6 +754,14 @@ void esdm_set_write_wakeup_bits(uint32_t val)
 	 * /dev/random write poll - reported satisfied far too early.
 	 */
 	esdm_write_wakeup_bits = min_uint32(val, esdm_avail_poolsize_aux());
+
+	/*
+	 * The threshold is one side of esdm_need_entropy(): moving it changes
+	 * the need without any change of the pool, so publish it here, as the
+	 * pool does after its changes. Nothing is evaluated before the status
+	 * segment exists.
+	 */
+	esdm_shm_status_set_need_entropy();
 }
 
 static uint32_t esdm_init_entropy_level(bool fully_seeded)

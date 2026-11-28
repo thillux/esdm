@@ -191,7 +191,8 @@ static void esdm_shm_status_set_suspend(void)
 	if (!status)
 		return;
 
-	atomic_store(&status->suspend_trigger, true);
+	/* A new generation: every reader acts on it once, see the segment */
+	atomic_fetch_add(&status->suspend_gen, 1);
 
 	/* Wake up all waiters */
 	esdm_shm_wake_all();
@@ -516,8 +517,12 @@ int esdm_shm_status_init(void)
 	esdm_shm_status_set_operational(esdm_state_operational());
 	mutex_w_unlock(&drng->lock);
 	esdm_shm_status_set_need_entropy();
+	/*
+	 * The suspend generation of a segment taken over from a predecessor
+	 * is kept: its readers compare it with the one they acted on, and a
+	 * reset could bring it back to just that value.
+	 */
 	esdm_shm_status_install_signal_suspend();
-	atomic_store(&esdm_shm_status->suspend_trigger, false);
 
 	/*
 	 * Publish the version last, after a barrier, so a reader that observes
@@ -527,6 +532,16 @@ int esdm_shm_status_init(void)
 	 */
 	atomic_thread_fence(memory_order_seq_cst);
 	esdm_shm_status->version = ESDM_SHM_STATUS_VERSION;
+	atomic_thread_fence(memory_order_seq_cst);
+
+	/*
+	 * The version is part of what a CUSE daemon acts on, so its change is
+	 * announced like every other one: a poll checker that looked while the
+	 * version was withdrawn and then found it published would otherwise
+	 * wait on its semaphore without having seen this status - the posts
+	 * above came before the version.
+	 */
+	esdm_shm_status_up();
 
 	return 0;
 }

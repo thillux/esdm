@@ -82,7 +82,7 @@ extern "C" {
 #define ESDM_CUSE_URANDOM_DEVNAME "uesdm"
 #define ESDM_CUSE_URANDOM_DEVICE "/dev/" ESDM_CUSE_URANDOM_DEVNAME
 
-#define ESDM_SHM_STATUS_VERSION 2
+#define ESDM_SHM_STATUS_VERSION 3
 
 /*
  * Size of the rendered status report kept in the shared memory segment.
@@ -93,6 +93,7 @@ extern "C" {
  * client). Leave headroom for added sources.
  * Growing this changes the layout of struct esdm_shm_status, hence the version
  * bump above - an old client rejects the segment rather than misreading it.
+ * Version 3 replaced the one-shot suspend trigger by a generation counter.
  */
 #define ESDM_SHM_STATUS_INFO_SIZE 4096
 
@@ -111,8 +112,13 @@ struct esdm_shm_status {
 	atomic_bool operational;
 	/* Do we need new entropy? */
 	atomic_bool need_entropy;
-	/* Wake up due to suspend/hibernate trigger */
-	atomic_bool suspend_trigger;
+	/*
+	 * Suspend/hibernate notifications so far. Only the server writes it,
+	 * and only by counting up: every reader compares it with the count it
+	 * has acted on, so that one notification reaches all of them. A flag a
+	 * reader clears would be gone for the others.
+	 */
+	atomic_uint suspend_gen;
 };
 
 static inline key_t esdm_ftok(const char *pathname, int proj_id)

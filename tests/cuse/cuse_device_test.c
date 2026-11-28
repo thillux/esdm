@@ -1019,10 +1019,23 @@ static void test_shm_status(void)
 	esdm_cuse_fallback(-1, false);
 
 	atomic_store(&esdm_cuse_shm_status->need_entropy, false);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, true);
+	/*
+	 * A suspend generation the checker has not acted on wakes every
+	 * poller; reading the mask does not consume it, and this daemon
+	 * having seen it changes nothing in the segment - the other CUSE
+	 * daemon reads the same counter.
+	 */
+	atomic_fetch_add(&esdm_cuse_shm_status->suspend_gen, 1);
 	esdm_cuse_get_pollmask(&mask);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
-	atomic_store(&esdm_cuse_shm_status->suspend_trigger, false);
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
+	atomic_store(&esdm_cuse_suspend_seen,
+		     atomic_load(&esdm_cuse_shm_status->suspend_gen));
+	esdm_cuse_get_pollmask(&mask);
+	CHECK_EQ(mask, 0);
+	CHECK(atomic_load(&esdm_cuse_shm_status->suspend_gen) != 0,
+	      "seeing a suspend generation changed the shared segment");
 
 	/* The status ioctl answers out of the same segment */
 	esdm_cuse_shm_status->infolen = 5;

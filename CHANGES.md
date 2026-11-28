@@ -12,6 +12,22 @@ checked the verdict under the DRNG lock before generating a chunk, but the
 verdict is not written under that lock, so one chunk per request in flight
 could be generated after the failure was recorded. The verdict is checked
 again after the generation and such a chunk is wiped
+* Status segment version 3: the one-shot suspend trigger is a generation
+counter that only the server writes. The two CUSE daemons shared the trigger,
+and the first poll checker to see it cleared it before the other one looked,
+whose pollers then slept through the suspend. Each daemon now compares the
+counter with the generation it has acted on. Server and CUSE daemons have to
+be updated together, a daemon of the other version takes the segment as one
+no server publishes to
+
+* The server posts the semaphores of the CUSE daemons after it published the
+version of the status segment: a poll checker that looked between the last
+post and the version waited without having seen the status of the new server
+
+* A change of the write wakeup threshold (RpcSetWriteWakeupThresh, the EGD
+command, esdm_set_write_wakeup_bits()) publishes the need for entropy it
+changes: the status segment, and with it the write poll of /dev/random and the
+entropy providers, followed only at the next change of the auxiliary pool
 
 * RPC: RpcRndAddEntropy refuses a claim of more entropy than the data has
 bits with -EINVAL, as the other interfaces do; RpcGetRandomBytesPr answers a
