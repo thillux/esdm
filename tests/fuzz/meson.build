@@ -93,7 +93,7 @@ fuzz_targets = [
 		'sources': [ common_src, crypto_src, esdm_src,
 			     files('esdm_lib_fuzz.c') ],
 		'include': include_dirs_server,
-		'deps': dependencies_esdm_lib,
+		'deps': dependencies_esdm_lib + [ protobuf_c_dep ],
 		'link': [ ],
 	},
 	# The EGD client library, the other side of the socket the EGD harness
