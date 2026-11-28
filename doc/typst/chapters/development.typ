@@ -229,7 +229,12 @@ cc -o example example.c $(pkg-config --cflags --libs esdm_rpc_client)
 `esdm_rpcc_get_seed` the seed path; table @tab:interfaces lists all calls.
 A program that runs the #ac("ESDM") itself, as `esdm-server` does, links
 `libesdm` and calls `esdm_init()`, `esdm_get_random_bytes_full()` and
-`esdm_fini()` of `esdm.h` instead. Such a process does not take the
+`esdm_fini()` of `esdm.h` instead. Without `esdm_init_monitor()`, which the
+server runs on a thread, such a process has neither the reseed worker nor the
+#ac("ES") monitor: its #ac("DRNG", pl: true) are seeded by `esdm_init()` and
+reseeded by the requests that find a reseed due, and a blocking call that
+waits for the #ac("ESDM") to be seeded collects from the entropy sources
+itself, about twice a second, until they deliver. Such a process does not take the
 #ac("ESDM") across a `fork()`: the child holds a copy of every #ac("DRNG")
 state, which would repeat the output of the parent, but none of the threads
 that seed. In the child, every call for random data or a seed fails with

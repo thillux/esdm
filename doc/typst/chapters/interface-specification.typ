@@ -1114,6 +1114,17 @@ or seed data return `-EOPNOTSUPP` in a forked process
 libraries of IF-LIB-RPCC and IF-LIB-EGDC hold no such state and reconnect in
 the child.]
 
+#paragraph[libesdm without the monitor][A process that calls `esdm_init`
+but not `esdm_init_monitor` has neither the reseed worker nor the #ac("ES")
+monitor: no thread of the library seeds the #ac("DRNG", pl: true), only
+`esdm_init` and the requests do. A blocking function that finds the
+#ac("ESDM") not operational – `esdm_get_seed`: not all #ac("DRNG") instances
+fully seeded – seeds and then waits. While it waits and no reseed worker
+runs, it seeds again once $2^29$ ns have passed (`ESDM_ES_MONITOR_INTERVAL_NS`, about
+0.54 s; `esdm_drng_wait_retry` in `esdm/esdm_drng_mgr.c`), so that it
+returns once the entropy sources deliver. Of several waiting functions, one
+seeds per interval.]
+
 #paragraph[Errors of libesdm][The functions of IF-LIB-ESDM return the errors
 the #ac("RPC") calls pass on (section @sec:if-rpc-u): `-EAGAIN` from a
 `_noblock` variant that would have to wait, `-EOPNOTSUPP` while the

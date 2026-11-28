@@ -18,6 +18,9 @@
 (* - The worker's waits and retry backoffs are left out: each reseed or    *)
 (*   bring-up runs on a task thread, and a pass that would start none is   *)
 (*   no step. Wakeups only shorten waits and are left out as well.         *)
+(* - A blocking request that waits for the operational state seeds again   *)
+(*   itself while no reseed worker is on duty, in the code at the interval *)
+(*   of the ES monitor: a step it may take whenever it waits.              *)
 (* - esdm_reset() is called after a VM generation change, by the thread    *)
 (*   of esdm_es_events.c, followed by                                      *)
 (*   esdm_force_fully_seeded_all_drbgs(); the admin process runs both at   *)
@@ -71,6 +74,9 @@ CONSTANTS
                   \* resets the DRNGs, not after as before its fix
     ResetEpoch,   \* a collection begun before a reset of its DRNG is given
                   \* no credit, which it was before the fix
+    WaitRetry,    \* a blocking request that waits seeds again itself while
+                  \* no reseed worker is on duty; before the fix it seeded
+                  \* once and then only waited
     PartialResets, \* a defect the code never had: every injection resets
                   \* the output count, not only one reaching the full seed
     Liveness    \* the environment eventually turns good
@@ -628,6 +634,13 @@ sn0: if (snb2) {
 sn1: if (snb2) {
          rv[self] := IF operational THEN 0 ELSE -2;
          return;
+     } else if (operational) {
+         rv[self] := 0;
+         return;
+     } else if (WaitRetry /\ ~Worker) {
+         \* esdm_drng_wait_retry(): nothing else brings the DRNGs up, the
+         \* waiting request seeds again
+         goto sn0;
      } else {
          await operational;
          rv[self] := 0;
@@ -2133,11 +2146,19 @@ sn1(self) == /\ pc[self] = "sn1"
                         /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ snb2' = [snb2 EXCEPT ![self] = Head(stack[self]).snb2]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                   ELSE /\ operational
-                        /\ rv' = [rv EXCEPT ![self] = 0]
-                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ snb2' = [snb2 EXCEPT ![self] = Head(stack[self]).snb2]
-                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                   ELSE /\ IF operational
+                              THEN /\ rv' = [rv EXCEPT ![self] = 0]
+                                   /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ snb2' = [snb2 EXCEPT ![self] = Head(stack[self]).snb2]
+                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                              ELSE /\ IF WaitRetry /\ ~Worker
+                                         THEN /\ pc' = [pc EXCEPT ![self] = "sn0"]
+                                              /\ UNCHANGED << rv, stack, snb2 >>
+                                         ELSE /\ operational
+                                              /\ rv' = [rv EXCEPT ![self] = 0]
+                                              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                              /\ snb2' = [snb2 EXCEPT ![self] = Head(stack[self]).snb2]
+                                              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << fs, force, initiated, used, due, lock, seedLock, 
                              operational, allSeeded, reseedRunning, running, 
                              bringups, task, prLock, resets, forces, dues, 

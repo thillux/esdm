@@ -722,7 +722,7 @@ largest state space checked.
 #figure(
   table(columns: (0.9fr, 1fr, 1.6fr, 1fr), align: left + horizon,
     table.header([Model], [Code], [Processes], [Configurations]),
-    [`EsdmReseed` \ section @sec:fv-reseed], [`esdm/esdm_drng_mgr.c`, `esdm/esdm_es_mgr.c`, `esdm/esdm_es_events.c`], [Requesters of the five output calls, the reseed worker and its tasks, the #ac("ES") monitor, an administrator, the environment], [41, 9 demonstrating; largest 105,996,577 states],
+    [`EsdmReseed` \ section @sec:fv-reseed], [`esdm/esdm_drng_mgr.c`, `esdm/esdm_es_mgr.c`, `esdm/esdm_es_events.c`], [Requesters of the five output calls, the reseed worker and its tasks, the #ac("ES") monitor, an administrator, the environment], [43, 9 demonstrating; largest 105,996,577 states],
     [`EsdmSelftest` \ section @sec:fv-selftest], [`esdm/esdm_selftest.c` and its callers], [Initialization, requests with and without blocking, seed callers, the #ac("RPC") self test, the reseed worker, the periodic worker, reinitialization, finalization, the environment], [23, 11 demonstrating; largest 287,713 states],
     [`EsdmAuxPool` \ section @sec:fv-aux], [`esdm/esdm_es_aux.c`], [Writers with and without entropy, seedings extracting, readers of the need for entropy, reinitialization, the environment], [25, 14 demonstrating; largest 934,668 states],
     [`EsdmShmStatus` \ section @sec:fv-shm-status], [`esdm/esdm_shm_status.c`, its readers], [The publishing threads of the server, the thread setting the threshold, the signal handler and the event thread, server start, exit and restart, the poll checkers of both #ac("CUSE") daemons, aux clients], [40, 16 demonstrating; largest 2,904,036 states],
@@ -758,7 +758,9 @@ bring-ups on its task threads; the #ac("ES") monitor seeds through
 and, as the thread of `esdm/esdm_es_events.c` does after a change of the
 #ac("VM") generation (section @sec:vm-clone), `esdm_reset` followed by
 `esdm_force_fully_seeded_all_drbgs`; the environment lets reseeds fall due.
-A reseed interval of zero seconds, with which every request reseeds its
+A blocking request that waits for the operational state seeds again itself
+while no reseed worker is on duty (`esdm_drng_wait_retry`). A reseed interval
+of zero seconds, with which every request reseeds its
 #ac("DRNG") first, is a mode a configuration selects. Every entropy source
 credits any amount up to the amount requested, including none, in every
 collection, and a seed operation may fail: a Jitter #acs("RNG") as the only
@@ -781,7 +783,9 @@ estimates in it. Entropy is counted in units of 128 bits, of 64 bits with the
 $2^15$ bits. The reseed interval and the request counter are modeled as one
 flag, which the environment raises. A pass of the reseed worker is one step,
 without its waits and retry backoffs, and a pass that would start nothing is
-no step. A collection and the injection that follows it are one step; for the
+no step. The seeding that a waiting request repeats at the interval of the
+#ac("ES") monitor is a step the request may take whenever it waits. A
+collection and the injection that follows it are one step; for the
 two seedings that collect without the lock of the #ac("DRNG") – the reseed of
 a fully seeded #ac("DRNG") and the forced reseed of one that used up its
 output – the model records when the collection began. The reseed interval is
@@ -826,7 +830,7 @@ deliver for good – every collection credits what is asked for, no seed
 operation fails, a Jitter #acs("RNG") collector is free – and that eventually
 no further reseed falls due by time. `AllEventuallySeeded` and
 `SpentReseeded` assume in addition a task thread per #ac("DRNG") or requests
-that eventually stop; the open observations below give the reason.]
+that eventually stop; the open observation below gives the reason.]
 
 #figure(
   table(columns: (0.8fr, 2fr), align: left + horizon,
@@ -907,12 +911,14 @@ that eventually stop; the open observations below give the reason.]
     [`QuickResetFull`], [Small scope: `esdm_reset` next to a blocking request and the reseed worker], [default], [holds], [2,797,039],
     [`QuickNoWorker`], [Small scope: no reseed worker, two requesters take the initial #ac("DRNG") out of the fully seeded state under each other; initial seed larger than a reseed], [default], [holds], [778,709],
     [`LiveWorker`], [Liveness: a blocking requester, the initial #ac("DRNG"), the reseed worker], [default], [holds], [59,678],
-    [`LiveMonitor`], [Liveness: a blocking requester, the initial #ac("DRNG"), the #ac("ES") monitor, no reseed worker], [default], [holds], [7,500],
+    [`LiveMonitor`], [Liveness: a blocking requester, the initial #ac("DRNG"), the #ac("ES") monitor, no reseed worker], [default], [holds], [7,536],
+    [`WaitRetry`], [Neither reseed worker nor #ac("ES") monitor: a blocking request that waits seeds again itself, a source short at any time], [default], [holds], [5,164],
+    [`LiveWaitRetry`], [Liveness: neither reseed worker nor #ac("ES") monitor, a blocking request returns once the entropy sources deliver], [default], [holds], [10,328],
     [`LiveNode`], [Liveness: a non-blocking requester uses up the per-node #ac("DRNG"), the reseed worker], [default], [holds], [43,464],
     [`LivePR`], [Liveness: prediction resistance requests, the reseed worker], [default], [holds], [22,216],
     [`LiveReset`], [Liveness: after `esdm_reset` the reseed worker seeds both #ac("DRNG", pl: true) again; no requester], [default], [holds], [12,560],
     [`Drg4`], [DRG.4 bit limits, the reseed worker, both calls, a source short at any time, both request sizes], [slow], [holds], [14,701,046],
-    [`NoWorker`], [No reseed worker: requests and the #ac("ES") monitor seed, failing seed operations], [slow], [holds], [33,577,662],
+    [`NoWorker`], [No reseed worker: requests and the #ac("ES") monitor seed, failing seed operations], [slow], [holds], [33,640,142],
     [`NoWorkerTwo`], [No reseed worker: two requesters take the per-node #ac("DRNG") out of the fully seeded state under each other], [slow], [holds], [52,118,531],
     [`Unbudgeted`], [No bit limits (default build): reseeds by interval and `esdm_drng_force_reseed`], [slow], [holds], [9,272,668],
     [`Admin`], [`esdm_reset` with the seeding after it and `esdm_drng_force_reseed` at any time, the reseed worker. With a source short at any time and failing seed operations in addition, the check did not complete: 50,289,167 states without a violation], [slow], [holds], [94,182,361],
@@ -934,7 +940,7 @@ that eventually stop; the open observations below give the reason.]
     [`ResetStale`], [Before the fix: a collection begun before `esdm_reset` credited after it], [default], [finds \ `CreditSinceOutput`], [4,639],
     [`ResetOrder`], [Before the fix: `esdm_reset` resetting the #ac("DRNG", pl: true) before the entropy sources], [default], [finds \ `CreditSinceOutput`], [256],
     [`CounterReset`], [A defect the code does not have: every injection resets the output count], [default], [finds \ `OutputBound`], [4,750],
-    [`NoSeeder`], [Neither reseed worker nor #ac("ES") monitor: a blocking request waits for good], [default], [finds a \ deadlock], [57],
+    [`NoSeeder`], [Before the fix: neither reseed worker nor #ac("ES") monitor, a blocking request waits for good], [default], [finds a \ deadlock], [53],
     [`LiveStarved`], [One task thread, two #ac("DRNG", pl: true), reseeds falling due without end], [default], [finds \ `BringupNotStarved`], [247,496],
     [`LiveLoad`], [One task thread, two #ac("DRNG", pl: true), requests using up the initial #ac("DRNG") without end], [default], [finds \ `SeededUnderLoad`], [6,395],
   ),
@@ -963,6 +969,9 @@ fails, which shows that the configurations exercise the guard:]
       reseed], [`QuickReset`], [`CreditSinceOutput`],
     [The second wait of a blocking request (`FullRetry` switched off)],
       [`QuickResetFull`], [`FullComplete`],
+    [The seeding a waiting request repeats without a reseed worker
+      (`WaitRetry` switched off)], [`WaitRetry`, `LiveWaitRetry`],
+      [deadlock; `RequestsReturn` with the deadlock check off],
     [The flag of all fully seeded #ac("DRNG", pl: true) cleared at the end of
       `esdm_reset`], [`QuickResetTwo`], [`AllSeededSound`],
     [A reseed left to the worker with a reseed interval of zero seconds],
@@ -994,9 +1003,9 @@ worker, the #ac("ES") monitor and the next request seed the #ac("DRNG",
 pl: true) all the same. No property requires that the thread handling the
 event seeds them itself; with too little entropy at that moment it does not.
 
-#paragraph[Findings][Five defects are fixed, and the configurations named
+#paragraph[Findings][Six defects are fixed, and the configurations named
 keep the code before each fix. Model checking found the first two and the
-last two:]
+last three:]
 
 - `esdm_drng_seed_es` adds a collection to the entropy it counts towards the
   fully seeded level, in all and per source, before `esdm_drng_inject` hands
@@ -1036,15 +1045,26 @@ last two:]
   #ac("DRNG") now counts its resets; a seeding reads the count before it
   collects and under the lock, and a collection of before a reset is injected
   without credit.
-
-#paragraph[Open observations][Two behaviors the model shows are left as they
-are; the configurations demonstrate them:]
-
 - Without a reseed worker and without the #ac("ES") monitor – a process that
-  uses the library without `esdm_init_monitor` – a blocking request seeds
-  once and then waits for the operational state. When that seeding collected
-  too little, nothing seeds again until another request arrives: the request
-  waits also after the sources recover (`NoSeeder`, a deadlock of the model).
+  uses the library without `esdm_init_monitor` – a blocking request seeded
+  once and then waited for the operational state. When that seeding collected
+  too little, nothing seeded again until another request arrived: the request
+  waited also after the sources recovered (`NoSeeder`, a deadlock of the
+  model). A waiting request now repeats the seeding itself while no reseed
+  worker is on duty, at the interval of the #ac("ES") monitor of $2^29$ ns
+  and one waiting request at a time (`esdm_drng_wait_retry`), and returns
+  once the sources deliver (`WaitRetry`, `LiveWaitRetry` with
+  `RequestsReturn`). The retry does not depend on the #ac("ES") monitor: in
+  the code, the monitor seeds only when one of the sources it polls
+  delivers, while the monitor of the model seeds whenever a #ac("DRNG") is
+  not fully seeded. `esdm_get_seed` waits in
+  `esdm_drng_sleep_while_not_all_nodes_seeded`, which has the same shape and
+  received the same retry; the model does not contain that call, and the
+  test `esdm_wait_retry_test` covers both.
+
+#paragraph[Open observation][One behavior the model shows is left as it is;
+the configurations demonstrate it:]
+
 - The reseed worker starts the reseeds that are due before the bring-ups, the
   reseed of the initial #ac("DRNG") last. With fewer task threads – Jitter
   #acs("RNG") collectors – than #ac("DRNG", pl: true), reseeds that fall due
@@ -3628,7 +3648,7 @@ statement of the behavior was wrong.
     [The prediction resistance #ac("DRNG") serves before its initial seed], [Reseeding], [low], [fixed],
     [`esdm_reset` resets the #ac("DRNG", pl: true) before the entropy sources: a seeding in between credits entropy of before the reset], [Reseeding], [medium], [fixed],
     [A collection begun before a reset is credited after it], [Reseeding], [low], [fixed],
-    [A waiting request without reseed worker and monitor seeds once and then only waits], [Reseeding], [low], [open],
+    [A waiting request without reseed worker and monitor seeded once and then only waited, also after the entropy sources recovered], [Reseeding], [low], [fixed],
     [The worker starts due reseeds before bring-ups, which can keep a bring-up waiting], [Reseeding], [low], [open],
     [The self test verdict checked once per request], [Self test], [medium], [fixed],
     [A failed self test does not stop the seedings], [Self test], [low], [fixed],

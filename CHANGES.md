@@ -2,6 +2,14 @@ Changes 1.2.4
 * The CUSE daemons and libesdm_aux_client attach the status shared memory
 segment read-only: a reader cannot change what the server and the other readers
 see, and a process of another user than the owner of the segment can attach it
+* libesdm without esdm_init_monitor(): a blocking call - esdm_get_random_bytes_full(),
+esdm_get_random_bytes_pr(), esdm_get_seed() - that waits for the ESDM to be
+seeded seeds again itself, about twice a second, while no reseed worker runs. It
+seeded once before it waited, and when that seeding collected too little it
+waited for good, also after the entropy sources delivered again, unless
+another request or an insert into the auxiliary pool seeded the ESDM. With a
+reseed worker, as in esdm-server, nothing changes
+
 * Every output call of libesdm returns -EOPNOTSUPP after esdm_fini(), as the
 documentation states: esdm_get_random_bytes_pr() returned 0,
 esdm_get_random_bytes_pr_noblock() -EAGAIN, and esdm_get_seed() collected from

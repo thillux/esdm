@@ -2507,6 +2507,47 @@ static void esdm_drng_try_seed(void)
 		esdm_drng_seed_work_try();
 }
 
+/*
+ * When the next waiting request seeds again, in nanoseconds on
+ * CLOCK_MONOTONIC - see esdm_drng_wait_retry().
+ */
+static _Atomic uint64_t esdm_drng_wait_retry_at = 0;
+
+/* A waiting request seeds now: the next one does an interval from here */
+static void esdm_drng_wait_retry_arm(void)
+{
+	atomic_store(&esdm_drng_wait_retry_at,
+		     esdm_monotonic_now_ns() + ESDM_ES_MONITOR_INTERVAL_NS);
+}
+
+/*
+ * Is the caller, waiting for a seeding, to seed again itself? The reseed
+ * worker brings up every DRNG that is not fully seeded, pass by pass. Without
+ * one on duty - a process using libesdm without esdm_init_monitor(), or one
+ * whose worker could not start - nothing does: the seeding a request makes
+ * before it waits is the only one, and if that collected too little the
+ * request waits also after the entropy sources recovered. The ES monitor is no
+ * substitute, as it seeds only when a source it polls delivers.
+ *
+ * At the interval of the ES monitor, and by one of the waiting requests only:
+ * the others find the DRNG seeded, or the time moved on. Not once esdm_fini()
+ * asked the worker to leave, which shuts the entropy sources down next, nor
+ * after a failed self test - see esdm_drng_reseed_stop().
+ */
+static bool esdm_drng_wait_retry(void)
+{
+	uint64_t at = atomic_load(&esdm_drng_wait_retry_at);
+	uint64_t now;
+
+	if (esdm_drng_mgr_reseed_worker_running() || esdm_drng_reseed_stop())
+		return false;
+
+	now = esdm_monotonic_now_ns();
+	return now >= at &&
+	       atomic_compare_exchange_strong(&esdm_drng_wait_retry_at, &at,
+					      now + ESDM_ES_MONITOR_INTERVAL_NS);
+}
+
 static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 {
 	if (esdm_drng_mgr_check_forked())
@@ -2525,17 +2566,25 @@ static int esdm_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 		return esdm_pool_all_nodes_seeded_get() ? 0 : -EAGAIN;
 	}
 
-	esdm_force_fully_seeded_all_drbgs();
-	if (esdm_pool_all_nodes_seeded_get())
-		return 0;
-	thread_wait_event(&esdm_init_wait,
-			  esdm_pool_all_nodes_seeded_get() ||
-				  atomic_load(&esdm_drng_mgr_terminate) ||
-				  esdm_selftest_crypto_failed());
-	/* A wait that esdm_fini() ended is not one a seeding ended */
-	if (esdm_drng_mgr_check_finalized())
-		return -EOPNOTSUPP;
-	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
+	/* Seed, and again where nothing else does - esdm_drng_wait_retry() */
+	for (;;) {
+		esdm_drng_wait_retry_arm();
+		esdm_force_fully_seeded_all_drbgs();
+		if (esdm_pool_all_nodes_seeded_get())
+			return 0;
+		thread_wait_event(&esdm_init_wait,
+				  esdm_pool_all_nodes_seeded_get() ||
+					  atomic_load(&esdm_drng_mgr_terminate) ||
+					  esdm_selftest_crypto_failed() ||
+					  esdm_drng_wait_retry());
+		/* A wait that esdm_fini() ended is not one a seeding ended */
+		if (esdm_drng_mgr_check_finalized())
+			return -EOPNOTSUPP;
+		if (esdm_selftest_crypto_failed())
+			return -EOPNOTSUPP;
+		if (esdm_pool_all_nodes_seeded_get())
+			return 0;
+	}
 }
 
 static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
@@ -2552,17 +2601,24 @@ static int esdm_drng_sleep_while_nonoperational(unsigned int nonblock)
 		return esdm_state_operational() ? 0 : -EAGAIN;
 	}
 
-	esdm_force_fully_seeded();
-	if (esdm_state_operational())
-		return 0;
-	thread_wait_event(&esdm_init_wait,
-			  esdm_state_operational() ||
-				  atomic_load(&esdm_drng_mgr_terminate) ||
-				  esdm_selftest_crypto_failed());
-	/* A wait that esdm_fini() ended is not one a seeding ended */
-	if (esdm_drng_mgr_check_finalized())
-		return -EOPNOTSUPP;
-	return esdm_selftest_crypto_failed() ? -EOPNOTSUPP : 0;
+	/* See esdm_drng_sleep_while_not_all_nodes_seeded() */
+	for (;;) {
+		esdm_drng_wait_retry_arm();
+		esdm_force_fully_seeded();
+		if (esdm_state_operational())
+			return 0;
+		thread_wait_event(&esdm_init_wait,
+				  esdm_state_operational() ||
+					  atomic_load(&esdm_drng_mgr_terminate) ||
+					  esdm_selftest_crypto_failed() ||
+					  esdm_drng_wait_retry());
+		if (esdm_drng_mgr_check_finalized())
+			return -EOPNOTSUPP;
+		if (esdm_selftest_crypto_failed())
+			return -EOPNOTSUPP;
+		if (esdm_state_operational())
+			return 0;
+	}
 }
 
 DSO_PUBLIC

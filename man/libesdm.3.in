@@ -56,6 +56,13 @@ for all DRNGs to be initialized. The optional
 .I priv_init_completion
 callback is invoked once the part of the initialization that requires
 privileges has completed, which is the point at which a daemon may drop them.
+The call also starts the worker that reseeds the DRNGs ahead of the requests.
+A process that does not call it has no thread that seeds: its DRNGs are
+seeded by
+.BR esdm_init ()
+and reseeded by the requests that find a reseed due, and a blocking call that
+waits for the ESDM to be seeded collects from the entropy sources itself,
+about twice a second, until they deliver.
 .TP
 .BI "void esdm_fini(void);"
 Terminate the entropy sources and the DRNG manager and release all resources.

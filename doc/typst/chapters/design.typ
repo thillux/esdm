@@ -2683,7 +2683,14 @@ and in the flags `esdm_operational`, `esdm_fully_seeded` and
 - Available to operational: the initial #ac("DRNG") instance reaches the
   fully seeded level (`esdm_init_ops`), normally within `esdm_init`, which
   seeds it synchronously. The waiters of the blocking calls are woken, and
-  the status segment reports the operational state.
+  the status segment reports the operational state. A blocking call that
+  finds the #ac("ESDM") not operational seeds before it waits. The reseed
+  worker brings the instances up while the call waits; in a process without
+  one – `libesdm` used without `esdm_init_monitor` – the waiting call
+  repeats the seeding itself at the interval of the #ac("ES") monitor of
+  $2^29$ ns, one waiting call at a time (`esdm_drng_wait_retry`), and
+  returns once the entropy sources deliver. `esdm_get_seed` waits for all
+  #ac("DRNG") instances in the same way.
 
 - Operational to available: the initial #ac("DRNG") instance loses the fully
   seeded level – it exceeded the limit of generate operations without a full
@@ -2719,10 +2726,12 @@ overrides the state: every call then returns `-EOPNOTSUPP`.]
       `-EAGAIN` if the #ac("DRNG") instances await their reseed],
       [`-EOPNOTSUPP`],
     [`esdm_get_random_bytes_full`], [Waits], [Seeds, then waits until
-      operational], [Data], [`-EOPNOTSUPP`],
+      operational; seeds again while it waits if no reseed worker runs],
+      [Data], [`-EOPNOTSUPP`],
     [`esdm_get_random_bytes_full_noblock`], [`-EAGAIN`], [`-EAGAIN`], [Data
       or `-EAGAIN`], [`-EOPNOTSUPP`],
-    [`esdm_get_random_bytes_pr`], [Waits], [Waits until operational], [As
+    [`esdm_get_random_bytes_pr`], [Waits], [As
+      `esdm_get_random_bytes_full`], [As
       many bytes as fresh entropy allows, possibly none; `-EAGAIN` while
       another request holds the instance], [`-EOPNOTSUPP`],
     [`esdm_get_random_bytes_pr_noblock`], [`-EAGAIN`], [`-EAGAIN`], [Data or

@@ -297,4 +297,17 @@ if get_option('esdm-server').enabled()
 		args : [ 'waiting' ],
 		timeout: 120,
 		suite: 'core')
+
+	esdm_wait_retry_test = executable(
+		'esdm_wait_retry_test',
+		[ esdm_ipc_ns, 'esdm_wait_retry_test.c' ],
+		include_directories: include_dirs_server,
+		link_with: esdm_static_lib,
+		dependencies: dependencies_server,
+	)
+
+	test('ESDM waiting request without worker and monitor',
+		esdm_wait_retry_test,
+		timeout: 120,
+		suite: 'core')
 endif
