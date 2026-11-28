@@ -625,8 +625,10 @@ All header fields are unsigned 32-bit numbers in little-endian byte order:
   `ESDM_RPC_MAX_INTERNAL_MSG_SIZE`.
 
 - `request_id`: an identifier the server copies into the response without
-  interpreting it. The client library sends 0 and assigns the responses to
-  its requests by their order.
+  interpreting it. The client library numbers the requests of each of its
+  connections, starting with 1, and takes a response for the answer to its
+  request only if it repeats the `request_id` and the `method_index` of that
+  request. Another client may send any value.
 
 - `status_code`, response only: 0 for success
   (`PROTOBUF_C_RPC_STATUS_CODE_SUCCESS`). The server sends 1
@@ -663,8 +665,8 @@ All header fields are unsigned 32-bit numbers in little-endian byte order:
       option `client-reconnect-attempts`, 5 to 30],
     [`ESDM_MAX_RX_TX_RETRIES`], [5], [Repetitions of a timed out send or
       receive],
-    [`ESDM_CLIENT_RESET_RETRIES`], [2], [Connection resets after which the
-      client gives up a call],
+    [`ESDM_CLIENT_RESET_RETRIES`], [2], [Connection resets and responses
+      to another request after which the client gives up a call],
   ),
   caption: [Limits and timeouts of the #ac("RPC") transport],
 ) <tab:if-rpc-limits>
@@ -692,11 +694,17 @@ when no response arrived within the bound of one call – three times six
 receive timeouts, about 4.8 seconds –, the `errno` value of a failed
 connect or transfer, `-EPROTO` or `-EOVERFLOW` for a response with an invalid
 header, and `-EINTR` when the interrupt function of the caller ended the
-call. The library repeats a call after a timeout or a reset of the
-connection, on a new connection. It never repeats IF-RPC-U.8, IF-RPC-P.1 to
-IF-RPC-P.4 and IF-RPC-P.7, which the server may already have executed: for
-them it returns `-ETIMEDOUT` after a timeout or an interruption and
-`-ECONNRESET` after a reset of the connection.]
+call. A response that repeats another `request_id` or `method_index` than
+those of the request answers another request: the library does not decode it
+and closes the connection, on which requests and responses are out of step.
+The library repeats a call after a timeout, a reset of the connection or
+such a response, on a new connection; when the resets and such responses
+exceed `ESDM_CLIENT_RESET_RETRIES`, the call fails with `-ECONNRESET` or,
+after such a response, with `-EPROTO`. It never repeats IF-RPC-U.8,
+IF-RPC-P.1 to IF-RPC-P.4 and IF-RPC-P.7, which the server may already have
+executed: for them it returns `-ETIMEDOUT` after a timeout or an
+interruption, `-ECONNRESET` after a reset of the connection and `-EPROTO`
+after a response to another request.]
 
 == EGD Sockets <sec:if-egd>
 

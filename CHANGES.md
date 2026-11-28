@@ -142,6 +142,15 @@ reads fall back to, a /dev/urandom read stops waiting for a reseed once the
 ESDM is no longer operational, and an RNDADDENTROPY or RNDADDTOENTCNT the
 ESDM may have credited is not credited to the kernel as well
 
+* RPC client: the requests of a connection are numbered in the request_id of
+the header, which was 0, and a response is taken for the answer only if it
+echoes the request_id and the method_index of the request in flight. Responses
+were matched by their order alone: an answer a server wrote twice was handed
+out as the answer to the next request. Such a response closes the connection;
+the call is sent again on a new one, or fails with -EPROTO when it is a
+request that must not run twice or the resets are used up. The wire format is
+unchanged, servers echo both fields already
+
 * RPC client: an interrupted request that must not run twice returns
 -ETIMEDOUT rather than -EINTR, so that esdm_invoke() does not repeat it; a
 failed read closes the connection; esdm_rpcc_get_random_bytes_full_timeout()

@@ -24,7 +24,9 @@
 (*   slice, and the server is silent only while it is not good or on a     *)
 (*   request whose answer it lost. The invoke bound (esdm_rpcc_expired())  *)
 (*   may pass at any re-send, at the latest after MaxRounds of them; a     *)
-(*   receive budget is Slices slices.                                      *)
+(*   receive budget is Slices slices. It does not pass at the first        *)
+(*   re-send of an invoke after a response refused for its identifier with *)
+(*   no slice waited: that response was read at once, no time has passed.  *)
 (* - The connect loop of esdm_connect_proto_service() is one step that    *)
 (*   succeeds if the server listens. The write loop reconnects after EPIPE *)
 (*   once. The reconnect after half the server's idle timeout is left out: *)
@@ -33,18 +35,25 @@
 (*   esdm_rpcc_conn_lock with the pointer load and released with the       *)
 (*   claim: nothing else touches what they guard in between.               *)
 (* - A request is a tag <<thread, bit>>, the bit flipped per write; the    *)
-(*   server echoes it. The tag is a ghost: esdm_rpc_client_pack() sends    *)
-(*   request_id 0, the server echoes request_id and method_index, and      *)
-(*   esdm_rpc_client_read_handler() byte-swaps and logs both and compares  *)
-(*   neither. The client takes the next message of the socket as the       *)
-(*   answer; the tag lets us check that it is the right one.               *)
-(* - ResponseMatch therefore rests on the server: it holds for a server    *)
-(*   that writes at most one response per request it read, in their order. *)
+(*   server echoes it. The tag stands for request_id and method_index:     *)
+(*   esdm_rpc_client_pack() numbers the requests of a connection, the      *)
+(*   server echoes both, and esdm_rpc_client_read_handler() takes the next *)
+(*   message of the socket as the answer only if it carries them (CheckId, *)
+(*   the code). A response with others is not decoded: the socket is       *)
+(*   dropped and the request sent again on a new one like one whose        *)
+(*   connection the server closed, within the same bounds; a request that  *)
+(*   is not re-sendable fails with -EPROTO. The tag is also the ghost that *)
+(*   tells whether a response taken is the right one. One bit per thread   *)
+(*   is enough: two requests that follow each other on a socket differ in  *)
+(*   the thread or the bit, and the code leaves no older answer on a       *)
+(*   socket, as every path that abandons a request drops it.               *)
+(* - Without the comparison (CheckId = FALSE, the code before the fix)     *)
+(*   ResponseMatch rests on the server: it holds for a server that writes  *)
+(*   at most one response per request it read, in their order.             *)
 (*   esdm_rpcs_unpack() does that (one closure per request, the connection *)
 (*   closed when the write fails), and the model's server does unless      *)
-(*   MaxExtra > 0: then it may write an answer twice, which the client     *)
-(*   takes for the answer to its next request. CheckId is a comparison of  *)
-(*   the echoed id the code does not have, to show what it would give.     *)
+(*   MaxExtra > 0: then it may write an answer twice, which that client    *)
+(*   took for the answer to its next request.                              *)
 (* - The calls: "nb" esdm_rpcc_get_random_bytes(), "full"                 *)
 (*   esdm_rpcc_get_random_bytes_full() and _pr() (same client logic),      *)
 (*   "fullnb" _full_noblock() and _pr_noblock(), "timeout"                 *)
@@ -66,8 +75,9 @@
 (* - The threads make MaxCalls calls each and end, and the server and the  *)
 (*   environment end with them, so that a state without a successor other  *)
 (*   than the final one is a hang; with Endless they call without end.     *)
-(* - The fix switches ResetOnErr, IntrUnknown and TimedGet are the code as *)
-(*   it is; the configurations that show a finding turn one off.           *)
+(* - The fix switches ResetOnErr, IntrUnknown, TimedGet and CheckId are    *)
+(*   the code as it is; the configurations that show a finding turn one    *)
+(*   off.                                                                  *)
 (* - Not modelled: the fork handlers, a second init/fini pair (the init    *)
 (*   reference count), the privileged service (identical code), the last  *)
 (*   served time of the connect loop, the per-thread buffers.              *)
@@ -105,9 +115,9 @@ CONSTANTS
     NoOwnerDeadReset, \* mutation: EOWNERDEAD on the lock keeps the socket
     Robust,       \* the mutexes are robust; FALSE: mutation, plain ones
     MaxExtra,     \* answers the server writes twice: not what the server
-                  \* does, but nothing the client would notice
-    CheckId       \* NOT in the code: the client compares the echoed
-                  \* request id and drops the socket on another one
+                  \* does
+    CheckId       \* fix: the client compares the echoed request id and
+                  \* method, and drops the socket on others
 
 Conns == 1..NC
 NoProc == "none"
@@ -259,6 +269,8 @@ gs6: waiters[node] := waiters[node] - 1;
 \* esdm_rpc_client_write_data_fd() and esdm_rpc_client_read_handler() on
 \* the connection held. ivr: "ok", "intr" (-EAGAIN), "err", "tmo"
 \* (-ETIMEDOUT), "reset" (-ECONNRESET); cres as the closure leaves it.
+\* Within the invoke r is also "eagain" and "stale", the response to another
+\* request, which ivR re-sends or turns into "tmo" and "err" (-EPROTO).
 procedure invoke(once)
     variables rounds = 0, resets = 0, sl = 0, wr = 0, r = "none";
 {
@@ -332,14 +344,12 @@ rh:  if (Intr(self)) {
              if (toCli[held[self]] # <<>>
                  /\ CheckId
                  /\ Head(toCli[held[self]])[1] # <<self, bit[self]>>) {
-                 \* not in the code: another id than the one sent
-                 resetSock(held[self]);
-                 cres[self] := "err";
-                 r := "err";
-                 goto ivOut;
+                 \* another request_id or method_index than the ones sent:
+                 \* not decoded, the closure not called
+                 r := "stale";
              } else if (toCli[held[self]] # <<>>) {
-                 \* the code: the next message is the answer, the echoed
-                 \* request_id and method_index are not compared
+                 \* the next message is the answer; before the fix whatever
+                 \* it echoed
                  if (Head(toCli[held[self]])[1] # <<self, bit[self]>>)
                      viol := viol \cup {"Mismatch"};
                  cres[self] := Head(toCli[held[self]])[2];
@@ -372,16 +382,17 @@ rh:  if (Intr(self)) {
              };
          };
      };
-     \* -EAGAIN and -ECONNRESET: drop the socket, ask again within bounds
+     \* -EAGAIN, -ECONNRESET and the response to another request: drop the
+     \* socket, ask again within bounds
 ivR: if (once) {
          if (~NoReset) resetSock(held[self]);
-         r := IF r = "eagain" THEN "tmo" ELSE r;
+         r := CASE r = "eagain" -> "tmo" [] r = "stale" -> "err" [] OTHER -> r;
          goto ivOut;
      } else {
          either {
-             await rounds < MaxRounds /\ ~(r = "reset" /\ resets >= 2);
+             await rounds < MaxRounds /\ ~(r # "eagain" /\ resets >= 2);
              rounds := rounds + 1;
-             resets := IF r = "reset" THEN resets + 1 ELSE resets;
+             resets := IF r # "eagain" THEN resets + 1 ELSE resets;
              sl := 0;
              wr := 0;
              if (NoReset) {
@@ -402,9 +413,11 @@ ivR: if (once) {
                  goto ivOut;
              };
          } or {
-             \* expired, or the resets used up
+             \* expired, or the resets used up; a response refused at once
+             \* took no time, see the header
+             await r # "stale" \/ rounds > 0 \/ sl > 0;
              if (~NoReset) resetSock(held[self]);
-             r := IF r = "eagain" THEN "tmo" ELSE r;
+             r := CASE r = "eagain" -> "tmo" [] r = "stale" -> "err" [] OTHER -> r;
              goto ivOut;
          };
      };
@@ -949,15 +962,11 @@ rh(self) == /\ pc[self] = "rh"
                           \/ /\ IF toCli[held[self]] # <<>>
                                    /\ CheckId
                                    /\ Head(toCli[held[self]])[1] # <<self, bit[self]>>
-                                   THEN /\ cfd' = [cfd EXCEPT ![(held[self])] = FALSE]
-                                        /\ sopen' = [sopen EXCEPT ![(held[self])] = FALSE]
-                                        /\ toSrv' = [toSrv EXCEPT ![(held[self])] = <<>>]
-                                        /\ toCli' = [toCli EXCEPT ![(held[self])] = <<>>]
-                                        /\ rst' = [rst EXCEPT ![(held[self])] = FALSE]
-                                        /\ cres' = [cres EXCEPT ![self] = "err"]
-                                        /\ r' = [r EXCEPT ![self] = "err"]
-                                        /\ pc' = [pc EXCEPT ![self] = "ivOut"]
-                                        /\ UNCHANGED << viol, sl >>
+                                   THEN /\ r' = [r EXCEPT ![self] = "stale"]
+                                        /\ pc' = [pc EXCEPT ![self] = "ivR"]
+                                        /\ UNCHANGED << cfd, sopen, toSrv, 
+                                                        toCli, rst, cres, viol, 
+                                                        sl >>
                                    ELSE /\ IF toCli[held[self]] # <<>>
                                               THEN /\ IF Head(toCli[held[self]])[1] # <<self, bit[self]>>
                                                          THEN /\ viol' = (viol \cup {"Mismatch"})
@@ -1025,12 +1034,12 @@ ivR(self) == /\ pc[self] = "ivR"
                               ELSE /\ TRUE
                                    /\ UNCHANGED << cfd, sopen, toSrv, toCli, 
                                                    rst >>
-                        /\ r' = [r EXCEPT ![self] = IF r[self] = "eagain" THEN "tmo" ELSE r[self]]
+                        /\ r' = [r EXCEPT ![self] = CASE r[self] = "eagain" -> "tmo" [] r[self] = "stale" -> "err" [] OTHER -> r[self]]
                         /\ pc' = [pc EXCEPT ![self] = "ivOut"]
                         /\ UNCHANGED << rounds, resets, sl, wr >>
-                   ELSE /\ \/ /\ rounds[self] < MaxRounds /\ ~(r[self] = "reset" /\ resets[self] >= 2)
+                   ELSE /\ \/ /\ rounds[self] < MaxRounds /\ ~(r[self] # "eagain" /\ resets[self] >= 2)
                               /\ rounds' = [rounds EXCEPT ![self] = rounds[self] + 1]
-                              /\ resets' = [resets EXCEPT ![self] = IF r[self] = "reset" THEN resets[self] + 1 ELSE resets[self]]
+                              /\ resets' = [resets EXCEPT ![self] = IF r[self] # "eagain" THEN resets[self] + 1 ELSE resets[self]]
                               /\ sl' = [sl EXCEPT ![self] = 0]
                               /\ wr' = [wr EXCEPT ![self] = 0]
                               /\ IF NoReset
@@ -1060,7 +1069,8 @@ ivR(self) == /\ pc[self] = "ivR"
                                                     /\ rst' = [rst EXCEPT ![(held[self])] = FALSE]
                                                     /\ r' = [r EXCEPT ![self] = "err"]
                                                     /\ pc' = [pc EXCEPT ![self] = "ivOut"]
-                           \/ /\ IF ~NoReset
+                           \/ /\ r[self] # "stale" \/ rounds[self] > 0 \/ sl[self] > 0
+                              /\ IF ~NoReset
                                     THEN /\ cfd' = [cfd EXCEPT ![(held[self])] = FALSE]
                                          /\ sopen' = [sopen EXCEPT ![(held[self])] = FALSE]
                                          /\ toSrv' = [toSrv EXCEPT ![(held[self])] = <<>>]
@@ -1069,7 +1079,7 @@ ivR(self) == /\ pc[self] = "ivR"
                                     ELSE /\ TRUE
                                          /\ UNCHANGED << cfd, sopen, toSrv, 
                                                          toCli, rst >>
-                              /\ r' = [r EXCEPT ![self] = IF r[self] = "eagain" THEN "tmo" ELSE r[self]]
+                              /\ r' = [r EXCEPT ![self] = CASE r[self] = "eagain" -> "tmo" [] r[self] = "stale" -> "err" [] OTHER -> r[self]]
                               /\ pc' = [pc EXCEPT ![self] = "ivOut"]
                               /\ UNCHANGED <<rounds, resets, sl, wr>>
              /\ UNCHANGED << ref, lk, waiters, cstate, destroyed, published, 

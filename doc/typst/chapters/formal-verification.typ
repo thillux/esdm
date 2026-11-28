@@ -730,7 +730,7 @@ largest state space checked.
     [`EsdmEgd` \ section @sec:fv-egd], [`service-egd/server/esdm_egd_server.c`], [The worker, clients of both sockets, the generators], [29, 13 demonstrating; largest 2,272,766 states],
     [`EsdmSupervisor` \ section @sec:fv-supervisor], [`common/linux_support.c` and its callers], [The supervisor, the daemon, senders of signals], [25, 18 demonstrating; largest 239,648 states],
     [`EsdmRpcServer` \ section @sec:fv-rpc-server], [`service-rpc/server/esdm_rpc_server.c`, the thread pool], [The main thread, the unprivileged interface thread, its workers, clients, termination signals, `esdm_fini`], [37, 12 demonstrating; largest 49,696,012 states],
-    [`EsdmRpcClient` \ section @sec:fv-rpc-client], [`service-rpc/client/`], [Client threads of the calls for random bytes and of a call not re-sent, the server per connection, interrupts, deadlines, the teardown], [28, 8 demonstrating; largest 7,005,733 states],
+    [`EsdmRpcClient` \ section @sec:fv-rpc-client], [`service-rpc/client/`], [Client threads of the calls for random bytes and of a call not re-sent, the server per connection, interrupts, deadlines, the teardown], [29, 9 demonstrating; largest 7,005,733 states],
     [`EsdmKernelEs` \ section @sec:fv-kernel-es], [`kernel/esdm_es/`: `esdm_es_ring.c`, `esdm_health.c`, `esdm_es_drbg.c`], [The interrupt and scheduler hooks per #ac("CPU") with nested interrupts, the #ac("IOCTL") readers, notifier resets, module exit], [32, 16 demonstrating; largest 125,689,609 states],
     [`EsdmKernelCdev` \ section @sec:fv-kernel-cdev], [`kernel/esdm_cdev/esdm_cdev_main.c`], [Readers and pollers of the three devices, the watcher, the wake work of `/dev/esdm_pr`, the #ac("ESDM"), signals], [20, 6 demonstrating; largest 2,336,957 states],
     [`EsdmKernelCdevConn` \ section @sec:fv-kernel-cdev-conn], [`kernel/esdm_cdev/esdm_cdev_egd.c`], [Tasks calling `esdm_cdev_invoke`, the connect work, the #ac("ESDM") with restarts and closes, signals, timeouts], [31, 14 demonstrating; largest 61,155,842 states],
@@ -2634,29 +2634,38 @@ one receive timeout, and the bound of an invoke may pass at every re-send.
 The connect loop is one step, and the size negotiation and the fork handlers
 are omitted.]
 
-#paragraph[Assumptions][A request carries a ghost tag naming its thread and
-its write, which the server echoes. The code has no counterpart:
-`esdm_rpc_client_pack` sends the request identifier 0, and
-`esdm_rpc_client_read_handler` compares neither the request identifier nor
-the method index that the server echoes, so that the client takes the next
-message of a socket for the answer. `ResponseMatch` is therefore a statement
-about the client under the assumption that the server writes at most one
-response per request it read, in the order of the requests. The server of
-the model does so, as `esdm_rpcs_unpack` does; the model assumes this and
-does not show it, and the configuration `ExtraAnswer` drops the assumption.
-Every step is weakly fair. The wait for the `ref_cnt` mutex of a busy
-connection is strongly fair, that is, a waiting thread obtains the mutex
-although other threads keep taking it in between; POSIX does not guarantee
-this of `pthread_mutex_lock`, and the configuration `Starve` drops it.]
+#paragraph[Request identifier][A request carries a tag naming its thread and
+its write, which the server echoes. The tag stands for the request
+identifier and the method index of the header: `esdm_rpc_client_pack`
+numbers the requests of a connection, the server echoes both fields, and
+`esdm_rpc_client_read_handler` takes the next message of a socket for the
+answer only if it repeats them. A response that repeats others is not
+decoded. `esdm_client_invoke` drops the socket and sends the request again on
+a new one, within the bounds that hold after a connection closed by the
+server; a request that must not run twice is not sent again and fails with
+`-EPROTO`. The model also uses the tag to tell whether a response taken is
+the right one. In the configuration `ExtraAnswerChecked` the server writes an
+answer twice; `ExtraAnswer` keeps the client before the fix, which compared
+neither field, so that `ResponseMatch` held only for a server that writes at
+most one response per request it read, in the order of the requests. As time
+is left out, the model needs one statement about it here: the bound of an
+invoke does not pass at the first re-send after a response that was refused
+without a receive timeout before it, since that response was read at once.]
+
+#paragraph[Assumptions][Every step is weakly fair. The wait for the
+`ref_cnt` mutex of a busy connection is strongly fair, that is, a waiting
+thread obtains the mutex although other threads keep taking it in between;
+POSIX does not guarantee this of `pthread_mutex_lock`, and the configuration
+`Starve` drops it.]
 
 #figure(
   table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
-    [`ResponseMatch`], [Given a server that writes at most one response per
-      request, a call takes the response to its own request or none: never
-      that of another thread and never the late answer of a request
+    [`ResponseMatch`], [A call takes the response to its own request or
+      none: never that of another thread, never the late answer of a request
       abandoned after a receive timeout, an interrupt, a closed connection
-      or a canceled owner.],
+      or a canceled owner, and never an answer that the server wrote
+      twice.],
     [`ExclusiveUse`], [A socket is used by one thread at a time, the one that
       checked the connection out and holds its lock.],
     [`NoUseAfterClose`, `NoLockLeak`], [`read()` and `write()` act on open
@@ -2673,8 +2682,10 @@ this of `pthread_mutex_lock`, and the configuration `Starve` drops it.]
       past its deadline is never left waiting for a connection that another
       caller keeps.],
     [`GoodCallsSucceed`], [A call made once the server answers permanently
-      succeeds, regardless of the sockets that earlier lost answers, closes
-      and restarts left behind.],
+      succeeds, regardless of the sockets that earlier lost answers, closes,
+      restarts and answers written twice left behind. A request that must
+      not run twice is the exception on a socket that holds an answer
+      written twice (`ExtraAnswerOnce`).],
     [`CallsReturn`], [Once the server answers permanently, every call
       returns. With threads that call without end this is freedom from
       starvation, and it holds only under the assumed strong fairness of the
@@ -2716,14 +2727,15 @@ this of `pthread_mutex_lock`, and the configuration `Starve` drops it.]
     [`Fair`], [`CallsReturn`, `CallsProgress`: two threads calling without end, strongly fair `ref_cnt`], [holds], [58,984],
     [`Liveness` (slow)], [`CallsReturn` after lost answers, closes and a restart], [holds], [308,785],
     [`Starve`], [Assumption dropped: `ref_cnt` only weakly fair, threads calling without end], [finds `CallsReturn`], [58,984],
-    [`ExtraAnswer`], [Assumption dropped: the server writes an answer twice], [finds `ResponseMatch`], [26,406],
-    [`ExtraAnswerChecked`], [Not the code: the echoed request identifier compared, the server writes an answer twice], [holds], [1,190,081],
-    [`Once`], [Before the fix: a one-shot interrupt and `esdm_invoke`], [finds `RanOnce`], [4,288],
-    [`ReadErr`], [Before the fix: a failed read keeping the socket], [finds `ResponseMatch`], [28,731],
-    [`Hog`], [Before the fix: the wait for a connection past the deadline], [finds `DeadlineNoWait`], [62],
-    [`NoReset`], [Mutation: the socket of an abandoned request kept], [finds `ResponseMatch`], [4,147],
-    [`NoOwnerDeadReset`], [Mutation: no reset on `EOWNERDEAD`], [finds `ResponseMatch`], [7,079],
-    [`NotRobust`], [Mutation: plain mutexes, a thread canceled in `read()`], [finds a deadlock], [2,699],
+    [`ExtraAnswerChecked`], [The server writes an answer twice, loses answers and closes, then answers permanently: the second answer refused, the request sent again], [holds], [2,801,438],
+    [`ExtraAnswer`], [Before the fix: the server writes an answer twice, no identifier compared], [finds `ResponseMatch`], [25,185],
+    [`ExtraAnswerOnce`], [A request that must not run twice meets an answer written twice and fails], [finds `GoodCallsSucceed`], [81,471],
+    [`Once`], [Before the fix: a one-shot interrupt and `esdm_invoke`], [finds `RanOnce`], [3,901],
+    [`ReadErr`], [Before both fixes: a failed read keeping the socket, no identifier compared], [finds `ResponseMatch`], [30,281],
+    [`Hog`], [Before the fix: the wait for a connection past the deadline], [finds `DeadlineNoWait`], [49],
+    [`NoReset`], [Mutation: the socket of an abandoned request kept, no identifier compared], [finds `ResponseMatch`], [4,740],
+    [`NoOwnerDeadReset`], [Mutation: no reset on `EOWNERDEAD`, no identifier compared], [finds `ResponseMatch`], [7,184],
+    [`NotRobust`], [Mutation: plain mutexes, a thread canceled in `read()`], [finds a deadlock], [2,983],
   ),
   caption: [Configurations of the #ac("RPC") client model and their results],
 ) <tab:fv-rpc-client-results>
@@ -2736,10 +2748,15 @@ between runs.
 #paragraph[Findings][Every path that abandons a request in flight closes
 the socket: an interrupt in the read, a spent receive budget, a connection
 closed by the server and `EOWNERDEAD` on the lock of a canceled owner.
-Mutations that keep the socket on these paths break `ResponseMatch`
-(configurations `NoReset` and `NoOwnerDeadReset`). Model checking found two
-gaps and the review of the code found a third, which the model shows as well. All
-three are fixed; the configurations `Once`, `ReadErr` and `Hog` keep the code
+Mutations that keep the socket on these paths break `ResponseMatch` for a
+client that does not compare the request identifier (configurations `NoReset`
+and `NoOwnerDeadReset`). With the comparison, copies of `NoOwnerDeadReset`
+and of `ReadErr` find no violation: the late answer is refused and the
+request sent again, and the reset of the socket saves the next call that
+detour. Model checking found two gaps and the review of the
+code found a third, which the model shows as well; a fourth was a statement
+that held under an assumption on the server only. All four are fixed; the
+configurations `Once`, `ReadErr`, `Hog` and `ExtraAnswer` keep the code
 before the fix:]
 
 - An interrupt in the read reported `-EINTR` for every call, and the
@@ -2762,20 +2779,25 @@ before the fix:]
   without bound when all were checked out, past its deadline for as long as
   another caller kept one (`Hog`, `DeadlineNoWait`). The wait now ends at the
   deadline, with `mutex_w_timedlock` (`HogFixed`).
+- The client sent the request identifier 0 and compared neither the
+  identifier nor the method index of a response with those of its request.
+  Had a server written an answer twice, the client would have taken the
+  second one for the answer to its next request on that socket without
+  noticing (`ExtraAnswer`, `ResponseMatch`). The server code writes one
+  response per request and closes the connection when the write fails, so
+  this was no defect of the two together; the match of request and response
+  was, however, not checked end to end. The client now numbers its requests
+  and refuses a response that repeats another identifier or method index:
+  it closes the socket and sends the request again on a new one, so that a
+  call made once the server answers permanently succeeds
+  (`ExtraAnswerChecked`). A request that must not run twice is not sent
+  again and fails with `-EPROTO`, its outcome being unknown as after a lost
+  answer (`ExtraAnswerOnce`, `GoodCallsSucceed`). The wire format is
+  unchanged: the header had the field, and the server echoed it.
 
-#paragraph[Limits][Three statements hold under an assumption only, and one
+#paragraph[Limits][Two statements hold under an assumption only, and one
 configuration each removes it:]
 
-- The client does not compare the request identifier or the method index of
-  a response with those of its request. Were the server to write an answer
-  twice, the client would take the second one for the answer to its next
-  request on that socket and would not notice (`ExtraAnswer`,
-  `ResponseMatch`). The server code writes one response per request and
-  closes the connection when the write fails, so this is no defect of the
-  two together; the match of request and response is, however, not checked
-  end to end. A comparison of the echoed identifier, which the code does
-  not contain, would refuse such an answer and fail the call
-  (`ExtraAnswerChecked`).
 - With threads that call without end, a thread waiting for the `ref_cnt`
   mutex of its home connection can wait permanently when the mutex is only
   weakly fair: the other thread returns the connection and takes it again
@@ -3586,7 +3608,7 @@ statement of the behavior was wrong.
     [#ac("CUSE") credits the kernel after an outcome left unknown], [#ac("CUSE")], [low], [fixed],
     [A failed read keeps the socket with a request in flight], [#ac("RPC") client], [low], [fixed],
     [The deadline of the timeout call does not bound the wait for a connection], [#ac("RPC") client], [low], [fixed],
-    [The echoed request identifier is not compared: a duplicated answer is taken for the next request], [#ac("RPC") client], [low], [open],
+    [The echoed request identifier is not compared: a duplicated answer is taken for the next request], [#ac("RPC") client], [low], [fixed],
     [A call waiting for its connection can be starved by calls that retake it with a trylock], [#ac("RPC") client], [low], [open],
     [A failing eventfd leaves workers on freed memory], [#ac("RPC") server], [medium], [fixed],
     [A lost reply leaves the connection open], [#ac("RPC") server], [low], [fixed],

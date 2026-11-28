@@ -149,6 +149,12 @@ static struct esdm_rpcc_tbuf *esdm_rpcc_tbuf_get(void)
 #define ESDM_CLIENT_RESET_RETRIES 2
 
 /*
+ * esdm_rpc_client_read_handler() to esdm_client_invoke(): the response is not
+ * the one to the request in flight. Callers get -EPROTO.
+ */
+#define ESDM_CLIENT_OUT_OF_STEP EBADMSG
+
+/*
  * How long after a server last served this process a refused connect is taken
  * for a restart worth waiting for - see esdm_connect_proto_service().
  */
@@ -525,7 +531,15 @@ static int esdm_rpc_client_pack(const ProtobufCMessage *message,
 	cs_header = (struct esdm_rpc_proto_cs_header *)esdm_rpcc_reqbuf;
 	cs_header->method_index = le_bswap32(method_index);
 	cs_header->message_length = le_bswap32(message_length);
-	cs_header->request_id = le_bswap32(0);
+	/*
+	 * Number the request and remember its method: the server echoes both,
+	 * and the read handler takes only the response that carries them. The
+	 * numbers of a connection never repeat within 2^32 requests, also not
+	 * across its sockets.
+	 */
+	rpc_conn->request_id++;
+	rpc_conn->method_index = method_index;
+	cs_header->request_id = le_bswap32(rpc_conn->request_id);
 
 	esdm_logger(
 		LOGGER_DEBUG, LOGGER_C_RPC,
@@ -673,6 +687,26 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 			header->method_index, header->request_id);
 
 		/*
+		 * The server echoes the identifier and the method of the
+		 * request it answers. A response with others answers another
+		 * request - one written twice, or one a server lost count of:
+		 * responses are otherwise matched by order alone, and this one
+		 * would be handed out as the answer to the request in flight.
+		 * It is not decoded and the socket, out of step now, is
+		 * dropped by esdm_client_invoke().
+		 */
+		if (header->request_id != rpc_conn->request_id ||
+		    header->method_index != rpc_conn->method_index) {
+			esdm_logger(
+				LOGGER_WARN, LOGGER_C_RPC,
+				"Response to request ID %u, message index %u, while waiting for request ID %u, message index %u\n",
+				header->request_id, header->method_index,
+				rpc_conn->request_id, rpc_conn->method_index);
+			ret = -ESDM_CLIENT_OUT_OF_STEP;
+			break;
+		}
+
+		/*
 		 * Reject if the server specified too much buffer
 		 * data. As the server also checks this, it is a
 		 * clear protocol violation.
@@ -798,8 +832,9 @@ esdm_rpc_client_read_handler(esdm_rpc_client_connection_t *rpc_conn,
 
 		/* esdm_client_invoke() knows the method: may it run twice? */
 		ret = -EINTR;
-	} else if (ret != -EAGAIN && ret != -ECONNRESET) {
-		/* Those two are asked again by esdm_client_invoke() */
+	} else if (ret != -EAGAIN && ret != -ECONNRESET &&
+		   ret != -ESDM_CLIENT_OUT_OF_STEP) {
+		/* Those three are asked again by esdm_client_invoke() */
 		ProtobufCMessage *msg;
 
 		esdm_logger(LOGGER_VERBOSE, LOGGER_C_RPC,
@@ -963,19 +998,23 @@ static void esdm_client_invoke(ProtobufCService *service,
 		}
 
 		/* EAGAIN is ok here, since sockets are non-blocking now */
-		if (ret < 0 && ret != -EAGAIN && ret != -ECONNRESET) {
+		if (ret < 0 && ret != -EAGAIN && ret != -ECONNRESET &&
+		    ret != -ESDM_CLIENT_OUT_OF_STEP) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_ANY,
 				    "Receiving of data failed: %d\n", ret);
 		}
 
-		if (ret != -EAGAIN && ret != -ECONNRESET)
+		if (ret != -EAGAIN && ret != -ECONNRESET &&
+		    ret != -ESDM_CLIENT_OUT_OF_STEP)
 			break;
 
 		/*
 		 * Re-submitting gives up on the answer to the request just
-		 * sent. Drop the socket so it cannot arrive afterwards:
-		 * responses are matched purely by order, so a late one would be
-		 * handed out as the reply to the next call.
+		 * sent. Drop the socket so it cannot arrive afterwards: a late
+		 * one would be out of step with the next call, which refuses
+		 * it by its identifier and has to ask again. A socket that
+		 * delivered the answer to another request is out of step
+		 * already.
 		 */
 		reset_conn_socket(rpc_conn);
 
@@ -994,9 +1033,16 @@ static void esdm_client_invoke(ProtobufCService *service,
 				ret = -ETIMEDOUT;
 			break;
 		}
-		if (ret == -ECONNRESET && ++resets > ESDM_CLIENT_RESET_RETRIES)
+		if (ret != -EAGAIN && ++resets > ESDM_CLIENT_RESET_RETRIES)
 			break;
 	} while (1);
+
+	/*
+	 * No answer to this request came, and the closure was not invoked. The
+	 * server has read the request and may have run it.
+	 */
+	if (ret == -ESDM_CLIENT_OUT_OF_STEP)
+		ret = -EPROTO;
 
 out:
 	/*

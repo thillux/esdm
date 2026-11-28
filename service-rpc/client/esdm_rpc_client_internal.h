@@ -45,6 +45,9 @@ extern "C" {
  * @param [in] closure_data Opaque pointer handed to @p closure
  * @return 0 on success, < 0 on error - a malformed response is rejected, which
  * 	is the expected outcome
+ *
+ * The request it answers has the identifier 0 and the method index 0: a
+ * response that echoes others is refused with -EBADMSG.
  */
 int esdm_rpcc_fuzz_response(const ProtobufCMessageDescriptor *message_desc,
 			    const uint8_t *data, size_t len,
@@ -97,6 +100,15 @@ struct esdm_rpc_client_connection {
 
 	/* Bound of the request in flight - see esdm_client_invoke() */
 	struct timespec deadline;
+
+	/*
+	 * Identifier and method of the request in flight. The identifier counts
+	 * the requests of this connection structure; the server echoes both,
+	 * and esdm_rpc_client_read_handler() takes no response that carries
+	 * others. Guarded by lock.
+	 */
+	uint32_t request_id;
+	uint32_t method_index;
 
 	/*
 	 * The request/response and unpack scratch buffers are per calling

@@ -282,7 +282,8 @@ const struct fuzz_seed *fuzz_seed_corpus(size_t *num)
 			le_bswap32(PROTOBUF_C_RPC_STATUS_CODE_SUCCESS);
 		header.method_index = 0;
 		header.message_length = le_bswap32((uint32_t)packed);
-		header.request_id = le_bswap32((uint32_t)i);
+		/* The identifier of the request esdm_rpcc_fuzz_response() awaits */
+		header.request_id = 0;
 
 		seed[0] = (uint8_t)i;
 		memcpy(seed + 1, &header, sizeof(header));

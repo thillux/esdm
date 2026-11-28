@@ -3271,9 +3271,11 @@ struct esdm_rpc_proto_sc_header {	/* server to client */
 } __attribute__((packed));
 ```
 
-#par(first-line-indent: 0pt)[The client sends the request identifier 0; it
-matches the responses to its requests by their order, as a connection carries
-one request at a time.]
+#par(first-line-indent: 0pt)[The client numbers the requests of a connection
+in `request_id`, and the server repeats the number and the method index in
+its response. A connection carries one request at a time, so that the next
+response is the answer; the client takes it only if it repeats both values,
+and closes the connection otherwise.]
 
 #paragraph[Messages][The three random number calls share one request and one
 response (`unpriv_access.proto`), a privileged call has messages of its own
@@ -3310,13 +3312,14 @@ byte string.]
     table.cell(colspan: 3)[_Request, 14 bytes_],
     [`05 00 00 00`], [`method_index`], [`RpcGetRandomBytes`],
     [`02 00 00 00`], [`message_length`], [2 bytes of protobuf],
-    [`00 00 00 00`], [`request_id`], [0],
+    [`01 00 00 00`], [`request_id`], [1, the first request of the
+      connection],
     [`08 20`], [`len`], [field 1, varint 32],
     table.cell(colspan: 3)[_Response, 52 bytes_],
     [`00 00 00 00`], [`status_code`], [success],
     [`05 00 00 00`], [`method_index`], [`RpcGetRandomBytes`],
     [`24 00 00 00`], [`message_length`], [36 bytes of protobuf],
-    [`00 00 00 00`], [`request_id`], [0],
+    [`01 00 00 00`], [`request_id`], [1, repeated from the request],
     [`08 20`], [`ret`], [field 1, varint 32],
     [`12 20 …`], [`randval`], [field 2, 32 bytes, followed by them],
   ),
@@ -3333,7 +3336,8 @@ resistance request for more than 32 bytes with `-EINVAL`, an insertion of
 entropy that claims more bits than the data holds with `-EINVAL`. The client
 library never repeats a call that changes the state of the #ac("ESDM") –
 inserting data, clearing the entropy, reseeding, running the self tests – after
-a timeout or a reset of the connection, as the server may have executed it.]
+a timeout, a reset of the connection or a response to another request, as the
+server may have executed it.]
 
 - Unprivileged operations: obtaining random numbers (`RpcGetRandomBytes`,
   `RpcGetRandomBytesFull`, `RpcGetRandomBytesPr`), seed data (`RpcGetSeed`),

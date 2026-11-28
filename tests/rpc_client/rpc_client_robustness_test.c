@@ -23,7 +23,9 @@
  * interrupt function get to their fallbacks. Also from a thread with a small
  * stack - the client's scratch buffers must not be carved from it. And against
  * a socket file nobody listens on, where a call fails at once. A request that
- * must not run twice is sent once, however long its answer takes.
+ * must not run twice is sent once, however long its answer takes. And against
+ * a server that writes an answer twice: the second one is not taken for the
+ * answer to the next request.
  *
  * Runs unprivileged: the namespaces of tests/test_ipc_ns.c give it a /tmp of
  * its own to bind the socket in.
@@ -44,6 +46,7 @@
 
 #include "../test_namespace.h"
 #include "esdm_rpc_client.h"
+#include "esdm_rpc_protocol.h"
 #include "esdm_rpc_service.h"
 #include "esdm_ppoll.h"
 
@@ -246,6 +249,199 @@ static int test_sent_once(void)
 	return 0;
 }
 
+/*
+ * A server that answers every request - one for random bytes with 32 bytes
+ * that all hold the number of the request, any other with the return code 0 -
+ * and writes its first answer twice.
+ */
+#define TEST_DUP_BYTES 32
+
+struct test_dup {
+	int fd;
+	pthread_t thread;
+	bool bytes;
+	atomic_int requests;
+	atomic_int conns;
+	atomic_bool stop;
+};
+
+static void test_dup_answer(struct test_dup *d, int conn, const uint8_t *req)
+{
+	struct esdm_rpc_proto_cs_header cs;
+	struct esdm_rpc_proto_sc_header sc;
+	uint8_t resp[sizeof(sc) + 2 + TEST_DUP_BYTES];
+	size_t len = sizeof(sc);
+	int n = atomic_fetch_add(&d->requests, 1) + 1;
+
+	/* Method and identifier are echoed as they came */
+	memcpy(&cs, req, sizeof(cs));
+	memset(&sc, 0, sizeof(sc));
+	sc.status_code = PROTOBUF_C_RPC_STATUS_CODE_SUCCESS;
+	sc.method_index = cs.method_index;
+	sc.request_id = cs.request_id;
+
+	if (d->bytes) {
+		/* RandValResponse: field 2, wire type 2, length, the bytes */
+		resp[len++] = 0x12;
+		resp[len++] = TEST_DUP_BYTES;
+		memset(resp + len, n, TEST_DUP_BYTES);
+		len += TEST_DUP_BYTES;
+	}
+	/* The header fields are little endian, the length fits into a byte */
+	memcpy(&sc.message_length, (uint8_t[4]){ (uint8_t)(len - sizeof(sc)) },
+	       sizeof(sc.message_length));
+	memcpy(resp, &sc, sizeof(sc));
+
+	/*
+	 * A write fails when the client dropped the socket meanwhile, as it
+	 * does for the answer written twice.
+	 */
+	if (write(conn, resp, len) == (ssize_t)len && n == 1 &&
+	    write(conn, resp, len) != (ssize_t)len)
+		printf("duplicated answer: cannot write the answer twice\n");
+}
+
+static void *test_dup_serve(void *arg)
+{
+	struct test_dup *d = arg;
+	struct pollfd pfd[16];
+	nfds_t n = 1, i;
+	uint8_t buf[4096];
+
+	pfd[0].fd = d->fd;
+	pfd[0].events = POLLIN;
+
+	while (!atomic_load(&d->stop)) {
+		if (esdm_ppoll_ms(pfd, n, 50) <= 0)
+			continue;
+
+		for (i = 1; i < n; i++) {
+			if (!(pfd[i].revents & (POLLIN | POLLHUP)))
+				continue;
+			if (read(pfd[i].fd, buf, sizeof(buf)) >=
+			    (ssize_t)sizeof(struct esdm_rpc_proto_cs_header)) {
+				test_dup_answer(d, pfd[i].fd, buf);
+			} else {
+				close(pfd[i].fd);
+				pfd[i--] = pfd[--n];
+			}
+		}
+
+		if ((pfd[0].revents & POLLIN) && n < 16) {
+			int conn = accept(d->fd, NULL, NULL);
+
+			if (conn >= 0) {
+				atomic_fetch_add(&d->conns, 1);
+				pfd[n].fd = conn;
+				pfd[n].events = POLLIN;
+				pfd[n].revents = 0;
+				n++;
+			}
+		}
+	}
+
+	for (i = 1; i < n; i++)
+		close(pfd[i].fd);
+	return NULL;
+}
+
+static int test_dup_start(struct test_dup *d, const char *path, bool bytes)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+
+	d->bytes = bytes;
+	d->fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	if (d->fd < 0)
+		return 1;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+	unlink(path);
+	if (bind(d->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+	    listen(d->fd, 16) < 0 ||
+	    pthread_create(&d->thread, NULL, test_dup_serve, d)) {
+		close(d->fd);
+		unlink(path);
+		return 1;
+	}
+
+	return 0;
+}
+
+static void test_dup_stop(struct test_dup *d, const char *path)
+{
+	atomic_store(&d->stop, true);
+	pthread_join(d->thread, NULL);
+	close(d->fd);
+	unlink(path);
+}
+
+/*
+ * The server answers the first request twice. The second answer waits in the
+ * socket when the next request goes out, and it echoes the identifier of the
+ * first: the client refuses it, drops the socket and asks again on a new one,
+ * instead of handing the bytes of the first request out once more.
+ */
+static int test_dup_resent(void)
+{
+	struct test_dup d = { .fd = -1 };
+	uint8_t first[TEST_DUP_BYTES] = { 0 }, second[TEST_DUP_BYTES] = { 0 };
+	ssize_t ret1, ret2;
+	int requests, conns;
+
+	if (test_dup_start(&d, ESDM_RPC_UNPRIV_SOCKET, true))
+		return 1;
+
+	ret1 = esdm_rpcc_get_random_bytes(first, sizeof(first));
+	ret2 = esdm_rpcc_get_random_bytes(second, sizeof(second));
+	requests = atomic_load(&d.requests);
+	conns = atomic_load(&d.conns);
+	test_dup_stop(&d, ESDM_RPC_UNPRIV_SOCKET);
+
+	printf("duplicated answer: calls returned %zd and %zd, bytes of request %u and %u, %d request(s) on %d connection(s)\n",
+	       ret1, ret2, first[0], second[0], requests, conns);
+	if (ret1 != sizeof(first) || first[0] != 1) {
+		printf("duplicated answer: the first call failed\n");
+		return 1;
+	}
+	if (ret2 != sizeof(second) || second[0] != 3 || requests != 3 ||
+	    conns != 2) {
+		printf("duplicated answer: expected the second call to refuse the answer to the first and to ask again on a new connection\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * The same with a request that must not run twice: it is not sent again, and
+ * the call fails instead of taking the answer to the request before it.
+ */
+static int test_dup_once(void)
+{
+	struct test_dup d = { .fd = -1 };
+	uint8_t buf[32] = { 0 };
+	int ret1 = 1, ret2 = 1, requests;
+
+	if (test_dup_start(&d, ESDM_RPC_PRIV_SOCKET, false))
+		return 1;
+
+	if (!esdm_rpcc_init_priv_service(NULL)) {
+		ret1 = esdm_rpcc_rnd_add_entropy(buf, sizeof(buf), 0);
+		ret2 = esdm_rpcc_rnd_add_entropy(buf, sizeof(buf), 0);
+		esdm_rpcc_fini_priv_service();
+	}
+	requests = atomic_load(&d.requests);
+	test_dup_stop(&d, ESDM_RPC_PRIV_SOCKET);
+
+	printf("duplicated answer, add_entropy: calls returned %d and %d, %d request(s) sent\n",
+	       ret1, ret2, requests);
+	if (ret1 != 0 || ret2 != -EPROTO || requests != 2) {
+		printf("duplicated answer, add_entropy: expected the second call to fail with -EPROTO after one request\n");
+		return 1;
+	}
+
+	return 0;
+}
+
 static int test_check(const char *what, const struct test_call *call)
 {
 	printf("%s: returned %zd after %.1f s\n", what, call->ret,
@@ -280,6 +476,12 @@ int main(void)
 		return 77;
 	}
 
+	/*
+	 * One connection per service: the two calls of test_dup_resent() have
+	 * to meet on one socket.
+	 */
+	esdm_rpcc_set_max_online_nodes(1);
+
 	if (esdm_rpcc_init_unpriv_service(NULL)) {
 		printf("Cannot initialize the RPC client\n");
 		return 1;
@@ -288,6 +490,8 @@ int main(void)
 	/* First, while no server has served this process yet */
 	ret = test_stale_socket();
 	ret |= test_sent_once();
+	ret |= test_dup_resent();
+	ret |= test_dup_once();
 
 	fd = test_stuck_server();
 	if (fd < 0) {
