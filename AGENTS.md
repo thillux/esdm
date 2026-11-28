@@ -184,6 +184,48 @@ Citations:
   identifier against the source; if the source is not at hand, say so
   rather than guess.
 
+Duplication:
+
+- Prevent duplication, and reduce it where it exists. A fact has one place
+  where it is stated in full; every other place refers to it by its label.
+- Before writing a statement, search for it. Extend the existing place
+  rather than add a second one. A reader who finds two versions of a fact
+  must not have to decide which one holds.
+- Generate what can be derived instead of copying it: the option reference
+  comes from `meson_options.txt`, the excerpts of the slides are the files
+  themselves, the version comes from the build.
+- A summary may repeat a result in one sentence and then refers to its
+  section. Tables that overlap are merged or split along one criterion.
+- The slides and the poster take their statements from the design document.
+  They shorten it and do not add facts of their own.
+- When a fact changes, change every place that carries it in the same
+  commit; search the chapters, the slides, the poster, the manual pages and
+  `CHANGES.md`.
+
+Appearance:
+
+- The documents are visually appealing and are not marketing material.
+  Appearance serves the reading: a clear hierarchy, quiet pages, figures
+  that carry technical content. No slogans, no superlatives, no decoration
+  without information, no claim that the text does not support.
+- A figure is preferred to a paragraph where it shows structure, a flow or
+  states. Every figure has a source in the repository, a caption and a
+  reference in the text. Its labels are readable at the size it is printed.
+- The color scheme is the one of `palette.typ` and nothing else;
+  `check-palette` enforces it. Colors have fixed roles in every document
+  and figure: warm tones for the entropy sources of the ESDM itself, blue
+  for the processing and the interfaces of the ESDM, slate and gray for
+  external parts, containers and secondary text, red for failure paths,
+  always dashed. A color is never the only carrier of a meaning; the
+  grayscale variant of the document must remain readable.
+- The design document, the slides and the poster have one aligned look: the
+  same palette and color roles, the same symbols of `icons.typ`, the same
+  shapes for the same things in figures, the same names for the same
+  parts. A reader who knows one of them recognizes the others.
+- Keep the typography uniform within a document: one scale of sizes, one
+  style of tables, captions and code. Change a style in the template, not
+  at the place of use.
+
 Rules for the text:
 
 - Formal technical English, no first person, no informal headings.
