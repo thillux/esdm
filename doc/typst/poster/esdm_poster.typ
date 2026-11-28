@@ -194,7 +194,7 @@
 #let claims = {
   heading-text[Why the ESDM]
   v(14mm, weak: true)
-  stack(spacing: 7mm,
+  stack(spacing: 6mm,
     claim("plug")[Drop-in][No change to the applications],
     claim("microchip")[Stock kernel][No kernel patch; updated like any
       package],
@@ -256,8 +256,19 @@
 // Hardware and services as entropy sources: each is served by a provider
 // process that the server reads as its external entropy source.
 #let devices = {
-  heading-text[HSM, Smart Card, KMS]
+  heading-text[Extensible Entropy Sources]
   v(14mm, weak: true)
+  {
+    set text(size: t-small)
+    set list(marker: text(fill: accent)[•], body-indent: 0.5em,
+      spacing: 8mm)
+    [
+      - An entropy source of your own is a small process built on
+        `libesdm_es_ext`.
+      - The providers for PKCS\#11 and PC/SC ship with the ESDM.
+    ]
+  }
+  v(10mm, weak: true)
   let part(title, sub, fill: background, stroke: rule, height: 33mm) = chip(
     fill: fill, stroke: stroke, height: height, stack(spacing: 5mm,
       text(weight: "semibold", title),
