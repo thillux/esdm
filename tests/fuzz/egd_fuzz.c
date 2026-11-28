@@ -48,6 +48,7 @@
 #include "esdm_egd_server.h"
 #include "esdm_logger.h"
 #include "esdm_rpc_protocol.h"
+#include "helper.h"
 #include "fuzz.h"
 
 /*

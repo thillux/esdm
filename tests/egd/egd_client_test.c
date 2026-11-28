@@ -865,6 +865,486 @@ struct egd_test {
 	int (*run)(void);
 };
 
+/* Start a peer in @mode and connect a client to it */
+static int test_setup(const char *name, enum egd_peer_mode mode,
+		      struct egd_peer **peer, struct esdm_egd_client **client)
+{
+	if (egd_peer_start(peer, test_socket(name), mode))
+		return 1;
+
+	if (esdm_egd_client_alloc(client, test_socket(name),
+				  TEST_TIMEOUT_MS)) {
+		egd_peer_stop(*peer);
+		return 1;
+	}
+
+	return 0;
+}
+
+/* Is @buf the peer's counter sequence from @offset on? */
+static bool test_is_sequence(const uint8_t *buf, size_t len, size_t offset)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (buf[i] != egd_peer_data_byte(offset + i))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * The prediction resistance and the unseeded reads are the reads of EGD under
+ * another command byte: split and reassembled, or short, as those.
+ */
+static int test_esdm_reads(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	uint8_t buf[300];
+	size_t generated = 0;
+	int ret = 0;
+
+	if (test_setup("esdmread", EGD_PEER_SHORT, &peer, &client))
+		return 1;
+
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) == 0,
+	      "the blocking PR read failed");
+	CHECK(test_is_sequence(buf, sizeof(buf), 0),
+	      "the blocking PR read is not reassembled in order");
+	CHECK(egd_peer_requests(peer) == 2, "%u transfers, expected 2",
+	      egd_peer_requests(peer));
+
+	CHECK(esdm_egd_client_get_random_pr_nonblock(client, buf, 100,
+						     &generated) == 0 &&
+		      generated == 50,
+	      "the non-blocking PR read delivered %zu bytes, expected 50",
+	      generated);
+	CHECK(test_is_sequence(buf, generated, 300),
+	      "the non-blocking PR read is out of sequence");
+
+	CHECK(esdm_egd_client_get_random_unseeded(client, buf, 100,
+						  &generated) == 0 &&
+		      generated == 50,
+	      "the unseeded read delivered %zu bytes, expected 50", generated);
+	CHECK(test_is_sequence(buf, generated, 350),
+	      "the unseeded read is out of sequence");
+
+	CHECK(esdm_egd_client_get_random_pr(client, NULL, 1) == -EINVAL,
+	      "a PR read without a buffer was accepted");
+	CHECK(esdm_egd_client_get_random_pr_nonblock(
+		      client, buf, ESDM_EGD_MAX_TRANSFER + 1, &generated) ==
+		      -EINVAL,
+	      "a non-blocking PR read beyond one transfer was accepted");
+	CHECK(esdm_egd_client_get_random_unseeded(
+		      client, buf, ESDM_EGD_MAX_TRANSFER + 1, &generated) ==
+		      -EINVAL,
+	      "an unseeded read beyond one transfer was accepted");
+	CHECK(esdm_egd_client_get_random_unseeded(client, buf, 1, NULL) ==
+		      -EINVAL,
+	      "an unseeded read without a length was accepted");
+
+	CHECK(egd_peer_connections(peer) == 1,
+	      "%u connections, expected a single one",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/* The bulk read takes more than one EGD transfer in a single request. */
+static int test_bulk_read(void)
+{
+	static const uint8_t reads[] = { ESDM_EGD_CMD_READ_NONBLOCK,
+					 ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK,
+					 ESDM_EGD_CMD_ESDM_READ_UNSEEDED };
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	static uint8_t buf[ESDM_EGD_MAX_BULK + 1];
+	uint8_t zero[64] = { 0 };
+	size_t generated = 0, offset = 0;
+	unsigned int i, requests;
+	int ret = 0;
+
+	if (test_setup("bulk", EGD_PEER_NORMAL, &peer, &client))
+		return 1;
+
+	for (i = 0; i < sizeof(reads); i++) {
+		CHECK(esdm_egd_client_get_random_bulk(client, reads[i], buf,
+						      1000, &generated) == 0 &&
+			      generated == 1000,
+		      "the bulk read 0x%02x delivered %zu bytes, expected 1000",
+		      reads[i], generated);
+		CHECK(test_is_sequence(buf, generated, offset),
+		      "the bulk read 0x%02x is out of sequence", reads[i]);
+		offset += generated;
+	}
+	CHECK(egd_peer_requests(peer) == 3, "%u requests, expected 3",
+	      egd_peer_requests(peer));
+
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, buf,
+					      ESDM_EGD_MAX_BULK,
+					      &generated) == 0 &&
+		      generated == ESDM_EGD_MAX_BULK,
+	      "the largest bulk read delivered %zu bytes", generated);
+
+	/* What the ESDM would close the connection for never reaches it */
+	requests = egd_peer_requests(peer);
+	CHECK(esdm_egd_client_get_random_bulk(client, ESDM_EGD_CMD_READ_BLOCK,
+					      buf, 16, &generated) == -EINVAL,
+	      "a bulk read standing for the blocking read was accepted");
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, buf,
+					      ESDM_EGD_MAX_BULK + 1,
+					      &generated) == -EINVAL,
+	      "a bulk read beyond the bound was accepted");
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, NULL,
+					      16, &generated) == -EINVAL,
+	      "a bulk read without a buffer was accepted");
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, buf,
+					      0, &generated) == 0 &&
+		      generated == 0,
+	      "an empty bulk read failed");
+	CHECK(egd_peer_requests(peer) == requests,
+	      "a rejected bulk read was sent");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	/* A short answer is reported as such */
+	if (test_setup("bulkshort", EGD_PEER_SHORT, &peer, &client))
+		return 1;
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_ESDM_READ_UNSEEDED,
+					      buf, 1000, &generated) == 0 &&
+		      generated == 500,
+	      "the short bulk read delivered %zu bytes, expected 500",
+	      generated);
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	/* More than asked for is rejected on the length, the buffer wiped */
+	if (test_setup("bulklong", EGD_PEER_OVERLONG, &peer, &client))
+		return 1;
+	memset(buf, 0xaa, sizeof(zero));
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, buf,
+					      sizeof(zero),
+					      &generated) == -EPROTO,
+	      "an overlong bulk answer was accepted");
+	CHECK(generated == 0 && !memcmp(buf, zero, sizeof(zero)),
+	      "the buffer of a failed bulk read was not cleansed");
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/* Every field of the state, and the stream in sync after the unknown one. */
+static int test_get_state(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct esdm_egd_client_state state;
+	uint32_t bits = 0;
+	int ret = 0;
+
+	if (test_setup("fullstate", EGD_PEER_NORMAL, &peer, &client))
+		return 1;
+
+	memset(&state, 0xff, sizeof(state));
+	CHECK(esdm_egd_client_get_state(client, &state) == 0,
+	      "the state query failed");
+	CHECK(state.flags == (ESDM_EGD_STATE_FLAG_OPERATIONAL |
+			      ESDM_EGD_STATE_FLAG_FULLY_SEEDED),
+	      "flags 0x%x", state.flags);
+	CHECK(state.entropy_count == EGD_PEER_STATE_ENT_CNT,
+	      "entropy count 0x%x", state.entropy_count);
+	CHECK(state.poolsize == EGD_PEER_STATE_POOLSIZE, "pool size 0x%x",
+	      state.poolsize);
+	CHECK(state.write_wakeup == EGD_PEER_STATE_WRITE_WAKEUP,
+	      "write wakeup threshold 0x%x", state.write_wakeup);
+	CHECK(state.min_reseed_secs == EGD_PEER_STATE_MIN_RESEED_SECS,
+	      "reseed seconds 0x%x", state.min_reseed_secs);
+	CHECK(esdm_egd_client_get_state(client, NULL) == -EINVAL,
+	      "no state pointer was accepted");
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0 &&
+		      bits == EGD_PEER_ENTROPY_BITS,
+	      "the answer after the state is out of sync");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
+ * The status reports arrive without a NUL and may exceed the caller's buffer:
+ * the text is cut short, the JSON document refused, and either way all of the
+ * report is taken off the stream.
+ */
+static int test_status(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	char buf[ESDM_EGD_MAX_STATUS + 1], small[8];
+	uint32_t bits = 0;
+	int ret = 0;
+
+	if (test_setup("status", EGD_PEER_NORMAL, &peer, &client))
+		return 1;
+
+	memset(buf, 'x', sizeof(buf));
+	CHECK(esdm_egd_client_status(client, buf, sizeof(buf)) == 0,
+	      "the status request failed");
+	CHECK(!strcmp(buf, EGD_PEER_STATUS), "status \"%s\"", buf);
+
+	memset(buf, 'x', sizeof(buf));
+	CHECK(esdm_egd_client_status_json(client, buf, sizeof(buf)) == 0,
+	      "the JSON status request failed");
+	CHECK(!strcmp(buf, EGD_PEER_STATUS_JSON), "JSON status \"%s\"", buf);
+
+	/* A buffer of exactly the report and its NUL */
+	CHECK(esdm_egd_client_status_json(client, buf,
+					  strlen(EGD_PEER_STATUS_JSON) + 1) ==
+		      0 &&
+		      !strcmp(buf, EGD_PEER_STATUS_JSON),
+	      "the JSON status does not fit a buffer of its size");
+	CHECK(esdm_egd_client_status_json(client, buf,
+					  strlen(EGD_PEER_STATUS_JSON)) ==
+		      -EMSGSIZE &&
+		      buf[0] == '\0',
+	      "a JSON status one byte too long was returned");
+
+	memset(small, 'x', sizeof(small));
+	CHECK(esdm_egd_client_status(client, small, sizeof(small)) == 0,
+	      "the status request into a small buffer failed");
+	CHECK(strlen(small) == sizeof(small) - 1 &&
+		      !strncmp(small, EGD_PEER_STATUS, sizeof(small) - 1),
+	      "the status is not cut to the buffer: \"%.8s\"", small);
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0 &&
+		      bits == EGD_PEER_ENTROPY_BITS,
+	      "the answer after a status cut short is out of sync");
+
+	CHECK(esdm_egd_client_status_json(client, small, sizeof(small)) ==
+		      -EMSGSIZE,
+	      "a JSON status that does not fit was returned");
+	CHECK(small[0] == '\0', "a refused JSON status left data behind");
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0 &&
+		      bits == EGD_PEER_ENTROPY_BITS,
+	      "the answer after a refused JSON status is out of sync");
+
+	CHECK(esdm_egd_client_status(client, NULL, 16) == -EINVAL,
+	      "a status request without a buffer was accepted");
+	CHECK(esdm_egd_client_status_json(client, buf, 0) == -EINVAL,
+	      "a status request with an empty buffer was accepted");
+	CHECK(egd_peer_connections(peer) == 1,
+	      "%u connections, expected a single one",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	/* An ESDM that cannot produce the report sends an empty one */
+	if (test_setup("nostatus", EGD_PEER_SHORT, &peer, &client))
+		return 1;
+	CHECK(esdm_egd_client_status(client, buf, sizeof(buf)) == -ENODATA,
+	      "an empty status was not reported");
+	CHECK(esdm_egd_client_status_json(client, buf, sizeof(buf)) ==
+		      -ENODATA,
+	      "an empty JSON status was not reported");
+	CHECK(egd_peer_connections(peer) == 1,
+	      "an empty status dropped the connection");
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/* One privileged command: sent with its argument, answered with a status */
+static int test_priv_cmd(struct egd_peer *peer, int result, int expected,
+			 uint8_t cmd, uint32_t arg, unsigned int count)
+{
+	uint8_t seen_cmd = 0;
+	uint32_t seen_arg = ~arg;
+	int ret = 0;
+
+	CHECK(result == expected, "command 0x%02x returned %d, expected %d",
+	      cmd, result, expected);
+	CHECK(egd_peer_last_priv(peer, &seen_cmd, &seen_arg) == count,
+	      "command 0x%02x did not arrive", cmd);
+	CHECK(seen_cmd == cmd && seen_arg == arg,
+	      "command 0x%02x with argument %u arrived as 0x%02x with %u", cmd,
+	      arg, seen_cmd, seen_arg);
+
+	return ret;
+}
+
+static int test_priv_cmds(struct egd_peer *peer,
+			  struct esdm_egd_client *client, int expected)
+{
+	int ret = 0;
+
+	ret |= test_priv_cmd(peer,
+			     esdm_egd_client_add_to_entropy_count(client, 384),
+			     expected, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT, 384,
+			     1);
+	ret |= test_priv_cmd(peer, esdm_egd_client_clear_pool(client),
+			     expected, ESDM_EGD_CMD_ESDM_CLEAR_POOL, 0, 2);
+	ret |= test_priv_cmd(peer, esdm_egd_client_reseed(client), expected,
+			     ESDM_EGD_CMD_ESDM_RESEED, 0, 3);
+	ret |= test_priv_cmd(peer,
+			     esdm_egd_client_set_write_wakeup(client,
+							      0x01020304),
+			     expected, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP,
+			     0x01020304, 4);
+	ret |= test_priv_cmd(peer,
+			     esdm_egd_client_set_min_reseed_secs(client, 600),
+			     expected, ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS,
+			     600, 5);
+
+	return ret;
+}
+
+/*
+ * The privileged commands are answered with a status. A refusal is such an
+ * answer: it is handed to the caller and neither repeated nor paid for with the
+ * connection.
+ */
+static int test_privileged(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct esdm_egd_client_state state;
+	int ret = 0;
+
+	if (test_setup("priv", EGD_PEER_NORMAL, &peer, &client))
+		return 1;
+
+	ret |= test_priv_cmds(peer, client, 0);
+	CHECK(esdm_egd_client_get_state(client, &state) == 0 &&
+		      state.write_wakeup == 0x01020304 &&
+		      state.min_reseed_secs == 600,
+	      "the state does not show what was set: %u, %u",
+	      state.write_wakeup, state.min_reseed_secs);
+	CHECK(egd_peer_connections(peer) == 1,
+	      "%u connections, expected a single one",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	if (test_setup("unpriv", EGD_PEER_UNPRIVILEGED, &peer, &client))
+		return 1;
+
+	ret |= test_priv_cmds(peer, client, -EPERM);
+	CHECK(esdm_egd_client_get_state(client, &state) == 0 &&
+		      state.write_wakeup == EGD_PEER_STATE_WRITE_WAKEUP &&
+		      state.min_reseed_secs == EGD_PEER_STATE_MIN_RESEED_SECS,
+	      "the state after refused commands: %u, %u", state.write_wakeup,
+	      state.min_reseed_secs);
+	CHECK(egd_peer_connections(peer) == 1,
+	      "a refusal cost the connection: %u connections",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/* The bulk insert carries its length in four bytes and is confirmed. */
+static int test_insert(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	static uint8_t data[ESDM_EGD_MAX_BULK + 1];
+	uint32_t sum = 0, expected = 0;
+	size_t len = 0, i;
+	int ret = 0;
+
+	if (test_setup("insert", EGD_PEER_NORMAL, &peer, &client))
+		return 1;
+
+	for (i = 0; i < sizeof(data); i++)
+		data[i] = (uint8_t)(i * 7);
+	for (i = 0; i < 1000; i++)
+		expected += data[i];
+
+	CHECK(esdm_egd_client_insert(client, data, 1000) == 0,
+	      "the bulk insert failed");
+	CHECK(egd_peer_inserted(peer, &len, &sum) == 1 && len == 1000 &&
+		      sum == expected,
+	      "%zu bytes with sum %u arrived, expected 1000 with sum %u", len,
+	      sum, expected);
+
+	CHECK(esdm_egd_client_insert(client, data, ESDM_EGD_MAX_BULK) == 0,
+	      "the largest bulk insert failed");
+	CHECK(egd_peer_inserted(peer, &len, NULL) == 2 &&
+		      len == 1000 + ESDM_EGD_MAX_BULK,
+	      "%zu bytes arrived in all", len);
+
+	CHECK(esdm_egd_client_insert(client, data, 0) == 0,
+	      "an empty bulk insert failed");
+	CHECK(esdm_egd_client_insert(client, data, sizeof(data)) == -EINVAL,
+	      "a bulk insert beyond the bound was accepted");
+	CHECK(esdm_egd_client_insert(client, NULL, 16) == -EINVAL,
+	      "a bulk insert without data was accepted");
+	CHECK(egd_peer_inserted(peer, NULL, NULL) == 2,
+	      "a rejected bulk insert was sent");
+	CHECK(egd_peer_connections(peer) == 1,
+	      "%u connections, expected a single one",
+	      egd_peer_connections(peer));
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
+/*
+ * A peer that does not know the commands of the ESDM closes the connection.
+ * That is an error after the one retry, and the commands of EGD work on.
+ */
+static int test_legacy_peer(void)
+{
+	struct egd_peer *peer;
+	struct esdm_egd_client *client = NULL;
+	struct esdm_egd_client_state state;
+	uint8_t buf[16];
+	uint32_t bits = 0;
+	int ret = 0;
+
+	if (test_setup("legacy", EGD_PEER_LEGACY, &peer, &client))
+		return 1;
+
+	CHECK(esdm_egd_client_get_state(client, &state) < 0,
+	      "a state was read from a peer that has none");
+	CHECK(egd_peer_connections(peer) == 2,
+	      "%u connections, expected the first one and a retry",
+	      egd_peer_connections(peer));
+	/* The peer serves a handful of connections, each of these takes two */
+	CHECK(esdm_egd_client_reseed(client) < 0,
+	      "a reseed was confirmed by a peer that knows none");
+	CHECK(esdm_egd_client_get_random_pr(client, buf, sizeof(buf)) < 0,
+	      "a PR read was answered by a peer that knows none");
+
+	CHECK(esdm_egd_client_entropy_count(client, &bits) == 0 &&
+		      bits == EGD_PEER_ENTROPY_BITS,
+	      "the EGD commands do not work after an unknown one");
+
+	esdm_egd_client_free(client);
+	egd_peer_stop(peer);
+
+	return ret;
+}
+
 int main(int argc, char *argv[])
 {
 	static const struct egd_test tests[] = {
@@ -886,6 +1366,13 @@ int main(int argc, char *argv[])
 		  test_write_to_closed_peer },
 		{ "fork", test_fork },
 		{ "peer arriving late", test_late_peer },
+		{ "ESDM reads", test_esdm_reads },
+		{ "ESDM bulk read", test_bulk_read },
+		{ "ESDM state", test_get_state },
+		{ "ESDM status reports", test_status },
+		{ "ESDM privileged commands", test_privileged },
+		{ "ESDM bulk insert", test_insert },
+		{ "peer without the ESDM commands", test_legacy_peer },
 	};
 	unsigned int failed = 0;
 	size_t i;

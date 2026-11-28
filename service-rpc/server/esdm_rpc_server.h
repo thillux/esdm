@@ -65,7 +65,8 @@ void esdm_server_remove_stale_socket(const char *path, int socktype);
 
 /**
  * @brief Remove the server IPC resources: both RPC Unix domain sockets, the
- *	  status SHM segment and its semaphores.
+ *	  EGD sockets the server bound, the status SHM segment and its
+ *	  semaphores.
  *
  * Honors esdm_config_ipc_cleanup() and skips the socket removal when the
  * sockets are managed by systemd (socket activation). The removal of the

@@ -27,6 +27,11 @@
  * checked is what a user and a script see: the exit status, the message and the
  * bytes on stdout. Skipped (77) unless run as root, since the esdm-server
  * refuses to start otherwise.
+ *
+ * In a build without the RPC interface both sides use the EGD interface: the
+ * server serves its default EGD socket and the tool talks to it. The commands
+ * the EGD protocol cannot express are left out here, within ESDM_SERVER_RPC;
+ * that the tool refuses them is checked by tests/tool/tool_cli_test.c.
  */
 
 #define _GNU_SOURCE
@@ -58,6 +63,13 @@
  * the whole run, so the failure is this test's rather than the harness'.
  */
 #define TEST_WATCHDOG_SEC 480
+
+/* The socket the server is up with, and the tool talks to */
+#ifdef ESDM_SERVER_RPC
+#define TEST_SERVER_SOCKET ESDM_RPC_UNPRIV_SOCKET
+#else
+#define TEST_SERVER_SOCKET ESDM_EGD_DEFAULT_SOCKET
+#endif
 
 /* How long the ESDM is given to reach the fully seeded level */
 #define TEST_SEED_TRIES "30"
@@ -101,8 +113,8 @@ static int server_start(void)
 		_exit(127);
 	}
 
-	/* The server is up once it has bound its unprivileged RPC socket */
-	if (!test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
+	/* The server is up once it has bound the socket of its clients */
+	if (!test_wait_for_type(TEST_SERVER_SOCKET, S_IFSOCK,
 				TEST_WAIT_TIMEOUT_MS)) {
 		printf("the esdm-server did not come up\n");
 		return 1;
@@ -217,7 +229,9 @@ static void test_status(void)
 {
 	const char *const status[] = { "-s", NULL };
 	const char *const json[] = { "--status-json", NULL };
+#ifdef ESDM_SERVER_RPC
 	const char *const jent[] = { "-J", NULL };
+#endif
 	const char *const syslog[] = { "--use-syslog", "-s", NULL };
 	const char *const verbose[] = { "-v", "-v", "-V", "-s", NULL };
 	struct test_run r;
@@ -237,6 +251,7 @@ static void test_status(void)
 	      "--status-json did not produce a valid status document: %.300s",
 	      r.out);
 
+#ifdef ESDM_SERVER_RPC
 	/*
 	 * The DRNG instances, which the status document above does not carry.
 	 */
@@ -299,6 +314,7 @@ static void test_status(void)
 
 	/* Present or not, the jitterentropy status must not fail the tool */
 	check_ok(jent);
+#endif
 
 	/* The logging switches change where output goes, not whether it works */
 	check_ok(syslog);
@@ -361,6 +377,7 @@ static void test_entropy_reporting(void)
 	check_says(seeded, "ESDM fully seeded: 1");
 }
 
+#ifdef ESDM_SERVER_RPC
 static void test_get_seed(void)
 {
 	const char *const hex[] = { "--get-seed", NULL };
@@ -381,6 +398,7 @@ static void test_get_seed(void)
 	check_ok(raw);
 	check_ok(unseeded);
 }
+#endif /* ESDM_SERVER_RPC */
 
 /*
  * The commands that change the ESDM's state rather than reporting on it. They
@@ -394,6 +412,13 @@ static void test_privileged_commands(void)
 					  "16", NULL };
 	const char *const clear[] = { "--clear-pool", NULL };
 	const char *const reseed[] = { "--reseed-crng", NULL };
+	const char *const interval[] = { "--max-reseed-secs", "300", NULL };
+	/* More than one write of the EGD protocol takes */
+	char long_data[601];
+	const char *const write_long[] = { "-W", long_data, "-B", "256",
+					   NULL };
+	const char *const overclaim[] = { "-W", "ab", "-B", "17", NULL };
+	struct test_run r;
 
 	if (geteuid()) {
 		printf("not root - skipping the privileged commands\n");
@@ -404,12 +429,30 @@ static void test_privileged_commands(void)
 	check_ok(clear);
 	check_ok(reseed);
 
+	/* The interval is read back from the server and reported */
+	check_says(interval, "Maximum reseed interval: 300 seconds");
+
+	/*
+	 * Data with an entropy claim. What the pool holds afterwards is not
+	 * checked: a reseed may have taken it by the time it is asked for.
+	 */
+	memset(long_data, 'x', sizeof(long_data) - 1);
+	long_data[sizeof(long_data) - 1] = '\0';
+	check_ok(write_long);
+
+	/* Two bytes do not hold 17 bits */
+	announce(overclaim);
+	CHECK(test_run(&r, overclaim, NULL) == EXIT_FAILURE,
+	      "an entropy claim beyond the data was accepted");
+
+#ifdef ESDM_SERVER_RPC
 	{
 		/* The self tests, run on demand. */
 		const char *const selftest[] = { "--selftest", NULL };
 
 		check_says(selftest, "Self tests passed");
 	}
+#endif
 
 #ifdef ESDM_HAS_AUX_CLIENT
 	{
@@ -437,15 +480,19 @@ static void test_stress_modes(void)
 				       TEST_STRESS_DURATION, NULL };
 	const char *const process[] = { "--stress-process", "--stress-duration",
 					TEST_STRESS_DURATION, NULL };
+#ifdef ESDM_SERVER_RPC
 	const char *const init_fini[] = { "--stress-init-fini",
 					  "--stress-duration",
 					  TEST_STRESS_DURATION, NULL };
+#endif
 	const char *const fork_test[] = { "--stress-fork", NULL };
 
 	check_ok(delay);
 	check_ok(thread);
 	check_ok(process);
+#ifdef ESDM_SERVER_RPC
 	check_ok(init_fini);
+#endif
 	check_ok(fork_test);
 }
 
@@ -498,6 +545,7 @@ static void test_endless_stress_without_server(void)
 	      r.err);
 }
 
+#ifdef ESDM_SERVER_RPC
 /* Only the builds that can set the rates of the sources ask, see below */
 #if defined(ESDM_TESTMODE) || defined(ESDM_BUILDTYPE_DEBUG)
 /*
@@ -588,6 +636,7 @@ static void test_es_rates(void)
 	      r.err);
 #endif
 }
+#endif /* ESDM_SERVER_RPC */
 
 int main(int argc, char *argv[])
 {
@@ -633,11 +682,15 @@ int main(int argc, char *argv[])
 		test_status();
 		test_get_random();
 		test_entropy_reporting();
+#ifdef ESDM_SERVER_RPC
 		test_get_seed();
+#endif
 		test_stress_modes();
 		test_benchmark();
 		test_privileged_commands();
+#ifdef ESDM_SERVER_RPC
 		test_es_rates();
+#endif
 	}
 
 	server_stop();

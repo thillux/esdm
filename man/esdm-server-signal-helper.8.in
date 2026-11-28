@@ -35,6 +35,18 @@ as
 .B esdm\-tool \-\-reseed\-crng
 does. This requires root; no PID file is needed for it.
 .PP
+A build without the RPC interface (meson option
+.BR esdm\-server\-rpc )
+sends the reseed command of the EGD interface instead
+.RB ( esdm_egd_client_reseed (),
+see
+.BR libesdm_egd_client (3)),
+to the socket the environment variable
+.B ESDM_EGD_SOCKET
+names, or else to the EGD socket a server of such a build serves by default,
+.IR @EGD_SOCKET_PATH@ .
+The ESDM carries the command out for a client connected as root.
+.PP
 Both operations are wired to the sleep targets by the shipped
 .BR esdm\-server\-suspend.service " and " esdm\-server\-resume.service
 systemd units, so the helper rarely needs to be invoked by hand.
@@ -78,6 +90,7 @@ and the file the shipped suspend unit passes to this helper.
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-tool (1),
-.BR libesdm_rpc_client (3)
+.BR libesdm_rpc_client (3),
+.BR libesdm_egd_client (3)
 .SH AUTHOR
 Stephan Mueller <smueller@chronox.de>

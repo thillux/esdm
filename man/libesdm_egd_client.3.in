@@ -20,12 +20,15 @@ The reason to use this rather than
 is reach: the EGD interface needs nothing but a single UNIX domain stream
 socket \- no protobuf, no shared memory, no second socket \- so it works in
 places the RPC interface cannot go, such as a chroot that can be handed
-exactly one socket. The price is the protocol: the commands this library uses are the legacy
-ones, which neither select prediction resistance per request nor transfer more
+exactly one socket. The price is the protocol: the commands of EGD
+neither select prediction resistance per request nor transfer more
 than
 .B ESDM_EGD_MAX_TRANSFER
 (255) bytes per request, though this client splits larger requests
-transparently.
+transparently. The commands the ESDM adds to the protocol lift both limits and
+give access to its state, its status and its administration; see
+.B "ESDM extensions"
+below.
 .SS Clients and concurrency
 A client owns exactly one connection. The EGD protocol carries no request
 identifiers \- responses are matched to requests purely by their order on the
@@ -134,6 +137,141 @@ is therefore not an error \- the claim is simply dropped.
 .TP
 .BI "int esdm_egd_client_get_pid(struct esdm_egd_client *" client ", pid_t *" pid ");"
 PID of the daemon serving the socket.
+.SS ESDM extensions
+The following functions use the commands the ESDM adds to the EGD protocol
+.RI ( esdm_egd_protocol.h ).
+They connect, reconnect and time out like the functions above. A peer that does
+not know such a command \- another EGD, or an ESDM from before the command was
+added \- closes the connection: the function then fails with
+.B \-EPIPE
+or, where it was still sending data, with
+.BR \-ECONNRESET ,
+after its one retry on a fresh connection.
+.PP
+The commands that change the entropy accounting or the DRNGs are privileged:
+the ESDM carries them out for a client connected with UID 0 only. For any other
+client the function returns
+.BR \-EPERM ;
+the connection stays usable.
+.TP
+.BI "int esdm_egd_client_get_state(struct esdm_egd_client *" client ", struct esdm_egd_client_state *" state ");"
+State of the ESDM with all of its fields:
+.I flags
+as
+.BR esdm_egd_client_get_state_flags (),
+.I entropy_count
+and
+.IR poolsize ,
+the entropy and the size of the auxiliary pool in bits,
+.IR write_wakeup ,
+the write wakeup threshold in bits, and
+.IR min_reseed_secs ,
+the maximum time between two reseeds of a DRNG in seconds.
+.TP
+.BI "int esdm_egd_client_get_random_pr(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ");"
+As
+.BR esdm_egd_client_get_random (),
+but served by the prediction resistance DRNG whatever the socket: every request
+is preceded by a reseed from the entropy sources and delivers no more than they
+just produced, so that it takes as long as collecting that entropy does.
+.TP
+.BI "int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"
+As
+.BR esdm_egd_client_get_random_nonblock (),
+but served by the prediction resistance DRNG.
+.TP
+.BI "int esdm_egd_client_get_random_unseeded(struct esdm_egd_client *" client ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"
+Obtain at most
+.B ESDM_EGD_MAX_TRANSFER
+bytes without waiting for the DRNGs to be fully seeded, the semantics of
+.IR /dev/urandom .
+The ESDM hands out nothing before it is operational, the answer is empty then;
+otherwise the answer is short only when the DRNG reached the most it may
+generate without a full reseed, or on an error in the ESDM.
+.TP
+.BI "int esdm_egd_client_get_random_bulk(struct esdm_egd_client *" client ", uint8_t " read_cmd ", uint8_t *" buf ", size_t " buflen ", size_t *" generated ");"
+Obtain at most
+.B ESDM_EGD_MAX_BULK
+(65536) bytes in one transfer.
+.I read_cmd
+names the read that does not wait which the transfer stands for and is
+answered as:
+.RS
+.TP
+.B ESDM_EGD_CMD_READ_NONBLOCK
+.BR esdm_egd_client_get_random_nonblock ()
+.TP
+.B ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK
+.BR esdm_egd_client_get_random_pr_nonblock ()
+.TP
+.B ESDM_EGD_CMD_ESDM_READ_UNSEEDED
+.BR esdm_egd_client_get_random_unseeded ()
+.RE
+.IP
+Any other value is refused with
+.BR \-EINVAL .
+.TP
+.BI "int esdm_egd_client_status(struct esdm_egd_client *" client ", char *" buf ", size_t " buflen ");"
+Status report of the ESDM as text, NUL terminated. A report that does not fit
+.I buf
+is cut short;
+.B ESDM_EGD_MAX_STATUS
++ 1 bytes hold every report. Returns
+.B \-ENODATA
+when the ESDM could not produce the report.
+.TP
+.BI "int esdm_egd_client_status_json(struct esdm_egd_client *" client ", char *" buf ", size_t " buflen ");"
+Status of the ESDM as JSON document, NUL terminated. A document that does not
+fit
+.I buf
+is not returned in part: the function fails with
+.BR \-EMSGSIZE .
+It returns
+.B \-ENODATA
+when the ESDM could not produce the document or the document exceeds
+.BR ESDM_EGD_MAX_STATUS .
+.TP
+.BI "int esdm_egd_client_add_to_entropy_count(struct esdm_egd_client *" client ", uint32_t " entropy_bits ");"
+Privileged. Credit
+.I entropy_bits
+to the auxiliary pool, as the
+.B RNDADDTOENTCNT
+ioctl does; the ESDM never credits more than the pool can hold. If the
+transfer fails after the command was sent, the function returns the error
+without sending the command again, as a second one could credit twice: the
+caller cannot tell then whether the entropy was credited.
+.TP
+.BI "int esdm_egd_client_clear_pool(struct esdm_egd_client *" client ");"
+Privileged. Set the entropy of the auxiliary pool to zero, as the
+.BR RNDZAPENTCNT " and " RNDCLEARPOOL
+ioctls do.
+.TP
+.BI "int esdm_egd_client_reseed(struct esdm_egd_client *" client ");"
+Privileged. Have the DRNGs reseeded at their next use, as the
+.B RNDRESEEDCRNG
+ioctl does.
+.TP
+.BI "int esdm_egd_client_set_write_wakeup(struct esdm_egd_client *" client ", uint32_t " bits ");"
+Privileged. Set the write wakeup threshold in bits, the counterpart of
+.IR /proc/sys/kernel/random/write_wakeup_threshold .
+.TP
+.BI "int esdm_egd_client_set_min_reseed_secs(struct esdm_egd_client *" client ", uint32_t " seconds ");"
+Privileged. Set the maximum time between two reseeds of a DRNG, the
+counterpart of
+.IR /proc/sys/kernel/random/urandom_min_reseed_secs .
+The ESDM may adjust the value;
+.BR esdm_egd_client_get_state ()
+reports the one in effect.
+.TP
+.BI "int esdm_egd_client_insert(struct esdm_egd_client *" client ", const uint8_t *" buf ", size_t " buflen ");"
+Insert at most
+.B ESDM_EGD_MAX_BULK
+bytes into the auxiliary pool without entropy credit, for every caller. Other
+than
+.BR esdm_egd_client_write_entropy (),
+whose command has no answer, the ESDM confirms the insertion. A privileged
+caller credits entropy to the data with
+.BR esdm_egd_client_add_to_entropy_count ().
 .SH RETURN VALUE
 All functions returning
 .B int

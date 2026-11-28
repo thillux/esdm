@@ -34,6 +34,22 @@ the EGD protocol, if a socket is configured with
 .BR OPTIONS ).
 .RE
 .PP
+The RPC interface and the EGD interface are each a build option,
+.B esdm\-server\-rpc
+and
+.BR esdm\-server\-egd ;
+a daemon is built with at least one of them. A daemon built without the RPC
+interface opens no RPC socket and always serves the EGD protocol: on the sockets
+it is given, and on
+.I @EGD_SOCKET_PATH@
+when neither
+.B \-\-egd_socket
+nor systemd gives it the regular socket. A daemon built without the EGD
+interface rejects
+.B \-\-egd_socket
+and
+.BR \-\-egd_socket_pr .
+.PP
 The daemon must be started as root. It creates its listening sockets and its
 status shared memory segment while privileged and then permanently drops to an
 unprivileged user; see
@@ -128,13 +144,15 @@ is given.
 .BR \-e ", " \-\-egd_socket " \fIPATH\fR"
 Additionally serve the EGD protocol on the UNIX domain socket
 .IR PATH .
-Disabled by default.
+Disabled by default; a daemon built without the RPC interface serves
+.I @EGD_SOCKET_PATH@
+without this option. Rejected by a daemon built without the EGD interface.
 .TP
 .BR \-E ", " \-\-egd_socket_pr " \fIPATH\fR"
 Serve the EGD protocol backed by the prediction\-resistance generator on
 .IR PATH .
 The EGD protocol cannot select the generator per request, hence the separate
-socket.
+socket. Rejected by a daemon built without the EGD interface.
 .TP
 .BR \-\-es_ext " \fIPATH\fR"
 Read the external entropy source served on the UNIX domain socket
@@ -249,11 +267,13 @@ build option.
 .TP
 .I /run/esdm\-egd.socket
 Default socket of the EGD interface, when the shipped systemd socket unit is
-used.
+used, and the socket a daemon built without the RPC interface serves when it is
+given none.
 .SH EXIT STATUS
 .B esdm\-server
 exits with a non\-zero status when it cannot initialize the ESDM or the
-requested interfaces, or when an RPC worker thread fails.
+requested interfaces, or when an RPC worker thread fails \- in a daemon built
+without the RPC interface, when the EGD worker thread fails.
 .SH SEE ALSO
 .BR esdm\-tool (1),
 .BR esdm\-cuse\-random (8),

@@ -68,6 +68,20 @@ enum egd_peer_mode {
 	 * A connection counts once its end is shut down.
 	 */
 	EGD_PEER_SHUT_RD,
+
+	/*
+	 * Refuse the privileged commands of the ESDM with -EPERM, as the ESDM
+	 * does for a peer that is not connected with UID 0, and serve
+	 * everything else normally.
+	 */
+	EGD_PEER_UNPRIVILEGED,
+
+	/*
+	 * Know the commands of EGD only: one of the ESDM's extensions closes
+	 * the connection, which is what an EGD other than the ESDM, or an ESDM
+	 * from before the command was added, does.
+	 */
+	EGD_PEER_LEGACY,
 };
 
 /* What the peer answers an entropy count command with. */
@@ -75,6 +89,19 @@ enum egd_peer_mode {
 
 /* What it answers a PID request with. */
 #define EGD_PEER_PID 4711
+
+/* The fields of its state next to the flags, until a command sets them. */
+#define EGD_PEER_STATE_ENT_CNT 0x00000111u
+#define EGD_PEER_STATE_POOLSIZE 0x00002200u
+#define EGD_PEER_STATE_WRITE_WAKEUP 0x00000333u
+#define EGD_PEER_STATE_MIN_RESEED_SECS 0x00000444u
+
+/*
+ * Its status reports. EGD_PEER_SHORT answers with an empty report, which is
+ * what an ESDM that cannot produce one sends.
+ */
+#define EGD_PEER_STATUS "ESDM test peer\nstatus: running\n"
+#define EGD_PEER_STATUS_JSON "{\"peer\":\"test\",\"running\":true}"
 
 struct egd_peer;
 
@@ -116,6 +143,30 @@ unsigned int egd_peer_requests(struct egd_peer *peer);
 unsigned int egd_peer_last_write(struct egd_peer *peer, uint8_t *buf,
 				 size_t buflen, size_t *len,
 				 uint32_t *entropy_bits);
+
+/**
+ * @brief The last privileged command of the ESDM received
+ *
+ * @param [out] cmd The command, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT to
+ *		    ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS
+ * @param [out] arg Its argument, 0 for a command without one
+ *
+ * @return the number of privileged commands received so far, refused ones
+ *	   included
+ */
+unsigned int egd_peer_last_priv(struct egd_peer *peer, uint8_t *cmd,
+				uint32_t *arg);
+
+/**
+ * @brief The data of the bulk insert commands received
+ *
+ * @param [out] len Number of bytes inserted so far
+ * @param [out] sum Sum of all of these bytes
+ *
+ * @return the number of bulk insert commands received so far
+ */
+unsigned int egd_peer_inserted(struct egd_peer *peer, size_t *len,
+			       uint32_t *sum);
 
 /**
  * @brief The byte a read command is answered with at offset @offset

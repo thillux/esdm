@@ -65,13 +65,12 @@
 #include "esdm_ppoll.h"
 
 /*
- * Two helpers the EGD server shares with the RPC server, which is not linked
+ * A helper the EGD server shares with the RPC server, which is not linked
  * here - it would pull the entire RPC machinery into a test speaking a
  * different protocol. Declared rather than included from esdm_rpc_server.h for
- * the same reason, so only review keeps the signatures in step.
+ * the same reason, so only review keeps the signature in step.
  */
 void esdm_server_remove_stale_socket(const char *path, int socktype);
-int set_fd_nonblocking(int fd);
 
 /*
  * The socket of this test is created in a temporary directory of its own, where
@@ -83,22 +82,17 @@ void esdm_server_remove_stale_socket(const char *path, int socktype)
 	(void)socktype;
 }
 
+#ifndef ESDM_SERVER_RPC
 /*
- * Only reached on the systemd socket activation path, which this test does not
- * take. Implemented rather than stubbed anyway: a stub that silently succeeds
- * would leave a blocking descriptor behind should that ever change.
+ * In a build without the RPC interface a failed EGD worker ends the server,
+ * through the engine that is not linked here either. No test has it fail.
  */
-int set_fd_nonblocking(int fd)
+void esdm_rpc_server_signal_exit(void);
+
+void esdm_rpc_server_signal_exit(void)
 {
-	int flags = fcntl(fd, F_GETFL);
-
-	if (flags < 0)
-		return -errno;
-	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-		return -errno;
-
-	return 0;
 }
+#endif
 
 /*
  * Backstop for a request that never comes back. Below the timeout the harness

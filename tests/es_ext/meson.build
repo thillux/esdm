@@ -106,8 +106,9 @@ if get_option('es_ext').enabled() and get_option('esdm-es-ext').enabled()
 			suite: 'es_ext', timeout: 60)
 	endforeach
 
-	# Skipped (77) unless run as root
-	if get_option('esdm-server').enabled()
+	# Skipped (77) unless run as root. It asks the server for its status
+	# over the RPC interface.
+	if get_option('esdm-server').enabled() and get_option('esdm-server-rpc').enabled()
 		es_ext_server_test = executable('es_ext_server_test',
 			'es_ext_server_test.c',
 			include_directories: [ include_dirs_client,

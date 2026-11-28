@@ -40,8 +40,18 @@
 
 #include "../test_run.h"
 
+/* How the usage names the program */
+#ifdef ESDM_SERVER_RPC
+#define TEST_USAGE_TITLE "ESDM RPC server"
+#else
+#define TEST_USAGE_TITLE "ESDM server (EGD interface only)"
+#endif
+
 /* What an unprivileged run gets to say before it stops */
 #define TEST_NOT_ROOT "must start as root"
+
+/* What a build without the EGD interface says to an option of it */
+#define TEST_NO_EGD "the EGD interface is not part of this build"
 
 static void test_usage(void)
 {
@@ -55,7 +65,7 @@ static void test_usage(void)
 	 * having asked for it is not success - there is no daemon afterwards.
 	 */
 	CHECK_EQ(rc, 1);
-	CHECK(strstr(r.err, "ESDM RPC server") != NULL,
+	CHECK(strstr(r.err, TEST_USAGE_TITLE) != NULL,
 	      "the usage does not name the program (output: %.200s)", r.err);
 
 	/*
@@ -69,12 +79,17 @@ static void test_usage(void)
 	      "the usage does not mention --groupname");
 	CHECK(strstr(r.err, "--foreground") != NULL,
 	      "the usage does not mention --foreground");
+#ifdef ESDM_SERVER_EGD
 	CHECK(strstr(r.err, "--egd_socket") != NULL,
 	      "the usage does not mention --egd_socket");
+#else
+	CHECK(strstr(r.err, "--egd_socket") == NULL,
+	      "the usage offers --egd_socket in a build without the EGD interface");
+#endif
 
 	/* The long form is the same answer */
 	CHECK_EQ(test_run(&r, help_long, NULL), 1);
-	CHECK(strstr(r.err, "ESDM RPC server") != NULL,
+	CHECK(strstr(r.err, TEST_USAGE_TITLE) != NULL,
 	      "--help does not print the usage (output: %.200s)", r.err);
 }
 
@@ -171,6 +186,7 @@ static void test_options_accepted(void)
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the short options were not all accepted (output: %.300s)", r.err);
 
+#ifdef ESDM_SERVER_EGD
 	/*
 	 * The EGD sockets are only recorded here - they are bound once the
 	 * daemon is up, so a path that cannot exist is accepted at this point.
@@ -184,6 +200,26 @@ static void test_options_accepted(void)
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,
 	      "the long EGD socket options were not accepted (output: %.300s)",
 	      r.err);
+#else
+	/*
+	 * A build without the EGD interface says so, rather than starting a
+	 * daemon that does not serve the socket it was asked for.
+	 */
+	CHECK_EQ(test_run(&r, sockets, NULL), 1);
+	CHECK(strstr(r.err, TEST_NO_EGD) != NULL &&
+		      strstr(r.err, TEST_NOT_ROOT) == NULL,
+	      "the EGD socket options were not rejected (output: %.300s)",
+	      r.err);
+
+	CHECK_EQ(test_run(&r, sockets_long, NULL), 1);
+	CHECK(strstr(r.err, TEST_NO_EGD) != NULL &&
+		      strstr(r.err, TEST_NOT_ROOT) == NULL,
+	      "the long EGD socket options were not rejected (output: %.300s)",
+	      r.err);
+	CHECK(strstr(r.err, "--egd_socket") != NULL,
+	      "the rejection does not name the option (output: %.300s)",
+	      r.err);
+#endif
 
 	CHECK_EQ(test_run(&r, assigned, NULL), 1);
 	CHECK(strstr(r.err, TEST_NOT_ROOT) != NULL,

@@ -243,6 +243,8 @@ static struct esdm_egd_listener esdm_egd_listeners[] = {
 
 static atomic_int esdm_egd_exit = 0;
 static atomic_bool esdm_egd_worker_running = false;
+/* What the worker left with, see esdm_egd_server_worker_ret() */
+static atomic_int esdm_egd_worker_ret = 0;
 
 static int esdm_egd_listener_enable(struct esdm_egd_listener *listener,
 				    const char *socket_path)
@@ -296,6 +298,12 @@ static bool esdm_egd_server_active(void)
 	}
 
 	return false;
+}
+
+/* Is the regular socket, the one without prediction resistance, requested? */
+bool esdm_egd_server_regular_enabled(void)
+{
+	return esdm_egd_listener_enabled(ESDM_EGD_LISTENER_REGULAR);
 }
 
 bool esdm_egd_server_enabled(void)
@@ -475,6 +483,23 @@ int esdm_egd_server_socket_init(void)
 		if (ret)
 			return ret;
 	}
+
+#ifndef ESDM_SERVER_RPC
+	/*
+	 * A server built without the RPC interface has no other one. It is
+	 * given the default socket where it was given none, see
+	 * ESDM_EGD_DEFAULT_SOCKET, so that this only happens when systemd
+	 * started it with sockets none of which is an EGD one.
+	 */
+	if (!esdm_egd_server_active()) {
+		esdm_logger(
+			LOGGER_ERR, LOGGER_C_SERVER,
+			"EGD server: no socket to serve - systemd handed over none named %s or %s, and this build has no other interface\n",
+			ESDM_EGD_LISTENER_REGULAR->systemd_name,
+			ESDM_EGD_LISTENER_PR->systemd_name);
+		return -ENOENT;
+	}
+#endif
 
 	return 0;
 }
@@ -1933,6 +1958,17 @@ out:
 	if (epfd >= 0)
 		close(epfd);
 
+	atomic_store(&esdm_egd_worker_ret, ret);
+#ifndef ESDM_SERVER_RPC
+	/*
+	 * The only interface of this build: a server without it serves nobody,
+	 * so that a failure of the worker ends it, as a failure of an RPC
+	 * worker does.
+	 */
+	if (ret)
+		esdm_rpc_server_signal_exit();
+#endif
+
 	atomic_store(&esdm_egd_worker_running, false);
 
 	return ret;
@@ -1960,6 +1996,11 @@ int esdm_egd_server_start(void)
 	}
 
 	return ret;
+}
+
+int esdm_egd_server_worker_ret(void)
+{
+	return atomic_load(&esdm_egd_worker_ret);
 }
 
 void esdm_egd_server_signal_exit_safe(void)

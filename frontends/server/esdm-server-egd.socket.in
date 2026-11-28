@@ -2,9 +2,11 @@
 #
 # This socket is not part of the ESDM's regular interfaces - it exists to serve
 # legacy consumers that can only obtain entropy from an EGD (libgcrypt built
-# with --enable-random=egd, OpenSSL's RAND_egd(), ...). It is therefore not
-# pulled in by esdm-server.service; starting or enabling this unit is what
-# requests the EGD interface:
+# with --enable-random=egd, OpenSSL's RAND_egd(), ...). In a build with the RPC
+# interface it is therefore not pulled in by esdm-server.service, and starting
+# or enabling this unit is what requests the EGD interface; a build without the
+# RPC interface (meson option esdm-server-rpc) has this socket as its only
+# regular one, and esdm-server.service requires it:
 #
 #	systemctl enable --now esdm-server-egd.socket
 #

@@ -49,7 +49,7 @@ DeviceAllow=/dev/tpmrm0 rw
 DevicePolicy=strict
 # --keep_ipc: the CUSE daemons are not coupled to this unit (only Wants=), so
 # they must survive a server restart; hence do not remove the status SHM
-# segment and semaphores they monitor at shutdown. (The RPC sockets are
+# segment and semaphores they monitor at shutdown. (The sockets are
 # systemd-managed via socket activation and never removed by the server.)
 #
 # ESDM_SERVER_OPTIONS: options of a site, set in a drop-in, e.g. those reading

@@ -188,8 +188,11 @@ static void test_privileged_commands_refused(void)
 		{ "--max-reseed-secs", "0" },
 		{ "-W", "some entropy" },
 		{ "--endless-stress", NULL },
+#ifdef ESDM_SERVER_RPC
+		/* Not part of a tool without the RPC interface at all */
 		{ "--selftest", NULL },
 		{ "--set-es-rate", "all=0" },
+#endif
 #ifdef ESDM_HAS_AUX_CLIENT
 		{ "--seed-via-os", NULL },
 		{ "--reseed-via-os", NULL },
@@ -232,7 +235,9 @@ static void test_without_server(void)
 		  EXIT_FAILURE },
 		{ { "-e", NULL }, "entropy count failed", EXIT_FAILURE },
 		{ { "-E", NULL }, "entropy level failed", EXIT_FAILURE },
+#ifdef ESDM_SERVER_RPC
 		{ { "--get-seed", NULL }, "Unable to fetch seed", EXIT_FAILURE },
+#endif
 		{ { "-w", "1", NULL }, "Waiting another round", EXIT_FAILURE },
 		/*
 		 * The status commands report the failure but exit successfully:
@@ -241,7 +246,9 @@ static void test_without_server(void)
 		 */
 		{ { "-s", NULL }, "Fetching ESDM status failed", -1 },
 		{ { "--status-json", NULL }, "Fetching ESDM status failed", -1 },
+#ifdef ESDM_SERVER_RPC
 		{ { "-J", NULL }, "jitterentropy status failed", -1 },
+#endif
 		{ { "--benchmark-mode", "pr", NULL },
 		  "Failed to get bytes from ESDM", EXIT_FAILURE },
 	};
@@ -283,6 +290,58 @@ static void test_without_server(void)
 		      "%s without a server did not report \"%s\" (output: %.300s)",
 		      cases[i].opts[0], cases[i].says, runs[i].err);
 	}
+}
+
+/*
+ * A tool built without the RPC interface works over the EGD interface, whose
+ * protocol cannot express every command. Such a command is refused with the
+ * option and the reason, whoever asks and whether a server runs or not - and
+ * not with the complaint about root, which would send the user to sudo for a
+ * command that is not there.
+ */
+static void test_commands_without_rpc(void)
+{
+#ifndef ESDM_SERVER_RPC
+	static const struct {
+		const char *opts[3];
+		const char *names;
+	} cases[] = {
+		{ { "--drng-status", NULL }, "--drng-status" },
+		{ { "--drng-status=pr", NULL }, "--drng-status" },
+		{ { "--drng-status-json=0", NULL }, "--drng-status" },
+		{ { "--jent-status", NULL }, "--jent-status" },
+		{ { "-J", NULL }, "--jent-status" },
+		{ { "--get-seed", NULL }, "--get-seed" },
+		{ { "--selftest", NULL }, "--selftest" },
+		{ { "--set-es-rate", "all=0", NULL }, "--set-es-rate" },
+		{ { "--stress-init-fini", NULL }, "--stress-init-fini" },
+	};
+	const char *const help[] = { "-h", NULL };
+	struct test_run r;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		int rc = test_run(&r, cases[i].opts, NULL);
+
+		CHECK_EQ(rc, EXIT_FAILURE);
+		CHECK(strstr(r.err, cases[i].names) != NULL &&
+			      strstr(r.err, "needs the RPC interface") != NULL &&
+			      strstr(r.err, "esdm-server-rpc") != NULL,
+		      "%s was not refused with the option and the reason (output: %.300s)",
+		      cases[i].opts[0], r.err);
+		CHECK(strstr(r.err, "must start as root") == NULL,
+		      "%s was refused for want of root (output: %.300s)",
+		      cases[i].opts[0], r.err);
+	}
+
+	/* The usage says which interface it is and what it lacks */
+	CHECK_EQ(test_run(&r, help, NULL), EXIT_FAILURE);
+	CHECK(strstr(r.err, "ESDM_EGD_SOCKET") != NULL &&
+		      strstr(r.err, ESDM_EGD_DEFAULT_SOCKET) != NULL,
+	      "the usage does not name the EGD socket (output: %.300s)", r.err);
+	CHECK(strstr(r.err, "Not available over this interface") != NULL,
+	      "the usage does not list what the EGD interface lacks");
+#endif
 }
 
 static void test_fips_checkfile(void)
@@ -365,6 +424,7 @@ int main(int argc, char *argv[])
 	test_out_of_range_numbers();
 	test_privileged_commands_refused();
 	test_without_server();
+	test_commands_without_rpc();
 	test_fips_checkfile();
 
 	test_run_fini();

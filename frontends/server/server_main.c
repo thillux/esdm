@@ -92,7 +92,11 @@ static void usage(void)
 	memset(version, 0, sizeof(version));
 	esdm_version(version, sizeof(version));
 
+#ifdef ESDM_SERVER_RPC
 	fprintf(stderr, "\nESDM RPC server\n\n");
+#else
+	fprintf(stderr, "\nESDM server (EGD interface only)\n\n");
+#endif
 	fprintf(stderr, "%s\n\n", version);
 	fprintf(stderr, "Usage:\n");
 	fprintf(stderr, "\t-h --help\tThis help information\n");
@@ -134,15 +138,24 @@ static void usage(void)
 		"\t   --pid_namespace\tFork the daemon into an isolating PID namespace;\n");
 	fprintf(stderr,
 		"\t\t\tthe starting process remains as supervisor\n");
+#if defined(ESDM_SERVER_EGD) && defined(ESDM_SERVER_RPC)
 	fprintf(stderr,
 		"\t-e --egd_socket <PATH>\tAdditionally serve the EGD protocol on the\n");
 	fprintf(stderr,
 		"\t\t\tUnix domain socket PATH (disabled by default)\n");
+#elif defined(ESDM_SERVER_EGD)
+	fprintf(stderr,
+		"\t-e --egd_socket <PATH>\tServe the EGD protocol on the Unix domain\n");
+	fprintf(stderr, "\t\t\tsocket PATH (default: %s)\n",
+		ESDM_EGD_DEFAULT_SOCKET);
+#endif
+#ifdef ESDM_SERVER_EGD
 	fprintf(stderr,
 		"\t-E --egd_socket_pr <PATH>\tThe same, but serving the prediction\n");
 	fprintf(stderr,
 		"\t\t\tresistance generator - the EGD protocol cannot select it\n");
 	fprintf(stderr, "\t\t\tper request, so it gets a socket of its own\n");
+#endif
 	fprintf(stderr,
 		"\t   --es_ext <PATH>\tRead the external entropy source of the\n"
 		"\t\t\tprovider on the Unix domain socket PATH\n"
@@ -156,6 +169,18 @@ static void usage(void)
 		"\t\t\tNAME for the kernel Jitter RNG entropy source instead of\n");
 	fprintf(stderr,
 		"\t\t\tthe one the build configured (es_jent_kernel_name)\n");
+	exit(1);
+}
+
+/* Exit on what an EGD socket option could not set */
+static void egd_set(const char *opt, int ret)
+{
+	if (!ret)
+		return;
+	if (ret == -ENOENT)
+		fprintf(stderr,
+			"%s: the EGD interface is not part of this build (meson option esdm-server-egd)\n",
+			opt);
 	exit(1);
 }
 
@@ -376,13 +401,13 @@ static void parse_opts(int argc, char *argv[])
 				break;
 			case 15:
 				/* egd_socket */
-				if (esdm_egd_server_enable(optarg))
-					exit(1);
+				egd_set("--egd_socket",
+					esdm_egd_server_enable(optarg));
 				break;
 			case 16:
 				/* egd_socket_pr */
-				if (esdm_egd_server_enable_pr(optarg))
-					exit(1);
+				egd_set("--egd_socket_pr",
+					esdm_egd_server_enable_pr(optarg));
 				break;
 			case 17:
 				/* es_ext */
@@ -463,13 +488,12 @@ static void parse_opts(int argc, char *argv[])
 			break;
 		case 'e':
 			/* egd_socket */
-			if (esdm_egd_server_enable(optarg))
-				exit(1);
+			egd_set("--egd_socket", esdm_egd_server_enable(optarg));
 			break;
 		case 'E':
 			/* egd_socket_pr */
-			if (esdm_egd_server_enable_pr(optarg))
-				exit(1);
+			egd_set("--egd_socket_pr",
+				esdm_egd_server_enable_pr(optarg));
 			break;
 
 		default:
@@ -724,6 +748,20 @@ int main(int argc, char *argv[])
 	 * agree on whether the RPC sockets belong to systemd.
 	 */
 	systemd_listen_fds_init();
+
+#ifndef ESDM_SERVER_RPC
+	/*
+	 * The EGD interface is the only one of this build, and esdm-tool and
+	 * the resume helper reach the server at the default socket: a server
+	 * that was not given the regular socket, neither with --egd_socket nor
+	 * by systemd, serves the default one - also next to a socket of
+	 * --egd_socket_pr. Requested here, before the PID namespace prefork,
+	 * so that the supervisor knows the socket it has to remove.
+	 */
+	if (!esdm_egd_server_regular_enabled() && systemd_listen_fds() <= 0)
+		egd_set("--egd_socket",
+			esdm_egd_server_enable(ESDM_EGD_DEFAULT_SOCKET));
+#endif
 
 	if (verbosity == 0 && !foreground)
 		daemonize();

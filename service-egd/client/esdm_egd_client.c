@@ -690,6 +690,8 @@ static int esdm_egd_client_invoke(struct esdm_egd_client *client,
  ****************************/
 
 struct esdm_egd_random_op {
+	/* The read command, the ESDM's variants are answered as those of EGD */
+	uint8_t cmd;
 	uint8_t *buf;
 	size_t buflen;
 	size_t generated;
@@ -707,7 +709,7 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 		uint8_t chunk = (remaining > ESDM_EGD_MAX_TRANSFER) ?
 					ESDM_EGD_MAX_TRANSFER :
 					(uint8_t)remaining;
-		uint8_t request[2] = { ESDM_EGD_CMD_READ_BLOCK, chunk };
+		uint8_t request[2] = { op->cmd, chunk };
 		int ret;
 
 		ret = esdm_egd_client_write_all_locked(client, request,
@@ -728,11 +730,13 @@ static int esdm_egd_client_get_random_op(struct esdm_egd_client *client,
 	return 0;
 }
 
-DSO_PUBLIC
-int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
-			       size_t buflen)
+/* The blocking read @cmd: ESDM_EGD_CMD_READ_BLOCK or its PR variant */
+static int esdm_egd_client_get_random_block(struct esdm_egd_client *client,
+					    uint8_t cmd, uint8_t *buf,
+					    size_t buflen)
 {
 	struct esdm_egd_random_op op = {
+		.cmd = cmd,
 		.buf = buf,
 		.buflen = buflen,
 		.generated = 0,
@@ -757,12 +761,27 @@ int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
 	return ret;
 }
 
+DSO_PUBLIC
+int esdm_egd_client_get_random(struct esdm_egd_client *client, uint8_t *buf,
+			       size_t buflen)
+{
+	return esdm_egd_client_get_random_block(client, ESDM_EGD_CMD_READ_BLOCK,
+						buf, buflen);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_pr(struct esdm_egd_client *client, uint8_t *buf,
+				  size_t buflen)
+{
+	return esdm_egd_client_get_random_block(
+		client, ESDM_EGD_CMD_ESDM_PR_READ_BLOCK, buf, buflen);
+}
+
 static int esdm_egd_client_get_random_nonblock_op(struct esdm_egd_client *client,
 						  void *arg)
 {
 	struct esdm_egd_random_op *op = arg;
-	uint8_t request[2] = { ESDM_EGD_CMD_READ_NONBLOCK,
-			       (uint8_t)op->buflen };
+	uint8_t request[2] = { op->cmd, (uint8_t)op->buflen };
 	uint8_t delivered;
 	int ret;
 
@@ -795,12 +814,16 @@ static int esdm_egd_client_get_random_nonblock_op(struct esdm_egd_client *client
 	return 0;
 }
 
-DSO_PUBLIC
-int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
-					uint8_t *buf, size_t buflen,
-					size_t *generated)
+/*
+ * The read @cmd answered with a length byte: ESDM_EGD_CMD_READ_NONBLOCK, its
+ * PR variant or ESDM_EGD_CMD_ESDM_READ_UNSEEDED
+ */
+static int esdm_egd_client_get_random_short(struct esdm_egd_client *client,
+					    uint8_t cmd, uint8_t *buf,
+					    size_t buflen, size_t *generated)
 {
 	struct esdm_egd_random_op op = {
+		.cmd = cmd,
 		.buf = buf,
 		.buflen = buflen,
 		.generated = 0,
@@ -818,6 +841,115 @@ int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
 
 	ret = esdm_egd_client_invoke(
 		client, esdm_egd_client_get_random_nonblock_op, &op);
+	if (ret) {
+		memset_secure(buf, 0, buflen);
+		return ret;
+	}
+
+	*generated = op.generated;
+
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_nonblock(struct esdm_egd_client *client,
+					uint8_t *buf, size_t buflen,
+					size_t *generated)
+{
+	return esdm_egd_client_get_random_short(client,
+						ESDM_EGD_CMD_READ_NONBLOCK, buf,
+						buflen, generated);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_pr_nonblock(struct esdm_egd_client *client,
+					   uint8_t *buf, size_t buflen,
+					   size_t *generated)
+{
+	return esdm_egd_client_get_random_short(
+		client, ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK, buf, buflen,
+		generated);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_unseeded(struct esdm_egd_client *client,
+					uint8_t *buf, size_t buflen,
+					size_t *generated)
+{
+	return esdm_egd_client_get_random_short(
+		client, ESDM_EGD_CMD_ESDM_READ_UNSEEDED, buf, buflen,
+		generated);
+}
+
+/* Command 0xeb: the read op->cmd stands for, with a 4 byte length */
+static int esdm_egd_client_get_random_bulk_op(struct esdm_egd_client *client,
+					      void *arg)
+{
+	struct esdm_egd_random_op *op = arg;
+	uint8_t request[6] = { ESDM_EGD_CMD_ESDM_BULK_READ, op->cmd };
+	uint8_t response[4];
+	uint32_t delivered;
+	int ret;
+
+	be32_to_ptr(request + 2, (uint32_t)op->buflen);
+
+	ret = esdm_egd_client_write_all_locked(client, request,
+					       sizeof(request));
+	if (ret)
+		return ret;
+
+	ret = esdm_egd_client_read_all_locked(client, response,
+					      sizeof(response));
+	if (ret)
+		return ret;
+
+	/* As for the non-blocking read: more than asked for is not ours */
+	delivered = ptr_to_be32(response);
+	if (delivered > op->buflen)
+		return -EPROTO;
+
+	if (delivered) {
+		ret = esdm_egd_client_read_all_locked(client, op->buf,
+						      delivered);
+		if (ret)
+			return ret;
+	}
+
+	op->generated = delivered;
+
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_random_bulk(struct esdm_egd_client *client,
+				    uint8_t read_cmd, uint8_t *buf,
+				    size_t buflen, size_t *generated)
+{
+	struct esdm_egd_random_op op = {
+		.cmd = read_cmd,
+		.buf = buf,
+		.buflen = buflen,
+		.generated = 0,
+	};
+	int ret;
+
+	if (buf == NULL || generated == NULL)
+		return -EINVAL;
+	if (buflen > ESDM_EGD_MAX_BULK)
+		return -EINVAL;
+
+	/* Any other read makes the ESDM close the connection */
+	if (read_cmd != ESDM_EGD_CMD_READ_NONBLOCK &&
+	    read_cmd != ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK &&
+	    read_cmd != ESDM_EGD_CMD_ESDM_READ_UNSEEDED)
+		return -EINVAL;
+
+	*generated = 0;
+	if (buflen == 0)
+		return 0;
+
+	ret = esdm_egd_client_invoke(client,
+				     esdm_egd_client_get_random_bulk_op, &op);
 	if (ret) {
 		memset_secure(buf, 0, buflen);
 		return ret;
@@ -905,6 +1037,333 @@ int esdm_egd_client_get_state_flags(struct esdm_egd_client *client,
 
 	return esdm_egd_client_invoke(client, esdm_egd_client_state_flags_op,
 				      flags);
+}
+
+static int esdm_egd_client_state_op(struct esdm_egd_client *client, void *arg)
+{
+	const uint8_t request = ESDM_EGD_CMD_ESDM_GET_STATE;
+	struct esdm_egd_client_state *state = arg;
+	uint32_t fields[ESDM_EGD_STATE_NUM_FIELDS] = { 0 };
+	uint8_t num, field[4];
+	unsigned int i;
+	int ret;
+
+	ret = esdm_egd_client_write_all_locked(client, &request,
+					       sizeof(request));
+	if (ret)
+		return ret;
+
+	ret = esdm_egd_client_read_all_locked(client, &num, sizeof(num));
+	if (ret)
+		return ret;
+
+	/* Fields are only ever appended: all are read to keep the stream. */
+	for (i = 0; i < num; i++) {
+		ret = esdm_egd_client_read_all_locked(client, field,
+						      sizeof(field));
+		if (ret)
+			return ret;
+		if (i < ESDM_EGD_STATE_NUM_FIELDS)
+			fields[i] = ptr_to_be32(field);
+	}
+
+	/* Fewer than this protocol ever had: not an answer to this command */
+	if (num < ESDM_EGD_STATE_NUM_FIELDS)
+		return -EPROTO;
+
+	state->flags = fields[ESDM_EGD_STATE_FLAGS];
+	state->entropy_count = fields[ESDM_EGD_STATE_ENT_CNT];
+	state->poolsize = fields[ESDM_EGD_STATE_POOLSIZE];
+	state->write_wakeup = fields[ESDM_EGD_STATE_WRITE_WAKEUP];
+	state->min_reseed_secs = fields[ESDM_EGD_STATE_MIN_RESEED_SECS];
+
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_get_state(struct esdm_egd_client *client,
+			      struct esdm_egd_client_state *state)
+{
+	if (state == NULL)
+		return -EINVAL;
+
+	return esdm_egd_client_invoke(client, esdm_egd_client_state_op, state);
+}
+
+struct esdm_egd_status_op {
+	uint8_t cmd;
+	char *buf;
+	size_t buflen;
+	/* Length of the report as the ESDM sent it */
+	size_t len;
+};
+
+/* Commands 0xe4 and 0xe5: a report preceded by its 4 byte length */
+static int esdm_egd_client_status_op(struct esdm_egd_client *client, void *arg)
+{
+	struct esdm_egd_status_op *op = arg;
+	uint8_t response[4], discard[256];
+	size_t len, left, chunk;
+	int ret;
+
+	ret = esdm_egd_client_write_all_locked(client, &op->cmd,
+					       sizeof(op->cmd));
+	if (ret)
+		return ret;
+
+	ret = esdm_egd_client_read_all_locked(client, response,
+					      sizeof(response));
+	if (ret)
+		return ret;
+
+	len = ptr_to_be32(response);
+	if (len > ESDM_EGD_MAX_STATUS)
+		return -EPROTO;
+
+	/* The caller's buffer keeps room for the NUL the report lacks */
+	chunk = (len < op->buflen) ? len : op->buflen - 1;
+	ret = esdm_egd_client_read_all_locked(client, (uint8_t *)op->buf,
+					      chunk);
+	if (ret)
+		return ret;
+	op->buf[chunk] = '\0';
+
+	/* What does not fit is read all the same to keep the stream */
+	for (left = len - chunk; left; left -= chunk) {
+		chunk = (left < sizeof(discard)) ? left : sizeof(discard);
+		ret = esdm_egd_client_read_all_locked(client, discard, chunk);
+		if (ret)
+			return ret;
+	}
+
+	op->len = len;
+
+	return 0;
+}
+
+static int esdm_egd_client_get_status(struct esdm_egd_client *client,
+				      uint8_t cmd, char *buf, size_t buflen)
+{
+	struct esdm_egd_status_op op = {
+		.cmd = cmd,
+		.buf = buf,
+		.buflen = buflen,
+		.len = 0,
+	};
+	int ret;
+
+	if (buf == NULL || buflen == 0)
+		return -EINVAL;
+
+	buf[0] = '\0';
+
+	ret = esdm_egd_client_invoke(client, esdm_egd_client_status_op, &op);
+	if (ret) {
+		buf[0] = '\0';
+		return ret;
+	}
+
+	/* The ESDM could not produce the report, or it exceeds the protocol */
+	if (op.len == 0)
+		return -ENODATA;
+
+	/*
+	 * The text stays readable when cut short and is returned as far as it
+	 * fits - half a JSON document is of no use to anybody.
+	 */
+	if (op.len >= buflen && cmd == ESDM_EGD_CMD_ESDM_STATUS_JSON) {
+		buf[0] = '\0';
+		return -EMSGSIZE;
+	}
+
+	return 0;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_status(struct esdm_egd_client *client, char *buf,
+			   size_t buflen)
+{
+	return esdm_egd_client_get_status(client, ESDM_EGD_CMD_ESDM_STATUS, buf,
+					  buflen);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_status_json(struct esdm_egd_client *client, char *buf,
+				size_t buflen)
+{
+	return esdm_egd_client_get_status(client, ESDM_EGD_CMD_ESDM_STATUS_JSON,
+					  buf, buflen);
+}
+
+/*
+ * The answer of the commands 0xe6 to 0xea and 0xec: 0 or a negative errno in
+ * two's complement. A refusal is an answer, not a failed transfer - the
+ * connection stays usable - so it is reported through @status rather than
+ * through the return code, which would drop the connection and repeat the
+ * command.
+ */
+static int esdm_egd_client_read_status_locked(struct esdm_egd_client *client,
+					      int *status)
+{
+	uint8_t response[4];
+	int32_t value;
+	int ret;
+
+	ret = esdm_egd_client_read_all_locked(client, response,
+					      sizeof(response));
+	if (ret)
+		return ret;
+
+	value = (int32_t)ptr_to_be32(response);
+
+	/* Neither success nor an errno: the peer speaks something else */
+	if (value > 0 || value < -4095)
+		return -EPROTO;
+
+	*status = value;
+
+	return 0;
+}
+
+struct esdm_egd_priv_op {
+	uint8_t cmd;
+	bool has_arg;
+	uint32_t arg;
+	int status;
+	/* The request went out in full, and the error that followed */
+	bool sent;
+	int sent_err;
+};
+
+/* Commands 0xe6 to 0xea: a command byte and, for some, a 4 byte argument */
+static int esdm_egd_client_priv_op(struct esdm_egd_client *client, void *arg)
+{
+	struct esdm_egd_priv_op *op = arg;
+	uint8_t request[5] = { op->cmd };
+	int ret;
+
+	/*
+	 * A credit that went out and was not confirmed is not sent again: the
+	 * ESDM may have carried it out, and a second one would credit twice.
+	 * The other commands set a value or a state and can be repeated.
+	 */
+	if (op->sent && op->cmd == ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT)
+		return op->sent_err;
+
+	be32_to_ptr(request + 1, op->arg);
+
+	ret = esdm_egd_client_write_all_locked(client, request,
+					       op->has_arg ? sizeof(request) :
+							     1);
+	if (ret)
+		return ret;
+
+	op->sent = true;
+	ret = esdm_egd_client_read_status_locked(client, &op->status);
+	op->sent_err = ret;
+
+	return ret;
+}
+
+static int esdm_egd_client_priv(struct esdm_egd_client *client, uint8_t cmd,
+				bool has_arg, uint32_t arg)
+{
+	struct esdm_egd_priv_op op = {
+		.cmd = cmd,
+		.has_arg = has_arg,
+		.arg = arg,
+		.status = 0,
+	};
+	int ret = esdm_egd_client_invoke(client, esdm_egd_client_priv_op, &op);
+
+	return ret ? ret : op.status;
+}
+
+DSO_PUBLIC
+int esdm_egd_client_add_to_entropy_count(struct esdm_egd_client *client,
+					 uint32_t entropy_bits)
+{
+	return esdm_egd_client_priv(client, ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT,
+				    true, entropy_bits);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_clear_pool(struct esdm_egd_client *client)
+{
+	return esdm_egd_client_priv(client, ESDM_EGD_CMD_ESDM_CLEAR_POOL, false,
+				    0);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_reseed(struct esdm_egd_client *client)
+{
+	return esdm_egd_client_priv(client, ESDM_EGD_CMD_ESDM_RESEED, false, 0);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_set_write_wakeup(struct esdm_egd_client *client,
+				     uint32_t bits)
+{
+	return esdm_egd_client_priv(client, ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP,
+				    true, bits);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_set_min_reseed_secs(struct esdm_egd_client *client,
+					uint32_t seconds)
+{
+	return esdm_egd_client_priv(client,
+				    ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS, true,
+				    seconds);
+}
+
+struct esdm_egd_insert_op {
+	const uint8_t *buf;
+	size_t buflen;
+	int status;
+};
+
+/* Command 0xec: a 4 byte length and the data, answered with a status */
+static int esdm_egd_client_insert_op(struct esdm_egd_client *client, void *arg)
+{
+	struct esdm_egd_insert_op *op = arg;
+	uint8_t header[5] = { ESDM_EGD_CMD_ESDM_BULK_INSERT };
+	int ret;
+
+	be32_to_ptr(header + 1, (uint32_t)op->buflen);
+
+	ret = esdm_egd_client_write_all_locked(client, header, sizeof(header));
+	if (ret)
+		return ret;
+
+	ret = esdm_egd_client_write_all_locked(client, op->buf, op->buflen);
+	if (ret)
+		return ret;
+
+	return esdm_egd_client_read_status_locked(client, &op->status);
+}
+
+DSO_PUBLIC
+int esdm_egd_client_insert(struct esdm_egd_client *client, const uint8_t *buf,
+			   size_t buflen)
+{
+	struct esdm_egd_insert_op op = {
+		.buf = buf,
+		.buflen = buflen,
+		.status = 0,
+	};
+	int ret;
+
+	if (buf == NULL)
+		return -EINVAL;
+	if (buflen == 0)
+		return 0;
+	if (buflen > ESDM_EGD_MAX_BULK)
+		return -EINVAL;
+
+	ret = esdm_egd_client_invoke(client, esdm_egd_client_insert_op, &op);
+
+	return ret ? ret : op.status;
 }
 
 struct esdm_egd_write_op {

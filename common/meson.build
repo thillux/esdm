@@ -289,6 +289,20 @@ conf_data.set_quoted('ESDM_SERVER_RPC_BASE_PATH_PRIVILEGED', get_option('esdm-se
 conf_data.set_quoted('ESDM_SERVER_EGD_SOCKET_PATH', get_option('esdm-server-egd-socket-path'))
 conf_data.set_quoted('ESDM_SERVER_EGD_PR_SOCKET_PATH', get_option('esdm-server-egd-pr-socket-path'))
 
+# The interfaces of the esdm-server that are part of the build
+conf_data.set('ESDM_SERVER_RPC', get_option('esdm-server-rpc').enabled())
+conf_data.set('ESDM_SERVER_EGD', get_option('esdm-server-egd').enabled())
+
+# The EGD socket an esdm-server built without the RPC interface serves when it
+# is given none, as it would have no interface otherwise, and the one esdm-tool
+# talks to in such a build. As the RPC sockets, it is one of its own in test
+# mode, so that a test build stays away from the socket of an installed ESDM.
+if get_option('testmode').enabled()
+	conf_data.set_quoted('ESDM_EGD_DEFAULT_SOCKET', '/tmp/esdm-egd-testmode.socket')
+else
+	conf_data.set_quoted('ESDM_EGD_DEFAULT_SOCKET', get_option('esdm-server-egd-socket-path'))
+endif
+
 conf_data.set('ESDM_RPC_IDLE_TIMEOUT_USEC', get_option('esdm-server-rpc-idle-timeout-usec'))
 
 conf_data.set('ESDM_HAS_AUX_CLIENT', get_option('esdm-aux-client').enabled())

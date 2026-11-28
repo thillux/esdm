@@ -17,6 +17,7 @@
  * DAMAGE.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -24,7 +25,15 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "config.h"
+
+/* The resume notification goes over the RPC interface where the build has it */
+#ifdef ESDM_SERVER_RPC
 #include <esdm_rpc_client.h>
+#else
+#include <esdm_egd_client.h>
+#endif
 
 /*
  * Does the server named in the PID file still run? It locks the file for its
@@ -94,6 +103,7 @@ static bool signal_suspend(char *pidfile_path)
 	return kill(pid, SIGUSR1) == 0;
 }
 
+#ifdef ESDM_SERVER_RPC
 static bool signal_resume(void)
 {
 	int ret = -1;
@@ -113,6 +123,33 @@ static bool signal_resume(void)
 
 	return ret == 0;
 }
+#else /* ESDM_SERVER_RPC */
+static bool signal_resume(void)
+{
+	/* As esdm-tool: the socket the environment names, else the default */
+	const char *path = secure_getenv("ESDM_EGD_SOCKET");
+	struct esdm_egd_client *client = NULL;
+	int ret;
+
+	/*
+	 * A build without the RPC interface: the same reseed of every DRNG,
+	 * by the reseed command the ESDM adds to the EGD protocol. The ESDM
+	 * carries it out for a peer connected as root; the unit runs as root.
+	 */
+	if (esdm_egd_client_alloc(&client,
+				  (path && *path) ? path :
+						    ESDM_EGD_DEFAULT_SOCKET,
+				  0))
+		return false;
+	fprintf(stdout, "Signal resume to ESDM\n");
+
+	ret = esdm_egd_client_reseed(client);
+
+	esdm_egd_client_free(client);
+
+	return ret == 0;
+}
+#endif /* ESDM_SERVER_RPC */
 
 static void usage(void)
 {

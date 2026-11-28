@@ -47,6 +47,7 @@
 #include "common_test.h"
 #include "esdm_rpc_protocol.h"
 #include "esdm_rpc_protocol_helper.h"
+#include "helper.h"
 #include "unpriv_access.pb-c.h"
 
 /******************************************************************************

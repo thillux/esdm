@@ -18,11 +18,11 @@
  */
 
 #include "tool.h"
+#include "backend.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <signal.h>
-#include <esdm_rpc_client.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -37,11 +37,11 @@ static atomic_bool should_terminate = false;
 static void process_fn(double timeout_sec, long id, int sock_fd,
 		       uint32_t request_size)
 {
-	esdm_rpcc_init_unpriv_service(NULL);
+	tool_be_init();
 
 	handle_stress_delay_one_core(timeout_sec, id, sock_fd, request_size);
 
-	esdm_rpcc_fini_unpriv_service();
+	tool_be_fini();
 
 	exit(EXIT_SUCCESS);
 }

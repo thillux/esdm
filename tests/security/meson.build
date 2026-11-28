@@ -78,7 +78,8 @@ if get_option('esdm-server').enabled()
 	# directory it is given. Holds back two OpenSSL calls for three
 	# seconds each, after waiting for the Jitter RNG like the Jitter RNG
 	# only test.
-	if get_option('openssl-rand-provider').enabled()
+	# Through the RPC based provider, with the RPC server in the test
+	if get_option('openssl-rand-provider').enabled() and get_option('esdm-server-rpc').enabled()
 		security_tests += [
 			{
 				'name': 'OpenSSL with the Jitter RNG as the only credited source',

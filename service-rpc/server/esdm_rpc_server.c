@@ -70,6 +70,14 @@
 #include "threading_support.h"
 #include "esdm_ppoll.h"
 
+/*
+ * This file is the engine of the esdm-server - its start, the privilege drop,
+ * its interfaces, its end - and the transport of the RPC interface. A build
+ * without the RPC interface (meson option esdm-server-rpc) leaves out the
+ * transport, everything within ESDM_SERVER_RPC, and keeps the engine.
+ */
+#ifdef ESDM_SERVER_RPC
+
 #ifndef TAILQ_FOREACH_SAFE
 #define TAILQ_FOREACH_SAFE(var, head, field, tvar)                             \
 	for ((var) = TAILQ_FIRST((head));                                      \
@@ -126,6 +134,8 @@ struct esdm_rpcs_write_buf {
 	struct esdm_rpcs_connection *rpc_conn;
 };
 
+#endif /* ESDM_SERVER_RPC */
+
 enum esdm_rpcs_init_state {
 	esdm_rpcs_state_uninitialized,
 	esdm_rpcs_state_priv_init_complete,
@@ -136,6 +146,7 @@ enum esdm_rpcs_init_state {
 
 static atomic_int esdm_rpc_init_state =
 	esdm_rpcs_state_uninitialized;
+#ifdef ESDM_SERVER_RPC
 /* Why the unprivileged interface failed - see esdm_rpcs_state_unpriv_failed */
 static atomic_int esdm_rpcs_unpriv_init_ret = 0;
 /*
@@ -144,6 +155,7 @@ static atomic_int esdm_rpcs_unpriv_init_ret = 0;
  * may still wait for in thread_start(), and waits for that thread.
  */
 static atomic_bool esdm_rpcs_unpriv_running = false;
+#endif /* ESDM_SERVER_RPC */
 static DECLARE_WAIT_QUEUE(esdm_rpc_thread_init_wait);
 
 static atomic_int server_exit = 0;
@@ -213,6 +225,8 @@ void esdm_server_remove_stale_socket(const char *path, int socktype)
 	}
 	unlink(path);
 }
+
+#ifdef ESDM_SERVER_RPC
 
 /* Write data into an RPC connection. */
 static int esdm_rpcs_write_data(struct esdm_rpcs_connection *rpc_conn,
@@ -1604,6 +1618,59 @@ out:
 	return ret;
 }
 
+#else /* ESDM_SERVER_RPC */
+
+/*
+ * Initialize the interfaces of a server without the RPC interface: the EGD
+ * interface is the only one, served by its worker. The current thread, which
+ * serves the privileged RPC interface otherwise, has nothing to serve and is
+ * the main loop that waits for the request to exit.
+ */
+static int esdm_rpcs_interfaces_init(const char *username,
+				     const char *groupname)
+{
+	int ret;
+
+	/*
+	 * Obtain the EGD sockets while the privileges to bind them and to make
+	 * them accessible to all users are still held.
+	 */
+	CKINT(esdm_egd_server_socket_init());
+
+	if (atomic_load(&server_exit) != 0)
+		goto out;
+
+	/* Permanently drop all privileges */
+	CKINT(drop_privileges_permanent(username ? username : "nobody",
+					groupname ? groupname : NULL));
+	atomic_store(&esdm_rpc_init_state, esdm_rpcs_state_perm_dropped);
+
+	/*
+	 * Started only now so that all handling of the data the clients supply
+	 * happens unprivileged.
+	 */
+	CKINT(esdm_egd_server_start());
+
+	systemd_notify_status("ESDM ready, all sockets allocated");
+	systemd_notify_ready();
+	systemd_notify_status("Running");
+
+	/*
+	 * A signal handler only stores the exit request: the bounded re-poll
+	 * of thread_wait_event() is what notices it here.
+	 */
+	thread_wait_event(&esdm_rpc_thread_init_wait,
+			  (atomic_load(&server_exit) != 0));
+
+	/* Set if a failure of the EGD worker ended the server */
+	ret = esdm_egd_server_worker_ret();
+
+out:
+	return ret;
+}
+
+#endif /* ESDM_SERVER_RPC */
+
 static void esdm_rpc_priv_init_complete(void)
 {
 	if (atomic_load(&esdm_rpc_init_state) != esdm_rpcs_state_uninitialized)
@@ -1672,9 +1739,13 @@ int esdm_rpc_server_init(const char *username, const char *groupname)
 			   esdm_rpcs_state_priv_init_complete) ||
 				  (atomic_load(&server_exit) != 0));
 
+#ifdef ESDM_SERVER_RPC
 	esdm_logger(LOGGER_WARN, LOGGER_C_RPC, "RPC server started\n");
+#else
+	esdm_logger(LOGGER_WARN, LOGGER_C_SERVER, "ESDM server started\n");
+#endif
 
-	/* start the RPC server threads */
+	/* start the threads of the server interfaces */
 	ret = esdm_rpcs_interfaces_init(username, groupname);
 
 out:
@@ -1710,9 +1781,11 @@ void esdm_rpc_server_fini(void)
 {
 	esdm_rpc_server_signal_exit();
 
+#ifdef ESDM_SERVER_RPC
 	/* Before any join, see esdm_rpcs_unpriv_running; it leaves on exit */
 	thread_wait_event(&esdm_rpc_thread_init_wait,
 			  !atomic_load(&esdm_rpcs_unpriv_running));
+#endif
 
 	/*
 	 * Terminate the EGD worker before the ESDM is finalized - it is a
@@ -1726,6 +1799,7 @@ void esdm_rpc_server_fini(void)
 	esdm_test_shm_status_fini();
 }
 
+#ifdef ESDM_SERVER_RPC
 static void esdm_rpcs_cleanup_socket(const char *path)
 {
 	if (unlink(path) < 0) {
@@ -1740,12 +1814,14 @@ static void esdm_rpcs_cleanup_socket(const char *path)
 			    "ESDM Unix domain socket %s deleted\n", path);
 	}
 }
+#endif /* ESDM_SERVER_RPC */
 
 void esdm_rpc_server_cleanup(void)
 {
 	if (!esdm_config_ipc_cleanup())
 		return;
 
+#ifdef ESDM_SERVER_RPC
 	/*
 	 * Sockets passed in by systemd socket activation are created and
 	 * removed by systemd - leave their lifecycle to it. Removing a socket
@@ -1763,6 +1839,7 @@ void esdm_rpc_server_cleanup(void)
 		esdm_rpcs_cleanup_socket(ESDM_RPC_UNPRIV_SOCKET);
 		esdm_rpcs_cleanup_socket(ESDM_RPC_PRIV_SOCKET);
 	}
+#endif
 
 	/*
 	 * The EGD socket is always created by the server itself - there is no

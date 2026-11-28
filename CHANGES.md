@@ -1,4 +1,32 @@
 Changes 1.2.4
+* The two interfaces of the server are build options: esdm-server-rpc and
+esdm-server-egd, both enabled by default, of which a server needs at least one.
+A disabled interface is not part of the build: the server contains none of its
+code, and its client library, its socket units, the OpenSSL provider modules on
+it and its tests are not built. Without the RPC interface the server serves the
+EGD interface always - given no socket, the one of esdm-server-egd-socket-path -
+and esdm-server.service requires esdm-server-egd.socket; esdm-kernel-seeder is
+not built, linux-devfiles and linux-getrandom have to be disabled. Without the
+EGD interface the server rejects --egd_socket and --egd_socket_pr. The default
+build is unchanged
+
+* esdm-tool of a build without the RPC interface works over the EGD interface:
+status, seeding state, entropy counts, random numbers (also with --use-pr,
+--allow-unseeded and --timeout-msec), the write to the auxiliary pool,
+--clear-pool, --reseed-crng, --max-reseed-secs, --is-running, the benchmark and
+the stress modes. The socket is the one ESDM_EGD_SOCKET names or the default
+one. --drng-status, --drng-status-json, --jent-status, --get-seed, --selftest,
+--set-es-rate and --stress-init-fini are refused with the reason, as the EGD
+protocol has no command for them. esdm-server-signal-helper --resume sends the
+reseed command of the EGD interface in such a build
+
+* libesdm_egd_client: functions for the commands the ESDM adds to the EGD
+protocol - esdm_egd_client_get_random_pr(), _get_random_pr_nonblock(),
+_get_random_unseeded(), _get_random_bulk(), _get_state(), _status(),
+_status_json(), _add_to_entropy_count(), _clear_pool(), _reseed(),
+_set_write_wakeup(), _set_min_reseed_secs() and _insert(). The privileged ones
+return -EPERM for a client that is not connected as root
+
 * Auxiliary pool: RNDADDTOENTCNT (esdm_pool_add_entropy()) and
 esdm_pool_set_entropy() with a value above zero credit no pool whose XDRBG
 holds no state, which is the case after esdm_reinit() or a failed XOF

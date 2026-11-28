@@ -18,12 +18,12 @@
  */
 
 #include "tool.h"
+#include "backend.h"
 #include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <esdm_rpc_client.h>
 #include <unistd.h>
 #include <assert.h>
 
@@ -41,7 +41,6 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 	double duration;
 	uint64_t bytes = 0;
 	uint8_t *rnd_buffer;
-	ssize_t ret;
 
 	rnd_buffer = malloc(request_size);
 	if (rnd_buffer == NULL) {
@@ -54,8 +53,7 @@ void handle_stress_delay_one_core(double timeout_sec, long id, int sock_fd,
 	while (1) {
 		clock_gettime(CLOCK_MONOTONIC, &before);
 
-		esdm_invoke(esdm_rpcc_get_random_bytes_full(rnd_buffer,
-							    request_size));
+		(void)tool_be_get_random_bytes_full(rnd_buffer, request_size);
 		bytes += request_size;
 
 		clock_gettime(CLOCK_MONOTONIC, &after);

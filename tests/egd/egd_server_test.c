@@ -145,6 +145,10 @@ static void server_stop(void)
 int main(int argc, char *argv[])
 {
 	struct esdm_egd_client *client = NULL;
+	struct esdm_egd_client_state state;
+	static char status[ESDM_EGD_MAX_STATUS + 1];
+	/* More than the 255 bytes of an EGD transfer */
+	static uint8_t bulk[4096];
 	/* More than one protocol transfer, so the server serves two. */
 	uint8_t buf[300];
 	uint8_t zero[sizeof(buf)];
@@ -262,6 +266,83 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
+
+	/*
+	 * The ESDM's extensions of the protocol. The test runs as root, so the
+	 * server carries out the privileged ones.
+	 */
+	printf("EGD server: ESDM state\n");
+	CHECK(esdm_egd_client_get_state(client, &state) == 0,
+	      "the state query failed");
+	CHECK(state.flags & ESDM_EGD_STATE_FLAG_OPERATIONAL,
+	      "the server is not operational after serving a read");
+	CHECK(state.poolsize > 0, "an auxiliary pool of no size");
+	printf("  flags 0x%x, %u of %u bits, wakeup at %u bits, reseed after %u s\n",
+	       state.flags, state.entropy_count, state.poolsize,
+	       state.write_wakeup, state.min_reseed_secs);
+
+	printf("EGD server: ESDM status reports\n");
+	i = (unsigned int)-esdm_egd_client_status(client, status,
+						  sizeof(status));
+	CHECK(i == 0 && strstr(status, "DRNG name"),
+	      "the status report failed (%s) or names no DRNG: \"%.60s\"",
+	      strerror((int)i), status);
+	CHECK(esdm_egd_client_status_json(client, status, sizeof(status)) ==
+		      0 &&
+		      status[0] == '{',
+	      "the JSON status failed or is no JSON object");
+
+	printf("EGD server: ESDM reads\n");
+	memset(buf, 0, sizeof(buf));
+	CHECK(esdm_egd_client_get_random_pr(client, buf, 32) == 0 &&
+		      memcmp(buf, zero, 32) != 0,
+	      "the blocking PR read failed or delivered zeroes");
+	CHECK(esdm_egd_client_get_random_pr_nonblock(client, buf, 32,
+						     &generated) == 0 &&
+		      generated <= 32,
+	      "the non-blocking PR read failed");
+	CHECK(esdm_egd_client_get_random_unseeded(client, buf, 64,
+						  &generated) == 0 &&
+		      generated == 64,
+	      "the unseeded read failed or is short: %zu bytes", generated);
+	memset(bulk, 0, sizeof(bulk));
+	CHECK(esdm_egd_client_get_random_bulk(client,
+					      ESDM_EGD_CMD_READ_NONBLOCK, bulk,
+					      sizeof(bulk), &generated) == 0 &&
+		      generated == sizeof(bulk),
+	      "the bulk read failed or is short: %zu bytes", generated);
+	CHECK(memcmp(bulk + sizeof(bulk) - sizeof(zero), zero, sizeof(zero)) !=
+		      0,
+	      "the bulk read delivered zeroes at its end");
+
+	printf("EGD server: ESDM bulk insert and privileged commands\n");
+	CHECK(esdm_egd_client_insert(client, bulk, sizeof(bulk)) == 0,
+	      "the bulk insert failed");
+	CHECK(esdm_egd_client_clear_pool(client) == 0, "clear pool failed");
+	CHECK(esdm_egd_client_get_state(client, &state) == 0 &&
+		      state.entropy_count == 0,
+	      "%u bits in the auxiliary pool after clearing it",
+	      state.entropy_count);
+	CHECK(esdm_egd_client_add_to_entropy_count(client, 64) == 0,
+	      "add to entropy count failed");
+	/* A reseed in between may have taken the credit, none adds to it */
+	CHECK(esdm_egd_client_get_state(client, &state) == 0 &&
+		      state.entropy_count <= 64,
+	      "%u bits in the auxiliary pool after crediting 64",
+	      state.entropy_count);
+	printf("  %u bits in the auxiliary pool after crediting 64\n",
+	       state.entropy_count);
+	CHECK(esdm_egd_client_set_write_wakeup(client, 256) == 0,
+	      "set write wakeup failed");
+	CHECK(esdm_egd_client_set_min_reseed_secs(client, 300) == 0,
+	      "set min reseed secs failed");
+	CHECK(esdm_egd_client_get_state(client, &state) == 0 &&
+		      state.write_wakeup == 256 && state.min_reseed_secs == 300,
+	      "the state reports wakeup at %u bits and reseed after %u s",
+	      state.write_wakeup, state.min_reseed_secs);
+	CHECK(esdm_egd_client_reseed(client) == 0, "reseed failed");
+	CHECK(esdm_egd_client_get_random(client, buf, 64) == 0,
+	      "the read after the forced reseed failed");
 
 	/*
 	 * The daemon goes away underneath the client: the request must come

@@ -117,8 +117,13 @@ int env_init(void)
 		return errno;
 	if (pid == 0) {
 		char buf[FILENAME_MAX];
-		char *server_argv[] = { buf,	    "-vvvvv", "--egd_socket",
-					(char *)ESDM_TEST_EGD_SOCKET, NULL };
+		/* A server built without the EGD interface rejects the option */
+		char *server_argv[] = { buf, "-vvvvv",
+#ifdef ESDM_SERVER_EGD
+					"--egd_socket",
+					(char *)ESDM_TEST_EGD_SOCKET,
+#endif
+					NULL };
 
 		snprintf(buf, sizeof(buf), "%s", server);
 		execve(server, server_argv, server_envp);
@@ -127,12 +132,16 @@ int env_init(void)
 		return EFAULT;
 	}
 	server_pid = pid;
+#ifdef ESDM_SERVER_RPC
 	/* The server is up once it has bound its unprivileged RPC socket */
 	test_wait_for_type(ESDM_RPC_UNPRIV_SOCKET, S_IFSOCK,
 			   TEST_WAIT_TIMEOUT_MS);
+#endif
+#ifdef ESDM_SERVER_EGD
 	/* and serving EGD once that socket is there as well */
 	test_wait_for_type(ESDM_TEST_EGD_SOCKET, S_IFSOCK,
 			   TEST_WAIT_TIMEOUT_MS);
+#endif
 
 out:
 	return ret;

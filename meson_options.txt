@@ -912,6 +912,36 @@ option('linux-reseed-entropy-count', type: 'integer', value: 0, min: 0, max: 512
 option('esdm-server', type: 'feature', value: 'enabled',
        description: 'Enable the ESDM server')
 
+option('esdm-server-rpc', type: 'feature', value: 'enabled',
+       description: '''Build the RPC interface of the ESDM server and its clients.
+
+The esdm-server serves the RPC interface on its two sockets, the unprivileged
+and the privileged one. Disabled, the interface is not part of the build: the
+server contains no RPC code and opens neither socket, and libesdm_rpc_client and
+what needs it are not built - the kernel seeder, the RPC based OpenSSL provider
+modules, the RPC socket units and the tests of the interface. linux-devfiles
+and linux-getrandom need the interface and have to be disabled with it.
+
+The server then serves the EGD interface only: on the sockets it is given, or
+on the socket of esdm-server-egd-socket-path where it is not given the regular
+socket (a build with testmode uses /tmp/esdm-egd-testmode.socket there). esdm-tool
+and the resume notification of esdm-server-signal-helper work over that
+interface. With esdm-server enabled, at least one of esdm-server-rpc and
+esdm-server-egd has to be enabled.
+''')
+
+option('esdm-server-egd', type: 'feature', value: 'enabled',
+       description: '''Build the EGD interface of the ESDM server and its clients.
+
+The esdm-server serves the EGD protocol with the extensions of the ESDM on the
+sockets given with --egd_socket and --egd_socket_pr or handed over by the EGD
+socket units. Disabled, the interface is not part of the build: the server
+contains no EGD code and rejects the two options, and libesdm_egd_client, the
+EGD based OpenSSL provider modules, the EGD socket units and the tests of the
+interface are not built. The kernel module esdm_cdev is built on its own and
+reads the ESDM through this interface: it needs a server built with it.
+''')
+
 option('esdm-server-rpc-path-unprivileged', type: 'string', value: '/run',
        description: '''Sets the base path of ESDM's RPC sockets (default: /run)
 
@@ -929,6 +959,10 @@ option('esdm-server-egd-socket-path', type: 'string', value: '/run/esdm-egd.sock
        interface is opt-in: it is only served when that socket unit is started
        or when the esdm-server is invoked with --egd_socket <path>, so this
        option merely defines where the socket unit places it.
+
+       A server built without the RPC interface (esdm-server-rpc disabled)
+       serves the EGD interface in any case: on this path when it is given no
+       socket, and esdm-tool of such a build talks to this path.
        ''')
 
 option('esdm-server-egd-pr-socket-path', type: 'string', value: '/run/esdm-egd-pr.socket',
@@ -994,7 +1028,11 @@ Change the default with care/know the consequences!
 (perform tests under load, ...)''')
 
 option('esdm-tool', type: 'feature', value: 'enabled',
-       description: '''Enable the ESDM client CLI tool''')
+       description: '''Enable the ESDM client CLI tool
+
+esdm-tool works over the RPC interface of the server. In a build without it
+(esdm-server-rpc disabled) it works over the EGD interface and refuses the
+commands the EGD protocol cannot express - see esdm-tool(1).''')
 
 ################################################################################
 # Server-related Configuration

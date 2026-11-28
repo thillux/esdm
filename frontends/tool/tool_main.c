@@ -18,6 +18,7 @@
  */
 
 #include "tool.h"
+#include "backend.h"
 #include "config.h"
 #include "esdm_logger.h"
 #include "helper.h"
@@ -25,9 +26,8 @@
 #include "memset_secure.h"
 #include "fips_integrity.h"
 
+#include <assert.h>
 #include <errno.h>
-#include <esdm_rpc_client.h>
-#include <esdm_rpc_service.h>
 #ifdef ESDM_HAS_AUX_CLIENT
 #include <esdm_aux_client.h>
 #endif
@@ -183,14 +183,16 @@ static void handle_usage(void)
 	fprintf(stderr,
 		"\t--fips-targetfile PATH\t\tReads FIPS target file in PATH to create HMAC\n");
 #endif
+
+	tool_be_usage();
 }
 
 static void handle_status(void)
 {
-	char status_buffer[ESDM_RPC_MAX_DATA];
-	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
+	char status_buffer[tool_be_max_data];
+	memset(&status_buffer[0], 0, tool_be_max_data);
 	int ret;
-	esdm_invoke(esdm_rpcc_status(&status_buffer[0], ESDM_RPC_MAX_DATA));
+	ret = tool_be_status(&status_buffer[0], tool_be_max_data);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM status failed!\n");
@@ -202,11 +204,10 @@ static void handle_status(void)
 
 static void handle_status_json(void)
 {
-	char status_buffer[ESDM_RPC_MAX_DATA];
-	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
+	char status_buffer[tool_be_max_data];
+	memset(&status_buffer[0], 0, tool_be_max_data);
 	int ret;
-	esdm_invoke(
-		esdm_rpcc_status_json(&status_buffer[0], ESDM_RPC_MAX_DATA));
+	ret = tool_be_status_json(&status_buffer[0], tool_be_max_data);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM status failed!\n");
@@ -237,17 +238,17 @@ enum drng_status_target {
 static int drng_status_add(struct json_object *out, uint32_t node, bool pr,
 			   struct json_object **obj)
 {
-	char status_buffer[ESDM_RPC_MAX_DATA];
+	char status_buffer[tool_be_max_data];
 	int ret;
 
 	memset(&status_buffer[0], 0, sizeof(status_buffer));
 
 	if (pr) {
-		esdm_invoke(esdm_rpcc_drng_status_pr_json(
-			&status_buffer[0], sizeof(status_buffer)));
+		ret = tool_be_drng_status_pr_json(&status_buffer[0],
+						  sizeof(status_buffer));
 	} else {
-		esdm_invoke(esdm_rpcc_drng_status_json(node, &status_buffer[0],
-						       sizeof(status_buffer)));
+		ret = tool_be_drng_status_json(node, &status_buffer[0],
+					       sizeof(status_buffer));
 	}
 
 	if (ret)
@@ -333,11 +334,10 @@ out:
 
 static void handle_jent_status(void)
 {
-	char status_buffer[ESDM_RPC_MAX_DATA];
-	memset(&status_buffer[0], 0, ESDM_RPC_MAX_DATA);
+	char status_buffer[tool_be_max_data];
+	memset(&status_buffer[0], 0, tool_be_max_data);
 	int ret;
-	esdm_invoke(
-		esdm_rpcc_jent_status(&status_buffer[0], ESDM_RPC_MAX_DATA));
+	ret = tool_be_jent_status(&status_buffer[0], tool_be_max_data);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM jitterentropy status failed!\n");
@@ -350,7 +350,7 @@ static int handle_is_fully_seeded(void)
 {
 	int ret = 0;
 	bool fully_seeded = false;
-	esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+	ret = tool_be_is_fully_seeded(&fully_seeded);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Fetching ESDM fully seeded status failed!");
@@ -376,8 +376,7 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 		ret = 0;
 		switch (mode) {
 		case RAND_MODE_NONE:
-			esdm_invoke(
-				esdm_rpcc_get_random_bytes(bytes, chunk_size));
+			ret = tool_be_get_random_bytes(bytes, chunk_size);
 			/*
 			 * Short or -EAGAIN: operational, every DRNG awaiting
 			 * its reseed, which the waiting getter waits for.
@@ -387,25 +386,23 @@ static int handle_get_random(size_t num_rand_bytes, enum RANDOM_MODE mode,
 			if (ret >= 0 && ret < (ssize_t)chunk_size) {
 				size_t done = (size_t)ret;
 
-				esdm_invoke(esdm_rpcc_get_random_bytes_full(
-					bytes + done, chunk_size - done));
+				ret = tool_be_get_random_bytes_full(
+					bytes + done, chunk_size - done);
 				if (ret >= 0)
 					ret += (ssize_t)done;
 			}
 			break;
 		case RAND_MODE_FULL:
-			esdm_invoke(esdm_rpcc_get_random_bytes_full(
-				bytes, chunk_size));
+			ret = tool_be_get_random_bytes_full(bytes, chunk_size);
 			break;
 		case RAND_MODE_FULL_TIMEOUT:
 			sleep_time.tv_sec = timeout_msec / 1000;
 			sleep_time.tv_nsec = (timeout_msec % 1000) * 1000000;
-			esdm_invoke(esdm_rpcc_get_random_bytes_full_timeout(
-				bytes, chunk_size, &sleep_time));
+			ret = tool_be_get_random_bytes_full_timeout(
+				bytes, chunk_size, &sleep_time);
 			break;
 		case RAND_MODE_PR:
-			esdm_invoke(esdm_rpcc_get_random_bytes_pr(bytes,
-								  chunk_size));
+			ret = tool_be_get_random_bytes_pr(bytes, chunk_size);
 			break;
 		}
 		if (ret == (ssize_t)chunk_size) {
@@ -442,7 +439,7 @@ static int handle_entropy_count(void)
 	int ret = 0;
 	unsigned int ent_cnt = 0;
 
-	esdm_invoke(esdm_rpcc_rnd_get_ent_cnt(&ent_cnt));
+	ret = tool_be_rnd_get_ent_cnt(&ent_cnt);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "fetching entropy count failed\n");
@@ -460,7 +457,7 @@ static int handle_entropy_level(void)
 	int ret = 0;
 	unsigned int ent_lvl = 0;
 
-	esdm_invoke(esdm_rpcc_get_ent_lvl(&ent_lvl));
+	ret = tool_be_get_ent_lvl(&ent_lvl);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "fetching entropy level failed\n");
@@ -485,7 +482,7 @@ static int handle_wait_until_seeded(long seed_test_tries)
 		{
 			int ret;
 
-			esdm_invoke(esdm_rpcc_is_fully_seeded(&fully_seeded));
+			ret = tool_be_is_fully_seeded(&fully_seeded);
 			if (ret == 0 && fully_seeded) {
 				esdm_logger(LOGGER_STATUS, LOGGER_C_TOOL,
 					    "ESDM is fully seeded!\n");
@@ -509,8 +506,8 @@ static int handle_wait_until_seeded(long seed_test_tries)
 			sleep_time.tv_sec = 1;
 			sleep_time.tv_nsec = 0;
 			clock_gettime(CLOCK_MONOTONIC, &before);
-			esdm_invoke(esdm_rpcc_get_random_bytes_full_timeout(
-				&b, sizeof(b), &sleep_time));
+			ret = tool_be_get_random_bytes_full_timeout(
+				&b, sizeof(b), &sleep_time);
 			clock_gettime(CLOCK_MONOTONIC, &after);
 
 			sleep_diff_ns = timespec_diff_ns(&before, &after);
@@ -540,18 +537,18 @@ static int handle_write_to_aux_pool(const char *aux_data,
 		return EXIT_FAILURE;
 	}
 
-	esdm_rpcc_init_priv_service(NULL);
+	tool_be_init_priv();
 	int ret = 0;
 	size_t len = strlen(aux_data);
-	esdm_invoke(esdm_rpcc_rnd_add_entropy((const uint8_t *)aux_data, len,
-					      write_entropy_bits));
+	ret = tool_be_rnd_add_entropy((const uint8_t *)aux_data, len,
+				      write_entropy_bits);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "unable to write entropy to aux pool\n");
 		exit(EXIT_FAILURE);
 	}
 
-	esdm_rpcc_fini_priv_service();
+	tool_be_fini_priv();
 
 	return EXIT_SUCCESS;
 }
@@ -571,8 +568,8 @@ static int do_benchmark_single(bool pr, size_t buffer_size)
 	size_t num_iterations;
 	uint8_t *buffer = NULL;
 
-	if (buffer_size > ESDM_RPC_MAX_DATA)
-		buffer_size = ESDM_RPC_MAX_DATA;
+	if (buffer_size > tool_be_max_data)
+		buffer_size = tool_be_max_data;
 	buffer = malloc(buffer_size);
 
 	if (buffer == NULL) {
@@ -596,11 +593,10 @@ static int do_benchmark_single(bool pr, size_t buffer_size)
 	ssize_t ret = 0;
 	for (size_t i = 0; i < num_iterations;) {
 		if (pr) {
-			esdm_invoke(esdm_rpcc_get_random_bytes_pr(buffer,
-								  buffer_size));
+			ret = tool_be_get_random_bytes_pr(buffer, buffer_size);
 		} else {
-			esdm_invoke(esdm_rpcc_get_random_bytes_full(
-				buffer, buffer_size));
+			ret = tool_be_get_random_bytes_full(buffer,
+							    buffer_size);
 		}
 		if (ret != (ssize_t)buffer_size) {
 			esdm_logger(
@@ -662,9 +658,9 @@ static int handle_clear_pool(void)
 {
 	int ret;
 
-	esdm_rpcc_init_priv_service(NULL);
-	esdm_invoke(esdm_rpcc_rnd_clear_pool());
-	esdm_rpcc_fini_priv_service();
+	tool_be_init_priv();
+	ret = tool_be_rnd_clear_pool();
+	tool_be_fini_priv();
 
 	return ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
@@ -673,9 +669,9 @@ static int handle_reseed_crng(void)
 {
 	int ret;
 
-	esdm_rpcc_init_priv_service(NULL);
-	esdm_invoke(esdm_rpcc_rnd_reseed_crng());
-	esdm_rpcc_fini_priv_service();
+	tool_be_init_priv();
+	ret = tool_be_rnd_reseed_crng();
+	tool_be_fini_priv();
 
 	return ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
@@ -685,9 +681,9 @@ static int handle_set_es_rate(const char *es, uint32_t rate)
 {
 	int ret;
 
-	esdm_rpcc_init_priv_service(NULL);
-	esdm_invoke(esdm_rpcc_set_es_rate(es, rate));
-	esdm_rpcc_fini_priv_service();
+	tool_be_init_priv();
+	ret = tool_be_set_es_rate(es, rate);
+	tool_be_fini_priv();
 
 	if (ret == -EOPNOTSUPP) {
 		esdm_logger(
@@ -722,9 +718,9 @@ static int handle_set_max_reseed_secs(unsigned int seconds)
 	unsigned int effective = 0;
 	int ret;
 
-	esdm_rpcc_init_priv_service(NULL);
-	esdm_invoke(esdm_rpcc_set_min_reseed_secs(seconds));
-	esdm_rpcc_fini_priv_service();
+	tool_be_init_priv();
+	ret = tool_be_set_min_reseed_secs(seconds);
+	tool_be_fini_priv();
 
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
@@ -732,7 +728,7 @@ static int handle_set_max_reseed_secs(unsigned int seconds)
 		return EXIT_FAILURE;
 	}
 
-	esdm_invoke(esdm_rpcc_get_min_reseed_secs(&effective));
+	ret = tool_be_get_min_reseed_secs(&effective);
 	if (ret != 0) {
 		esdm_logger(
 			LOGGER_WARN, LOGGER_C_TOOL,
@@ -758,14 +754,14 @@ static int handle_set_max_reseed_secs(unsigned int seconds)
 }
 
 /* Name of a self test state as the server reports it */
-static const char *selftest_state_name(enum esdm_rpcc_selftest_state state)
+static const char *selftest_state_name(enum tool_be_selftest_state state)
 {
 	switch (state) {
-	case esdm_rpcc_selftest_undone:
+	case tool_be_selftest_undone:
 		return "undone";
-	case esdm_rpcc_selftest_passed:
+	case tool_be_selftest_passed:
 		return "passed";
-	case esdm_rpcc_selftest_failed:
+	case tool_be_selftest_failed:
 		return "failed";
 	}
 
@@ -775,19 +771,19 @@ static const char *selftest_state_name(enum esdm_rpcc_selftest_state state)
 /* Run the self tests in the server now and report what they found. */
 static int handle_selftest(void)
 {
-	struct esdm_rpcc_selftest_result result;
+	struct tool_be_selftest_result result;
 	int ret;
 
-	esdm_rpcc_init_priv_service(NULL);
-	esdm_invoke(esdm_rpcc_selftest(&result));
-	esdm_rpcc_fini_priv_service();
+	tool_be_init_priv();
+	ret = tool_be_selftest(&result);
+	tool_be_fini_priv();
 
 	/*
 	 * The server always runs both passes before it answers, so two undone
 	 * states mean no answer arrived rather than an outcome worth printing.
 	 */
-	if (ret && result.crypto_state == esdm_rpcc_selftest_undone &&
-	    result.es_state == esdm_rpcc_selftest_undone) {
+	if (ret && result.crypto_state == tool_be_selftest_undone &&
+	    result.es_state == tool_be_selftest_undone) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Running the self tests failed: %s\n",
 			    strerror(ret < 0 ? -ret : ret));
@@ -817,13 +813,12 @@ static int handle_selftest(void)
 static int handle_is_running(void)
 {
 	int i;
-	const char *files_to_check[] = { ESDM_RPC_UNPRIV_SOCKET,
-					 ESDM_RPC_PRIV_SOCKET, NULL };
+	const char *const *files_to_check = tool_be_sockets();
 	uint8_t bytes[32];
 	struct stat buffer;
 	ssize_t ret;
 
-	/* check for RPC files first */
+	/* check for the socket files first */
 	for (i = 0; files_to_check[i] != NULL; ++i) {
 		if (stat(files_to_check[i], &buffer) != 0) {
 			esdm_logger(
@@ -843,7 +838,7 @@ static int handle_is_running(void)
 	 * A liveness check: an operational ESDM whose DRNGs all await their
 	 * reseed answers short or with -EAGAIN
 	 */
-	esdm_invoke(esdm_rpcc_get_random_bytes(bytes, sizeof(bytes)));
+	ret = tool_be_get_random_bytes(bytes, sizeof(bytes));
 	if (ret <= 0 && ret != -EAGAIN) {
 		esdm_logger(
 			LOGGER_ERR, LOGGER_C_TOOL,
@@ -859,8 +854,7 @@ static int handle_is_running(void)
 
 static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 {
-	uint8_t *buffer = calloc(1, ESDM_RPC_MAX_DATA);
-	unsigned int flags = 0;
+	uint8_t *buffer = calloc(1, tool_be_max_data);
 	ssize_t ret;
 
 	if (buffer == NULL) {
@@ -869,14 +863,12 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		return EXIT_FAILURE;
 	}
 
-	if (!allow_not_fully_seeded)
-		flags |= ESDM_GET_SEED_FULLY_SEEDED;
-
-	esdm_invoke(esdm_rpcc_get_seed(buffer, ESDM_RPC_MAX_DATA, flags));
+	ret = tool_be_get_seed(buffer, tool_be_max_data,
+			       !allow_not_fully_seeded);
 	if (ret < 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "Unable to fetch seed, exiting.\n");
-		memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
+		memset_secure(buffer, 0, tool_be_max_data);
 		free(buffer);
 		return EXIT_FAILURE;
 	}
@@ -895,7 +887,7 @@ static int handle_get_seed(bool allow_not_fully_seeded, bool raw)
 		}
 	}
 
-	memset_secure(buffer, 0, ESDM_RPC_MAX_DATA);
+	memset_secure(buffer, 0, tool_be_max_data);
 	free(buffer);
 	return EXIT_SUCCESS;
 }
@@ -912,18 +904,17 @@ static int handle_endless_stress(bool continue_on_failure)
 	bool no_error = true;
 	ssize_t ret;
 
-	esdm_rpcc_init_priv_service(NULL);
+	tool_be_init_priv();
 
 	while (no_error || continue_on_failure) {
-		esdm_invoke(esdm_rpcc_rnd_add_entropy(buffer, sizeof(buffer),
-						      entropy_cnt_bits));
+		ret = tool_be_rnd_add_entropy(buffer, sizeof(buffer),
+					      entropy_cnt_bits);
 		if (ret != 0) {
 			no_error = false;
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 				    "failed to add entropy count\n");
 		}
-		esdm_invoke(
-			esdm_rpcc_get_random_bytes_pr(buffer, sizeof(buffer)));
+		ret = tool_be_get_random_bytes_pr(buffer, sizeof(buffer));
 		if (ret != (ssize_t)sizeof(buffer)) {
 			no_error = false;
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
@@ -931,7 +922,7 @@ static int handle_endless_stress(bool continue_on_failure)
 		}
 	}
 
-	esdm_rpcc_fini_priv_service();
+	tool_be_fini_priv();
 	return EXIT_SUCCESS;
 }
 
@@ -946,8 +937,7 @@ static int handle_stress_fork(void)
 
 	while (fork_depth++ < max_fork_depth) {
 		for (i = 0; i < 200; ++i) {
-			esdm_invoke(esdm_rpcc_get_random_bytes_full(buffer,
-								    buf_len));
+			ret = tool_be_get_random_bytes_full(buffer, buf_len);
 			if (ret == -EINTR || ret == -EPROTO ||
 			    ret == -ECONNRESET || ret == -ETIMEDOUT)
 				continue;
@@ -984,7 +974,7 @@ static int handle_seed_via_os(void)
 	int ret_val = EXIT_SUCCESS;
 	int ret;
 
-	if (esdm_rpcc_init_priv_service(NULL) != 0) {
+	if (tool_be_init_priv() != 0) {
 		ret_val = EXIT_FAILURE;
 		goto out_ret;
 	}
@@ -996,8 +986,8 @@ static int handle_seed_via_os(void)
 		goto out_1;
 	}
 
-	esdm_invoke(esdm_rpcc_rnd_add_entropy(seed_buffer, sizeof(seed_buffer),
-					      sizeof(seed_buffer) * 8));
+	ret = tool_be_rnd_add_entropy(seed_buffer, sizeof(seed_buffer),
+				      sizeof(seed_buffer) * 8);
 	if (ret != 0) {
 		esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 			    "seeding ESDM failed, exiting!\n");
@@ -1010,7 +1000,7 @@ static int handle_seed_via_os(void)
 		sizeof(seed_buffer), sizeof(seed_buffer) * 8);
 
 out_1:
-	esdm_rpcc_fini_priv_service();
+	tool_be_fini_priv();
 
 out_ret:
 	return ret_val;
@@ -1028,7 +1018,7 @@ static int handle_reseed_via_os(long reseed_delay_ms)
 	char *t2 = NULL;
 	int ret;
 
-	if (esdm_rpcc_init_priv_service(NULL) != 0) {
+	if (tool_be_init_priv() != 0) {
 		ret_val = EXIT_FAILURE;
 		goto out_ret;
 	}
@@ -1090,9 +1080,9 @@ static int handle_reseed_via_os(long reseed_delay_ms)
 			}
 		}
 
-		esdm_invoke(esdm_rpcc_rnd_add_entropy(
-			reseed_buffer, sizeof(reseed_buffer),
-			sizeof(reseed_buffer) * 8));
+		ret = tool_be_rnd_add_entropy(reseed_buffer,
+					      sizeof(reseed_buffer),
+					      sizeof(reseed_buffer) * 8);
 		if (ret != 0) {
 			esdm_logger(LOGGER_ERR, LOGGER_C_TOOL,
 				    "reseeding ESDM failed, exiting!\n");
@@ -1109,7 +1099,7 @@ out_1:
 	esdm_aux_fini_wait_for_need_entropy();
 
 out_2:
-	esdm_rpcc_fini_priv_service();
+	tool_be_fini_priv();
 
 out_ret:
 	return ret_val;
@@ -1626,6 +1616,34 @@ int main(int argc, char **argv)
 	if (use_syslog)
 		esdm_logger_enable_syslog("esdm-tool");
 
+	/*
+	 * Commands the interface of this build cannot express, see
+	 * tool_be_missing(): said here, before anything is asked of a server.
+	 */
+	if (!help && tool_be_missing()) {
+		const char *cmd = NULL;
+
+		if (drng_status)
+			cmd = "--drng-status";
+		else if (jent_status)
+			cmd = "--jent-status";
+		else if (get_seed)
+			cmd = "--get-seed";
+		else if (selftest)
+			cmd = "--selftest";
+		else if (es_rate_name)
+			cmd = "--set-es-rate";
+		else if (stress_init_fini)
+			cmd = "--stress-init-fini";
+
+		if (cmd) {
+			fprintf(stderr, "esdm-tool: %s needs %s\n", cmd,
+				tool_be_missing());
+			return_val = EXIT_FAILURE;
+			goto out;
+		}
+	}
+
 	/* check for privileged commands */
 	if (geteuid() &&
 	    (write_to_aux_pool || clear_pool || reseed_crng || reseed_via_os ||
@@ -1639,7 +1657,7 @@ int main(int argc, char **argv)
 	}
 
 	/* initialized in child processes in this test */
-	esdm_rpcc_init_unpriv_service(NULL);
+	tool_be_init();
 
 	/*
 	 * handle individual commands
@@ -1743,7 +1761,7 @@ int main(int argc, char **argv)
 		return_val = EXIT_FAILURE;
 	}
 
-	esdm_rpcc_fini_unpriv_service();
+	tool_be_fini();
 
 out:
 	free(es_rate_name);

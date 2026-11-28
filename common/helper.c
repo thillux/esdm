@@ -27,6 +27,7 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +126,17 @@ ssize_t esdm_safe_write(int fd, uint8_t *buf, size_t buflen)
 
 out:
 	return bytes_written;
+}
+
+int set_fd_nonblocking(int fd)
+{
+	int flags = fcntl(fd, F_GETFL);
+
+	if (flags < 0)
+		return -errno;
+	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+		return -errno;
+	return 0;
 }
 
 void may_enable_memory_debugging()

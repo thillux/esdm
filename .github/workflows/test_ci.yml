@@ -83,6 +83,21 @@ jobs:
             backend:
               name: builtin-uncapped
               opts: -Dcrypto_backend=builtin -Dfips140=false
+          # The server with one of its two interfaces only (meson options
+          # esdm-server-rpc and esdm-server-egd). Without the RPC interface,
+          # what needs it cannot be built and is switched off.
+          - runner: ubuntu-26.04
+            backend:
+              name: builtin-rpc-only
+              opts: -Dcrypto_backend=builtin -Desdm-server-egd=disabled
+          - runner: ubuntu-26.04
+            backend:
+              name: builtin-egd-only
+              opts: >-
+                -Dcrypto_backend=builtin
+                -Desdm-server-rpc=disabled
+                -Dlinux-devfiles=disabled
+                -Dlinux-getrandom=disabled
           - runner: ubuntu-22.04
             backend:
               name: openssl-es-ext
@@ -323,6 +338,8 @@ jobs:
       run: meson test -v -C build
 
     - name: Meson test (privileged)
+      # A build without the EGD interface has no such test
+      if: ${{ !contains(matrix.backend.opts, '-Desdm-server-egd=disabled') }}
       run: |
         # The esdm-server refuses to run unprivileged, so the EGD server test
         # only reports "must be started as root" and skips in the run above.
@@ -340,7 +357,7 @@ jobs:
     # build without the external entropy source has no such test, and meson
     # fails on a test name it does not know.
     - name: Meson test (privileged, external entropy source)
-      if: ${{ !contains(matrix.backend.opts, '-Des_ext=disabled') }}
+      if: ${{ !contains(matrix.backend.opts, '-Des_ext=disabled') && !contains(matrix.backend.opts, '-Desdm-server-rpc=disabled') }}
       run: |
         sudo env LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
              meson test -v -C build 'esdm-server with an external entropy source'

@@ -15,7 +15,7 @@ if get_option('esdm-server').enabled()
 				include_directories('../common') ],
 			dependencies: [ dependencies_client ],
 			link_with: [ esdm_common_static_lib,
-				     esdm_rpc_client_lib ],
+				     esdm_server_signal_helper_lib ],
 		)
 
 	test('esdm-server-signal-helper', signal_helper_test,

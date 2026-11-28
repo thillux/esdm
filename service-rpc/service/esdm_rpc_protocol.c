@@ -18,7 +18,6 @@
  */
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -68,17 +67,6 @@ void esdm_rpc_free(void *allocator_data, void *data)
 	(void)allocator_data;
 	(void)data;
 	return;
-}
-
-int set_fd_nonblocking(int fd)
-{
-	int flags = fcntl(fd, F_GETFL);
-
-	if (flags < 0)
-		return -errno;
-	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-		return -errno;
-	return 0;
 }
 
 /* Read a base-128 varint, advancing *pos. Returns 0 or -EPROTO. */

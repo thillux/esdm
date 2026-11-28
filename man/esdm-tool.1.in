@@ -16,6 +16,12 @@ Options that change the state of the daemon go through the privileged RPC
 interface and therefore require root; they are marked as such below. All other
 operations work for any user that may access the unprivileged RPC socket.
 .PP
+An
+.B esdm\-tool
+built without the RPC interface works over the EGD interface of the daemon and
+lacks the commands that interface cannot express; see
+.BR "BUILDS WITHOUT THE RPC INTERFACE" .
+.PP
 Log messages go to standard error, the output of
 .BR \-\-status ,
 .BR \-\-entropy\-count ,
@@ -294,6 +300,69 @@ Delay inserted before each write of
 .BR \-\-reseed\-via\-os ,
 to emulate the latency of a smartcard or a TPM. Less than one second: a larger
 value is cut to that.
+.SH BUILDS WITHOUT THE RPC INTERFACE
+A build with the meson option
+.B esdm\-server\-rpc
+disabled has neither the RPC interface in
+.BR esdm\-server (8)
+nor the RPC client library.
+.B esdm\-tool
+of such a build uses
+.BR libesdm_egd_client (3)
+and the EGD protocol with the commands the ESDM adds to it. There is one socket
+for all commands; the daemon carries out the commands requiring root for a
+client connected as root. The usage printed by
+.B \-\-help
+names the interface, the socket and the commands that are not available.
+.PP
+The following work as described under
+.BR OPTIONS ,
+with these differences:
+.TP
+.BR \-\-status ", " \-\-status\-json ", " \-\-is\-fully\-seeded ", " \-\-wait\-until\-seeded ", " \-\-entropy\-count ", " \-\-entropy\-level
+No difference.
+.TP
+.BR \-\-is\-running
+Checks the one EGD socket instead of the two RPC sockets.
+.TP
+.BR \-\-get\-random ", " \-\-use\-pr ", " \-\-allow\-unseeded
+The blocking read, the prediction resistance read and the unseeded read of the
+protocol.
+.TP
+.BR \-\-timeout\-msec
+The read that does not wait is repeated until all bytes are delivered or the
+time is up. The daemon holds such a read back for up to one second while its
+DRNGs await a reseed, so that the timeout may be exceeded by that.
+.TP
+.BR \-\-write\-to\-aux\-pool ", " \-\-write\-entropy\-bits
+The data is written 255 bytes at a time, each write with the part of the
+entropy claim its bytes can hold.
+.TP
+.BR \-\-clear\-pool ", " \-\-reseed\-crng ", " \-\-max\-reseed\-secs
+No difference.
+.TP
+.BR \-\-benchmark ", " \-\-benchmark\-mode ", " \-\-stress\-delay ", " \-\-stress\-thread ", " \-\-stress\-process ", " \-\-stress\-fork ", " \-\-endless\-stress ", " \-\-seed\-via\-os ", " \-\-reseed\-via\-os
+With the reads and the write above; the full path of the benchmark runs up to
+65536 bytes per request.
+.PP
+The protocol has no command for the following. They are refused with a message
+naming the option and the reason, and with status 1, for every user:
+.BR \-\-drng\-status ,
+.BR \-\-drng\-status\-json ,
+.BR \-\-jent\-status ,
+.BR \-\-get\-seed ,
+.BR \-\-selftest ,
+.B \-\-set\-es\-rate
+and
+.BR \-\-stress\-init\-fini .
+.SH ENVIRONMENT
+.TP
+.B ESDM_EGD_SOCKET
+In a build without the RPC interface: path of the EGD socket of the daemon.
+Without it the tool uses the socket such a daemon serves when it is given
+none,
+.IR @EGD_SOCKET_PATH@ .
+A build with the RPC interface does not read the variable.
 .SH EXIT STATUS
 .B esdm\-tool
 exits with status 0 on success. The query options
@@ -303,7 +372,8 @@ exits with status 0 on success. The query options
 report their answer through the exit status and are meant to be used in
 scripts and service units. Status 1 is returned when a command fails, after
 .B \-\-help
-or without a command, for an invalid argument, and for a command requiring
+or without a command, for an invalid argument, for a command the interface of
+the build cannot express, and for a command requiring
 root when run by another user.
 .PP
 .BR \-\-status ,
@@ -345,6 +415,7 @@ esdm\-tool \-\-drng\-status\-json | jq '.[] | select(.fully_seeded == false)'
 .SH SEE ALSO
 .BR esdm\-server (8),
 .BR esdm\-kernel\-seeder (8),
-.BR libesdm_rpc_client (3)
+.BR libesdm_rpc_client (3),
+.BR libesdm_egd_client (3)
 .SH AUTHOR
 Stephan Mueller <smueller@chronox.de>

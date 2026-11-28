@@ -11,16 +11,24 @@ man_conf_data.set('EGD_SOCKET_PATH',
 # that are built unconditionally.
 man_pages = [
 	'libesdm.3',
-	'libesdm_rpc_client.3',
-	'libesdm_egd_client.3',
 ]
+
+if get_option('esdm-server-rpc').enabled()
+	man_pages += [ 'libesdm_rpc_client.3' ]
+endif
+
+if get_option('esdm-server-egd').enabled()
+	man_pages += [ 'libesdm_egd_client.3' ]
+endif
 
 if get_option('esdm-server').enabled()
 	man_pages += [
 		'esdm-server.8',
 		'esdm-server-signal-helper.8',
-		'esdm-kernel-seeder.8',
 	]
+	if get_option('esdm-server-rpc').enabled()
+		man_pages += [ 'esdm-kernel-seeder.8' ]
+	endif
 endif
 
 if get_option('esdm-tool').enabled()

@@ -20,6 +20,7 @@
 #ifndef ESDM_EGD_SERVER_H
 #define ESDM_EGD_SERVER_H
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -29,6 +30,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#ifdef ESDM_SERVER_EGD
 
 /**
  * @brief Enable the EGD (Entropy Gathering Daemon) compatibility interface
@@ -78,6 +81,13 @@ int esdm_egd_server_enable_pr(const char *socket_path);
 bool esdm_egd_server_enabled(void);
 
 /**
+ * @brief Was the path of the regular socket requested on the command line?
+ *
+ * @return boolean whether esdm_egd_server_enable() was called
+ */
+bool esdm_egd_server_regular_enabled(void);
+
+/**
  * @brief Obtain the EGD listening socket
  *
  * A socket handed over by systemd under the name ESDM_EGD_SOCKET is preferred
@@ -104,6 +114,17 @@ int esdm_egd_server_socket_init(void);
  * @return 0 on success, < 0 on error
  */
 int esdm_egd_server_start(void);
+
+/**
+ * @brief How the EGD worker ended
+ *
+ * A server whose only interface is the EGD one - a build without the RPC
+ * interface - ends when its worker fails, and reports this as its own result.
+ *
+ * @return 0 while the worker runs and after it was asked to exit, < 0 if it
+ *	   left on a failure
+ */
+int esdm_egd_server_worker_ret(void);
 
 /**
  * @brief Async-signal-safe shutdown trigger for the EGD worker
@@ -144,6 +165,49 @@ void esdm_egd_server_cleanup(void);
 int esdm_egd_fuzz_stream(bool prediction_resistance, int out_fd,
 			 const uint8_t *data, size_t len);
 #endif /* ESDM_FUZZING */
+
+#else /* ESDM_SERVER_EGD */
+
+/*
+ * A build without the EGD interface (meson option esdm-server-egd): the socket
+ * cannot be requested, and the server engine drives a lifecycle that does
+ * nothing.
+ */
+static inline int esdm_egd_server_enable(const char *socket_path)
+{
+	(void)socket_path;
+	return -ENOENT;
+}
+
+static inline int esdm_egd_server_enable_pr(const char *socket_path)
+{
+	(void)socket_path;
+	return -ENOENT;
+}
+
+static inline int esdm_egd_server_socket_init(void)
+{
+	return 0;
+}
+
+static inline int esdm_egd_server_start(void)
+{
+	return 0;
+}
+
+static inline void esdm_egd_server_signal_exit_safe(void)
+{
+}
+
+static inline void esdm_egd_server_fini(void)
+{
+}
+
+static inline void esdm_egd_server_cleanup(void)
+{
+}
+
+#endif /* ESDM_SERVER_EGD */
 
 #ifdef __cplusplus
 }

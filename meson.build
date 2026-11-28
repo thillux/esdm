@@ -180,7 +180,29 @@ es_ext_proto_src = files('es-ext/es_ext.pb-c.c')
 protobuf_c_dep = dependency('libprotobuf-c')
 
 subdirs = [ 'common', 'crypto', 'esdm', 'service-egd',
-	    'service-rpc/server', 'service-rpc/service', 'service-rpc/client/' ]
+	    'service-rpc/server', 'service-rpc/service' ]
+
+# The interfaces of the esdm-server: each can be left out of the build, with its
+# client library and everything that needs it.
+server_rpc = get_option('esdm-server-rpc').enabled()
+server_egd = get_option('esdm-server-egd').enabled()
+
+if get_option('esdm-server').enabled() and not server_rpc and not server_egd
+	error('The ESDM server needs an interface - enable esdm-server-rpc, esdm-server-egd or both')
+endif
+
+if server_rpc
+	subdirs += [ 'service-rpc/client/' ]
+else
+	foreach opt : [ 'linux-devfiles', 'linux-getrandom' ]
+		if get_option(opt).enabled()
+			error(opt + ' uses the RPC interface of the ESDM server - disable it together with esdm-server-rpc')
+		endif
+	endforeach
+	if get_option('openssl-rand-provider').enabled() and not server_egd
+		error('The OpenSSL RAND provider needs an interface of the ESDM server - enable esdm-server-rpc or esdm-server-egd')
+	endif
+endif
 
 if get_option('esdm-server').disabled() and get_option('linux-devfiles').enabled()
 	error('Linux device file support requires the ESDM server')
@@ -192,6 +214,10 @@ endif
 
 if get_option('esdm-server').disabled() and get_option('openssl-rand-provider').enabled()
 	error('OpenSSL RAND provider support requires the ESDM server')
+endif
+
+if not server_egd and get_option('esdm-cdev-check').enabled()
+	error('esdm-cdev-check checks the kernel module esdm_cdev, which reads the ESDM through its EGD interface - enable esdm-server-egd')
 endif
 
 if get_option('es_jent_kernel').enabled()
@@ -212,7 +238,12 @@ if get_option('es_ebpf_testing').enabled()
 endif
 
 if get_option('esdm-server').enabled()
-	subdirs += [ 'frontends/server', 'frontends/server-signal-helper', 'frontends/kernel-seeder' ]
+	# The signal helper works over either interface, the kernel seeder
+	# reads its seed over the RPC interface
+	subdirs += [ 'frontends/server', 'frontends/server-signal-helper' ]
+	if server_rpc
+		subdirs += [ 'frontends/kernel-seeder' ]
+	endif
 endif
 
 if get_option('linux-devfiles').enabled()
@@ -307,7 +338,11 @@ foreach opt : [ 'es_pkcs11', 'es_pcsc' ]
 	endif
 endforeach
 
+# esdm-tool works over the RPC interface or, without it, over the EGD interface
 if get_option('esdm-tool').enabled()
+	if not server_rpc and not server_egd
+		error('esdm-tool needs an interface of the ESDM server - enable esdm-server-rpc or esdm-server-egd')
+	endif
 	subdirs += [ 'frontends/tool' ]
 endif
 
@@ -331,23 +366,33 @@ testdirs = [
 	'tests/common',
 	'tests/crypto',
 	'tests/cuse',
-	'tests/egd',
 	'tests/es',
 	'tests/es_ext',
 	'tests/esdm',
-	'tests/esdm_cdev',
 	'tests/getrandom',
-	'tests/kernel-seeder',
 	'tests/misc',
 	'tests/proc',
-	'tests/rpc_client',
-	'tests/rpc_service',
 	'tests/security',
 	'tests/server',
 	'tests/server-signal-helper',
 	'tests/aux-client',
 	'tests/tool',
 	]
+# The RPC interface and what reaches the server through it
+if server_rpc
+testdirs += [
+	'tests/kernel-seeder',
+	'tests/rpc_client',
+	'tests/rpc_service',
+]
+endif
+# The EGD interface, and esdm_cdev as its client in the kernel
+if server_egd
+testdirs += [
+	'tests/egd',
+	'tests/esdm_cdev',
+]
+endif
 if get_option('fuzzing').enabled()
 testdirs += [
 	'tests/fuzz',

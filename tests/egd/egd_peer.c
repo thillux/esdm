@@ -64,6 +64,16 @@ struct egd_peer {
 	size_t write_len;
 	uint32_t write_bits;
 
+	unsigned int privs;
+	uint8_t priv_cmd;
+	uint32_t priv_arg;
+	uint32_t write_wakeup;
+	uint32_t min_reseed_secs;
+
+	unsigned int inserts;
+	size_t insert_len;
+	uint32_t insert_sum;
+
 	char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 };
 
@@ -130,11 +140,35 @@ static int peer_send_data(struct egd_peer_conn *conn, size_t len)
 	uint8_t buf[ESDM_EGD_MAX_TRANSFER];
 	size_t i;
 
-	for (i = 0; i < len; i++)
-		buf[i] = egd_peer_data_byte(conn->sent + i);
-	conn->sent += len;
+	while (len) {
+		size_t chunk = (len < sizeof(buf)) ? len : sizeof(buf);
+		int ret;
 
-	return peer_write_all(conn->fd, buf, len);
+		for (i = 0; i < chunk; i++)
+			buf[i] = egd_peer_data_byte(conn->sent + i);
+		conn->sent += chunk;
+
+		ret = peer_write_all(conn->fd, buf, chunk);
+		if (ret)
+			return ret;
+		len -= chunk;
+	}
+
+	return 0;
+}
+
+static void peer_be32(uint8_t *p, uint32_t value)
+{
+	p[0] = (uint8_t)(value >> 24);
+	p[1] = (uint8_t)(value >> 16);
+	p[2] = (uint8_t)(value >> 8);
+	p[3] = (uint8_t)value;
+}
+
+static uint32_t peer_from_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
 static int peer_cmd_entropy_count(struct egd_peer_conn *conn)
@@ -156,11 +190,24 @@ static int peer_cmd_entropy_count(struct egd_peer_conn *conn)
 static int peer_cmd_get_state(struct egd_peer_conn *conn)
 {
 	uint8_t response[1 + 4 * (ESDM_EGD_STATE_NUM_FIELDS + 1)] = { 0 };
+	struct egd_peer *peer = conn->peer;
 
 	response[0] = ESDM_EGD_STATE_NUM_FIELDS + 1;
 	response[1 + 4 * ESDM_EGD_STATE_FLAGS + 3] =
 		ESDM_EGD_STATE_FLAG_OPERATIONAL |
 		ESDM_EGD_STATE_FLAG_FULLY_SEEDED;
+	peer_be32(response + 1 + 4 * ESDM_EGD_STATE_ENT_CNT,
+		  EGD_PEER_STATE_ENT_CNT);
+	peer_be32(response + 1 + 4 * ESDM_EGD_STATE_POOLSIZE,
+		  EGD_PEER_STATE_POOLSIZE);
+
+	/* The two a privileged command sets */
+	pthread_mutex_lock(&peer->lock);
+	peer_be32(response + 1 + 4 * ESDM_EGD_STATE_WRITE_WAKEUP,
+		  peer->write_wakeup);
+	peer_be32(response + 1 + 4 * ESDM_EGD_STATE_MIN_RESEED_SECS,
+		  peer->min_reseed_secs);
+	pthread_mutex_unlock(&peer->lock);
 
 	return peer_write_all(conn->fd, response, sizeof(response));
 }
@@ -193,6 +240,8 @@ static int peer_cmd_read_nonblock(struct egd_peer_conn *conn)
 	case EGD_PEER_SILENT:
 	case EGD_PEER_HANGUP:
 	case EGD_PEER_SHUT_RD:
+	case EGD_PEER_UNPRIVILEGED:
+	case EGD_PEER_LEGACY:
 		delivered = requested;
 		break;
 	}
@@ -263,6 +312,126 @@ static int peer_cmd_get_pid(struct egd_peer_conn *conn)
 	return peer_write_all(conn->fd, (const uint8_t *)pid, len);
 }
 
+/*
+ * The bulk read of the ESDM: answered as the non-blocking read it names, with
+ * a 4 byte length.
+ */
+static int peer_cmd_bulk_read(struct egd_peer_conn *conn)
+{
+	uint8_t request[5], response[4];
+	uint32_t requested, delivered;
+	int ret;
+
+	ret = peer_read_all(conn->fd, request, sizeof(request));
+	if (ret)
+		return ret;
+
+	requested = peer_from_be32(request + 1);
+	if ((request[0] != ESDM_EGD_CMD_READ_NONBLOCK &&
+	     request[0] != ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK &&
+	     request[0] != ESDM_EGD_CMD_ESDM_READ_UNSEEDED) ||
+	    requested > ESDM_EGD_MAX_BULK)
+		return -EPROTO;
+
+	if (conn->peer->mode == EGD_PEER_SHORT)
+		delivered = requested / 2;
+	else if (conn->peer->mode == EGD_PEER_OVERLONG)
+		delivered = requested + 1;
+	else
+		delivered = requested;
+
+	peer_be32(response, delivered);
+	ret = peer_write_all(conn->fd, response, sizeof(response));
+	if (ret)
+		return ret;
+
+	return peer_send_data(conn, delivered);
+}
+
+/* The status reports of the ESDM, preceded by their 4 byte length */
+static int peer_cmd_status(struct egd_peer_conn *conn, int json)
+{
+	const char *report = json ? EGD_PEER_STATUS_JSON : EGD_PEER_STATUS;
+	size_t len = (conn->peer->mode == EGD_PEER_SHORT) ? 0 : strlen(report);
+	uint8_t response[4];
+	int ret;
+
+	peer_be32(response, (uint32_t)len);
+	ret = peer_write_all(conn->fd, response, sizeof(response));
+	if (ret)
+		return ret;
+
+	return peer_write_all(conn->fd, (const uint8_t *)report, len);
+}
+
+/*
+ * The privileged commands of the ESDM: recorded and answered with a status -
+ * with -EPERM, and without any effect, by the unprivileged peer.
+ */
+static int peer_cmd_priv(struct egd_peer_conn *conn, uint8_t cmd, int has_arg)
+{
+	struct egd_peer *peer = conn->peer;
+	uint8_t arg[4] = { 0 }, response[4];
+	int status = (peer->mode == EGD_PEER_UNPRIVILEGED) ? -EPERM : 0;
+	int ret;
+
+	if (has_arg) {
+		ret = peer_read_all(conn->fd, arg, sizeof(arg));
+		if (ret)
+			return ret;
+	}
+
+	pthread_mutex_lock(&peer->lock);
+	peer->privs++;
+	peer->priv_cmd = cmd;
+	peer->priv_arg = peer_from_be32(arg);
+	if (!status && cmd == ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP)
+		peer->write_wakeup = peer->priv_arg;
+	if (!status && cmd == ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS)
+		peer->min_reseed_secs = peer->priv_arg;
+	pthread_mutex_unlock(&peer->lock);
+
+	peer_be32(response, (uint32_t)status);
+
+	return peer_write_all(conn->fd, response, sizeof(response));
+}
+
+/* The bulk insert of the ESDM: answered with a status once all data is in */
+static int peer_cmd_bulk_insert(struct egd_peer_conn *conn)
+{
+	struct egd_peer *peer = conn->peer;
+	uint8_t header[4], buf[256], response[4] = { 0 };
+	uint32_t sum = 0;
+	size_t len, left, chunk, i;
+	int ret;
+
+	ret = peer_read_all(conn->fd, header, sizeof(header));
+	if (ret)
+		return ret;
+
+	len = peer_from_be32(header);
+	if (len > ESDM_EGD_MAX_BULK)
+		return -EPROTO;
+
+	for (left = len; left; left -= chunk) {
+		chunk = (left < sizeof(buf)) ? left : sizeof(buf);
+
+		ret = peer_read_all(conn->fd, buf, chunk);
+		if (ret)
+			return ret;
+		for (i = 0; i < chunk; i++)
+			sum += buf[i];
+	}
+
+	pthread_mutex_lock(&peer->lock);
+	peer->inserts++;
+	peer->insert_len += len;
+	peer->insert_sum += sum;
+	pthread_mutex_unlock(&peer->lock);
+
+	return peer_write_all(conn->fd, response, sizeof(response));
+}
+
 /****************************
  * Connection and accept loop
  ****************************/
@@ -331,6 +500,13 @@ static void *peer_conn_thread(void *arg)
 		peer->requests++;
 		pthread_mutex_unlock(&peer->lock);
 
+		/* Not a command of EGD: unknown to a peer that is no ESDM */
+		if (peer->mode == EGD_PEER_LEGACY &&
+		    cmd > ESDM_EGD_CMD_GET_PID) {
+			shutdown(conn->fd, SHUT_RDWR);
+			break;
+		}
+
 		switch (cmd) {
 		case ESDM_EGD_CMD_ENTROPY_COUNT:
 			ret = peer_cmd_entropy_count(conn);
@@ -349,6 +525,34 @@ static void *peer_conn_thread(void *arg)
 			break;
 		case ESDM_EGD_CMD_ESDM_GET_STATE:
 			ret = peer_cmd_get_state(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_PR_READ_NONBLOCK:
+		case ESDM_EGD_CMD_ESDM_READ_UNSEEDED:
+			ret = peer_cmd_read_nonblock(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_PR_READ_BLOCK:
+			ret = peer_cmd_read_block(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_BULK_READ:
+			ret = peer_cmd_bulk_read(conn);
+			break;
+		case ESDM_EGD_CMD_ESDM_STATUS:
+			ret = peer_cmd_status(conn, 0);
+			break;
+		case ESDM_EGD_CMD_ESDM_STATUS_JSON:
+			ret = peer_cmd_status(conn, 1);
+			break;
+		case ESDM_EGD_CMD_ESDM_ADD_TO_ENT_CNT:
+		case ESDM_EGD_CMD_ESDM_SET_WRITE_WAKEUP:
+		case ESDM_EGD_CMD_ESDM_SET_MIN_RESEED_SECS:
+			ret = peer_cmd_priv(conn, cmd, 1);
+			break;
+		case ESDM_EGD_CMD_ESDM_CLEAR_POOL:
+		case ESDM_EGD_CMD_ESDM_RESEED:
+			ret = peer_cmd_priv(conn, cmd, 0);
+			break;
+		case ESDM_EGD_CMD_ESDM_BULK_INSERT:
+			ret = peer_cmd_bulk_insert(conn);
 			break;
 		default:
 			printf("EGD peer: unknown command 0x%02x\n", cmd);
@@ -461,6 +665,8 @@ int egd_peer_start(struct egd_peer **peer, const char *path,
 
 	new_peer->mode = mode;
 	new_peer->listen_fd = -1;
+	new_peer->write_wakeup = EGD_PEER_STATE_WRITE_WAKEUP;
+	new_peer->min_reseed_secs = EGD_PEER_STATE_MIN_RESEED_SECS;
 	atomic_init(&new_peer->stop, 0);
 	pthread_mutex_init(&new_peer->lock, NULL);
 
@@ -580,4 +786,36 @@ unsigned int egd_peer_last_write(struct egd_peer *peer, uint8_t *buf,
 	pthread_mutex_unlock(&peer->lock);
 
 	return writes;
+}
+
+unsigned int egd_peer_last_priv(struct egd_peer *peer, uint8_t *cmd,
+				uint32_t *arg)
+{
+	unsigned int privs;
+
+	pthread_mutex_lock(&peer->lock);
+	privs = peer->privs;
+	if (cmd)
+		*cmd = peer->priv_cmd;
+	if (arg)
+		*arg = peer->priv_arg;
+	pthread_mutex_unlock(&peer->lock);
+
+	return privs;
+}
+
+unsigned int egd_peer_inserted(struct egd_peer *peer, size_t *len,
+			       uint32_t *sum)
+{
+	unsigned int inserts;
+
+	pthread_mutex_lock(&peer->lock);
+	inserts = peer->inserts;
+	if (len)
+		*len = peer->insert_len;
+	if (sum)
+		*sum = peer->insert_sum;
+	pthread_mutex_unlock(&peer->lock);
+
+	return inserts;
 }
