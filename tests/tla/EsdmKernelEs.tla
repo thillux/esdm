@@ -27,15 +27,24 @@
 (* - The health tests: a sample may fail the APT or the RCT (at most       *)
 (*   MaxFail times in all) and may end an APT window (MaxWin times), so a  *)
 (*   window lasts one sample or more; SB stands for                        *)
-(*   ESDM_SP80090B_STARTUP_BLOCKS. A failing sample may be stored or       *)
-(*   dropped. The stuck test and the RCT reset of a passing sample only    *)
-(*   drop samples and are left out, as are the permanent failure (the same *)
-(*   restart), the panic and the deferred messages.                        *)
+(*   ESDM_SP80090B_STARTUP_BLOCKS, and the counter starts at StartBlocks:  *)
+(*   SB as in the code, 0 for a startup test passed before, SB + 1 for the *)
+(*   window of a failure whose reset is done. A failing sample may be      *)
+(*   stored or dropped. The sample fails first and ends the window then,   *)
+(*   as the APT does; the RCT failure of a sample that ended a window is   *)
+(*   the failure of the CPU's next sample, which is dropped. The stuck     *)
+(*   test and the RCT reset of a passing sample only drop samples and are  *)
+(*   left out, as are the permanent failure (the same restart), the panic  *)
+(*   and the deferred messages.                                            *)
 (* - The reader asks for Blocks blocks of Need events each; a block is     *)
 (*   credited when it collected Need events, the abstraction of the        *)
-(*   oversampling arithmetic. drbg_seed()/drbg_generate() may fail         *)
-(*   (SeedFail). NR readers stand for the descriptors of the device, which *)
-(*   the IOCTL mutex serializes (Mutex, the code).                         *)
+(*   oversampling arithmetic. esdm_es_ring_avail_events() is one step: it  *)
+(*   only decides whether the request tries. drbg_seed()/drbg_generate()   *)
+(*   may fail (SeedFail). NR readers stand for the descriptors of the      *)
+(*   device, which the IOCTL mutex serializes (Mutex, the code).           *)
+(* - Every context is bounded and ends: a state in which a context waits   *)
+(*   and no other can step is a deadlock, which every configuration        *)
+(*   checks; Termination states the same as a liveness property.           *)
 (* - Not modelled: CPU hotplug (the online mask is all CPUs), the DRBG     *)
 (*   registration work, last_timestamp, the timer GCD, the testing         *)
 (*   interfaces.                                                           *)
@@ -62,11 +71,21 @@ CONSTANTS
     SeedFail,    \* drbg_seed() or drbg_generate() may fail
     SchedIrqOff, \* esdm_sched_randomness() disables interrupts (the code)
     IrqSave,     \* the ring lock is taken with interrupts off (the code)
+    FirstCheck,  \* the startup test is checked before the collection (the
+                 \* code)
     FinalCheck,  \* the startup test is checked again before the last
                  \* generation (the code since the fix)
+    FinalPend,   \* that check reads the count of changes in progress too
+                 \* (the code)
     PendReset,   \* a change of the startup test counts as a reset in progress
                  \* until its reset is done, which fails the startup test (the
                  \* code since the fix)
+    PendWin,     \* with PendReset: so does the end of a window, not only a
+                 \* failure (the code)
+    EarlyReturn, \* with PendWin: but not the end of a window that finds the
+                 \* startup test passed (the code)
+    FailReset,   \* the first failure of a window resets the rings (the code)
+    WinReset,    \* the end of the window of a failure resets them (the code)
     AtomicReset, \* alternative fix, not in the code: such a change and its
                  \* reset are one critical section of the ring lock
     Unload,      \* module exit once the device is closed
@@ -119,7 +138,9 @@ variables
     \* ghosts: per slot unused, write parity and the event's tag; the tag
     \* of each producer's sample (sampled in a failure window, failures and
     \* resets before it, a reset while it was in flight) and whether it is
-    \* in flight; failures, resets, windows, events stored and credited
+    \* in flight; failures, resets, ends of a window chosen, the startup
+    \* test passed once; events stored, credited, and taken out of the
+    \* rings - hashed by a block that was released, or discarded by a reset
     fr = [c \in Cpus |-> [i \in Slot |-> FALSE]],
     ver = [c \in Cpus |-> [i \in Slot |-> 0]],
     tg = [c \in Cpus |-> [i \in Slot |-> Tag0]],
@@ -128,8 +149,10 @@ variables
     fcnt = 0,
     rcnt = 0,
     wins = 0,
+    passed = StartBlocks = 0,
     produced = 0,
     credited = 0,
+    gone = 0,
     viol = {};
 
 define {
@@ -141,8 +164,10 @@ define {
     SumAvail(S) == IF S = {} THEN 0
                    ELSE LET c == CHOOSE c \in S : TRUE
                         IN Dist(wp[c], rp[c]) + SumAvail(S \ {c})
-    \* what a credited block takes from the events it hashed
-    Bad(S, fs, rs) ==
+    \* what a block takes from the slots it hashed: slots handed out or
+    \* discarded before, slots overwritten since the collection, events of
+    \* the window of a failure
+    Bad(S) ==
         LET T(e) == tg[e[1]][e[2]]
             F == {e \in S : fr[e[1]][e[2]]}
         IN  (IF \E e \in S : ~fr[e[1]][e[2]] THEN {"Stale"} ELSE {})
@@ -151,12 +176,17 @@ define {
             \cup (IF \E e \in F : T(e).win /\ ~T(e).sv
                   THEN {"Window"} ELSE {})
             \cup (IF \E e \in F : T(e).win THEN {"WindowSurv"} ELSE {})
-            \cup (IF \E e \in F : T(e).fc < fs /\ ~T(e).sv
-                  THEN {"PreFail"} ELSE {})
-            \cup (IF \E e \in F : T(e).fc < fs THEN {"PreFailSurv"} ELSE {})
-            \cup (IF \E e \in F : T(e).rc < rs /\ ~T(e).sv
-                  THEN {"PreReset"} ELSE {})
-            \cup (IF \E e \in F : T(e).rc < rs THEN {"PreResetSurv"} ELSE {})
+    \* when the events a block hashed were sampled
+    Tags(S) ==
+        {[fc |-> tg[e[1]][e[2]].fc, rc |-> tg[e[1]][e[2]].rc,
+          sv |-> tg[e[1]][e[2]].sv] : e \in {x \in S : fr[x[1]][x[2]]}}
+    \* what a request credits of events sampled before the last of fs
+    \* failures or of rs resets
+    Old(H, fs, rs) ==
+        (IF \E t \in H : t.fc < fs /\ ~t.sv THEN {"PreFail"} ELSE {})
+        \cup (IF \E t \in H : t.fc < fs THEN {"PreFailSurv"} ELSE {})
+        \cup (IF \E t \in H : t.rc < rs /\ ~t.sv THEN {"PreReset"} ELSE {})
+        \cup (IF \E t \in H : t.rc < rs THEN {"PreResetSurv"} ELSE {})
 }
 
 \* raw_spin_lock_irqsave(&ring->lock): a task context disables interrupts
@@ -185,6 +215,7 @@ macro rel() {
 macro resetBody() {
     gen := gen + 1;
     rcnt := rcnt + 1;
+    gone := gone + SumAvail(Cpus);
     fr := [c \in Cpus |-> [i \in Slot |-> fr[c][i] /\ ~InRing(c, i)]];
     rp := wp;
     tagE := [q \in Prods |-> IF infl[q] THEN [tagE[q] EXCEPT !.sv = TRUE]
@@ -204,13 +235,13 @@ rr2: await Run(self);
          with (o = blocks) {
              fcnt := fcnt + 1;
              blocks := SB + 1;
-             if (o # SB + 1) resetBody();
+             if (o # SB + 1 /\ FailReset) resetBody();
          };
      } else if (xc = "win") {
          with (o = blocks) {
-             wins := wins + 1;
              if (o > 0) blocks := o - 1;
-             if (o - 1 = SB) resetBody();
+             if (o = 1) passed := TRUE;
+             if (o - 1 = SB /\ WinReset) resetBody();
          };
      } else {
          resetBody();
@@ -223,7 +254,7 @@ rr2: await Run(self);
 \* hook esdm_sched_randomness(), each running esdm_time_process()
 fair process (p \in Prods)
     variables n = 0, w = 0, r = 0, old = 0, res = -1, fl = FALSE,
-              we = FALSE, st = TRUE;
+              we = FALSE, st = TRUE, fno = 0, wfc = 0;
 {
 pe0: while (n < MaxEv) {
          \* the hook fires, an RCU read-side critical section
@@ -246,7 +277,8 @@ pe0: while (n < MaxEv) {
              infl[self] := TRUE;
          };
          \* esdm_apt_insert() / esdm_rct(): a failure restarts the startup
-         \* test, esdm_sp80090b_startup_restart()
+         \* test, esdm_sp80090b_startup_restart(). Before the fix, the
+         \* exchange is its first step.
 ht0:     await Run(self);
          either {
              skip;
@@ -257,40 +289,42 @@ ht0:     await Run(self);
                  call ringReset("fail");
                  goto ht2;
              } else if (PendReset) {
+                 \* esdm_sp80090b_change_begin()
                  pend := pend + 1;
                  goto hp0;
              } else {
                  old := blocks;
                  blocks := SB + 1;
                  fcnt := fcnt + 1;
+                 fno := fcnt;
              };
          };
 ht1:     await Run(self);
-         if (fl /\ old # SB + 1) call ringReset("none");
-         \* the sample ends an APT window: esdm_sp80090b_startup()
+         if (fl /\ old # SB + 1 /\ FailReset) call ringReset("none");
+         \* the sample ends an APT window: esdm_sp80090b_startup(). With
+         \* the fix, the read of the counter is the step: the startup test
+         \* passed, nothing to change and no change in progress.
 ht2:     await Run(self);
          either {
              skip;
          } or {
              await Fips /\ wins < MaxWin;
+             wins := wins + 1;
+             we := TRUE;
              if (AtomicReset) {
                  call ringReset("win");
                  goto ra1;
-             } else if (PendReset /\ blocks # 0) {
-                 \* the startup test passed: nothing to change and no
-                 \* reset in progress, the read of the counter is the step
-                 pend := pend + 1;
-                 we := TRUE;
-                 goto hp2;
+             } else if (PendReset /\ PendWin) {
+                 if (EarlyReturn /\ blocks = 0) goto ra1 else goto hp2;
              } else {
-                 wins := wins + 1;
                  res := blocks - 1;
                  if (blocks > 0) blocks := blocks - 1;
-                 we := TRUE;
+                 if (blocks = 0) passed := TRUE;
+                 wfc := fcnt;
              };
          };
 ht3:     await Run(self);
-         if (we /\ res = SB) call ringReset("none");
+         if (we /\ res = SB /\ WinReset) call ringReset("none");
          \* esdm_es_ring_add(): load wp and rp; a failing sample may be
          \* dropped
 ra1:     await Run(self);
@@ -326,33 +360,44 @@ pe9:     await Run(self);
          fl := FALSE;
          we := FALSE;
          st := TRUE;
+         fno := 0;
+         wfc := 0;
          goto pe0;
-         \* with PendReset: the exchange and the reset counted in progress
+         \* with PendReset: the exchange, and the reset for the first
+         \* failure of a window
 hp0:     await Run(self);
          old := blocks;
          blocks := SB + 1;
          fcnt := fcnt + 1;
-         if (old # SB + 1) {
+         fno := fcnt;
+         if (old # SB + 1 /\ FailReset) {
              call ringReset("none");
              goto hp1;
          } else {
              goto hp1;
          };
+         \* esdm_sp80090b_change_end()
 hp1:     await Run(self);
          pend := pend - 1;
          goto ht2;
-         \* ... the decrement and the reset
+         \* ... the end of a window: esdm_sp80090b_change_begin(),
 hp2:     await Run(self);
-         wins := wins + 1;
+         pend := pend + 1;
+         \* the decrement, and the reset when the window of a failure
+         \* completed,
+hp3:     await Run(self);
          res := blocks - 1;
          if (blocks > 0) blocks := blocks - 1;
-         if (res = SB) {
+         if (blocks = 0) passed := TRUE;
+         wfc := fcnt;
+         if (res = SB /\ WinReset) {
              call ringReset("none");
-             goto hp3;
+             goto hp4;
          } else {
-             goto hp3;
+             goto hp4;
          };
-hp3:     await Run(self);
+         \* esdm_sp80090b_change_end()
+hp4:     await Run(self);
          pend := pend - 1;
          goto ra1;
      };
@@ -361,8 +406,9 @@ hp3:     await Run(self);
 \* esdm_cdev_ioctl() of ESDM_IRQ_ENT_BUF / ESDM_SCHED_ENT_BUF under
 \* esdm_cdev_lock: esdm_es_drbg_pool_extract()
 fair process (cs \in ConsProcs)
-    variables nr = 0, g = 0, fseen = 0, rseen = 0, b = 0, coll = 0, ci = 1,
-              wpos = 0, staged = {}, ok = FALSE, valid = FALSE, rbad = {};
+    variables nr = 0, g = 0, fseen = 0, b = 0, coll = 0, ci = 1,
+              wpos = 0, staged = {}, ok = FALSE, valid = FALSE, rbad = {},
+              htag = {};
 {
 c0: while (nr < MaxReq) {
         \* esdm_cdev_ioctl(): mutex_lock(&esdm_cdev_lock)
@@ -373,12 +419,11 @@ c0: while (nr < MaxReq) {
 c1:     acq();
 c2:     await Run(self);
         g := gen;
-        rseen := rcnt;
         rel();
         \* esdm_sp80090b_startup_complete_es()
-c3:     if (Fips /\ blocks # 0) {
+c3:     if (FirstCheck /\ Fips /\ blocks # 0) {
             goto c9;
-        } else if (PendReset) {
+        } else if (FirstCheck /\ Fips /\ PendReset) {
             goto c3p;
         } else {
             fseen := fcnt;
@@ -415,7 +460,8 @@ cl4:        if (coll < Need) {
             \* drbg_seed() hashes the staged slots, drbg_generate()
 hs1:        either {
                 ok := TRUE;
-                rbad := rbad \cup Bad(staged, fseen, rseen);
+                rbad := rbad \cup Bad(staged);
+                htag := htag \cup Tags(staged);
             } or {
                 await SeedFail;
                 ok := FALSE;
@@ -425,6 +471,7 @@ rl0:        acq();
 rl1:        await Run(self);
             valid := gen = rpPendGen;
             if (gen = rpPendGen) {
+                gone := gone + Cardinality(staged);
                 fr := [c \in Cpus |->
                        [i \in Slot |->
                         fr[c][i]
@@ -448,14 +495,19 @@ rl2:        mask := {};
         \* the fix: the startup test once more, before the generation
 cf0:    if (FinalCheck /\ Fips /\ blocks # 0) {
             goto c9;
-        } else if (PendReset) {
+        } else if (FinalCheck /\ Fips /\ PendReset /\ FinalPend) {
+            fseen := fcnt;
             goto cfp;
+        } else if (FinalCheck) {
+            fseen := fcnt;
         };
-        \* the generation across the whole request
+        \* the generation across the whole request; the ghost: what the
+        \* request credits, against the failures before its last startup
+        \* check and the resets up to now
 cf1:    acq();
 cf2:    await Run(self);
         if (gen = g) {
-            viol := viol \cup rbad;
+            viol := viol \cup rbad \cup Old(htag, fseen, rcnt);
             credited := credited + Blocks * Need;
         };
         rel();
@@ -468,9 +520,9 @@ c9:     mtx := NoCtx;
         ok := FALSE;
         valid := FALSE;
         rbad := {};
+        htag := {};
         g := 0;
         fseen := 0;
-        rseen := 0;
         goto c0;
         \* with PendReset: no reset in progress either, read after the counter
 c3p:    if (pend # 0) {
@@ -508,7 +560,8 @@ ex2: freed := TRUE;
 CONSTANT defaultInitValue
 VARIABLES wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, blocks, pend, 
           inIrq, irqOffT, taskOn, hook, active, freed, fr, ver, tg, tagE, 
-          infl, fcnt, rcnt, wins, produced, credited, viol, pc, stack
+          infl, fcnt, rcnt, wins, passed, produced, credited, gone, viol, pc, 
+          stack
 
 (* define statement *)
 Run(p) == IsIrq(p) \/ ~inIrq[CpuOf(p)]
@@ -519,7 +572,9 @@ SumAvail(S) == IF S = {} THEN 0
                ELSE LET c == CHOOSE c \in S : TRUE
                     IN Dist(wp[c], rp[c]) + SumAvail(S \ {c})
 
-Bad(S, fs, rs) ==
+
+
+Bad(S) ==
     LET T(e) == tg[e[1]][e[2]]
         F == {e \in S : fr[e[1]][e[2]]}
     IN  (IF \E e \in S : ~fr[e[1]][e[2]] THEN {"Stale"} ELSE {})
@@ -528,21 +583,26 @@ Bad(S, fs, rs) ==
         \cup (IF \E e \in F : T(e).win /\ ~T(e).sv
               THEN {"Window"} ELSE {})
         \cup (IF \E e \in F : T(e).win THEN {"WindowSurv"} ELSE {})
-        \cup (IF \E e \in F : T(e).fc < fs /\ ~T(e).sv
-              THEN {"PreFail"} ELSE {})
-        \cup (IF \E e \in F : T(e).fc < fs THEN {"PreFailSurv"} ELSE {})
-        \cup (IF \E e \in F : T(e).rc < rs /\ ~T(e).sv
-              THEN {"PreReset"} ELSE {})
-        \cup (IF \E e \in F : T(e).rc < rs THEN {"PreResetSurv"} ELSE {})
 
-VARIABLES xc, n, w, r, old, res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-          wpos, staged, ok, valid, rbad, k
+Tags(S) ==
+    {[fc |-> tg[e[1]][e[2]].fc, rc |-> tg[e[1]][e[2]].rc,
+      sv |-> tg[e[1]][e[2]].sv] : e \in {x \in S : fr[x[1]][x[2]]}}
+
+
+Old(H, fs, rs) ==
+    (IF \E t \in H : t.fc < fs /\ ~t.sv THEN {"PreFail"} ELSE {})
+    \cup (IF \E t \in H : t.fc < fs THEN {"PreFailSurv"} ELSE {})
+    \cup (IF \E t \in H : t.rc < rs /\ ~t.sv THEN {"PreReset"} ELSE {})
+    \cup (IF \E t \in H : t.rc < rs THEN {"PreResetSurv"} ELSE {})
+
+VARIABLES xc, n, w, r, old, res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+          ci, wpos, staged, ok, valid, rbad, htag, k
 
 vars == << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, blocks, pend, 
            inIrq, irqOffT, taskOn, hook, active, freed, fr, ver, tg, tagE, 
-           infl, fcnt, rcnt, wins, produced, credited, viol, pc, stack, xc, n, 
-           w, r, old, res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, wpos, 
-           staged, ok, valid, rbad, k >>
+           infl, fcnt, rcnt, wins, passed, produced, credited, gone, viol, pc, 
+           stack, xc, n, w, r, old, res, fl, we, st, fno, wfc, nr, g, fseen, 
+           b, coll, ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 ProcSet == (Prods) \cup (ConsProcs) \cup (NotifProcs) \cup (ExitProcs)
 
@@ -571,8 +631,10 @@ Init == (* Global variables *)
         /\ fcnt = 0
         /\ rcnt = 0
         /\ wins = 0
+        /\ passed = (StartBlocks = 0)
         /\ produced = 0
         /\ credited = 0
+        /\ gone = 0
         /\ viol = {}
         (* Procedure ringReset *)
         /\ xc = [ self \in ProcSet |-> defaultInitValue]
@@ -585,11 +647,12 @@ Init == (* Global variables *)
         /\ fl = [self \in Prods |-> FALSE]
         /\ we = [self \in Prods |-> FALSE]
         /\ st = [self \in Prods |-> TRUE]
+        /\ fno = [self \in Prods |-> 0]
+        /\ wfc = [self \in Prods |-> 0]
         (* Process cs *)
         /\ nr = [self \in ConsProcs |-> 0]
         /\ g = [self \in ConsProcs |-> 0]
         /\ fseen = [self \in ConsProcs |-> 0]
-        /\ rseen = [self \in ConsProcs |-> 0]
         /\ b = [self \in ConsProcs |-> 0]
         /\ coll = [self \in ConsProcs |-> 0]
         /\ ci = [self \in ConsProcs |-> 1]
@@ -598,6 +661,7 @@ Init == (* Global variables *)
         /\ ok = [self \in ConsProcs |-> FALSE]
         /\ valid = [self \in ConsProcs |-> FALSE]
         /\ rbad = [self \in ConsProcs |-> {}]
+        /\ htag = [self \in ConsProcs |-> {}]
         (* Process nt *)
         /\ k = [self \in NotifProcs |-> 0]
         /\ stack = [self \in ProcSet |-> << >>]
@@ -621,10 +685,10 @@ rr1(self) == /\ pc[self] = "rr1"
              /\ pc' = [pc EXCEPT ![self] = "rr2"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, fr, ver, tg, 
-                             tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
-                             nr, g, fseen, rseen, b, coll, ci, wpos, staged, 
-                             ok, valid, rbad, k >>
+                             tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, gone, viol, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 rr2(self) == /\ pc[self] = "rr2"
              /\ Run(self)
@@ -632,41 +696,48 @@ rr2(self) == /\ pc[self] = "rr2"
                    THEN /\ LET o == blocks IN
                              /\ fcnt' = fcnt + 1
                              /\ blocks' = SB + 1
-                             /\ IF o # SB + 1
+                             /\ IF o # SB + 1 /\ FailReset
                                    THEN /\ gen' = gen + 1
                                         /\ rcnt' = rcnt + 1
+                                        /\ gone' = gone + SumAvail(Cpus)
                                         /\ fr' = [c \in Cpus |-> [i \in Slot |-> fr[c][i] /\ ~InRing(c, i)]]
                                         /\ rp' = wp
                                         /\ tagE' = [q \in Prods |-> IF infl[q] THEN [tagE[q] EXCEPT !.sv = TRUE]
                                                                     ELSE tagE[q]]
                                    ELSE /\ TRUE
                                         /\ UNCHANGED << rp, gen, fr, tagE, 
-                                                        rcnt >>
-                        /\ wins' = wins
+                                                        rcnt, gone >>
+                        /\ UNCHANGED passed
                    ELSE /\ IF xc[self] = "win"
                               THEN /\ LET o == blocks IN
-                                        /\ wins' = wins + 1
                                         /\ IF o > 0
                                               THEN /\ blocks' = o - 1
                                               ELSE /\ TRUE
                                                    /\ UNCHANGED blocks
-                                        /\ IF o - 1 = SB
+                                        /\ IF o = 1
+                                              THEN /\ passed' = TRUE
+                                              ELSE /\ TRUE
+                                                   /\ UNCHANGED passed
+                                        /\ IF o - 1 = SB /\ WinReset
                                               THEN /\ gen' = gen + 1
                                                    /\ rcnt' = rcnt + 1
+                                                   /\ gone' = gone + SumAvail(Cpus)
                                                    /\ fr' = [c \in Cpus |-> [i \in Slot |-> fr[c][i] /\ ~InRing(c, i)]]
                                                    /\ rp' = wp
                                                    /\ tagE' = [q \in Prods |-> IF infl[q] THEN [tagE[q] EXCEPT !.sv = TRUE]
                                                                                ELSE tagE[q]]
                                               ELSE /\ TRUE
                                                    /\ UNCHANGED << rp, gen, fr, 
-                                                                   tagE, rcnt >>
+                                                                   tagE, rcnt, 
+                                                                   gone >>
                               ELSE /\ gen' = gen + 1
                                    /\ rcnt' = rcnt + 1
+                                   /\ gone' = gone + SumAvail(Cpus)
                                    /\ fr' = [c \in Cpus |-> [i \in Slot |-> fr[c][i] /\ ~InRing(c, i)]]
                                    /\ rp' = wp
                                    /\ tagE' = [q \in Prods |-> IF infl[q] THEN [tagE[q] EXCEPT !.sv = TRUE]
                                                                ELSE tagE[q]]
-                                   /\ UNCHANGED << blocks, wins >>
+                                   /\ UNCHANGED << blocks, passed >>
                         /\ fcnt' = fcnt
              /\ lock' = NoCtx
              /\ IF ~IsIrq(self)
@@ -678,10 +749,10 @@ rr2(self) == /\ pc[self] = "rr2"
              /\ xc' = [xc EXCEPT ![self] = Head(stack[self]).xc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << wp, rpPend, mask, rpPendGen, mtx, pend, inIrq, 
-                             hook, active, freed, ver, tg, infl, produced, 
-                             credited, viol, n, w, r, old, res, fl, we, st, nr, 
-                             g, fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             hook, active, freed, ver, tg, infl, wins, 
+                             produced, credited, viol, n, w, r, old, res, fl, 
+                             we, st, fno, wfc, nr, g, fseen, b, coll, ci, wpos, 
+                             staged, ok, valid, rbad, htag, k >>
 
 ringReset(self) == rr1(self) \/ rr2(self)
 
@@ -709,15 +780,16 @@ pe0(self) == /\ pc[self] = "pe0"
                                         infl, n >>
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, hook, freed, fr, ver, tg, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             w, r, old, res, fl, we, st, nr, g, fseen, rseen, 
-                             b, coll, ci, wpos, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, w, r, old, res, fl, we, st, fno, 
+                             wfc, nr, g, fseen, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 ht0(self) == /\ pc[self] = "ht0"
              /\ Run(self)
              /\ \/ /\ TRUE
                    /\ pc' = [pc EXCEPT ![self] = "ht1"]
-                   /\ UNCHANGED <<blocks, pend, fcnt, stack, xc, old, fl>>
+                   /\ UNCHANGED <<blocks, pend, fcnt, stack, xc, old, fl, fno>>
                 \/ /\ Fips /\ fcnt < MaxFail
                    /\ fl' = [fl EXCEPT ![self] = TRUE]
                    /\ IF AtomicReset
@@ -727,27 +799,29 @@ ht0(self) == /\ pc[self] = "ht0"
                                                                       \o stack[self]]
                                  /\ xc' = [xc EXCEPT ![self] = "fail"]
                               /\ pc' = [pc EXCEPT ![self] = "rr1"]
-                              /\ UNCHANGED << blocks, pend, fcnt, old >>
+                              /\ UNCHANGED << blocks, pend, fcnt, old, fno >>
                          ELSE /\ IF PendReset
                                     THEN /\ pend' = pend + 1
                                          /\ pc' = [pc EXCEPT ![self] = "hp0"]
-                                         /\ UNCHANGED << blocks, fcnt, old >>
+                                         /\ UNCHANGED << blocks, fcnt, old, 
+                                                         fno >>
                                     ELSE /\ old' = [old EXCEPT ![self] = blocks]
                                          /\ blocks' = SB + 1
                                          /\ fcnt' = fcnt + 1
+                                         /\ fno' = [fno EXCEPT ![self] = fcnt']
                                          /\ pc' = [pc EXCEPT ![self] = "ht1"]
                                          /\ pend' = pend
                               /\ UNCHANGED << stack, xc >>
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              inIrq, irqOffT, taskOn, hook, active, freed, fr, 
-                             ver, tg, tagE, infl, rcnt, wins, produced, 
-                             credited, viol, n, w, r, res, we, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             ver, tg, tagE, infl, rcnt, wins, passed, produced, 
+                             credited, gone, viol, n, w, r, res, we, st, wfc, 
+                             nr, g, fseen, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 ht1(self) == /\ pc[self] = "ht1"
              /\ Run(self)
-             /\ IF fl[self] /\ old[self] # SB + 1
+             /\ IF fl[self] /\ old[self] # SB + 1 /\ FailReset
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ringReset",
                                                                     pc        |->  "ht2",
                                                                     xc        |->  xc[self] ] >>
@@ -759,16 +833,19 @@ ht1(self) == /\ pc[self] = "ht1"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, n, w, r, 
-                             old, res, fl, we, st, nr, g, fseen, rseen, b, 
-                             coll, ci, wpos, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, n, w, r, old, res, fl, we, st, fno, wfc, nr, 
+                             g, fseen, b, coll, ci, wpos, staged, ok, valid, 
+                             rbad, htag, k >>
 
 ht2(self) == /\ pc[self] = "ht2"
              /\ Run(self)
              /\ \/ /\ TRUE
                    /\ pc' = [pc EXCEPT ![self] = "ht3"]
-                   /\ UNCHANGED <<blocks, pend, wins, stack, xc, res, we>>
+                   /\ UNCHANGED <<blocks, wins, passed, stack, xc, res, we, wfc>>
                 \/ /\ Fips /\ wins < MaxWin
+                   /\ wins' = wins + 1
+                   /\ we' = [we EXCEPT ![self] = TRUE]
                    /\ IF AtomicReset
                          THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ringReset",
                                                                           pc        |->  "ra1",
@@ -776,32 +853,35 @@ ht2(self) == /\ pc[self] = "ht2"
                                                                       \o stack[self]]
                                  /\ xc' = [xc EXCEPT ![self] = "win"]
                               /\ pc' = [pc EXCEPT ![self] = "rr1"]
-                              /\ UNCHANGED << blocks, pend, wins, res, we >>
-                         ELSE /\ IF PendReset /\ blocks # 0
-                                    THEN /\ pend' = pend + 1
-                                         /\ we' = [we EXCEPT ![self] = TRUE]
-                                         /\ pc' = [pc EXCEPT ![self] = "hp2"]
-                                         /\ UNCHANGED << blocks, wins, res >>
-                                    ELSE /\ wins' = wins + 1
-                                         /\ res' = [res EXCEPT ![self] = blocks - 1]
+                              /\ UNCHANGED << blocks, passed, res, wfc >>
+                         ELSE /\ IF PendReset /\ PendWin
+                                    THEN /\ IF EarlyReturn /\ blocks = 0
+                                               THEN /\ pc' = [pc EXCEPT ![self] = "ra1"]
+                                               ELSE /\ pc' = [pc EXCEPT ![self] = "hp2"]
+                                         /\ UNCHANGED << blocks, passed, res, 
+                                                         wfc >>
+                                    ELSE /\ res' = [res EXCEPT ![self] = blocks - 1]
                                          /\ IF blocks > 0
                                                THEN /\ blocks' = blocks - 1
                                                ELSE /\ TRUE
                                                     /\ UNCHANGED blocks
-                                         /\ we' = [we EXCEPT ![self] = TRUE]
+                                         /\ IF blocks' = 0
+                                               THEN /\ passed' = TRUE
+                                               ELSE /\ TRUE
+                                                    /\ UNCHANGED passed
+                                         /\ wfc' = [wfc EXCEPT ![self] = fcnt]
                                          /\ pc' = [pc EXCEPT ![self] = "ht3"]
-                                         /\ pend' = pend
                               /\ UNCHANGED << stack, xc >>
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
-                             inIrq, irqOffT, taskOn, hook, active, freed, fr, 
-                             ver, tg, tagE, infl, fcnt, rcnt, produced, 
-                             credited, viol, n, w, r, old, fl, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             pend, inIrq, irqOffT, taskOn, hook, active, freed, 
+                             fr, ver, tg, tagE, infl, fcnt, rcnt, produced, 
+                             credited, gone, viol, n, w, r, old, fl, st, fno, 
+                             nr, g, fseen, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 ht3(self) == /\ pc[self] = "ht3"
              /\ Run(self)
-             /\ IF we[self] /\ res[self] = SB
+             /\ IF we[self] /\ res[self] = SB /\ WinReset
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ringReset",
                                                                     pc        |->  "ra1",
                                                                     xc        |->  xc[self] ] >>
@@ -813,9 +893,10 @@ ht3(self) == /\ pc[self] = "ht3"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, n, w, r, 
-                             old, res, fl, we, st, nr, g, fseen, rseen, b, 
-                             coll, ci, wpos, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, n, w, r, old, res, fl, we, st, fno, wfc, nr, 
+                             g, fseen, b, coll, ci, wpos, staged, ok, valid, 
+                             rbad, htag, k >>
 
 ra1(self) == /\ pc[self] = "ra1"
              /\ Run(self)
@@ -828,9 +909,10 @@ ra1(self) == /\ pc[self] = "ra1"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, old, res, fl, we, nr, g, fseen, rseen, b, coll, 
-                             ci, wpos, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, old, res, fl, we, fno, wfc, 
+                             nr, g, fseen, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 ra2(self) == /\ pc[self] = "ra2"
              /\ Run(self)
@@ -849,9 +931,9 @@ ra2(self) == /\ pc[self] = "ra2"
              /\ UNCHANGED << rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, tagE, infl, fcnt, rcnt, wins, 
-                             credited, stack, xc, n, w, r, old, res, fl, we, 
-                             st, nr, g, fseen, rseen, b, coll, ci, wpos, 
-                             staged, ok, valid, rbad, k >>
+                             passed, credited, gone, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 pe9(self) == /\ pc[self] = "pe9"
              /\ Run(self)
@@ -870,19 +952,22 @@ pe9(self) == /\ pc[self] = "pe9"
              /\ fl' = [fl EXCEPT ![self] = FALSE]
              /\ we' = [we EXCEPT ![self] = FALSE]
              /\ st' = [st EXCEPT ![self] = TRUE]
+             /\ fno' = [fno EXCEPT ![self] = 0]
+             /\ wfc' = [wfc EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = "pe0"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, hook, freed, fr, ver, tg, tagE, 
-                             fcnt, rcnt, wins, produced, credited, viol, stack, 
-                             xc, n, nr, g, fseen, rseen, b, coll, ci, wpos, 
-                             staged, ok, valid, rbad, k >>
+                             fcnt, rcnt, wins, passed, produced, credited, 
+                             gone, viol, stack, xc, n, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 hp0(self) == /\ pc[self] = "hp0"
              /\ Run(self)
              /\ old' = [old EXCEPT ![self] = blocks]
              /\ blocks' = SB + 1
              /\ fcnt' = fcnt + 1
-             /\ IF old'[self] # SB + 1
+             /\ fno' = [fno EXCEPT ![self] = fcnt']
+             /\ IF old'[self] # SB + 1 /\ FailReset
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ringReset",
                                                                     pc        |->  "hp1",
                                                                     xc        |->  xc[self] ] >>
@@ -893,10 +978,10 @@ hp0(self) == /\ pc[self] = "hp0"
                         /\ UNCHANGED << stack, xc >>
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                             fr, ver, tg, tagE, infl, rcnt, wins, produced, 
-                             credited, viol, n, w, r, res, fl, we, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             fr, ver, tg, tagE, infl, rcnt, wins, passed, 
+                             produced, credited, gone, viol, n, w, r, res, fl, 
+                             we, st, wfc, nr, g, fseen, b, coll, ci, wpos, 
+                             staged, ok, valid, rbad, htag, k >>
 
 hp1(self) == /\ pc[self] = "hp1"
              /\ Run(self)
@@ -905,48 +990,66 @@ hp1(self) == /\ pc[self] = "hp1"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, inIrq, irqOffT, taskOn, hook, active, 
                              freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                             wpos, staged, ok, valid, rbad, k >>
+                             passed, produced, credited, gone, viol, stack, xc, 
+                             n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                             fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                             htag, k >>
 
 hp2(self) == /\ pc[self] = "hp2"
              /\ Run(self)
-             /\ wins' = wins + 1
+             /\ pend' = pend + 1
+             /\ pc' = [pc EXCEPT ![self] = "hp3"]
+             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
+                             blocks, inIrq, irqOffT, taskOn, hook, active, 
+                             freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
+                             passed, produced, credited, gone, viol, stack, xc, 
+                             n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                             fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                             htag, k >>
+
+hp3(self) == /\ pc[self] = "hp3"
+             /\ Run(self)
              /\ res' = [res EXCEPT ![self] = blocks - 1]
              /\ IF blocks > 0
                    THEN /\ blocks' = blocks - 1
                    ELSE /\ TRUE
                         /\ UNCHANGED blocks
-             /\ IF res'[self] = SB
+             /\ IF blocks' = 0
+                   THEN /\ passed' = TRUE
+                   ELSE /\ TRUE
+                        /\ UNCHANGED passed
+             /\ wfc' = [wfc EXCEPT ![self] = fcnt]
+             /\ IF res'[self] = SB /\ WinReset
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ringReset",
-                                                                    pc        |->  "hp3",
+                                                                    pc        |->  "hp4",
                                                                     xc        |->  xc[self] ] >>
                                                                 \o stack[self]]
                            /\ xc' = [xc EXCEPT ![self] = "none"]
                         /\ pc' = [pc EXCEPT ![self] = "rr1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "hp3"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "hp4"]
                         /\ UNCHANGED << stack, xc >>
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                             fr, ver, tg, tagE, infl, fcnt, rcnt, produced, 
-                             credited, viol, n, w, r, old, fl, we, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
+                             produced, credited, gone, viol, n, w, r, old, fl, 
+                             we, st, fno, nr, g, fseen, b, coll, ci, wpos, 
+                             staged, ok, valid, rbad, htag, k >>
 
-hp3(self) == /\ pc[self] = "hp3"
+hp4(self) == /\ pc[self] = "hp4"
              /\ Run(self)
              /\ pend' = pend - 1
              /\ pc' = [pc EXCEPT ![self] = "ra1"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, inIrq, irqOffT, taskOn, hook, active, 
                              freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                             wpos, staged, ok, valid, rbad, k >>
+                             passed, produced, credited, gone, viol, stack, xc, 
+                             n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                             fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                             htag, k >>
 
 p(self) == pe0(self) \/ ht0(self) \/ ht1(self) \/ ht2(self) \/ ht3(self)
               \/ ra1(self) \/ ra2(self) \/ pe9(self) \/ hp0(self)
-              \/ hp1(self) \/ hp2(self) \/ hp3(self)
+              \/ hp1(self) \/ hp2(self) \/ hp3(self) \/ hp4(self)
 
 c0(self) == /\ pc[self] = "c0"
             /\ IF nr[self] < MaxReq
@@ -960,10 +1063,10 @@ c0(self) == /\ pc[self] = "c0"
                        /\ UNCHANGED << mtx, nr >>
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, blocks, 
                             pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                            fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                            produced, credited, viol, stack, xc, n, w, r, old, 
-                            res, fl, we, st, g, fseen, rseen, b, coll, ci, 
-                            wpos, staged, ok, valid, rbad, k >>
+                            fr, ver, tg, tagE, infl, fcnt, rcnt, wins, passed, 
+                            produced, credited, gone, viol, stack, xc, n, w, r, 
+                            old, res, fl, we, st, fno, wfc, g, fseen, b, coll, 
+                            ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 c1(self) == /\ pc[self] = "c1"
             /\ lock = NoCtx /\ Run(self)
@@ -980,15 +1083,14 @@ c1(self) == /\ pc[self] = "c1"
             /\ pc' = [pc EXCEPT ![self] = "c2"]
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                             pend, inIrq, hook, active, freed, fr, ver, tg, 
-                            tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                            viol, stack, xc, n, w, r, old, res, fl, we, st, nr, 
-                            g, fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                            valid, rbad, k >>
+                            tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                            credited, gone, viol, stack, xc, n, w, r, old, res, 
+                            fl, we, st, fno, wfc, nr, g, fseen, b, coll, ci, 
+                            wpos, staged, ok, valid, rbad, htag, k >>
 
 c2(self) == /\ pc[self] = "c2"
             /\ Run(self)
             /\ g' = [g EXCEPT ![self] = gen]
-            /\ rseen' = [rseen EXCEPT ![self] = rcnt]
             /\ lock' = NoCtx
             /\ IF ~IsIrq(self)
                   THEN /\ irqOffT' = [irqOffT EXCEPT ![CpuOf(self)] = self \in Prods /\ SchedIrqOff]
@@ -998,16 +1100,16 @@ c2(self) == /\ pc[self] = "c2"
             /\ pc' = [pc EXCEPT ![self] = "c3"]
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                             pend, inIrq, hook, active, freed, fr, ver, tg, 
-                            tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                            viol, stack, xc, n, w, r, old, res, fl, we, st, nr, 
-                            fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
-                            k >>
+                            tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                            credited, gone, viol, stack, xc, n, w, r, old, res, 
+                            fl, we, st, fno, wfc, nr, fseen, b, coll, ci, wpos, 
+                            staged, ok, valid, rbad, htag, k >>
 
 c3(self) == /\ pc[self] = "c3"
-            /\ IF Fips /\ blocks # 0
+            /\ IF FirstCheck /\ Fips /\ blocks # 0
                   THEN /\ pc' = [pc EXCEPT ![self] = "c9"]
                        /\ fseen' = fseen
-                  ELSE /\ IF PendReset
+                  ELSE /\ IF FirstCheck /\ Fips /\ PendReset
                              THEN /\ pc' = [pc EXCEPT ![self] = "c3p"]
                                   /\ fseen' = fseen
                              ELSE /\ fseen' = [fseen EXCEPT ![self] = fcnt]
@@ -1015,9 +1117,9 @@ c3(self) == /\ pc[self] = "c3"
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                             blocks, pend, inIrq, irqOffT, taskOn, hook, active, 
                             freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                            produced, credited, viol, stack, xc, n, w, r, old, 
-                            res, fl, we, st, nr, g, rseen, b, coll, ci, wpos, 
-                            staged, ok, valid, rbad, k >>
+                            passed, produced, credited, gone, viol, stack, xc, 
+                            n, w, r, old, res, fl, we, st, fno, wfc, nr, g, b, 
+                            coll, ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 c4(self) == /\ pc[self] = "c4"
             /\ IF SumAvail(Cpus) < Blocks * Need
@@ -1026,9 +1128,10 @@ c4(self) == /\ pc[self] = "c4"
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                             blocks, pend, inIrq, irqOffT, taskOn, hook, active, 
                             freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                            produced, credited, viol, stack, xc, n, w, r, old, 
-                            res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                            wpos, staged, ok, valid, rbad, k >>
+                            passed, produced, credited, gone, viol, stack, xc, 
+                            n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                            fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                            htag, k >>
 
 cb(self) == /\ pc[self] = "cb"
             /\ IF b[self] < Blocks
@@ -1037,9 +1140,10 @@ cb(self) == /\ pc[self] = "cb"
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                             blocks, pend, inIrq, irqOffT, taskOn, hook, active, 
                             freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                            produced, credited, viol, stack, xc, n, w, r, old, 
-                            res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                            wpos, staged, ok, valid, rbad, k >>
+                            passed, produced, credited, gone, viol, stack, xc, 
+                            n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                            fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                            htag, k >>
 
 cl0(self) == /\ pc[self] = "cl0"
              /\ lock = NoCtx /\ Run(self)
@@ -1056,10 +1160,10 @@ cl0(self) == /\ pc[self] = "cl0"
              /\ pc' = [pc EXCEPT ![self] = "cl1"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, fr, ver, tg, 
-                             tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
-                             nr, g, fseen, rseen, b, coll, ci, wpos, staged, 
-                             ok, valid, rbad, k >>
+                             tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, gone, viol, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 cl1(self) == /\ pc[self] = "cl1"
              /\ Run(self)
@@ -1073,10 +1177,10 @@ cl1(self) == /\ pc[self] = "cl1"
              /\ pc' = [pc EXCEPT ![self] = "cl2"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, mtx, blocks, pend, 
                              inIrq, hook, active, freed, fr, ver, tg, tagE, 
-                             infl, fcnt, rcnt, wins, produced, credited, viol, 
-                             stack, xc, n, w, r, old, res, fl, we, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, 
-                             valid, rbad, k >>
+                             infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, gone, viol, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 cl2(self) == /\ pc[self] = "cl2"
              /\ IF ci[self] <= NC /\ coll[self] < Need
@@ -1087,9 +1191,10 @@ cl2(self) == /\ pc[self] = "cl2"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, fseen, b, coll, ci, staged, ok, 
+                             valid, rbad, htag, k >>
 
 cl3(self) == /\ pc[self] = "cl3"
              /\ LET rpos == rp[ci[self]] IN
@@ -1107,10 +1212,10 @@ cl3(self) == /\ pc[self] = "cl3"
              /\ pc' = [pc EXCEPT ![self] = "cl2"]
              /\ UNCHANGED << wp, rp, gen, rpPendGen, lock, mtx, blocks, pend, 
                              inIrq, irqOffT, taskOn, hook, active, freed, fr, 
-                             ver, tg, tagE, infl, fcnt, rcnt, wins, produced, 
-                             credited, viol, stack, xc, n, w, r, old, res, fl, 
-                             we, st, nr, g, fseen, rseen, b, wpos, ok, valid, 
-                             rbad, k >>
+                             ver, tg, tagE, infl, fcnt, rcnt, wins, passed, 
+                             produced, credited, gone, viol, stack, xc, n, w, 
+                             r, old, res, fl, we, st, fno, wfc, nr, g, fseen, 
+                             b, wpos, ok, valid, rbad, htag, k >>
 
 cl4(self) == /\ pc[self] = "cl4"
              /\ IF coll[self] < Need
@@ -1120,24 +1225,27 @@ cl4(self) == /\ pc[self] = "cl4"
                         /\ mask' = mask
              /\ UNCHANGED << wp, rp, rpPend, gen, rpPendGen, lock, mtx, blocks, 
                              pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                             fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                             wpos, staged, ok, valid, rbad, k >>
+                             fr, ver, tg, tagE, infl, fcnt, rcnt, wins, passed, 
+                             produced, credited, gone, viol, stack, xc, n, w, 
+                             r, old, res, fl, we, st, fno, wfc, nr, g, fseen, 
+                             b, coll, ci, wpos, staged, ok, valid, rbad, htag, 
+                             k >>
 
 hs1(self) == /\ pc[self] = "hs1"
              /\ \/ /\ ok' = [ok EXCEPT ![self] = TRUE]
-                   /\ rbad' = [rbad EXCEPT ![self] = rbad[self] \cup Bad(staged[self], fseen[self], rseen[self])]
+                   /\ rbad' = [rbad EXCEPT ![self] = rbad[self] \cup Bad(staged[self])]
+                   /\ htag' = [htag EXCEPT ![self] = htag[self] \cup Tags(staged[self])]
                 \/ /\ SeedFail
                    /\ ok' = [ok EXCEPT ![self] = FALSE]
-                   /\ rbad' = rbad
+                   /\ UNCHANGED <<rbad, htag>>
              /\ pc' = [pc EXCEPT ![self] = "rl0"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, wpos, staged, valid, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, fseen, b, coll, ci, wpos, staged, 
+                             valid, k >>
 
 rl0(self) == /\ pc[self] = "rl0"
              /\ lock = NoCtx /\ Run(self)
@@ -1154,23 +1262,24 @@ rl0(self) == /\ pc[self] = "rl0"
              /\ pc' = [pc EXCEPT ![self] = "rl1"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, fr, ver, tg, 
-                             tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
-                             nr, g, fseen, rseen, b, coll, ci, wpos, staged, 
-                             ok, valid, rbad, k >>
+                             tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, gone, viol, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 rl1(self) == /\ pc[self] = "rl1"
              /\ Run(self)
              /\ valid' = [valid EXCEPT ![self] = gen = rpPendGen]
              /\ IF gen = rpPendGen
-                   THEN /\ fr' = [c \in Cpus |->
+                   THEN /\ gone' = gone + Cardinality(staged[self])
+                        /\ fr' = [c \in Cpus |->
                                   [i \in Slot |->
                                    fr[c][i]
                                    /\ ~(c \in mask
                                         /\ Dist(i, rp[c]) < Dist(rpPend[c], rp[c]))]]
                         /\ rp' = [c \in Cpus |-> IF c \in mask THEN rpPend[c] ELSE rp[c]]
                    ELSE /\ TRUE
-                        /\ UNCHANGED << rp, fr >>
+                        /\ UNCHANGED << rp, fr, gone >>
              /\ lock' = NoCtx
              /\ IF ~IsIrq(self)
                    THEN /\ irqOffT' = [irqOffT EXCEPT ![CpuOf(self)] = self \in Prods /\ SchedIrqOff]
@@ -1180,10 +1289,10 @@ rl1(self) == /\ pc[self] = "rl1"
              /\ pc' = [pc EXCEPT ![self] = "rl2"]
              /\ UNCHANGED << wp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, ver, tg, tagE, 
-                             infl, fcnt, rcnt, wins, produced, credited, viol, 
-                             stack, xc, n, w, r, old, res, fl, we, st, nr, g, 
-                             fseen, rseen, b, coll, ci, wpos, staged, ok, rbad, 
-                             k >>
+                             infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, viol, stack, xc, n, w, r, old, res, fl, 
+                             we, st, fno, wfc, nr, g, fseen, b, coll, ci, wpos, 
+                             staged, ok, rbad, htag, k >>
 
 rl2(self) == /\ pc[self] = "rl2"
              /\ mask' = {}
@@ -1199,24 +1308,30 @@ rl2(self) == /\ pc[self] = "rl2"
                         /\ pc' = [pc EXCEPT ![self] = "cb"]
              /\ UNCHANGED << wp, rp, rpPend, gen, rpPendGen, lock, mtx, blocks, 
                              pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                             fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, wpos, rbad, 
-                             k >>
+                             fr, ver, tg, tagE, infl, fcnt, rcnt, wins, passed, 
+                             produced, credited, gone, viol, stack, xc, n, w, 
+                             r, old, res, fl, we, st, fno, wfc, nr, g, fseen, 
+                             wpos, rbad, htag, k >>
 
 cf0(self) == /\ pc[self] = "cf0"
              /\ IF FinalCheck /\ Fips /\ blocks # 0
                    THEN /\ pc' = [pc EXCEPT ![self] = "c9"]
-                   ELSE /\ IF PendReset
-                              THEN /\ pc' = [pc EXCEPT ![self] = "cfp"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "cf1"]
+                        /\ fseen' = fseen
+                   ELSE /\ IF FinalCheck /\ Fips /\ PendReset /\ FinalPend
+                              THEN /\ fseen' = [fseen EXCEPT ![self] = fcnt]
+                                   /\ pc' = [pc EXCEPT ![self] = "cfp"]
+                              ELSE /\ IF FinalCheck
+                                         THEN /\ fseen' = [fseen EXCEPT ![self] = fcnt]
+                                         ELSE /\ TRUE
+                                              /\ fseen' = fseen
+                                   /\ pc' = [pc EXCEPT ![self] = "cf1"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
-                             k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 cf1(self) == /\ pc[self] = "cf1"
              /\ lock = NoCtx /\ Run(self)
@@ -1233,15 +1348,15 @@ cf1(self) == /\ pc[self] = "cf1"
              /\ pc' = [pc EXCEPT ![self] = "cf2"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, fr, ver, tg, 
-                             tagE, infl, fcnt, rcnt, wins, produced, credited, 
-                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
-                             nr, g, fseen, rseen, b, coll, ci, wpos, staged, 
-                             ok, valid, rbad, k >>
+                             tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                             credited, gone, viol, stack, xc, n, w, r, old, 
+                             res, fl, we, st, fno, wfc, nr, g, fseen, b, coll, 
+                             ci, wpos, staged, ok, valid, rbad, htag, k >>
 
 cf2(self) == /\ pc[self] = "cf2"
              /\ Run(self)
              /\ IF gen = g[self]
-                   THEN /\ viol' = (viol \cup rbad[self])
+                   THEN /\ viol' = (viol \cup rbad[self] \cup Old(htag[self], fseen[self], rcnt))
                         /\ credited' = credited + Blocks * Need
                    ELSE /\ TRUE
                         /\ UNCHANGED << credited, viol >>
@@ -1254,10 +1369,10 @@ cf2(self) == /\ pc[self] = "cf2"
              /\ pc' = [pc EXCEPT ![self] = "c9"]
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, mtx, blocks, 
                              pend, inIrq, hook, active, freed, fr, ver, tg, 
-                             tagE, infl, fcnt, rcnt, wins, produced, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
-                             k >>
+                             tagE, infl, fcnt, rcnt, wins, passed, produced, 
+                             gone, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, fseen, b, coll, ci, wpos, staged, 
+                             ok, valid, rbad, htag, k >>
 
 c9(self) == /\ pc[self] = "c9"
             /\ mtx' = NoCtx
@@ -1269,15 +1384,15 @@ c9(self) == /\ pc[self] = "c9"
             /\ ok' = [ok EXCEPT ![self] = FALSE]
             /\ valid' = [valid EXCEPT ![self] = FALSE]
             /\ rbad' = [rbad EXCEPT ![self] = {}]
+            /\ htag' = [htag EXCEPT ![self] = {}]
             /\ g' = [g EXCEPT ![self] = 0]
             /\ fseen' = [fseen EXCEPT ![self] = 0]
-            /\ rseen' = [rseen EXCEPT ![self] = 0]
             /\ pc' = [pc EXCEPT ![self] = "c0"]
             /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, blocks, 
                             pend, inIrq, irqOffT, taskOn, hook, active, freed, 
-                            fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                            produced, credited, viol, stack, xc, n, w, r, old, 
-                            res, fl, we, st, nr, k >>
+                            fr, ver, tg, tagE, infl, fcnt, rcnt, wins, passed, 
+                            produced, credited, gone, viol, stack, xc, n, w, r, 
+                            old, res, fl, we, st, fno, wfc, nr, k >>
 
 c3p(self) == /\ pc[self] = "c3p"
              /\ IF pend # 0
@@ -1288,9 +1403,10 @@ c3p(self) == /\ pc[self] = "c3p"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, rseen, b, 
-                             coll, ci, wpos, staged, ok, valid, rbad, k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, b, coll, ci, wpos, staged, ok, 
+                             valid, rbad, htag, k >>
 
 cfp(self) == /\ pc[self] = "cfp"
              /\ IF pend # 0
@@ -1299,10 +1415,10 @@ cfp(self) == /\ pc[self] = "cfp"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
-                             k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, fseen, b, coll, ci, wpos, staged, 
+                             ok, valid, rbad, htag, k >>
 
 cs(self) == c0(self) \/ c1(self) \/ c2(self) \/ c3(self) \/ c4(self)
                \/ cb(self) \/ cl0(self) \/ cl1(self) \/ cl2(self)
@@ -1324,9 +1440,10 @@ nf0(self) == /\ pc[self] = "nf0"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, n, w, r, 
-                             old, res, fl, we, st, nr, g, fseen, rseen, b, 
-                             coll, ci, wpos, staged, ok, valid, rbad >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, n, w, r, old, res, fl, we, st, fno, wfc, nr, 
+                             g, fseen, b, coll, ci, wpos, staged, ok, valid, 
+                             rbad, htag >>
 
 nt(self) == nf0(self)
 
@@ -1337,9 +1454,10 @@ ex0(self) == /\ pc[self] = "ex0"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, active, 
                              freed, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                             wpos, staged, ok, valid, rbad, k >>
+                             passed, produced, credited, gone, viol, stack, xc, 
+                             n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                             fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                             htag, k >>
 
 ex1(self) == /\ pc[self] = "ex1"
              /\ IF RcuSync
@@ -1349,10 +1467,10 @@ ex1(self) == /\ pc[self] = "ex1"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, freed, fr, ver, tg, tagE, infl, fcnt, 
-                             rcnt, wins, produced, credited, viol, stack, xc, 
-                             n, w, r, old, res, fl, we, st, nr, g, fseen, 
-                             rseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
-                             k >>
+                             rcnt, wins, passed, produced, credited, gone, 
+                             viol, stack, xc, n, w, r, old, res, fl, we, st, 
+                             fno, wfc, nr, g, fseen, b, coll, ci, wpos, staged, 
+                             ok, valid, rbad, htag, k >>
 
 ex2(self) == /\ pc[self] = "ex2"
              /\ freed' = TRUE
@@ -1360,9 +1478,10 @@ ex2(self) == /\ pc[self] = "ex2"
              /\ UNCHANGED << wp, rp, rpPend, mask, gen, rpPendGen, lock, mtx, 
                              blocks, pend, inIrq, irqOffT, taskOn, hook, 
                              active, fr, ver, tg, tagE, infl, fcnt, rcnt, wins, 
-                             produced, credited, viol, stack, xc, n, w, r, old, 
-                             res, fl, we, st, nr, g, fseen, rseen, b, coll, ci, 
-                             wpos, staged, ok, valid, rbad, k >>
+                             passed, produced, credited, gone, viol, stack, xc, 
+                             n, w, r, old, res, fl, we, st, fno, wfc, nr, g, 
+                             fseen, b, coll, ci, wpos, staged, ok, valid, rbad, 
+                             htag, k >>
 
 ex(self) == ex0(self) \/ ex1(self) \/ ex2(self)
 
@@ -1394,6 +1513,9 @@ TypeOK ==
     /\ wp \in [Cpus -> Slot]
     /\ rp \in [Cpus -> Slot]
     /\ blocks \in 0..SB+1
+    /\ pend \in 0..Cardinality(Prods)
+    /\ passed \in BOOLEAN
+    /\ gone \in Nat
     /\ lock \in Prods \cup ConsProcs \cup {Notif, Exit, NoCtx}
     /\ produced <= Cardinality(Prods) * MaxEv
 
@@ -1414,14 +1536,14 @@ HashIntact == "Overwritten" \notin viol
 CreditBound == credited <= produced
 
 \* No credited event was sampled before a reset that completed before the
-\* request read the generation, but for one stored concurrently with the
-\* reset.
+\* request compared the generation at its end - before the request or
+\* during it -, but for one stored concurrently with a reset.
 NoPreResetCredit == "PreReset" \notin viol
 NoPreResetCreditStrict == "PreResetSurv" \notin viol
 
 \* No credited event was sampled before a health test failure that came
-\* before the request's startup check, but for one stored concurrently with
-\* a reset.
+\* before the request's last check of the startup test, but for one stored
+\* concurrently with a reset.
 NoPreFailureCredit == "PreFail" \notin viol
 NoPreFailureCreditStrict == "PreFailSurv" \notin viol
 
@@ -1451,7 +1573,67 @@ NoSelfDeadlock ==
 \* No producer writes the ring arrays after module exit freed them.
 NoUseAfterFree == "UseAfterFree" \notin viol
 
+\* The rings lose no event and hand none out twice: every event stored is
+\* in a ring until a block that hashed it is released, or a reset discards
+\* it. The count of a release is what the block staged for the hash, not
+\* what the read position moved by. By design, an event is not stored when
+\* its ring is full, and the events of a released block are gone also when
+\* the DRBG or the request fails after that.
+NoEventLost == produced = SumAvail(Cpus) + gone
+
+\* The events a ring holds, sampled before the given point and not stored
+\* concurrently with a reset.
+Held(Before(_)) ==
+    {e \in Cpus \X Slot : /\ InRing(e[1], e[2]) /\ fr[e[1]][e[2]]
+                          /\ ~tg[e[1]][e[2]].sv /\ Before(tg[e[1]][e[2]])}
+
+\* The reset at the failure itself: once esdm_sp80090b_startup_restart()
+\* of the first failure of a window did its reset, no ring holds an event
+\* sampled before that failure, but for one stored concurrently with a
+\* reset. Not stated for AtomicReset, where the producer does not learn
+\* whether its failure was the first.
+FailureDiscards ==
+    \A q \in Prods :
+        pc[q] \in {"hp1", "ht2"} /\ fl[q] /\ old[q] # SB + 1 /\ ~AtomicReset
+            => LET Before(t) == t.fc < fno[q] IN Held(Before) = {}
+
+\* The reset at the end of the window of a failure: once
+\* esdm_sp80090b_startup() did it, no ring holds an event sampled within
+\* that window, with the same exception.
+WindowDiscards ==
+    \A q \in Prods :
+        pc[q] \in {"hp4", "ra1"} /\ we[q] /\ res[q] = SB /\ ~AtomicReset
+            => LET Before(t) == t.win /\ t.fc <= wfc[q] IN Held(Before) = {}
+
+\* Nothing is credited before the startup test passed for the first time.
+StartupGate == credited > 0 => passed
+
+\* The early return of esdm_sp80090b_startup(): while the startup test has
+\* passed and no failure began, no change is in progress - the windows that
+\* end at runtime fail no request.
+NoIdleChange ==
+    StartBlocks = 0 /\ fcnt = 0 /\ (\A q \in Prods : ~fl[q]) => pend = 0
+
 -----------------------------------------------------------------------------
 (* Liveness: Termination of the translation, every context finishes -  *)
-(* nothing spins or waits forever. *)
+(* no request, hook, notifier or module exit spins or waits forever. *)
+
+-----------------------------------------------------------------------------
+(* State constraints for three CPUs. TwoStalled is the scenario of two     *)
+(* resets outstanding at once: only the first producer fails, and it ends  *)
+(* no window; the others sample after that failure, which comes after the  *)
+(* request began. FewSamples keeps the roles and leaves the order free:   *)
+(* only the first producer fails, and it ends no window; the first and    *)
+(* the second take one sample.                                            *)
+TwoStalled ==
+    /\ \A q \in Prods : fl[q] => q = 1
+    /\ \A q \in Prods : we[q] => q # 1
+    /\ \A q \in Prods \ {1} : n[q] > 0 => fcnt > 0
+    /\ fcnt > 0 => \A q \in ConsProcs : nr[q] > 0
+
+FewSamples ==
+    /\ \A q \in Prods : fl[q] => q = 1
+    /\ \A q \in Prods : we[q] => q # 1
+    /\ n[1] <= 1
+    /\ n[2] <= 1
 =============================================================================
