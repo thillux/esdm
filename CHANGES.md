@@ -35,6 +35,11 @@ post and the version waited without having seen the status of the new server
 command, esdm_set_write_wakeup_bits()) publishes the need for entropy it
 changes: the status segment, and with it the write poll of /dev/random and the
 entropy providers, followed only at the next change of the auxiliary pool
+* RPC server: a worker thread that leaves on a failure of its epoll set, its
+timer, epoll_wait() or the registration of an accepted connection ends the
+server with that error, as a worker that fails to start does: the interface
+kept listening with fewer workers, the privileged one with none, and its
+clients waited in the backlog
 
 * RPC: RpcRndAddEntropy refuses a claim of more entropy than the data has
 bits with -EINVAL, as the other interfaces do; RpcGetRandomBytesPr answers a

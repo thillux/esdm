@@ -860,10 +860,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.ptr = NULL,
 		      }) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to add server FD %d to epoll\n",
 			    thread->proto->server_listening_fd);
-		ret = -errno;
 		goto out;
 	}
 
@@ -880,10 +880,10 @@ static int esdm_rpcs_handler(void *args)
 		},
 	};
 	if (timerfd_settime(tfd, 0, &its, NULL) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to arm cleanup timer: %s\n",
-			    strerror(errno));
-		ret = -errno;
+			    strerror(-ret));
 		goto out;
 	}
 
@@ -893,9 +893,9 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 1 /* no ptr will have this value */
 		      }) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to add timer FD %d to epoll\n", tfd);
-		ret = -errno;
 		goto out;
 	}
 
@@ -905,10 +905,10 @@ static int esdm_rpcs_handler(void *args)
 			      .events = EPOLLIN,
 			      .data.u64 = 2 /* no ptr will have this value */
 		      }) < 0) {
+		ret = -errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
 			    "Unable to add event FD %d to epoll\n",
 			    thread->eventfd);
-		ret = -errno;
 		goto out;
 	}
 
@@ -956,9 +956,10 @@ static int esdm_rpcs_handler(void *args)
 		}
 
 		if (nfds < 0) {
-			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
-				    "epoll_wait failed\n");
+			/* Before the logger, which may change errno */
 			ret = -errno;
+			esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+				    "epoll_wait failed: %s\n", strerror(-ret));
 			goto out;
 		}
 
@@ -1031,6 +1032,19 @@ static int esdm_rpcs_handler(void *args)
 out:
 	esdm_logger(LOGGER_DEBUG, LOGGER_C_RPC, "Exiting worker thread\n");
 
+	/*
+	 * A worker that leaves on a failure ends the server, as a worker that
+	 * failed to start does: the interface would keep listening with fewer
+	 * workers, the privileged one with none, and its clients would wait in
+	 * the backlog. esdm_rpcs_workerloop() returns the error once every
+	 * worker is joined.
+	 */
+	if (ret) {
+		esdm_logger(LOGGER_ERR, LOGGER_C_RPC,
+			    "RPC worker thread failed: %d\n", ret);
+		esdm_rpc_server_signal_exit();
+	}
+
 	TAILQ_FOREACH_SAFE(tmp1, &worker.conns, tailq, tmp2)
 	{
 		esdm_rpcs_close_conn(&worker, tmp1, " at exit");
@@ -1043,7 +1057,7 @@ out:
 		close(worker.epfd);
 	}
 
-	return 0;
+	return ret;
 }
 
 /* The ESDM RPC server main worker loop. */
