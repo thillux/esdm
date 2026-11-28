@@ -1,4 +1,18 @@
 Changes 1.2.4
+* Auxiliary pool: RNDADDTOENTCNT (esdm_pool_add_entropy()) and
+esdm_pool_set_entropy() with a value above zero credit no pool whose XDRBG
+holds no state, which is the case after esdm_reinit() or a failed XOF
+operation until the next insert: the credit was reported as available while no
+seeding obtained it, and the next insert, even one without entropy, had it
+handed out for its data. An insert that fails publishes the need for entropy,
+as the pool lost what it was credited with
+
+* A chunk generated while a self test failed is not handed out: esdm_drng_get()
+checked the verdict under the DRNG lock before generating a chunk, but the
+verdict is not written under that lock, so one chunk per request in flight
+could be generated after the failure was recorded. The verdict is checked
+again after the generation and such a chunk is wiped
+
 * RPC: RpcRndAddEntropy refuses a claim of more entropy than the data has
 bits with -EINVAL, as the other interfaces do; RpcGetRandomBytesPr answers a
 request above its limit with -EINVAL instead of -32, which read as -EPIPE; the

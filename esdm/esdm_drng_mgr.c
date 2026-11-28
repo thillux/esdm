@@ -2168,6 +2168,19 @@ static ssize_t esdm_drng_get(struct esdm_drng *drng, uint8_t *outbuf,
 		/* Now, generate random bits from the properly seeded DRNG. */
 		ret = drng->drng_cb->drng_generate(drng->drng,
 						   outbuf + processed, todo);
+
+		/*
+		 * The verdict is not written under this lock, so a self test
+		 * may have failed between the check above and the generation.
+		 * Checked again, every chunk handed out was generated before
+		 * a failure was recorded; this one was not and is wiped.
+		 */
+		if (ret > 0 && !esdm_selftest_crypto_passed()) {
+			memset_secure(outbuf + processed, 0, (size_t)ret);
+			mutex_w_unlock(&drng->lock);
+			return processed ? processed : -EOPNOTSUPP;
+		}
+
 		if (ret > 0) {
 			/*
 			 * Saturate at INT_MAX so the counter cannot wrap: it is

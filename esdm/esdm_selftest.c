@@ -388,6 +388,12 @@ static int esdm_periodic_selftest_worker(void *unused)
 
 bool esdm_selftest_periodic_start(void)
 {
+	/*
+	 * A caller past this check when esdm_fini() asks the worker to leave
+	 * may start one after esdm_fini() joined the threads. That worker finds
+	 * the request before its first wait and leaves without a pass: it uses
+	 * nothing esdm_fini() releases.
+	 */
 	if (esdm_selftest_stop())
 		return false;
 
