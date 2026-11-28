@@ -80,6 +80,13 @@
         (30pt, 44pt))),
     align(horizon, pad(left: 6mm, text(size: t-small, fill: muted, body)))))
 
+// A few points above a figure.
+#let points(body) = {
+  set text(size: t-small)
+  set list(marker: text(fill: accent)[•], body-indent: 0.5em, spacing: 8mm)
+  body
+}
+
 #let chips(columns, ..items) = grid(columns: (1fr,) * columns,
   column-gutter: 7mm, row-gutter: 7mm, ..items)
 
@@ -173,7 +180,7 @@
   stage(4)[Serve][Unmodified software, OpenSSL and hypervisors read from
     the interface they already use][
     #let face(body) = chip(fill: accent, stroke: accent, color: background,
-      weight: "semibold", body)
+      weight: "semibold", text(size: 37pt, body))
     #chips(3,
       face[`/dev/random`], face[`getrandom()`], face[RPC library],
       face[EGD socket], face[OpenSSL provider], face[`/dev/esdm_pr`])
@@ -185,8 +192,8 @@
 #let claim(sign, title, body) = grid(columns: (27mm, 1fr),
   column-gutter: 9mm, align: horizon,
   box(width: 27mm, height: 27mm, radius: 6mm, fill: accent-soft,
-    align(center + horizon, text(size: 54pt, icon(sign,
-      fill: accent-text)))),
+    align(center + horizon, text(size: 54pt, top-edge: "bounds",
+      bottom-edge: "bounds", icon(sign, fill: accent-text)))),
   stack(spacing: 6mm,
     text(size: 46pt, weight: "semibold", title),
     text(size: t-small, fill: muted, body)))
@@ -217,17 +224,23 @@
 #let example = {
   heading-text[Example: Entropy for a VM]
   v(14mm, weak: true)
+  points[
+    - A guest has few events of its own: the host delivers its entropy.
+    - `/dev/esdm_pr` reseeds for every read and never falls back to the
+      kernel RNG.
+  ]
+  v(10mm, weak: true)
   let part(title, sub, fill: background, stroke: rule) = chip(fill: fill,
-    stroke: stroke, height: 33mm, stack(spacing: 5mm,
+    stroke: stroke, height: 31mm, stack(spacing: 5mm,
       text(weight: "semibold", title),
       text(size: t-small, fill: muted, sub)))
-  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 17mm,
+  let link(body) = grid(columns: (1fr, 40pt, 1fr), rows: 15mm,
     align: (left, center, left + horizon),
     [],
-    grid(columns: 40pt, rows: (1fr, 30pt), align: center,
+    grid(columns: 40pt, rows: (1fr, 24pt), align: center,
       rect(width: 9pt, height: 100%, fill: accent, stroke: none),
-      polygon(fill: accent, stroke: none, (0pt, 0pt), (40pt, 0pt),
-        (20pt, 30pt))),
+      polygon(fill: accent, stroke: none, (0pt, 0pt), (36pt, 0pt),
+        (18pt, 24pt))),
     pad(left: 5mm, text(size: t-small, fill: muted, body)))
   let zone(name, fill, body) = block(width: 100%, fill: fill, radius: 8mm,
     inset: (x: 9mm, y: 7mm), {
@@ -258,16 +271,11 @@
 #let devices = {
   heading-text[Extensible Entropy Sources]
   v(14mm, weak: true)
-  {
-    set text(size: t-small)
-    set list(marker: text(fill: accent)[•], body-indent: 0.5em,
-      spacing: 8mm)
-    [
-      - An entropy source of your own is a small process built on
-        `libesdm_es_ext`.
-      - The providers for PKCS\#11 and PC/SC ship with the ESDM.
-    ]
-  }
+  points[
+    - An entropy source of your own is a small process built on
+      `libesdm_es_ext`.
+    - The providers for PKCS\#11 and PC/SC ship with the ESDM.
+  ]
   v(10mm, weak: true)
   let part(title, sub, fill: background, stroke: rule, height: 33mm) = chip(
     fill: fill, stroke: stroke, height: height, stack(spacing: 5mm,
