@@ -204,11 +204,17 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 	 * startup test with a fully ordered atomic_xchg() before its reset
 	 * increments the generation under the ring lock. A generation read
 	 * after that increment is ordered by the lock after the re-arming, so
-	 * the checks below see the startup test running again. A generation
-	 * read before it differs from the one read at the end. Taken after
+	 * the checks below see the startup test running again. Taken after
 	 * the checks, a failure in between would go unnoticed: the request
 	 * would be served from events collected after the failure only, while
 	 * the startup test still runs.
+	 *
+	 * A generation read before the increment is caught at the end, where
+	 * the startup test is checked again before the generation: until the
+	 * reset of a change of the startup test is done, the test does not
+	 * pass (see esdm_sp80090b_startup_complete_es()). Otherwise a request
+	 * overlapping a failure, or the completion of a failure's window, could
+	 * credit events the pending reset is about to discard.
 	 */
 	gen = esdm_es_ring_gen(drbg->ring);
 
@@ -246,7 +252,9 @@ void esdm_es_drbg_pool_extract(const struct esdm_es_drbg *drbg,
 		done += esdm_security_strength;
 	}
 
-	if (esdm_es_ring_gen(drbg->ring) != gen) {
+	/* The startup test before the generation, see above */
+	if (!esdm_sp80090b_startup_complete_es(drbg->es) ||
+	    esdm_es_ring_gen(drbg->ring) != gen) {
 		pr_warn("%s-based noise source reset during extraction\n",
 			drbg->name);
 		memzero_explicit(eb->e, sizeof(eb->e));

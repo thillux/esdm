@@ -1,0 +1,53 @@
+C esdm-startup-window-swapped
+
+(*
+ * esdm_sp80090b_startup() on P0 completes the window of a failure and resets,
+ * P2 completes the startup test meanwhile, P1 is the final check of
+ * esdm_es_drbg_pool_extract(): startup test, then the ring generation.
+ * Forbidden: the reader takes the test as passed with the reset outstanding.
+ *)
+
+{
+	atomic_t blocks = ATOMIC_INIT(2);
+	atomic_t resetting = ATOMIC_INIT(0);
+}
+
+P0(atomic_t *blocks, atomic_t *resetting, int *gen, spinlock_t *rl)
+{
+	int r0;
+
+	atomic_inc(resetting);
+	smp_mb__after_atomic();
+	r0 = atomic_dec_return(blocks);
+	spin_lock(rl);
+	WRITE_ONCE(*gen, 1);
+	spin_unlock(rl);
+	smp_mb__before_atomic();
+	atomic_dec(resetting);
+}
+
+P1(atomic_t *blocks, atomic_t *resetting, int *gen, spinlock_t *rl)
+{
+	int r0;
+	int r1;
+	int r2;
+
+	r1 = atomic_read_acquire(resetting);
+	r0 = atomic_read_acquire(blocks);
+	spin_lock(rl);
+	r2 = READ_ONCE(*gen);
+	spin_unlock(rl);
+}
+
+P2(atomic_t *blocks, atomic_t *resetting)
+{
+	int r0;
+
+	atomic_inc(resetting);
+	smp_mb__after_atomic();
+	r0 = atomic_dec_return(blocks);
+	smp_mb__before_atomic();
+	atomic_dec(resetting);
+}
+
+exists (0:r0=1 /\ 2:r0=0 /\ 1:r0=0 /\ 1:r1=0 /\ 1:r2=0)

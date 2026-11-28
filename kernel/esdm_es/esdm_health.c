@@ -89,6 +89,8 @@ struct esdm_health_es_state {
 	 ESDM_APT_WINDOW_SIZE)
 	/* APT windows still to pass, zero: startup test passed */
 	atomic_t sp80090b_startup_blocks;
+	/* Changes of it in progress, see esdm_sp80090b_change_begin() */
+	atomic_t sp80090b_resetting;
 
 	/* Bitmask of esdm_health_log_bit messages pending deferred printk */
 	unsigned long pending_log;
@@ -335,26 +337,59 @@ static bool esdm_sp80090b_health_enabled(void)
  ***************************************************************************/
 
 /*
+ * A change of the startup test and the reset of the entropy state it implies
+ * are two steps: until the reset bumped the ring generation, a reader could
+ * take the changed counter for a passed test and the events of before the
+ * reset for valid. So each change counts as in progress from before it until
+ * after its reset, and esdm_sp80090b_startup_complete_es() fails meanwhile.
+ */
+static void esdm_sp80090b_change_begin(struct esdm_health_es_state *es_state)
+{
+	atomic_inc(&es_state->sp80090b_resetting);
+	/* The count before the counter: pairs with its acquire read */
+	smp_mb__after_atomic();
+}
+
+static void esdm_sp80090b_change_end(struct esdm_health_es_state *es_state)
+{
+	/* The reset before the count: pairs with the count's acquire read */
+	smp_mb__before_atomic();
+	atomic_dec(&es_state->sp80090b_resetting);
+}
+
+/*
  * Perform SP800-90B startup testing
  */
 static void esdm_sp80090b_startup(struct esdm_health *health,
 				  enum esdm_internal_es es)
 {
 	struct esdm_health_es_state *es_state = &health->es_state[es];
-	int blocks = atomic_dec_if_positive(&es_state->sp80090b_startup_blocks);
-
-	/* Only the transition to zero completes the startup test */
-	if (!blocks) {
-		esdm_health_log(es, esdm_health_log_startup_done);
-		return;
-	}
+	int blocks;
 
 	/*
-	 * The window of a failure completed: discard what it collected, as its
-	 * later failures did not reset (see esdm_sp80090b_startup_restart()).
+	 * The startup test passed, the common case of every window completing
+	 * at runtime: nothing to change, as if this window had completed before
+	 * any failure that re-arms the test concurrently. Counted as a change
+	 * in progress, it would fail a request running at this very moment.
 	 */
-	if (blocks == ESDM_SP80090B_STARTUP_BLOCKS)
+	if (!atomic_read(&es_state->sp80090b_startup_blocks))
+		return;
+
+	esdm_sp80090b_change_begin(es_state);
+	blocks = atomic_dec_if_positive(&es_state->sp80090b_startup_blocks);
+
+	/*
+	 * Only the transition to zero completes the startup test. The one to
+	 * ESDM_SP80090B_STARTUP_BLOCKS completes the window of a failure:
+	 * discard what it collected, as its later failures did not reset (see
+	 * esdm_sp80090b_startup_restart()).
+	 */
+	if (!blocks)
+		esdm_health_log(es, esdm_health_log_startup_done);
+	else if (blocks == ESDM_SP80090B_STARTUP_BLOCKS)
 		esdm_reset_state(es);
+
+	esdm_sp80090b_change_end(es_state);
 }
 
 /*
@@ -387,18 +422,23 @@ static bool esdm_sp80090b_startup_restart(struct esdm_health *health,
 					  enum esdm_internal_es es)
 {
 	struct esdm_health_es_state *es_state = &health->es_state[es];
+	int blocks;
+
 	/*
 	 * Gate the output before resetting the entropy state. The exchange
 	 * cannot interleave with a window completing on another CPU: either
 	 * that completion still passes the startup test - and this is a
 	 * runtime failure - or it consumes one of the new blocks.
 	 */
-	int blocks = atomic_xchg(&es_state->sp80090b_startup_blocks,
-				 ESDM_SP80090B_STARTUP_BLOCKS + 1);
+	esdm_sp80090b_change_begin(es_state);
+	blocks = atomic_xchg(&es_state->sp80090b_startup_blocks,
+			     ESDM_SP80090B_STARTUP_BLOCKS + 1);
 
 	/* Reset entropy state NOTE: we are in atomic context */
 	if (blocks != ESDM_SP80090B_STARTUP_BLOCKS + 1)
 		esdm_reset_state(es);
+
+	esdm_sp80090b_change_end(es_state);
 
 	return !blocks;
 }
@@ -444,7 +484,20 @@ bool esdm_sp80090b_startup_complete_es(enum esdm_internal_es es)
 	if (!esdm_sp80090b_health_enabled())
 		return true;
 
-	return !atomic_read(&es_state->sp80090b_startup_blocks);
+	/*
+	 * The counter first, then the count of changes in progress: a change
+	 * raises the count before it changes the counter, so a reader seeing
+	 * the changed counter sees the count raised until the change's reset is
+	 * done. Read the other way round, a change could begin and complete the
+	 * startup test between the two reads. The acquire reads pair with the
+	 * barriers of esdm_sp80090b_change_begin()/_end() and order the count
+	 * read, and the caller's ring generation read after it, as the
+	 * sequentially consistent model in tests/tla/EsdmKernelEs.tla assumes.
+	 */
+	if (atomic_read_acquire(&es_state->sp80090b_startup_blocks))
+		return false;
+
+	return !atomic_read_acquire(&es_state->sp80090b_resetting);
 }
 
 bool esdm_sp80090b_compliant(enum esdm_internal_es es)
