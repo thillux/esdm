@@ -3,7 +3,8 @@
 #   make                  the design document as PDF/A-2b in A4 and US Letter
 #                         (esdm-a4.pdf, esdm-letter.pdf), in grayscale for
 #                         black and white printing (esdm-a4-gray.pdf,
-#                         esdm-letter-gray.pdf), the slide deck and the
+#                         esdm-letter-gray.pdf), the slide deck, its short
+#                         version (esdm_presentation_short.pdf) and the
 #                         poster as PDF/A-2b
 #   make poster           only the A0 poster, esdm_poster.pdf
 #   make figures          only render the draw.io and PlantUML figures to SVG
@@ -95,7 +96,8 @@ esdm_presentation_SRC := presentations/esdm_presentation.typ
 esdm_poster_SRC := poster/esdm_poster.typ
 PDFS := $(OUT)/esdm-a4.pdf $(OUT)/esdm-letter.pdf \
 	$(OUT)/esdm-a4-gray.pdf $(OUT)/esdm-letter-gray.pdf \
-	$(OUT)/esdm_presentation.pdf $(OUT)/esdm_poster.pdf
+	$(OUT)/esdm_presentation.pdf $(OUT)/esdm_presentation_short.pdf \
+	$(OUT)/esdm_poster.pdf
 
 # Where the QR code of the poster points.
 POSTER_REPO_URL ?= https://github.com/smuellerDD/esdm
@@ -218,6 +220,10 @@ $(OUT)/esdm-a4-gray.pdf $(OUT)/esdm-letter-gray.pdf: $(OUT)/esdm-%-gray.pdf: \
 
 $(OUT)/esdm_presentation.pdf: $(FIGURES) $(PLOTS) $(TYPST_SOURCES) | $(CHECKS)
 	$(call typst-compile,$(esdm_presentation_SRC),$@,.,$(PDFA))
+
+# The short deck: the slides of the presentation marked `short: true`.
+$(OUT)/esdm_presentation_short.pdf: $(FIGURES) $(PLOTS) $(TYPST_SOURCES) | $(CHECKS)
+	$(call typst-compile,$(esdm_presentation_SRC),$@,.,$(PDFA) --input deck=short)
 
 $(OUT)/esdm_poster.pdf: $(FIGURES) $(PLOTS) $(TYPST_SOURCES) | $(CHECKS)
 	$(call typst-compile,$(esdm_poster_SRC),$@,.,$(PDFA))

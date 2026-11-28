@@ -66,6 +66,10 @@
 #let current-section = state("esdm-current-section", 0)
 #let backup-name = [Backup]
 
+// The short deck (input deck=short) is the same source with only the slides
+// marked `short: true`, without the section dividers and the backup.
+#let short-deck = sys.inputs.at("deck", default: "full") == "short"
+
 // The bullets of the two list levels: a blue dot, a slate dash.
 #let bullet = box(width: 0.5em, height: 0.5em, baseline: -0.08em,
   align(center + horizon, circle(radius: 0.15em, fill: accent, stroke: none)))
@@ -108,7 +112,7 @@
   set text(size: 9pt, fill: muted, top-edge: "cap-height",
     bottom-edge: "baseline")
   place(top + left, dx: body-x, dy: 427pt, {
-    let names = secs + (backup-name,)
+    let names = secs + if short-deck { () } else { (backup-name,) }
     for (i, s) in names.enumerate() {
       if i > 0 { h(10pt) }
       if i + 1 == cur {
@@ -140,7 +144,9 @@
 
 // A content slide: the title states its message, the body holds a few
 // points or a figure with callouts. `valign` aligns the body in its area.
-#let slide(title: none, valign: top, body) = {
+// `short` puts the slide into the short deck as well.
+#let slide(title: none, valign: top, short: false, body) = {
+  if short-deck and not short { return }
   if title != none {
     bookmark(2, title)
     slide-title(title)
@@ -345,6 +351,8 @@
   context current-section.update(if number == none {
     deck-sections.get().len() + 1
   } else { number })
+  // The short deck has no dividers; the footer still follows the sections.
+  if short-deck { return }
   bookmark(1, title)
   place(top + left, rect(width: page-width, height: page-height,
     fill: navy, stroke: none))

@@ -8,6 +8,8 @@
 // each section names. The editor windows show meson_options.txt verbatim
 // (meson-excerpts.typ), the terminal windows program output of this release
 // (screens.typ).
+// The slides marked `short: true` alone are the short deck, built with
+// --input deck=short (esdm_presentation_short.pdf).
 // Build from doc/typst: typst compile --root . presentations/<this file>
 
 #import "template.typ": *
@@ -123,7 +125,7 @@
   subtitle: [Purpose, design goals, comparison with the alternatives and
     architecture])
 
-#slide(title: [Purpose of the ESDM])[
+#slide(short: true, title: [Purpose of the ESDM])[
   #grid(columns: (1fr, 1fr, 1fr), column-gutter: gap,
     stat[12][entropy sources, each with an entropy rate of its own],
     stat[4][output paths: full, plain, prediction resistance, seed],
@@ -140,7 +142,7 @@
   - The LRNG patch series in user space: unprivileged after start-up
 ]
 
-#slide(title: [Design Goals])[
+#slide(short: true, title: [Design Goals])[
   - An API- and ABI-compatible replacement of the Linux random number
     interfaces
   - User space: privileges serve the set-up only and are dropped before the
@@ -153,7 +155,7 @@
     AIS 20/31
 ]
 
-#slide(title: [Comparison with the Alternatives])[
+#slide(short: true, title: [Comparison with the Alternatives])[
   #let alt(name, adds, cost) = card(name, height: 250pt)[
     #adds
     #place(bottom + left)[#text(weight: "semibold")[Cost:] #cost]
@@ -173,7 +175,7 @@
   #more[“Design Rationale and Alternatives”]
 ]
 
-#slide(title: [Toolkit and Minimal Configurations])[
+#slide(short: true, title: [Toolkit and Minimal Configurations])[
   #let cfg(name, parts, serves) = card(name, height: 196pt)[
     #parts
     #place(bottom + left)[#text(weight: "semibold")[Serves:] #serves]
@@ -197,11 +199,11 @@
   #more[“Interfaces of a Deployment”]
 ]
 
-#slide(title: [Architecture])[
+#slide(short: true, title: [Architecture])[
   #pic("big-picture.svg")
 ]
 
-#slide(title: [Data Flow from Noise to Output])[
+#slide(short: true, title: [Data Flow from Noise to Output])[
   #grid(columns: (1fr, 1fr), column-gutter: gap, row-gutter: 26pt,
     step(1)[Collect][Internal sources time interrupts and task wakeups, in a
       kernel module or in eBPF programs. External sources deliver on
@@ -222,7 +224,7 @@
 #section-slide(number: 2, title: [Interfaces],
   subtitle: [Processes, output paths and first steps])
 
-#slide(title: [Processes])[
+#slide(short: true, title: [Processes])[
   #pic("processes.svg", height: 218pt)
   #v(10pt)
   #set text(size: t-small)
@@ -257,7 +259,7 @@
   client library, no units, no tests. The default build has both.
 ]
 
-#slide(title: [Output Paths])[
+#slide(short: true, title: [Output Paths])[
   #cols(widths: (1.45fr, 1fr), valign: horizon,
     pic("paths.svg"),
     [
@@ -345,7 +347,7 @@
 #section-slide(number: 3, title: [DRNG Management],
   subtitle: [Seeding, reseeding and state machines])
 
-#slide(title: [Seeding])[
+#slide(short: true, title: [Seeding])[
   #cols(widths: (1fr, 1.3fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -410,7 +412,7 @@
     and falls back to the initial instance
 ]
 
-#slide(title: [State Machines])[
+#slide(short: true, title: [State Machines])[
   #cols(widths: (1fr, 1.1fr), valign: horizon,
     [
       #set text(size: 18pt)
@@ -471,7 +473,7 @@
 #section-slide(number: 4, title: [Entropy Sources],
   subtitle: [Twelve sources, their entropy rates and health tests])
 
-#slide(title: [Entropy Sources and Their Rates])[
+#slide(short: true, title: [Entropy Sources and Their Rates])[
   #grid(columns: (1fr,) * 6, column-gutter: 9pt, row-gutter: 9pt,
     rate-tile(fill: source)[Interrupts \ kernel module][256],
     rate-tile(fill: source)[Scheduler \ kernel module][0],
@@ -627,7 +629,7 @@
   subtitle: [Clones and snapshots, suspend and resume, fork, entropy in
     virtual machines])
 
-#slide(title: [System Events])[
+#slide(short: true, title: [System Events])[
   #pic("deck-system-events.svg", height: 222pt)
   #v(8pt)
   #set text(size: 18pt)
@@ -736,7 +738,7 @@
   #more[“Attacker Model and Non-Goals”]
 ]
 
-#slide(title: [Attacker Model])[
+#slide(short: true, title: [Attacker Model])[
   #set text(size: t-small)
   #set par(leading: 0.42em)
   #let row(who, what) = (text(weight: "semibold", who), what)
@@ -768,7 +770,7 @@
     hypervisor; physical attacks; network attackers – all sockets are local
 ]
 
-#slide(title: [Security Domains])[
+#slide(short: true, title: [Security Domains])[
   #pic("deck-security-domains.svg", height: 252pt)
   #v(8pt)
   #set text(size: t-small)
@@ -808,7 +810,7 @@
   subtitle: [Configurations for SP 800-90C, FIPS 140-3 and AIS 20/31, and
     the claims not made])
 
-#slide(title: [Seeding Strategies])[
+#slide(short: true, title: [Seeding Strategies])[
   #let strategy(n, name, body) = card(none, height: 236pt)[
     #text(size: 40pt, weight: "semibold", fill: accent-text, tracking: -1pt,
       top-edge: "cap-height", bottom-edge: "baseline", n)
@@ -827,7 +829,7 @@
       deliver 240 bits each. Or the Jitter RNG in its own NTG.1 mode alone:
       `es_jent_ntg1`.],
   )
-  #more[the build options are shown verbatim in the backup section]
+  #more(if short-deck [the build options are described in chapter "Build Options"] else [the build options are shown verbatim in the backup section])
 ]
 
 #slide(title: [Build Options and Classes])[
@@ -931,7 +933,7 @@
   subtitle: [Testing, the interface specification and the formal
     verification of the concurrent parts])
 
-#slide(title: [Verification Methods])[
+#slide(short: true, title: [Verification Methods])[
   #set text(size: 18pt)
   #set par(leading: 0.42em)
   #let row(what, how) = (text(weight: "semibold", what), how)
@@ -1009,7 +1011,7 @@
   #more[chapter “Interface Specification”, “RPC Interfaces”]
 ]
 
-#slide(title: [Model Checking])[
+#slide(short: true, title: [Model Checking])[
   #pic("deck-model-checking.svg", height: 230pt)
   #v(8pt)
   #set text(size: 18pt)
@@ -1059,7 +1061,7 @@
   )
 ]
 
-#slide(title: [Further Reading])[
+#slide(short: true, title: [Further Reading])[
   #cols(widths: (1fr, 150pt), valign: horizon,
     [
       - *Design and assurance*: the design and the attacker model, the
