@@ -20,6 +20,13 @@ counter with the generation it has acted on. Server and CUSE daemons have to
 be updated together, a daemon of the other version takes the segment as one
 no server publishes to
 
+* CUSE: a suspend notification reaches a poll in flight. A notification that
+arrived after esdm_cuse_poll() read the status, and that the poll checker
+acted on before the handle of that poll was registered, woke nobody: the
+thread slept until the next change of the status. The re-check after the
+registration now notifies also for a suspend generation newer than the one
+the poll was answered with
+
 * The server posts the semaphores of the CUSE daemons after it published the
 version of the status segment: a poll checker that looked between the last
 post and the version waited without having seen the status of the new server

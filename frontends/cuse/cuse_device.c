@@ -69,11 +69,17 @@ static atomic_llong next_fh = 1;
  */
 static atomic_uint esdm_cuse_suspend_seen = 0;
 
-/* Is there a suspend notification the poll checker has yet to act on? */
-static bool esdm_cuse_suspend_pending(void)
+/*
+ * Is there a suspend notification the poll checker has yet to act on? The
+ * generation this is answered with is handed out, if asked for.
+ */
+static bool esdm_cuse_suspend_pending(unsigned int *suspend_gen)
 {
-	return atomic_load(&esdm_cuse_shm_status->suspend_gen) !=
-	       atomic_load(&esdm_cuse_suspend_seen);
+	unsigned int gen = atomic_load(&esdm_cuse_shm_status->suspend_gen);
+
+	if (suspend_gen)
+		*suspend_gen = gen;
+	return gen != atomic_load(&esdm_cuse_suspend_seen);
 }
 
 static int esdm_cuse_shm_status_avail(void)
@@ -1028,12 +1034,16 @@ static unsigned int esdm_cuse_fallback_pollmask(unsigned int events)
 	return (unsigned int)pfd.revents & events;
 }
 
-static void esdm_cuse_get_pollmask(unsigned int *outmask)
+/* *suspend_gen, if given, receives the suspend generation the mask is of */
+static void esdm_cuse_get_pollmask(unsigned int *outmask,
+				   unsigned int *suspend_gen)
 {
 #define ESDM_POLL_READER (POLLIN | POLLRDNORM)
 #define ESDM_POLL_WRITER (POLLOUT | POLLWRNORM)
 
 	*outmask = 0;
+	if (suspend_gen)
+		*suspend_gen = 0;
 
 	/*
 	 * Guard against a not-yet-attached status segment, mirroring the other
@@ -1069,7 +1079,7 @@ static void esdm_cuse_get_pollmask(unsigned int *outmask)
 	 * every registered poll handle against it (see
 	 * esdm_cuse_poll_checker()).
 	 */
-	if (esdm_cuse_suspend_pending())
+	if (esdm_cuse_suspend_pending(suspend_gen))
 		*outmask |= ESDM_POLL_READER | ESDM_POLL_WRITER;
 
 	/* Simply wake the poller no matter what it waits for. */
@@ -1091,7 +1101,7 @@ static void esdm_cuse_set_pollmask(unsigned int request_events,
 void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 		    struct fuse_pollhandle *ph)
 {
-	unsigned int sysmask, mask;
+	unsigned int sysmask, mask, suspend_gen;
 	uint32_t events;
 	int err_code;
 
@@ -1104,7 +1114,7 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 	 * Check current status and return it if it complies with requested
 	 * status.
 	 */
-	esdm_cuse_get_pollmask(&sysmask);
+	esdm_cuse_get_pollmask(&sysmask, &suspend_gen);
 	mask = sysmask;
 	esdm_cuse_set_pollmask(fi->poll_events, &mask);
 	fuse_reply_poll(req, mask);
@@ -1146,7 +1156,7 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 				fuse_notify_poll(ph);
 				fuse_pollhandle_destroy(ph);
 			} else {
-				unsigned int recheck;
+				unsigned int recheck, recheck_gen;
 
 				node->fh = fi->fh;
 				node->ph = ph;
@@ -1159,10 +1169,15 @@ void esdm_cuse_poll(fuse_req_t req, struct fuse_file_info *fi,
 				 * state became ready between the mask snapshot
 				 * above and this registration, deliver it now
 				 * instead of waiting for the next state change.
+				 * So for a suspend notification newer than the
+				 * one the reply was made with: the poll checker
+				 * may have acted on it meanwhile, when this
+				 * handle was not in its list, and the mask does
+				 * not show it any more.
 				 */
-				esdm_cuse_get_pollmask(&recheck);
+				esdm_cuse_get_pollmask(&recheck, &recheck_gen);
 				esdm_cuse_set_pollmask(events, &recheck);
-				if (recheck) {
+				if (recheck || recheck_gen != suspend_gen) {
 					fuse_notify_poll(node->ph);
 					fuse_pollhandle_destroy(node->ph);
 					esdm_cuse_poll_list = node->next;
@@ -1209,7 +1224,7 @@ static int esdm_cuse_poll_checker(void __unused *unused)
 
 			/* Get the mask once for this loop */
 			if (!sysmask_set) {
-				esdm_cuse_get_pollmask(&sysmask);
+				esdm_cuse_get_pollmask(&sysmask, NULL);
 				sysmask_set = true;
 			}
 

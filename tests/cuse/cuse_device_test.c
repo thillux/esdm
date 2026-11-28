@@ -164,11 +164,24 @@ int fuse_reply_open(fuse_req_t req, const struct fuse_file_info *fi)
 	return 0;
 }
 
+/*
+ * Set to have a suspend notification arrive, and the poll checker act on it,
+ * right after a poll was answered - before its handle is registered.
+ */
+static bool suspend_after_reply;
+
 int fuse_reply_poll(fuse_req_t req, unsigned revents)
 {
 	(void)req;
 	reply.kind = REPLY_POLL;
 	reply.revents = revents;
+
+	if (suspend_after_reply) {
+		/* The server, then a pass of the checker over an empty list */
+		atomic_fetch_add(&esdm_cuse_shm_status->suspend_gen, 1);
+		atomic_store(&esdm_cuse_suspend_seen,
+			     atomic_load(&esdm_cuse_shm_status->suspend_gen));
+	}
 
 	return 0;
 }
@@ -861,7 +874,7 @@ static void test_pollmask(void)
 {
 	unsigned int mask = 0xffffffff;
 
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, 0);
 
 	mask = POLLIN | POLLOUT;
@@ -968,6 +981,7 @@ static void test_privileged_ioctls(void)
  */
 static void test_shm_status(void)
 {
+	struct fuse_file_info fi;
 	unsigned int mask;
 
 	CHECK_EQ(esdm_cuse_shm_status_create_shm(), 0);
@@ -994,7 +1008,7 @@ static void test_shm_status(void)
 	 * the kernel's device, here none, so they fail at once and do not wait.
 	 */
 	esdm_cuse_shm_status->version = 0;
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
 	esdm_cuse_shm_status->version = ESDM_SHM_STATUS_VERSION;
 
@@ -1004,17 +1018,17 @@ static void test_shm_status(void)
 	 * a poller must not be left waiting on a device that is going away.
 	 */
 	atomic_store(&esdm_cuse_shm_status->operational, true);
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM);
 
 	atomic_store(&esdm_cuse_shm_status->operational, false);
 	atomic_store(&esdm_cuse_shm_status->need_entropy, true);
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLOUT | POLLWRNORM);
 
 	/* /dev/urandom reads the kernel device until the ESDM is operational */
 	esdm_cuse_fallback(-1, true);
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
 	esdm_cuse_fallback(-1, false);
 
@@ -1026,16 +1040,45 @@ static void test_shm_status(void)
 	 * daemon reads the same counter.
 	 */
 	atomic_fetch_add(&esdm_cuse_shm_status->suspend_gen, 1);
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
 	atomic_store(&esdm_cuse_suspend_seen,
 		     atomic_load(&esdm_cuse_shm_status->suspend_gen));
-	esdm_cuse_get_pollmask(&mask);
+	esdm_cuse_get_pollmask(&mask, NULL);
 	CHECK_EQ(mask, 0);
 	CHECK(atomic_load(&esdm_cuse_shm_status->suspend_gen) != 0,
 	      "seeing a suspend generation changed the shared segment");
+
+	/*
+	 * A suspend notification between the answer to a poll and its
+	 * registration, which the checker acts on while the handle is not in
+	 * its list yet: the mask does not show it any more, so the poll itself
+	 * has to notify for the newer generation instead of registering a
+	 * handle nobody would wake.
+	 */
+	memset(&fi, 0, sizeof(fi));
+	fi.fh = 4712;
+	fi.poll_events = POLLIN;
+	reply_reset();
+	suspend_after_reply = true;
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	suspend_after_reply = false;
+	CHECK_EQ(reply.kind, REPLY_POLL);
+	CHECK_EQ(reply.revents, 0);
+	CHECK_EQ(notify_calls, 1);
+	CHECK(esdm_cuse_poll_list == NULL,
+	      "a poll that missed a suspend notification was left registered");
+
+	/* Without one in between, the handle is registered and not notified */
+	reply_reset();
+	esdm_cuse_poll(TEST_REQ, &fi, TEST_PH);
+	CHECK_EQ(notify_calls, 0);
+	CHECK(esdm_cuse_poll_list != NULL,
+	      "the poll handle was not registered");
+	esdm_cuse_release(TEST_REQ, &fi);
+	reply_reset();
 
 	/* The status ioctl answers out of the same segment */
 	esdm_cuse_shm_status->infolen = 5;
