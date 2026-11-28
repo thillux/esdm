@@ -140,6 +140,12 @@ answer from before the ESDM turned operational clears the operational flag
 after the watcher set it and stopped - clearing the flag kicks the watcher
 while somebody waits
 
+* Kernel module esdm_cdev: a read of /dev/esdm_pr with O_NONBLOCK that gets no
+memory returns EAGAIN with the back-off of poll() armed, as after a read that
+found no data, instead of leaving the device readable; a blocking prediction
+resistant read woken early without a signal asks the ESDM again instead of
+returning ERESTARTSYS to its caller
+
 * esdm-server-signal-helper: --resume reseeds every DRNG through the
 privileged RPC interface, as the RNDRESEEDCRNG ioctl does, instead of writing
 a byte without entropy, which triggered no reseed; the exit status follows the

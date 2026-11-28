@@ -235,8 +235,18 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 		return 0;
 
 	block = kvmalloc(room, GFP_KERNEL);
-	if (!block)
-		return (pr_dev && nonblock) ? -EAGAIN : -ENOMEM;
+	if (!block) {
+		if (!pr_dev || !nonblock)
+			return -ENOMEM;
+
+		/*
+		 * /dev/esdm_pr: -EAGAIN, and not readable for a while as
+		 * after a read that found no data - its reader would spin
+		 * on a device poll() keeps reporting readable.
+		 */
+		esdm_cdev_pr_result(false);
+		return -EAGAIN;
+	}
 
 	while (done < count) {
 		int got;
@@ -287,10 +297,13 @@ static ssize_t esdm_cdev_read(struct file *file, char __user *ubuf,
 			if (pr) {
 				long tmo = msecs_to_jiffies(ESDM_CDEV_PR_RETRY_MS);
 
-				if (schedule_timeout_interruptible(tmo)) {
-					ret = -ERESTARTSYS;
-					break;
-				}
+				/*
+				 * Woken early by a signal, the loop ends the
+				 * read; by anything else, it asks again. An
+				 * -ERESTARTSYS without a signal pending would
+				 * reach the caller as it is.
+				 */
+				schedule_timeout_interruptible(tmo);
 				continue;
 			}
 
