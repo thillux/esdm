@@ -55,6 +55,8 @@
 #include "common_test.h"
 
 /* The unit under test */
+/* The test writes the status segment itself, in place of a server */
+#define ESDM_CUSE_SHM_ATTACH_FLAGS 0
 #include "cuse_device.c"
 
 /*

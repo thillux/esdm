@@ -1,4 +1,8 @@
 Changes 1.2.4
+* The CUSE daemons and libesdm_aux_client attach the status shared memory
+segment read-only: a reader cannot change what the server and the other readers
+see, and a process of another user than the owner of the segment can attach it
+
 * The two interfaces of the server are build options: esdm-server-rpc and
 esdm-server-egd, both enabled by default, of which a server needs at least one.
 A disabled interface is not part of the build: the server contains none of its

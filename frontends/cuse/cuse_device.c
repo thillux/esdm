@@ -102,6 +102,11 @@ static void esdm_cuse_shm_status_close_shm(void)
 	}
 }
 
+/* The unit test attaches for writing, as it plays the server as well */
+#ifndef ESDM_CUSE_SHM_ATTACH_FLAGS
+#define ESDM_CUSE_SHM_ATTACH_FLAGS SHM_RDONLY
+#endif
+
 static int esdm_cuse_shm_status_create_shm(void)
 {
 	int esdm_cuse_shmid = -1;
@@ -145,7 +150,12 @@ static int esdm_cuse_shm_status_create_shm(void)
 		}
 	}
 
-	tmp = shmat(esdm_cuse_shmid, NULL, 0);
+	/*
+	 * Read-only: this side only reads the status. A mapping it cannot
+	 * write keeps a defect here from changing what the server and the
+	 * other readers see.
+	 */
+	tmp = shmat(esdm_cuse_shmid, NULL, ESDM_CUSE_SHM_ATTACH_FLAGS);
 	if (tmp == (void *)-1) {
 		errsv = errno;
 		esdm_logger(LOGGER_ERR, LOGGER_C_CUSE,
