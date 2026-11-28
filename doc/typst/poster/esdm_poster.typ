@@ -46,12 +46,6 @@
   text(size: 24pt, fill: muted, caption)
 })
 
-// A number with what it counts.
-#let stat(number, label) = stack(spacing: 9mm,
-  text(size: 104pt, weight: "semibold", fill: accent-text, tracking: -2pt,
-    number),
-  text(size: 28pt, fill: muted, label))
-
 // A step of the path from the noise to the random numbers.
 #let step(n, title, body) = grid(columns: (62pt, 1fr), column-gutter: 18pt,
   box(width: 62pt, height: 62pt, radius: 31pt, fill: accent,
@@ -85,16 +79,6 @@
       upper[ESDM #esdm-version · #doc-date]),
     text(size: 30pt, fill: rule)[Stephan Müller · Markus Theil]))
 })
-
-// ---------------------------------------------------------------- numbers
-
-#block(width: 100%, fill: surface, inset: (x: margin, y: 18mm),
-  grid(columns: (1fr,) * 4, column-gutter: gutter,
-    stat[12][entropy sources, each with an entropy rate of its own],
-    stat[4][output paths: full, plain, prediction resistance, seed],
-    stat[5][crypto backends: builtin, OpenSSL, Botan, GnuTLS, leancrypto],
-    stat[12][TLA+ models of the concurrent parts, checked in CI],
-  ))
 
 // ---------------------------------------------------------------- footer
 
@@ -131,7 +115,7 @@
 
 // ---------------------------------------------------------------- body
 
-#block(inset: (x: margin, top: 22mm), {
+#block(inset: (x: margin, top: 34mm), {
 
   // From the noise to the random numbers
   grid(columns: (1fr, 1fr), column-gutter: gutter, align: horizon,
@@ -157,7 +141,7 @@
     ],
   )
 
-  v(26mm)
+  v(44mm)
 
   grid(columns: (1fr, 1fr), column-gutter: gutter,
     panel[Processes][
@@ -189,7 +173,7 @@
     ],
   )
 
-  v(26mm)
+  v(44mm)
 
   grid(columns: (1fr, 1fr), column-gutter: gutter,
     panel[DRNG Instance][
