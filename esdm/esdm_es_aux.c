@@ -263,7 +263,13 @@ void esdm_pool_set_entropy(uint32_t entropy_bits)
 		 * xchg/add and corrupt the entropy accounting.
 		 */
 		mutex_w_lock(&esdm_pools[i].lock);
-		esdm_pool_set_entropy_pool(&esdm_pools[i], entropy_bits);
+		/* No credit for a pool without a state, see below */
+		if (entropy_bits &&
+		    !esdm_xdrbg_seed_initialized(&esdm_pools[i].xdrbg))
+			esdm_pool_set_entropy_pool(&esdm_pools[i], 0);
+		else
+			esdm_pool_set_entropy_pool(&esdm_pools[i],
+						   entropy_bits);
 		mutex_w_unlock(&esdm_pools[i].lock);
 		if (entropy_bits != 0)
 			break;
@@ -285,6 +291,7 @@ void esdm_pool_add_entropy(uint32_t entropy_bits)
 {
 	/* As esdm_pool_set_entropy(), this interface credits the first pool */
 	struct esdm_pool *pool = &esdm_pools[0];
+	bool has_state;
 
 	/* Nothing changes, so nobody is to be notified either */
 	if (!entropy_bits)
@@ -295,10 +302,28 @@ void esdm_pool_add_entropy(uint32_t entropy_bits)
 	 * extraction in between does not have its bits credited once more.
 	 * esdm_get_aux_ent() is no base for that: it reports the count less
 	 * the oversampling of the pool, which would be lost with every credit.
+	 *
+	 * The credit is for the data the pool holds. A pool whose XDRBG has
+	 * no state - after esdm_reinit() or a failed XOF operation, until the
+	 * next insert - holds none: the data the caller means is gone. No
+	 * extraction would deliver such a credit, the source would report it
+	 * as available meanwhile, and the next insert, even one without
+	 * entropy, would have it handed out for its data.
 	 */
 	mutex_w_lock(&pool->lock);
-	esdm_pool_add_entropy_pool(pool, entropy_bits, esdm_get_digestsize());
+	has_state = esdm_xdrbg_seed_initialized(&pool->xdrbg);
+	if (has_state)
+		esdm_pool_add_entropy_pool(pool, entropy_bits,
+					   esdm_get_digestsize());
 	mutex_w_unlock(&pool->lock);
+
+	if (!has_state) {
+		esdm_logger(
+			LOGGER_WARN, LOGGER_C_ES,
+			"Aux pool holds no data, %u bits of entropy not credited\n",
+			entropy_bits);
+		return;
+	}
 
 	/*
 	 * As the DRNG is newly seeded, maybe the need entropy flag can be
@@ -472,6 +497,13 @@ int esdm_pool_insert_aux(const uint8_t *inbuf, size_t inbuflen,
 	esdm_es_add_entropy();
 
 out:
+	/*
+	 * A failed insert discarded the state of a pool and with it the
+	 * entropy the pool was credited with: publish the need that may have
+	 * arisen, which nothing else does before the next operation.
+	 */
+	if (ret)
+		esdm_shm_status_set_need_entropy();
 	return ret;
 }
 

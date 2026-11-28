@@ -165,6 +165,19 @@ int main(int argc, char *argv[])
 		ret = 1;
 	}
 
+	/*
+	 * The pool holds no data now, so there is nothing RNDADDTOENTCNT could
+	 * credit: no extraction would deliver it, and the next insert would
+	 * have it handed out for its data.
+	 */
+	esdm_pool_add_entropy(64);
+	avail = esdm_get_aux_ent();
+	if (avail) {
+		printf("Auxiliary pool without a state was credited %u bits\n",
+		       avail);
+		ret = 1;
+	}
+
 	/* The next insert begins a new instantiation, credited from then on */
 	if (esdm_ahf_insert()) {
 		printf("Insert after the failed extraction failed\n");
@@ -176,6 +189,48 @@ int main(int argc, char *argv[])
 	aux->get_ent(&eb_es, ESDM_DRNG_INIT_SEED_SIZE_BITS);
 	if (!eb_es.e_bits) {
 		printf("Auxiliary pool delivered no entropy after its recovery\n");
+		ret = 1;
+	}
+
+	/*
+	 * The same after a re-initialization, as esdm_reinit() does it: the
+	 * pool has a new XOF context and no state until the next insert.
+	 */
+	if (aux->init()) {
+		printf("Auxiliary pool re-initialization failed\n");
+		ret = 1;
+		goto fini;
+	}
+
+	esdm_pool_add_entropy(64);
+	avail = esdm_get_aux_ent();
+	if (avail) {
+		printf("Auxiliary pool was credited %u bits after its re-initialization\n",
+		       avail);
+		ret = 1;
+	}
+
+	/* An insert without entropy gives the pool a state, and no credit */
+	if (esdm_pool_insert_aux((const uint8_t *)"stir", 4, 0)) {
+		printf("Insert after the re-initialization failed\n");
+		ret = 1;
+		goto fini;
+	}
+
+	avail = esdm_get_aux_ent();
+	if (avail) {
+		printf("Refused credit of %u bits came back with the next insert\n",
+		       avail);
+		ret = 1;
+	}
+
+	/*
+	 * Now the credit is taken. The whole pool is credited, as the pool
+	 * reports its entropy less the oversampling, which may be 64 bits.
+	 */
+	esdm_pool_add_entropy(esdm_get_digestsize());
+	if (!esdm_get_aux_ent()) {
+		printf("Auxiliary pool with a state took no credit\n");
 		ret = 1;
 	}
 
