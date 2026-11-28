@@ -374,7 +374,7 @@ what the tool does over this interface; the usage of such a tool names the
 interface, the socket and the commands it lacks.]
 
 #figure(
-  table(columns: (auto, 1.6fr), align: left + horizon,
+  table(columns: (1fr, 1.6fr), align: left + horizon,
     table.header([Command], [Over the #ac("EGD") interface]),
     [`--status`, `--status-json`], [The status commands 0xe4 and 0xe5.],
     [`--is-fully-seeded`, `--wait-until-seeded`, `--entropy-count`], [The

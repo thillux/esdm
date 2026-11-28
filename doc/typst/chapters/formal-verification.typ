@@ -720,7 +720,7 @@ before its fix, a seeded defect, or a behavior the code accepts), and the
 largest state space checked.
 
 #figure(
-  table(columns: (auto, 1fr, 1.6fr, 1fr), align: left + horizon,
+  table(columns: (0.9fr, 1fr, 1.6fr, 1fr), align: left + horizon,
     table.header([Model], [Code], [Processes], [Configurations]),
     [`EsdmReseed` \ section @sec:fv-reseed], [`esdm/esdm_drng_mgr.c`, `esdm/esdm_es_mgr.c`, `esdm/esdm_es_events.c`], [Requesters of the five output calls, the reseed worker and its tasks, the #ac("ES") monitor, an administrator, the environment], [41, 9 demonstrating; largest 105,996,577 states],
     [`EsdmSelftest` \ section @sec:fv-selftest], [`esdm/esdm_selftest.c` and its callers], [Initialization, requests with and without blocking, seed callers, the #ac("RPC") self test, the reseed worker, the periodic worker, reinitialization, finalization, the environment], [19, 9 demonstrating; largest 264,807 states],
@@ -829,7 +829,7 @@ no further reseed falls due by time. `AllEventuallySeeded` and
 that eventually stop; the open observations below give the reason.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`OutputFromSeeded`], [Every chunk of the initial or a per-node
       #ac("DRNG") comes from a seed that met the seeding rule with entropy
@@ -894,7 +894,7 @@ that eventually stop; the open observations below give the reason.]
 ) <tab:fv-reseed-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 2.2fr, auto, auto, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Run], [Result], [States]),
     [`QuickDrg4`], [Small scope: DRG.4 bit limits, the reseed worker, `esdm_get_random_bytes_full` and `esdm_get_random_bytes`], [default], [holds], [2,182,383],
     [`QuickNoblock`], [Small scope: `esdm_get_random_bytes_full_noblock` and the reseed worker], [default], [holds], [965,563],
@@ -1119,7 +1119,7 @@ every configuration with a thread pool that models the current code lists.
 All processes are weakly fair.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`OutputGated`], [Every chunk and every seed handed out was generated or
       collected while the verdict of the crypto self tests stood passed:
@@ -1166,7 +1166,7 @@ All processes are weakly fair.]
 ) <tab:fv-selftest-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`GateEachChunk`], [The verdict checked before and after every chunk and before a seed is handed out, the implementations breaking], [holds], [79,908],
     [`GateSeeding`], [Seedings and the reseed worker stopping on a recorded failure], [holds], [29,883],
@@ -1298,7 +1298,7 @@ for a lock forever; the configurations whose properties hold check in
 addition that every thread ends (`AllDone`), under weak fairness.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`Conservation`], [The credit handed out plus the credit the pools hold
       never exceeds the credit accepted: no two extractions hand out the same
@@ -1344,7 +1344,7 @@ addition that every thread ends (`AllDone`), under weak fairness.]
 ) <tab:fv-aux-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Default`], [One pool, every writer, failing #ac("XOF"), two seedings], [holds], [81,203],
     [`Concurrent`], [Two pools], [holds], [89,728],
@@ -1522,7 +1522,7 @@ invariant is listed (`NoPostPublishHang`, `TwoAuxHang`). The liveness
 properties assume weak fairness of every process.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`NoLostWakeup`], [A poll checker waits on its semaphore only after it
       has seen what its poll mask follows, or while a writer that stored a
@@ -1560,7 +1560,7 @@ properties assume weak fairness of every process.]
 ) <tab:fv-shm-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Writers`], [Two pool threads, the #ac("DRNG") thread and a suspend signal on a running server], [holds], [1,073,132],
     [`WritersWide`], [As `Writers`, two changes of the operational state (slow)], [holds], [2,699,830],
@@ -1781,7 +1781,7 @@ the pass of the poll checker every second while no server publishes, and a
 read that waits by asking again. The liveness properties cover them.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`WaiterCovered`], [A thread asleep in `poll` is covered by a registered
       poll handle for its events, or by a poll request still under way.],
@@ -1810,7 +1810,7 @@ read that waits by asking again. The liveness properties cover them.]
 ) <tab:fv-cuse-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Poll`], [Pollers for `POLLIN` and `POLLOUT`, two workers, while the status changes], [holds], [2,407,603],
     [`PollWide` (slow)], [As `Poll`, with a second change of the need for entropy], [holds], [6,009,495],
@@ -2031,7 +2031,7 @@ descriptors is assumed; the configurations with liveness properties have no
 streaming client or return every ready descriptor.]
 
 #figure(
-  table(columns: (auto, 1.6fr, 1fr), align: left + horizon,
+  table(columns: (0.9fr, 1.6fr, 0.9fr), align: left + horizon,
     table.header([Property], [Statement], [Result]),
     [`WorkerNeverBlocks`], [The worker has a step in every state: with
       `recv`, `send` and the generation of a blocking read returning instead
@@ -2089,7 +2089,7 @@ streaming client or return every ready descriptor.]
 ) <tab:fv-egd-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Deferred`], [A deferred blocking read with a request behind it, a privileged command, half-close, close at any time; `Reclaimed`], [holds], [313,446],
     [`BufOne`], [The same with an input buffer of one command; `Reclaimed`], [holds], [265,087],
@@ -2222,7 +2222,7 @@ the drop cleared the parent-death signal, and signals sent to the daemon
 directly.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`NoLostSignal`], [A termination signal sent to the supervisor once the
       fork began, or `SIGUSR1` sent once the daemon installed its suspend
@@ -2266,7 +2266,7 @@ the environment can step in most states, the deadlock check alone would not
 show a hang of the two processes; `NoHang` does. No configuration is slow.
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Server`], [The server, three signals: all safety and liveness properties but `OrphanStops`], [holds], [98,708],
     [`Liveness`], [The server, four signals: the same], [holds], [239,648],
@@ -2425,7 +2425,7 @@ of the code: a request that arrives while the timer pass runs is dropped
 with its connection, and the client has to send it again on a new one.]
 
 #figure(
-  table(columns: (auto, 1.6fr, 1fr), align: left + horizon,
+  table(columns: (0.9fr, 1.6fr, 0.9fr), align: left + horizon,
     table.header([Property], [Statement], [Result]),
     [`ConnOwned`, `CountsConsistent`], [A connection is open exactly while
       the epoll set and the list of one worker hold it; the connection count
@@ -2495,7 +2495,7 @@ They are not checked where `accept4` may fail: nothing bounds the time for
 which the descriptors stay exhausted, and a queued client waits as long.
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Accept`], [Accept races of two workers, hang-up, EOF], [holds], [1,405,640],
     [`AcceptRetry`], [A failing `accept4` retried after an interval or a closed connection; a connection released at accept], [holds], [301,940],
@@ -2650,7 +2650,7 @@ although other threads keep taking it in between; POSIX does not guarantee
 this of `pthread_mutex_lock`, and the configuration `Starve` drops it.]
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`ResponseMatch`], [Given a server that writes at most one response per
       request, a call takes the response to its own request or none: never
@@ -2694,7 +2694,7 @@ this of `pthread_mutex_lock`, and the configuration `Starve` drops it.]
 ) <tab:fv-rpc-client-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Shared`], [Two threads on one connection, lost answers, closes, a restart, sticky interrupts], [holds], [2,320,845],
     [`Endless`], [Any number of calls per thread on one connection, lost answers, closes, a restart], [holds], [1,155,176],
@@ -2836,7 +2836,7 @@ is bounded: producers take a number of samples, readers issue a number of
 requests, and all of them end.]
 
 #figure(
-  table(columns: (auto, 1.6fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`NoOverrun`], [A producer never writes a slot that holds an event not
       consumed.],
@@ -2892,7 +2892,7 @@ requests, and all of them end.]
 ) <tab:fv-kernel-es-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Health` (slow)], [A failure, its window and the start-up test with the fix], [holds], [10,030,779],
     [`Failure`], [A failure while a request runs], [holds], [485,696],
@@ -3113,7 +3113,7 @@ properties assume weak fairness of every reader, poller and work item and of
 the passing of the 50 ms.]
 
 #figure(
-  table(columns: (auto, 1.6fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`ReadResult`], [A read returns data, `EAGAIN`, `ERESTARTSYS`, `ENOMEM`
       or, from `/dev/esdm_urandom`, the error of the request: a blocking read
@@ -3148,7 +3148,7 @@ the passing of the 50 ms.]
 ) <tab:fv-kernel-cdev-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Kick`], [A blocking and a non-blocking reader of `/dev/esdm_random`, liveness (slow)], [holds], [639,303],
     [`KickSafety`], [As `Kick`, invariants and deadlock only], [holds], [639,303],
@@ -3268,7 +3268,7 @@ fail on a mutation whose hang is that deadlock, which TLC would report
 first.]
 
 #figure(
-  table(columns: (auto, 1.6fr), align: left + horizon,
+  table(columns: (0.8fr, 2fr), align: left + horizon,
     table.header([Property], [Statement]),
     [`ResponseMatch`], [Every answer a request reads is the answer to that
       request: a reader never gets the data of another one, whatever was
@@ -3312,7 +3312,7 @@ first.]
 ) <tab:fv-kernel-cdev-conn-properties>
 
 #figure(
-  table(columns: (auto, 1fr, auto, auto), align: left + horizon,
+  table(columns: (1.85fr, 1.9fr, 1.35fr, auto), align: left + horizon,
     table.header([Configuration], [Checks], [Result], [States]),
     [`Pool`], [Three tasks on one connection that is connected, a signal, liveness], [holds], [87,090],
     [`Pool2`], [Four tasks on two connections, a signal (S)], [holds], [841,010],

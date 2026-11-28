@@ -32,7 +32,7 @@ add_global_arguments([ '-fstack-protector-strong',
 ```
 
 #figure(
-  table(columns: (auto, 1fr), align: left + horizon,
+  table(columns: (0.9fr, 2fr), align: left + horizon,
     table.header([Flag], [Effect]),
     [`-fstack-protector-strong`], [Stack canaries in every function with
       arrays or address-taken locals],
