@@ -302,23 +302,23 @@
   v(14mm, weak: true)
   points[
     - A guest has few events of its own: the host delivers its entropy.
-    - `/dev/esdm_pr` reseeds for every read and never falls back to the
-      kernel RNG.
+    - A host built for NTG.1 seeds the guest with NTG.1 output; host and
+      guest then form one DRT.1 tree.
   ]
   v(10mm, weak: true)
   zone([Host], surface, {
-    tile("server", fill: accent-soft, stroke: accent)[`esdm-server`][seeded
-      by the entropy sources of the host]
+    tile("server", fill: accent-soft, stroke: accent)[`esdm-server`][NTG.1
+      with the option `ais2031_ntg1`]
     link[EGD socket]
     tile("microchip")[`esdm_cdev`: `/dev/esdm_pr`][kernel module, no
       fallback]
     link[read]
     tile("cloud")[Cloud Hypervisor][`--rng src=/dev/esdm_pr`]
   })
-  link[virtio-rng]
+  link[virtio-rng: NTG.1 seed]
   zone([Guest], accent-faint, {
     tile("cube", fill: accent-soft, stroke: accent)[ESDM of the guest][
-      credits `/dev/hwrng` with 256 bits]
+      root of a DRT.1 tree, credits `/dev/hwrng`]
   })
 }
 
